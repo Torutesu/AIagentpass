@@ -158,7 +158,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
       if (failure === "stale") {
-        const card = deviceCard(page, "反映待ち Mac");
         const observation = {
           gateInvoked: false,
           gateSetupFailed: false,
@@ -167,6 +166,20 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           responseStatus: null,
           alertObserved: false,
         };
+        let gate;
+        try { gate = await fixture.installRecentAuthFailureGate(page, failure); }
+        catch { observation.gateSetupFailed = true; }
+        if (observation.gateSetupFailed) assert.fail(staleAuthorizationFailureMarker(observation));
+
+        // Installing the gate intentionally reloads the Console so the fetch
+        // wrapper exists before the application bundle captures `fetch`.
+        // Resolve actionability and start all document-bound waits only after
+        // that navigation has completed.
+        const card = deviceCard(page, "反映待ち Mac");
+        const wakeButton = card.getByRole("button", { name: "Wake requestを依頼" });
+        try { await wakeButton.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS }); }
+        catch { observation.clickFailed = true; }
+        if (observation.clickFailed) assert.fail(staleAuthorizationFailureMarker(observation));
         const refreshResponsePromise = page.waitForResponse(
           (response) => isKeyboardRefreshRequest(response.request()),
           { timeout: 15_000 }
@@ -174,11 +187,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const alertPromise = card.getByRole("alert").waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })
           .then(() => true)
           .catch(() => false);
-        let gate;
-        try { gate = await fixture.installRecentAuthFailureGate(page, failure); }
-        catch { observation.gateSetupFailed = true; }
         try {
-          await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+          await wakeButton.click();
         } catch {
           observation.clickFailed = true;
         }
@@ -535,8 +545,8 @@ export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
 });
 
 export function staleAuthorizationFailureMarker(observation = {}) {
-  if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
   if (observation.gateSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateSetupFailed;
+  if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
   if (observation.gateInvoked !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateNotInvoked;
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
   const status = observation.responseStatus;
