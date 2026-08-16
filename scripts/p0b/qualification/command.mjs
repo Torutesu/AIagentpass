@@ -13,6 +13,12 @@ const MAX_SAFE_FAILURE_MARKERS = 256;
 const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
 const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
+// A provisional TAP marker is intentionally not terminal: a more specific,
+// reviewed marker may be emitted immediately afterwards. It must nevertheless
+// have a bounded lifetime. Without this deadline, a test runner that emits the
+// coarse `not ok` line and then keeps a browser/socket handle open can survive
+// until the supervisor's much larger process timeout.
+const PROVISIONAL_FAILURE_GRACE_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 const SAFE_REASON = Object.freeze({
@@ -169,6 +175,7 @@ export function runQualificationCommand(command, args, options) {
   let settled = false;
   let timeoutHandle;
   let killHandle;
+  let provisionalFailureHandle;
   let child;
   let requestTermination = () => {};
 
@@ -204,8 +211,18 @@ export function runQualificationCommand(command, args, options) {
           safeFailureTerminal = true;
           safeFailureStdoutTail = Buffer.alloc(0);
           safeFailureStderrTail = Buffer.alloc(0);
+          if (provisionalFailureHandle !== undefined) clearTimeout(provisionalFailureHandle);
           if (terminateOnSafeFailure) setImmediate(() => requestTermination());
           return;
+        }
+        if (terminateOnSafeFailure && provisionalFailureHandle === undefined) {
+          provisionalFailureHandle = setTimeout(() => {
+            provisionalFailureHandle = undefined;
+            if (settled || safeFailureTerminal || safeFailureCode === null) return;
+            safeFailureTerminal = true;
+            requestTermination();
+          }, PROVISIONAL_FAILURE_GRACE_MS);
+          provisionalFailureHandle.unref?.();
         }
         break;
       }
@@ -223,6 +240,7 @@ export function runQualificationCommand(command, args, options) {
       settled = true;
       if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
       if (killHandle !== undefined) clearTimeout(killHandle);
+      if (provisionalFailureHandle !== undefined) clearTimeout(provisionalFailureHandle);
 
       const exitCode = Number.isSafeInteger(code) && code >= 0 && code <= 255 ? code : null;
       const normalizedSignal = typeof signal === "string" && /^[A-Z][A-Z0-9]{0,15}$/u.test(signal) ? signal : null;

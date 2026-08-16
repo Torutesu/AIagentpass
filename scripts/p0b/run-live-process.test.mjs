@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildTestEnvironment,
+  liveBrowserFailureReason,
   parseArgs,
   parseProtectedEnvironment,
   prepareQualificationOutput,
@@ -93,6 +94,21 @@ test("diagnostic reason is stable and code-only", () => {
     fixtureTimeoutMs: 1200,
     fixtureImage: "postgres:17-alpine"
   });
+});
+
+test("preserves a hard child timeout over a provisional browser marker", () => {
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_timeout",
+    internal: { timed_out: true, safe_failure_code: "admin_device_revoke" }
+  }), "child_timeout");
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_signal",
+    internal: { timed_out: false, safe_failure_code: "admin_device_revoke" }
+  }), "child_exit_nonzero_admin_device_revoke");
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_exit_nonzero",
+    internal: { timed_out: false, safe_failure_code: null }
+  }), "child_exit_nonzero");
 });
 
 test("every static live-browser safe failure marker is allow-listed by the orchestrator", async () => {

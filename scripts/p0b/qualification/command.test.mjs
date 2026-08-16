@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { runQualificationCommand } from "./command.mjs";
@@ -149,6 +152,54 @@ test("upgrades a provisional TAP failure to a terminal fixed diagnostic before c
   assert.equal(result.internal.safe_failure_code, "stale_auth_invalidation");
   assert.equal(result.internal.timed_out, false);
   assert.equal(Date.now() - startedAt < 2_000, true);
+});
+
+test("bounds a provisional admin revoke marker and kills its process tree", { skip: process.platform === "win32" }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-provisional-marker-"));
+  const pidFile = path.join(directory, "child-pids");
+  const marker = "not ok 13 - admin completes distinct real WebAuthn device revoke";
+  let descendantPid;
+  const startedAt = Date.now();
+  try {
+    const result = await runQualificationCommand(node, script([
+      "const fs = require('node:fs');",
+      "const { spawn } = require('node:child_process');",
+      `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);")}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(descendant.pid));`,
+      `process.stdout.write(${JSON.stringify(`${marker}\n`)});`,
+      "process.on('SIGTERM', () => {});",
+      "setInterval(() => {}, 1000);"
+    ].join("")), {
+      cwd,
+      env,
+      timeoutMs: 5_000,
+      terminateOnSafeFailure: true,
+      safeFailureMarkers: [{ marker, code: "admin_device_revoke", terminate: false }]
+    });
+
+    descendantPid = Number(await fs.readFile(pidFile, "utf8"));
+    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 0, true);
+    assert.equal(result.status, "failed");
+    assert.equal(result.internal.safe_failure_code, "admin_device_revoke");
+    assert.equal(result.internal.timed_out, false);
+    assert.equal(result.reason, "child_signal");
+    assert.equal(Date.now() - startedAt < 3_000, true);
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { process.kill(descendantPid, 0); }
+      catch (error) {
+        if (error?.code === "ESRCH") return;
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.fail("P0-B provisional marker left a descendant process running");
+  } finally {
+    if (descendantPid !== undefined) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
+    }
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("retains a provisional safe diagnostic when no detailed marker follows", async () => {

@@ -398,6 +398,13 @@ export function stableReason(error) {
   return /^[a-z][a-z0-9_]*$/u.test(code) ? code : "error";
 }
 
+export function liveBrowserFailureReason(result) {
+  const reason = stableReason({ code: result?.reason });
+  const diagnostic = result?.internal?.safe_failure_code;
+  if (result?.internal?.timed_out === true || typeof diagnostic !== "string") return reason;
+  return `child_exit_nonzero_${diagnostic}`;
+}
+
 export function usage() {
   return `Usage: node scripts/p0b/run-live-process.mjs [options]
 
@@ -539,8 +546,12 @@ export async function main(argv = process.argv.slice(2)) {
         activeChild = undefined;
         terminateActiveChild = undefined;
         if (result.status !== "passed") {
-          const diagnostic = result.internal.safe_failure_code;
-          failure = { stage: "live-browser", error: new OrchestrationError(diagnostic === null ? result.reason : `child_exit_nonzero_${diagnostic}`) };
+          // A provisional TAP marker is useful only while the child is still
+          // alive long enough to emit a more specific marker. If the command
+          // itself reaches its hard deadline, preserve that timeout instead of
+          // misreporting it as a normal nonzero admin/revoke failure.
+          const reason = liveBrowserFailureReason(result);
+          failure = { stage: "live-browser", error: new OrchestrationError(reason) };
         } else if (interrupted) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
