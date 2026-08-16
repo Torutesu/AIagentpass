@@ -170,6 +170,8 @@ const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_TLS_IMAGE",
   "P0B_POSTGRES_TLS_CONTAINER_ID"
 ]);
+const LIVE_BROWSER_SCENARIO_MAX_LENGTH = 128;
+const LIVE_BROWSER_SCENARIO_PATTERN = /^[^\u0000-\u001f\u007f]{1,128}$/u;
 const ENV_KEY = /^[A-Z][A-Z0-9_]*$/u;
 const CONTAINER_ID = /^[a-f0-9]{12,64}$/u;
 
@@ -277,13 +279,25 @@ export function parseProtectedEnvironment(contents) {
 
 export function buildTestEnvironment(base, fixtureEnvironment) {
   if (!base || typeof base !== "object") throw new TypeError("base environment is required");
+  const scenario = optionalLiveBrowserScenario(base.P0B_LIVE_BROWSER_SCENARIO);
   return Object.freeze({
     ...qualificationBaseEnvironment(base),
     ...fixtureEnvironment,
     // A caller's stale disable flag must not turn this live qualification into
     // a successful-looking skipped test.
-    P0B_DISABLE_EXTERNAL: "false"
+    P0B_DISABLE_EXTERNAL: "false",
+    ...(scenario === undefined ? {} : { P0B_LIVE_BROWSER_SCENARIO: scenario })
   });
+}
+
+function optionalLiveBrowserScenario(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new OrchestrationError("invalid_browser_scenario", "browser scenario filter is invalid");
+  const scenario = value.trim();
+  if (!LIVE_BROWSER_SCENARIO_PATTERN.test(scenario) || scenario.length > LIVE_BROWSER_SCENARIO_MAX_LENGTH) {
+    throw new OrchestrationError("invalid_browser_scenario", "browser scenario filter is invalid");
+  }
+  return scenario;
 }
 
 export function stableReason(error) {

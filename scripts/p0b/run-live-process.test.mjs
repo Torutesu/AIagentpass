@@ -60,6 +60,16 @@ test("test environment overrides stale external-disable state without printing s
   });
 });
 
+test("live browser scenario filter is passed through the qualified child environment", () => {
+  const env = buildTestEnvironment({
+    PATH: "/bin",
+    P0B_LIVE_BROWSER_SCENARIO: "accepts keyboard wake"
+  }, { P0B_POSTGRES_ADMIN_URL: ADMIN_URL });
+  assert.equal(env.P0B_LIVE_BROWSER_SCENARIO, "accepts keyboard wake");
+  assert.throws(() => buildTestEnvironment({ P0B_LIVE_BROWSER_SCENARIO: "bad\nfilter" }, {}), /browser scenario filter is invalid/);
+  assert.throws(() => buildTestEnvironment({ P0B_LIVE_BROWSER_SCENARIO: "x".repeat(129) }, {}), /browser scenario filter is invalid/);
+});
+
 test("qualification output is absolute, private, and removes stale evidence before a run", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-report-test-"));
   const output = path.join(directory, "qualification.json");
