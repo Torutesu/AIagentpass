@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` through `c4ef41c`
+Planning baseline: `codex/agent-platform` through `7ed5474`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -11,8 +11,8 @@ the day-to-day merge order from the current source checkpoint.
 
 ## 1. Current source checkpoint
 
-The repository currently has 187 catalog entries, 52 JSON Schemas, 63 OpenAPI
-operations, and 72 forward-only PostgreSQL migrations. The implemented source
+The repository currently has 188 catalog entries, 52 JSON Schemas, 63 OpenAPI
+operations, and 73 forward-only PostgreSQL migrations. The implemented source
 boundary includes:
 
 - organization-qualified Human identity, roles, sessions, WebAuthn credentials,
@@ -26,7 +26,11 @@ boundary includes:
   hosted file/private-key fallback rejection, exact eight-purpose readiness,
   immutable version/fingerprint checks, and active-key enforcement;
 - resumable headless onboarding, v2 device enrollment, native broker/XPC,
-  release-manifest verification, installer and hardware-qualification scaffolding.
+  release-manifest verification, installer and hardware-qualification scaffolding;
+- bounded loopback/stdin invitation delivery, a durable seven-state onboarding
+  journal, signed possession-receipt recovery of exact Control trust, and a
+  native durable sign-once transaction that treats post-provider ambiguity as
+  terminal and verifies persisted OpenSSH SSHSIG evidence before replay.
 
 The current source checkpoint additionally closes four implementation slices:
 
@@ -37,8 +41,14 @@ The current source checkpoint additionally closes four implementation slices:
 - S1.3 provider-admission lifecycle fencing and real-PostgreSQL multi-instance
   race tests wired into CI, with protected execution and real KMS evidence open;
 - D1.1 browser-led onboarding contracts across catalog, JSON Schema, OpenAPI,
-  shared protocol validators, CLI consumers, and native DTOs. D2 delivery and
-  durable runtime states are not implemented by this contract freeze.
+  shared protocol validators, CLI consumers, and native DTOs;
+- D2.1 invitation delivery is source-complete through `5f6b35b`; D2.2 has the
+  durable resume store through `06325e0` and authoritative signed-receipt
+  recovery through `7ed5474`, but the setup handler/CLI has not yet been wired
+  to advance that store through `control_acknowledged`;
+- M1.1's native sign-once transaction is source-complete through `2b76abf` and
+  its real Swift/OpenSSH verification repair `54bee51`. Full broker lifecycle,
+  physical process-loss evidence, and Claude Code lifecycle remain open.
 
 The last observed protected baseline passed the PostgreSQL 16 and 17 authority
 lanes and the full PostgreSQL integration lane before these new source slices
@@ -579,9 +589,9 @@ per-slice merge contract above.
 | S1.2 | Exact-byte provider reconciliation — eight-purpose behavioral coverage at `017efa4` | S1.1 | provider operation repositories/workers | two-instance contention, response loss, lookup absence, malformed response, process loss | each operation converges to one verified result or durable `uncertain` without re-signing |
 | S1.3 | Rotation, disablement, and drain — source at `da955e2`; PostgreSQL evidence wired at `f2e7957` | S1.2 | signer lifecycle/runtime | reserve/start/commit race matrix, active-to-retiring transition, emergency disable, bounded close | no new provider admission occurs after authority reduction wins and accepted ambiguity is quarantined |
 | D1.1 | Freeze onboarding public contract — implemented through `d63919a` and endpoint binding fix `c4ef41c` | H2, S1 metadata | catalog/OpenAPI/Core/CLI/native DTOs | generated-validator sync, duplicate/unknown field, canonical vectors, downgrade denial | one versioned contract contains no caller-controlled authority field |
-| D2.1 | Loopback and stdin delivery | D1.1 | Console, CLI, native setup state | origin/nonce binding, PNA denial, listener timeout, argv/env/history/storage scans | invitation material exists only in bounded memory or explicit one-shot stdin recovery |
-| D2.2 | Durable onboarding resume machine | D2.1 | CLI/native/PostgreSQL/Console reconciliation | interruption at every durable state, expiry, ambiguous POST, duplicate enrollment | restart resumes safely through `control_acknowledged` without duplicate authority |
-| M1.1 | Native durable sign-once transaction | D1.1 | broker/XPC/native persistence | process/policy/repository substitution, kill/restart, expiry, unknown outcome | key use occurs once after final re-observation and ambiguous signing is never retried |
+| D2.1 | Loopback and stdin delivery — source complete at `5f6b35b` | D1.1 | Console, CLI, native setup state | origin/nonce binding, PNA denial, listener timeout, argv/env/history/storage scans | protected HTTP/browser execution confirms invitation material exists only in bounded memory or explicit one-shot stdin recovery |
+| D2.2 | Durable onboarding resume machine — store and signed recovery source complete at `06325e0`/`7ed5474`; runtime wiring open | D2.1 | CLI/native/PostgreSQL/Console reconciliation | interruption at every durable state, expiry, ambiguous POST, duplicate enrollment | the production setup handler advances the durable store through `control_acknowledged`, and restart resumes without duplicate POST or authority |
+| M1.1 | Native durable sign-once transaction — source complete at `2b76abf`, verification fix `54bee51` | D1.1 | broker/XPC/native persistence | process/policy/repository substitution, kill/restart, expiry, unknown outcome | physical/broker qualification proves key use occurs once after final re-observation and ambiguous signing is never retried |
 | M1.2 | Claude Code lifecycle | M1.1, D2.2 | CLI/adapter/installer/doctor | install/setup/launch/status/close/revoke/uninstall; two unattended verified commits | adapter cannot select a key or widen policy and both commits verify independently |
 | M1.3 | Cursor parity | M1.2 | Cursor adapter only | same positive/negative matrix as Claude Code | no new broker selector, signing path, or authority surface is introduced |
 | R1.1 | Immutable signed PKG | M1 | release scripts/artifact manifests | hardened runtime, nested signatures, entitlements, SBOM, provenance, Gatekeeper | one digest is Developer ID signed, notarized, stapled, and independently verifiable |
@@ -640,6 +650,27 @@ Execution concurrency after Q2 is limited to three disjoint lanes: H1/H2,
 S1/S2, and D1/M1 preparation. Contract catalog changes, migrations, signing
 domains, XPC selectors, entitlements, and release identity remain serialized.
 No lane may declare another lane qualified from mocked or local-only evidence.
+
+### 12.3.2 Exact next execution queue from `7ed5474`
+
+This queue supersedes the older Wave B/C wording for day-to-day merge order.
+Each item is independently reviewable; a later item may be prepared in a
+disjoint worktree but cannot be declared complete before its dependency gate.
+
+| Order | Merge unit | Concrete implementation | Required tests/evidence | Exit gate |
+| --- | --- | --- | --- | --- |
+| 1 | D2.2 runtime integration | Inject `DeviceOnboardingResumeStore` at a fixed file under `defaultConfigDir`; bind it to candidate/release, organization, device, invitation digest, delivery and operation IDs; mark uncertainty before dispatch; reconcile only the verified signed receipt; advance after durable native trust provisioning, service refresh, and config ACK. Re-entry at every state must be idempotent and must never persist the credential, nonce, signature, or private key. | Handler/CLI unit tests, process termination after each journal/state/anchor replacement, first-run POST=1, response-loss POST=1, restarted recovery POST=0, binding/tamper/rollback/duplicate denial, secret scan. | A killed setup resumes through `control_acknowledged` with one Cloud authority and the exact signed Control trust. |
+| 2 | M1.2 Claude Code lifecycle | Route installation, status, Git signing, session close, revocation, uninstall, and doctor through the frozen broker/XPC surface. Remove any adapter-selected key/algorithm/namespace input. Persist only public identity and bounded operation evidence. | Clean-machine install; two unattended commits whose SSHSIG signatures verify independently; repository/branch/process/policy substitution; expiry, restart, revoke, ambiguous outcome; argv/env/log/state scans. | Claude Code can work unattended within policy, while revocation and uncertainty fail closed without a second key use. |
+| 3 | Q2 one-SHA qualification | Push the integrated D2.2/M1 head and run root, Console/browser, P0-B, PostgreSQL integration, PostgreSQL 16/17, and native jobs without replacement commits. Fix the first reproducible owning-boundary failure only. | Retained GitHub run URL and per-job logs; schema head 73; exact source SHA; no skip counted as pass. | All six lanes are terminal green on one SHA. |
+| 4 | M1.3 and onboarding UX | Add Cursor through the identical broker protocol. Make Console/browser onboarding explain pending approval, expired invitation, ambiguous recovery, restart/resume, and completion without exposing identifiers or secrets. | Claude/Cursor parity matrix; keyboard/focus/live-region/200% reflow; browser-storage/history/artifact scans; full setup E2E. | A non-engineer can install and recover setup safely; Cursor introduces no new authority surface. |
+| 5 | R1 immutable distribution | Produce one universal hardened-runtime PKG; freeze entitlements/designated requirements; Developer ID sign, notarize, staple, generate SBOM/provenance, and publish direct-download/Homebrew metadata that pins the same digest. | Gatekeeper and CodeDirectory verification; nested signatures; install/upgrade/uninstall/reinstall/rollback on Apple silicon and Intel/T2; digest equality across channels. | Both channels and hardware reports identify one independently verifiable notarized digest. |
+| 6 | S2/O1 production qualification | Execute purpose-separated AWS/GCP KMS IAM tests, deploy the immutable candidate to staging, run migration/PITR/outage/rotation/compromise/emergency-stop/tenant-isolation/rollback drills, and close independent review findings. | Signed provider reports, measured SLO/RPO/RTO, DAST/SAST/dependency/container/IaC reports, independent assessment, signed promotion record. | Zero open critical/high findings and explicit human go/no-go for the exact artifact and source digest. |
+
+Integration locks for this queue are migration numbers, catalog/schema versions,
+receipt/signing domains, XPC selectors and DTO encodings, entitlement sets,
+Developer ID identities, and production promotion authority. A single owner
+serializes those boundaries; UI, adapter, native internal tests, and provider
+qualification may otherwise proceed in parallel with disjoint files.
 
 ### 12.4 Delivery sequence, parallel capacity, and effort bands
 
