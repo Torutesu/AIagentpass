@@ -896,6 +896,61 @@ function enrollmentProgressLabel(progress: "pending" | "enrolled" | "recovery-pr
   return progress === "pending" ? "登録待ち" : progress === "enrolled" ? "enrollment proven" : "recovery-proven";
 }
 
+type InstallGuidanceState = "not-detected" | "checking" | "connected" | "delivered" | "failed";
+type InstallGuidance = Readonly<{
+  state: InstallGuidanceState;
+  tone: "green" | "amber" | "red";
+  label: string;
+  title: string;
+  copy: string;
+}>;
+
+function installGuidance(status: LiveHandoffStatus): InstallGuidance {
+  switch (status) {
+    case "loading":
+      return { state: "checking", tone: "amber", label: "確認中", title: "Macヘルパーの接続を確認しています", copy: "Macで起動したセットアップ接続から、公開情報だけを読み込んでいます。" };
+    case "ready":
+      return { state: "connected", tone: "green", label: "接続済み", title: "Macヘルパーが接続されています", copy: "公開preflightを読み込みました。端末名を入力して、Touch ID / パスキーで発行を承認してください。" };
+    case "delivered":
+      return { state: "delivered", tone: "green", label: "受け渡し済み", title: "セットアップ情報をMacへ渡しました", copy: "Mac側のセットアップ完了を待っています。招待情報をコピーしたり、もう一度発行したりする必要はありません。" };
+    case "failed":
+      return { state: "failed", tone: "red", label: "接続できません", title: "Macヘルパーへ自動接続できませんでした", copy: "CLIを終了して、管理者から案内されたセットアップコマンドを新しく実行してください。期限切れの接続は再利用できません。" };
+    case "none":
+    default:
+      return { state: "not-detected", tone: "amber", label: "未接続", title: "Macヘルパーの接続を待っています", copy: "署名済みAgentPassパッケージをMacへインストールし、管理者から案内されたセットアップコマンドを実行すると自動で接続されます。" };
+  }
+}
+
+function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
+  const guidance = installGuidance(status);
+  const isFailure = guidance.state === "failed";
+  return (
+    <article className="surface-card" data-install-state={guidance.state}>
+      <div className="stop-title-row">
+        <div>
+          <span className="section-kicker">INSTALL / 00</span>
+          <h2 className="surface-card-title">Macヘルパーを準備する</h2>
+          <p className="surface-card-copy">秘密鍵やCloud資格情報をこの画面へ入力する必要はありません。接続状態と次にすることだけを表示します。</p>
+        </div>
+        <StatusTag tone={guidance.tone}>{guidance.label}</StatusTag>
+      </div>
+      <div className="device-wake-action" role={isFailure ? "alert" : "status"} aria-live={isFailure ? "assertive" : "polite"}>
+        <p className="row-title">{guidance.title}</p>
+        <p className="device-state-description">{guidance.copy}</p>
+      </div>
+      {guidance.state === "not-detected" ? <ol className="row-list" aria-label="Macセットアップの手順">
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">1</span><div><p className="row-title">署名済みAgentPassパッケージをインストール</p><p className="row-description">管理者が指定した配布元のパッケージだけを使用してください。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">セットアップコマンドを実行</p><p className="row-description">管理者から案内されたコマンドをそのまま実行します。候補ID、指紋、招待JSONを自分で入力する必要はありません。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">3</span><div><p className="row-title">この画面で接続を確認</p><p className="row-description">接続されると、公開preflightが自動で表示されます。</p></div></div></li>
+      </ol> : null}
+      {guidance.state === "failed" ? <details className="advanced-enrollment">
+        <summary>自動接続できない場合の復旧</summary>
+        <p className="field-help">古いloopback接続や期限切れの接続は使い回さず、CLIを終了して新しいセットアップコマンドを実行してください。招待を発行した後に自動受け渡しが失敗した場合だけ、画面に表示される一度きりの標準入力手順を使います。</p>
+      </details> : null}
+    </article>
+  );
+}
+
 function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffStatus }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffStatus: (status: LiveHandoffStatus) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [preflightText, setPreflightText] = useState("");
@@ -1061,6 +1116,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           {liveHandoffStatus === "delivered" ? "招待をMacへ安全に渡しました。Mac側のセットアップ完了を待っています。" : null}
           {liveHandoffStatus === "failed" ? "自動受け渡しに失敗しました。発行済みの招待を下のJSONから標準入力へ渡してください。" : null}
         </div> : null}
+        <InstallStatusCard status={liveHandoffStatus} />
         {!canManage ? <article className="surface-card" role="status"><span className="section-kicker">READ ONLY</span><h2 className="surface-card-title">閲覧権限で表示しています</h2><p className="surface-card-copy">このロールでは端末・Agent・Capabilityを変更できません。変更が必要な場合はOwnerまたはAdminへ依頼してください。</p></article> : null}
         <article className="surface-card">
           <span className="section-kicker">CURRENT SESSION</span>
