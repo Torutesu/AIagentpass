@@ -172,17 +172,29 @@ function assertOrganizationMutation(
 
 function assertSecurityMutation(
   request: MutationRequest,
-  expected: { method: string; path: string; body: Record<string, unknown>; recentAuth?: string },
+  expected: {
+    method: string;
+    path: string;
+    body: Record<string, unknown>;
+    ifMatch?: string;
+    idempotency?: boolean;
+    recentAuth?: string;
+    recentAuthContext?: boolean;
+  },
 ): void {
   expect(request.method).toBe(expected.method);
   expect(request.path).toBe(expected.path);
   expect(request.body).toEqual(expected.body);
   expect(request.headers["agentpass-csrf"]).toBe(CSRF_TOKEN);
   expect(request.headers.accept).toBe("application/json");
-  expect(request.headers["if-match"]).toBeUndefined();
-  expect(request.headers["idempotency-key"]).toBeUndefined();
+  if (expected.ifMatch === undefined) expect(request.headers["if-match"]).toBeUndefined();
+  else expect(request.headers["if-match"]).toBe(expected.ifMatch);
+  if (expected.idempotency === true) expect(request.headers["idempotency-key"]).toMatch(UUID_V4);
+  else expect(request.headers["idempotency-key"]).toBeUndefined();
   if (expected.recentAuth === undefined) expect(request.headers["agentpass-recent-auth"]).toBeUndefined();
   else expect(request.headers["agentpass-recent-auth"]).toBe(expected.recentAuth);
+  if (expected.recentAuthContext === true) expect(request.headers["agentpass-recent-auth-context"]).toMatch(/^[0-9a-f]{64}$/u);
+  else expect(request.headers["agentpass-recent-auth-context"]).toBeUndefined();
 }
 
 async function assertNoReusableAuthority(page: Page, secrets: readonly string[]): Promise<void> {
@@ -580,13 +592,18 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     assertSecurityMutation(rename, {
       method: "PATCH",
       path: `/api/auth/security/passkeys/${CREDENTIAL_ID}`,
-      body: { label: "Mac Touch ID renamed", expected_version: 1 },
+      body: { label: "Mac Touch ID renamed" },
+      ifMatch: '"1"',
+      idempotency: true,
     });
     assertSecurityMutation(revokePasskeyRequest, {
       method: "POST",
       path: `/api/auth/security/passkeys/${CREDENTIAL_ID}/revoke`,
-      body: { expected_version: 2 },
+      body: {},
+      ifMatch: '"2"',
+      idempotency: true,
       recentAuth: AUTHORIZATION_ID,
+      recentAuthContext: true,
     });
     assertSecurityMutation(revokeOther, {
       method: "POST",
