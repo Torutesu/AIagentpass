@@ -52,6 +52,7 @@ class FakePool {
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
     if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
     if (text.startsWith("SELECT public.agentpass_maintain_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { quarantined: 0, reconciled: 0, pruned: 0, total: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_agent_signing_capability_recover_expired")) return { rowCount: 1, rows: [{ result: { status: "ok", expired: 0, uncertain: 0 } }] };
     if (text.startsWith("SELECT public.agentpass_health_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { version: 1, states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 0, rejected: 0, failed: 0 }, stale_started: 0, oldest_nonterminal_at: null } }] };
     if (text.startsWith("SELECT agentpass_quarantine_expired_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ quarantined: 0 }] };
     if (text.startsWith("WITH candidates") && text.includes("UPDATE managed_signer_provider_operations")) return { rowCount: 1, rows: [{ reconciled: 0 }] };
@@ -109,6 +110,11 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().consecutive_failures, 0);
   assert.equal(typeof runtime.providerOperationMaintenanceRepository.maintainProviderOperations, "function");
   assert.equal(typeof runtime.providerOperationMaintenanceRepository.health, "function");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "running");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().cycles, 1);
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().consecutive_failures, 0);
+  assert.equal(typeof runtime.agentSessionSigningCapabilityMaintenanceRepository.recoverExpiredReservations, "function");
+  assert.equal((await runtime.readiness()).checks.agent_session_signing_capability_maintenance.code, "ok");
   assert.equal((await runtime.readiness()).checks.managed_signer_provider_operations.code, "ok");
 
   let finish;
@@ -127,6 +133,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.pool.ended, true);
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
 });
@@ -155,6 +162,8 @@ test("PostgreSQL runtime isolates migration, signer, maintenance, and applicatio
   assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
   assert.equal(byRole.agentpass_signer.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), true);
   assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
+  assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), true);
+  assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), false);
   assert.equal(byRole.agentpass_migrator.calls.some(({ text }) => text.startsWith("SELECT version, checksum FROM schema_migrations")), true);
   await runtime.close();
   assert.equal(byRole.agentpass_app.ended, true);
@@ -218,6 +227,21 @@ test("PostgreSQL runtime can leave provider-operation maintenance idle and fails
   assert.equal(readiness.code, "managed_signer_provider_operations_worker_unavailable");
   await runtime.close();
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime can leave signing-capability maintenance idle and fails readiness closed", async () => {
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    agentSessionSigningCapabilityMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "idle");
+  const readiness = await runtime.readiness();
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.code, "agent_session_signing_capability_maintenance_worker_unavailable");
+  await runtime.close();
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
 });
 
 test("PostgreSQL runtime preserves migration failure and closes the pool exactly once", async () => {

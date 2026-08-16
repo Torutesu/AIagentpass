@@ -148,7 +148,7 @@ test("0074 exposes only function-owned app authority with tenant RLS", async () 
   assert.match(sql, /REVOKE ALL ON TABLE public\.agent_session_signing_capability_reservations[\s\S]*FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup/u);
   assert.match(sql, /GRANT SELECT ON TABLE public\.agent_session_signing_capability_reservations TO agentpass_backup/u);
   assert.match(sql, /CREATE POLICY agent_capability_sequence_heads_migrator_authority[\s\S]*TO agentpass_migrator[\s\S]*USING \(true\) WITH CHECK \(true\)/u);
-  assert.match(sql, /CREATE POLICY agent_session_signing_capability_reservations_migrator_authority[\s\S]*TO agentpass_migrator[\s\S]*USING \(true\) WITH CHECK \(true\)/u);
+  assert.match(sql, /CREATE POLICY agent_session_signing_reservations_migrator_authority[\s\S]*TO agentpass_migrator[\s\S]*USING \(true\) WITH CHECK \(true\)/u);
   assert.match(sql, /CREATE POLICY agent_sessions_signing_capability_migrator_authority[\s\S]*ON public\.agent_sessions[\s\S]*TO agentpass_migrator/u);
   for (const name of ["reserve", "commit", "replay", "uncertain"]) {
     assert.match(sql, new RegExp(`CREATE FUNCTION public\\.agentpass_agent_signing_capability_${name}\\(`, "u"));

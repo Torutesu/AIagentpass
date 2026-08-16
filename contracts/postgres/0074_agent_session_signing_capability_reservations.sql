@@ -1092,7 +1092,7 @@ CREATE POLICY agent_session_signing_capability_reservations_tenant_update
 CREATE POLICY agent_session_signing_capability_reservations_backup_select
   ON public.agent_session_signing_capability_reservations FOR SELECT TO agentpass_backup
   USING (true);
-CREATE POLICY agent_session_signing_capability_reservations_migrator_authority
+CREATE POLICY agent_session_signing_reservations_migrator_authority
   ON public.agent_session_signing_capability_reservations FOR ALL TO agentpass_migrator
   USING (true) WITH CHECK (true);
 CREATE POLICY agent_capability_sequence_heads_tenant_select

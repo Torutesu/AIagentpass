@@ -32,6 +32,7 @@ import { createPostgresManagedSignerKeyLifecycleRepository } from "./managed-sig
 import { createPostgresProviderOperationRepository } from "./provider-operation-repository.mjs";
 import { createPostgresProviderOperationMaintenanceRepository } from "./provider-operation-maintenance-repository.mjs";
 import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed-signer-provider-operation-maintenance-worker.mjs";
+import { createAgentSessionSigningCapabilityMaintenanceWorker } from "./agent-session-signing-capability-maintenance-worker.mjs";
 import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
 import { createPostgresPlatformPromotionIssuanceRepository } from "./platform-promotion-issuance-repository.mjs";
@@ -48,16 +49,21 @@ import {
 } from "./operational-health.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "./schema-head.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, MaintenancePoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, MaintenancePoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {}, agentSessionSigningCapabilityMaintenanceAutoStart = true, agentSessionSigningCapabilityMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   if (typeof managedSignerProviderOperationMaintenanceAutoStart !== "boolean" || !managedSignerProviderOperationMaintenanceWorkerOptions || typeof managedSignerProviderOperationMaintenanceWorkerOptions !== "object" || Array.isArray(managedSignerProviderOperationMaintenanceWorkerOptions)) throw new TypeError("managed signer provider-operation maintenance runtime configuration is invalid");
+  if (typeof agentSessionSigningCapabilityMaintenanceAutoStart !== "boolean" || !agentSessionSigningCapabilityMaintenanceWorkerOptions || typeof agentSessionSigningCapabilityMaintenanceWorkerOptions !== "object" || Array.isArray(agentSessionSigningCapabilityMaintenanceWorkerOptions)) throw new TypeError("Agent Session signing capability maintenance runtime configuration is invalid");
   if (typeof platformPromotionVerifyEvidence !== "function") throw new TypeError("platform promotion evidence verifier is required");
   const normalizedPlatformPromotionLifecycle = normalizePlatformPromotionLifecycle(platformPromotionLifecycle);
   createManagedSignerProviderOperationMaintenanceWorker({
     ...managedSignerProviderOperationMaintenanceWorkerOptions,
     repository: { async maintainProviderOperations() { return { quarantined: 0, reconciled: 0, pruned: 0, total: 0 }; } }
+  });
+  createAgentSessionSigningCapabilityMaintenanceWorker({
+    ...agentSessionSigningCapabilityMaintenanceWorkerOptions,
+    repository: { async recoverExpiredReservations() { return { expired: 0, uncertain: 0 }; } }
   });
   let ownerRecoveryDeliveryBinding;
   if (ownerRecoveryPublisher !== undefined
@@ -87,6 +93,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let ownerRecoveryOutboxRepository;
   let sharedControlMaintenanceWorker;
   let providerOperationMaintenanceWorker;
+  let agentSessionSigningCapabilityMaintenanceWorker;
   let refreshHintNotifier;
 
   function releaseMigrationClient(destroy = false) {
@@ -124,7 +131,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       [sharedControlMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })],
       [ownerRecoveryOutboxWorker, (worker) => worker.close({ timeout_ms: 0 })],
       [refreshHintNotifier, (notifier) => notifier.close()],
-      [providerOperationMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })]
+      [providerOperationMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })],
+      [agentSessionSigningCapabilityMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })]
     ];
     for (const [resource, close] of closers) {
       if (!resource) continue;
@@ -159,6 +167,15 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const operationalMetrics = createOperationalMetrics();
   const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: signerPool });
   const agentSessionSigningCapabilityMaintenanceRepository = createPostgresAgentSessionSigningCapabilityMaintenanceRepository({ client: maintenancePool });
+  agentSessionSigningCapabilityMaintenanceWorker = createAgentSessionSigningCapabilityMaintenanceWorker({
+    firstCycleDelayMs: 5_000,
+    intervalMs: 60_000,
+    limit: 256,
+    closeTimeoutMs: 10_000,
+    ...agentSessionSigningCapabilityMaintenanceWorkerOptions,
+    repository: agentSessionSigningCapabilityMaintenanceRepository,
+    metrics: operationalMetrics
+  });
   providerOperationMaintenanceWorker = createManagedSignerProviderOperationMaintenanceWorker({
     firstCycleDelayMs: 5_000,
     intervalMs: 30_000,
@@ -216,6 +233,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     const workerDrain = ownerRecoveryOutboxWorker?.drain({ timeout_ms: timeoutMs });
     const maintenanceDrain = sharedControlMaintenanceWorker?.close({ timeoutMs });
     const providerOperationMaintenanceDrain = providerOperationMaintenanceWorker?.close({ timeoutMs });
+    const signingCapabilityMaintenanceDrain = agentSessionSigningCapabilityMaintenanceWorker?.close({ timeoutMs });
     return drainController.drain({
       ...options,
       timeoutMs,
@@ -226,6 +244,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
         if (maintenanceResult && maintenanceResult.drained !== true) throw Object.assign(new Error("Shared-control maintenance worker drain timed out"), { code: "shared_control_maintenance_worker_drain_timeout" });
         const providerOperationMaintenanceResult = await providerOperationMaintenanceDrain;
         if (providerOperationMaintenanceResult && providerOperationMaintenanceResult.drained !== true) throw Object.assign(new Error("Managed signer provider-operation maintenance worker drain timed out"), { code: "managed_signer_provider_operation_maintenance_worker_drain_timeout" });
+        const signingCapabilityMaintenanceResult = await signingCapabilityMaintenanceDrain;
+        if (signingCapabilityMaintenanceResult && signingCapabilityMaintenanceResult.drained !== true) throw Object.assign(new Error("Agent Session signing capability maintenance worker drain timed out"), { code: "agent_session_signing_capability_maintenance_worker_drain_timeout" });
         await closePool();
       }
     });
@@ -375,6 +395,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     createAgentSessionSigningCapabilityReservationRepository: (context) =>
       createPostgresAgentSessionSigningCapabilityReservationRepository({ client: pool, context }),
     agentSessionSigningCapabilityMaintenanceRepository,
+    agentSessionSigningCapabilityMaintenanceWorker,
     maintenancePool,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
@@ -409,8 +430,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     operationalMetrics,
     operationalReport: Object.freeze({ snapshot: operationalHealth.operationalSnapshot }),
     metrics: operationalMetrics,
-    readiness: operationalHealth.readiness,
-    health: operationalHealth.health,
+    readiness: () => capabilityMaintenanceReadiness(operationalHealth.readiness, agentSessionSigningCapabilityMaintenanceWorker),
+    health: () => capabilityMaintenanceReadiness(operationalHealth.health, agentSessionSigningCapabilityMaintenanceWorker),
     // Hosted managed signers share this exact admission controller. Keeping
     // it at the composition boundary makes direct signer calls obey the same
     // drain fence as HTTP requests and PostgreSQL work.
@@ -425,6 +446,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   if (managedSignerProviderOperationMaintenanceAutoStart) {
     await providerOperationMaintenanceWorker.runOnce();
     providerOperationMaintenanceWorker.start();
+  }
+  if (agentSessionSigningCapabilityMaintenanceAutoStart) {
+    await agentSessionSigningCapabilityMaintenanceWorker.runOnce();
+    agentSessionSigningCapabilityMaintenanceWorker.start();
   }
   return runtime;
   } catch (error) {
@@ -469,6 +494,42 @@ function transactionBoundClient(tx) {
       if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
       return tx.query(text, params);
     }
+  });
+}
+
+async function capabilityMaintenanceReadiness(readiness, worker) {
+  const result = await readiness();
+  let snapshot;
+  try { snapshot = worker.snapshot(); } catch { snapshot = null; }
+  const draining = result?.checks?.drain?.state !== "running";
+  const ok = !draining
+    && snapshot?.state === "running"
+    && Number.isSafeInteger(snapshot.cycles)
+    && snapshot.cycles > 0
+    && snapshot.consecutive_failures === 0;
+  const check = Object.freeze({
+    ok,
+    code: draining ? "skipped" : ok ? "ok" : "worker_unavailable",
+    worker_state: typeof snapshot?.state === "string" ? snapshot.state : "unavailable",
+    cycles: Number.isSafeInteger(snapshot?.cycles) && snapshot.cycles >= 0 ? snapshot.cycles : 0,
+    consecutive_failures: Number.isSafeInteger(snapshot?.consecutive_failures) && snapshot.consecutive_failures >= 0
+      ? snapshot.consecutive_failures
+      : 0,
+    last_success_at: Number.isSafeInteger(snapshot?.last_success_at) && snapshot.last_success_at >= 0
+      ? snapshot.last_success_at
+      : null
+  });
+  const checks = Object.freeze({
+    ...result.checks,
+    agent_session_signing_capability_maintenance: check
+  });
+  if (draining || !result.ready || ok) return Object.freeze({ ...result, checks });
+  return Object.freeze({
+    ...result,
+    ready: false,
+    status: "not_ready",
+    code: "agent_session_signing_capability_maintenance_worker_unavailable",
+    checks
   });
 }
 

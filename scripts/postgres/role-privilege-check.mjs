@@ -242,7 +242,7 @@ signing_authority_policy_contract(relname, policy_name, policy_command, using_ex
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
-    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
+    ('agent_session_signing_capability_reservations', 'agent_session_signing_reservations_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),

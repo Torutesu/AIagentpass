@@ -72,6 +72,11 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordManagedSignerProviderOperationMaintenanceQuarantined(5);
   metrics.recordManagedSignerProviderOperationMaintenanceReconciled(4);
   metrics.recordManagedSignerProviderOperationMaintenancePruned(6);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceCycle(2);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceSuccess();
+  metrics.recordAgentSessionSigningCapabilityMaintenanceFailure(3);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceExpired(5);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceUncertain(4);
   for (const operation of Object.values(HUMAN_RECOVERY_OPERATIONS)) metrics.recordHumanRecoveryOperation(operation);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
@@ -127,6 +132,11 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     managed_signer_provider_operation_maintenance_quarantined_total: 5,
     managed_signer_provider_operation_maintenance_reconciled_total: 4,
     managed_signer_provider_operation_maintenance_pruned_total: 6,
+    agent_session_signing_capability_maintenance_cycle_total: 2,
+    agent_session_signing_capability_maintenance_success_total: 1,
+    agent_session_signing_capability_maintenance_failure_total: 3,
+    agent_session_signing_capability_maintenance_expired_total: 5,
+    agent_session_signing_capability_maintenance_uncertain_total: 4,
     owner_recovery_outbox_claim_total: 0,
     owner_recovery_outbox_publish_total: 0,
     owner_recovery_outbox_retry_total: 0,
