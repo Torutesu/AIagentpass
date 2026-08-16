@@ -44,6 +44,40 @@ AWSまたはGCPの保護されたqualification runnerは、provider SDKの生レ
    `managed_signer_provider_operations`に対して競合実行する
 6. redacted input JSONを生成する。raw provider outputやcredentialをinputへ入れない
 
+### provider-independent runner core
+
+このリポジトリには、provider SDKをimportしない固定件数runnerもあります。
+`scripts/kms-qualification/runner.mjs`の`runKmsQualification()`へ、保護されたAWS/GCP
+orchestrationを次の3操作として注入します。
+
+- `describePurpose({ name, purpose, registry_version, protocol_version, signing_version, algorithm }, { signal })`
+  は、`key_id`、`key_resource`、`key_version`、`lifecycle_epoch`、公開鍵fingerprintと、
+  HSM/non-exportableの証拠digestだけを返す
+- `signAndVerify({ purpose binding, request_bytes, request_digest }, { signal })`は、
+  署名と検証をprovider側で完了し、`status`、`verified`、署名digest、証拠digest、
+  観測時刻だけを返す。署名bytes、公開鍵、provider receiptは返さない
+- `checkIam({ requester, target, action: "sign", expected, request_bytes, request_digest }, { signal })`
+  は、allow/deny、status、証拠digest、観測時刻だけを返す
+
+runnerはrequest digestを自分で生成し、purposeのsign/verifyを8回、ordered IAM probeを
+64回だけ実行します。runner自身のretryはなく、同時実行数は最大8、各呼び出しには最大30秒の
+deadlineがあります。戻り値は`purpose_bindings`と`iam_matrix`のredacted primitivesなので、
+次のようにreport inputへ合成します。
+
+```js
+const probes = await runKmsQualification({ provider, operations });
+const reportInput = {
+  ...otherQualificationInputs,
+  purpose_bindings: probes.purpose_bindings,
+  iam_matrix: probes.iam_matrix
+};
+```
+
+`validateKmsQualificationRunnerResult()`は、runnerから保管・転送するhandoffを再検証します。
+unknown field、accessor、raw/response/result/output、credential、token、private key、
+diagnostic、stdout/stderr、自由記述エラーを含む値は拒否します。runnerの成功は、実AWS/GCPで
+実行されたことやproduction report全体の完成を意味しません。
+
 inputからcanonical reportを作成します。
 
 ```sh
@@ -97,6 +131,12 @@ tenant情報、ログ本文は保存しません。AWS/GCPで実際にqualificat
 このリポジトリのmock/unit testでは完了扱いにしません。
 
 - 実AWS/GCPアカウント、HSM key、purpose-separated workload identityの作成
+- AWS/GCP orchestrationの実装：SDKのraw responseをプロセス内でenum/digestへ写像し、
+  runnerの3操作へ接続する。raw responseやcredentialをファイル・stdout・証拠入力へ保存しない
+- 64 IAM probeを実provider policyへ接続し、同一purposeだけallow、cross-purposeはdenyとなる
+  workload identity/IAM policyの実証
+- `signAndVerify`をmanaged signer + durable operation ledgerへ接続し、response-loss時は
+  PostgreSQL reconciliationだけで収束させ、provider signを再実行しないことの実証
 - 実providerでの全シナリオ実行と、署名済みproduction reportの発行
 - protected PostgreSQL 2-instance runの実行・保管
 - stagingでのproduction candidateへの適用、独立security review、最終go/no-go
