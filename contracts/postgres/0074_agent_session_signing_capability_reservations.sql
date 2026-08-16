@@ -1095,6 +1095,9 @@ CREATE POLICY agent_capability_sequence_heads_tenant_update
   ON public.agent_capability_sequence_heads FOR UPDATE
   USING (organization_id = public.agentpass_current_organization_id())
   WITH CHECK (organization_id = public.agentpass_current_organization_id());
+CREATE POLICY agent_capability_sequence_heads_migrator_authority
+  ON public.agent_capability_sequence_heads TO agentpass_migrator
+  USING (true) WITH CHECK (true);
 CREATE POLICY agent_capability_sequence_heads_backup_select
   ON public.agent_capability_sequence_heads FOR SELECT TO agentpass_backup
   USING (true);

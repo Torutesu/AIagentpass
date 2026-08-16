@@ -37,6 +37,7 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /pg_get_expr\(p\.polwithcheck, p\.polrelid\)/u);
   assert.match(checker, /p\.polroles IS DISTINCT FROM ARRAY\[0::oid\]/u);
   assert.match(checker, /p\.polpermissive IS DISTINCT FROM true/u);
+  assert.match(checker, /SET search_path = pg_catalog;/u);
 
   for (const policy of [
     'agent_session_signing_capability_reservations_tenant_select',
@@ -45,6 +46,7 @@ test('signing capability role qualification is an explicit catalog contract', as
     'agent_capability_sequence_heads_tenant_select',
     'agent_capability_sequence_heads_tenant_insert',
     'agent_capability_sequence_heads_tenant_update',
+    'agent_capability_sequence_heads_migrator_authority',
   ]) {
     assert.match(checker, new RegExp(`'${policy}'`, 'u'));
   }

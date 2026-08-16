@@ -17,7 +17,7 @@ import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { canonicalManagedSignerRequestDigest } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "../../src/postgres/agent-session-consumption-repository.mjs";
-import { seedAgentSessionHumanHttpFixture } from "./agent-session-human-http-fixture.mjs";
+import { createAgentSessionHumanHttpFixture } from "./agent-session-human-http-fixture.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const { Pool } = DATABASE_URL ? await import("pg") : { Pool: undefined };
@@ -90,7 +90,7 @@ test("0074 real PostgreSQL migration and function-owned signing capability lifec
 
   await ensureSigningKey(client);
 
-  const firstFixture = await seedAgentSessionHumanHttpFixture({
+  const firstFixture = await createAgentSessionHumanHttpFixture({
     pool,
     options: { scope: SCOPE }
   });
@@ -160,7 +160,7 @@ test("0074 real PostgreSQL migration and function-owned signing capability lifec
   assert.equal(attributed.rows[0].device_id, firstContext.device_id);
   assert.equal(attributed.rows[0].statement_hash, first.committed.capability.statement_hash);
 
-  const secondFixture = await seedAgentSessionHumanHttpFixture({
+  const secondFixture = await createAgentSessionHumanHttpFixture({
     pool,
     options: { scope: SCOPE }
   });

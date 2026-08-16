@@ -96,6 +96,7 @@ if (process.argv.length !== 2) {
         fail('database URL must contain only sslmode=verify-full');
       } else {
         const sql = String.raw`
+SET search_path = pg_catalog;
 WITH target_schema AS (
   SELECT n.oid
   FROM pg_namespace AS n
@@ -232,6 +233,7 @@ signing_authority_policy_contract(relname, policy_name, policy_command, using_ex
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=public.agentpass_current_organization_id()', NULL, NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=public.agentpass_current_organization_id()', NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=public.agentpass_current_organization_id()', 'organization_id=public.agentpass_current_organization_id()', NULL),
+    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_backup_select', 'r', 'true', NULL, 'agentpass_backup')
 ),
 signer_function_oids AS (
