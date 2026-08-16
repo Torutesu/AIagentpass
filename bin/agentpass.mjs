@@ -35,6 +35,7 @@ import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal }
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
+import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
 import { unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 
 const [, , command, ...args] = process.argv;
@@ -1317,9 +1318,31 @@ function xmlEscape(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
+function launchAgent() {
+  // Normalize the public launch vector before reaching the lifecycle boundary.
+  // Until a verified native Host is wired here, retain the existing fail-closed
+  // response and never synthesize a session or invoke an alternate launcher.
+  const normalized = parseAgentLaunchArgs([command, ...args]);
+  void normalized;
+  console.log(JSON.stringify(unavailableAgentLifecycle("launch")));
+  process.exitCode = 1;
+}
+
+function launchContractFailure(error) {
+  if (!(error instanceof AgentLaunchContractError)) return false;
+  // Keep the public unavailable response stable while refusing the invalid
+  // vector. Contract details never cross this boundary, so selectors and
+  // their values cannot become part of CLI output or process diagnostics.
+  void error;
+  console.log(JSON.stringify(unavailableAgentLifecycle("launch")));
+  process.exitCode = 1;
+  return true;
+}
+
 try {
   if (command === undefined || command === "--help" || command === "-h") usage();
-  else if (command === "launch" || command === "close") {
+  else if (command === "launch") launchAgent();
+  else if (command === "close") {
     console.log(JSON.stringify(unavailableAgentLifecycle(command)));
     process.exitCode = 1;
   }
@@ -1353,6 +1376,8 @@ try {
     process.exitCode = 2;
   }
 } catch (error) {
-  console.error(`agentpass: ${error.message}`);
-  process.exitCode = 1;
+  if (!launchContractFailure(error)) {
+    console.error(`agentpass: ${error.message}`);
+    process.exitCode = 1;
+  }
 }
