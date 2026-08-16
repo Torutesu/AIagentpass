@@ -9,6 +9,22 @@ private let fixedUUID3 = "33333333-3333-4333-8333-333333333333"
 private let digest = Data(repeating: 0xA5, count: 32)
 private let nonce = Data(repeating: 0x5A, count: 32)
 
+private func fixedCapability(_ capabilityID: String = fixedUUID3) throws -> Data {
+    try NativeStrictJSON.data([
+        "version": 1, "capability_id": capabilityID,
+        "nonce": String(repeating: "N", count: 32), "issuer": "agentpass-cloud",
+        "key_id": "capability-v1",
+        "audience": ["agent_id": fixedUUID, "device_id": fixedUUID2],
+        "scope": [
+            "operations": ["git.commit.sign"], "repositories": ["/work/repo"],
+            "branches": ["allow": ["feature/*"], "deny": []],
+            "remotes": ["allow": ["git@example.test:repo.git"], "deny": []],
+        ],
+        "not_before": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:00:30.000Z",
+        "sequence": 1, "signature": String(repeating: "A", count: 86) + "==",
+    ])
+}
+
 private func archive(_ object: NSSecureCoding) throws -> Data {
     try NSKeyedArchiver.archivedData(withRootObject: object, requiringSecureCoding: true)
 }
@@ -110,6 +126,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
         sessionID: fixedUUID,
         requestID: fixedUUID2,
         capabilityID: fixedUUID3,
+        capability: try fixedCapability(),
         commitPayload: Data("tree abc\nauthor AgentPass\n\nmessage\n".utf8),
         requestNonce: nonce,
         createdAtMilliseconds: 4_000_000_000_000
@@ -133,13 +150,14 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     #expect(decodedSession.processBindingDigest == digest)
     #expect(decodedStatusRequest.sessionID == fixedUUID)
     #expect(decodedStatus.usedSignatures == 1)
+    #expect(decodedSignRequest.capability == (try fixedCapability()))
     #expect(decodedSignRequest.commitPayload.starts(with: Data("tree".utf8)))
     #expect(decodedSignResponse.signature.count == 64)
     #expect(decodedCloseRequest.reason == "completed")
     #expect(decodedCloseResponse.status == "closed")
 
     let publicPropertyNames = [
-        "token", "sessionToken", "capability", "privateKey", "privateKeyData", "operation", "namespace", "signerArguments"
+        "token", "sessionToken", "privateKey", "privateKeyData", "operation", "namespace", "signerArguments"
     ]
     for name in publicPropertyNames {
         #expect(String(describing: type(of: decodedSignRequest)).contains(name) == false)
@@ -184,11 +202,38 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
         sessionID: fixedUUID,
         requestID: fixedUUID2,
         capabilityID: fixedUUID3,
+        capability: try! fixedCapability(),
         commitPayload: Data(repeating: 0, count: AgentPassAgentSignRequest.maximumCommitPayloadBytes + 1),
         requestNonce: nonce,
         createdAtMilliseconds: 4_000_000_000_000
     ) == nil)
     #expect(AgentPassAgentCloseSessionRequest(sessionID: fixedUUID, reason: "revoke_all") == nil)
+}
+
+@Test func agentSignDTORejectsCapabilitySubstitutionAndNonCanonicalAuthority() throws {
+    #expect(AgentPassAgentSignRequest(
+        sessionID: fixedUUID,
+        requestID: fixedUUID2,
+        capabilityID: fixedUUID2,
+        capability: try fixedCapability(fixedUUID3),
+        commitPayload: Data("tree abc\n\nmessage\n".utf8),
+        requestNonce: nonce,
+        createdAtMilliseconds: 4_000_000_000_000
+    ) == nil)
+
+    let canonical = try fixedCapability()
+    var object = try #require(JSONSerialization.jsonObject(with: canonical) as? [String: Any])
+    object["unexpected"] = true
+    let widened = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    #expect(AgentPassAgentSignRequest(
+        sessionID: fixedUUID,
+        requestID: fixedUUID2,
+        capabilityID: fixedUUID3,
+        capability: widened,
+        commitPayload: Data("tree abc\n\nmessage\n".utf8),
+        requestNonce: nonce,
+        createdAtMilliseconds: 4_000_000_000_000
+    ) == nil)
 }
 
 @Test func secureDecoderRejectsWrongObjectClassesAndMissingRequiredFields() throws {

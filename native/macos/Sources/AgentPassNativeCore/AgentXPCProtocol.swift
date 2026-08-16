@@ -367,7 +367,10 @@ public final class AgentPassAgentSessionStatusResponse: NSObject, NSSecureCoding
 
 /// A fixed Git commit-sign request. There is intentionally no operation,
 /// namespace, key selector, signer argument, session token, or private key field:
-/// this DTO can express only the first supported operation.
+/// this DTO can express only the first supported operation. The bounded
+/// capability is a Cloud-signed authorization statement, not a caller-selected
+/// key handle. Its identifier is carried separately and must match the signed
+/// statement before the native service may reserve signing authority.
 @objc(AgentPassAgentSignRequest)
 public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @unchecked Sendable {
     public static var supportsSecureCoding: Bool { true }
@@ -375,10 +378,12 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
     public static let minimumNonceBytes = 16
     public static let maximumNonceBytes = 64
     public static let maximumCommitPayloadBytes = 1 * 1024 * 1024
+    public static let maximumCapabilityBytes = 64 * 1024
 
     public let sessionID: String
     public let requestID: String
     public let capabilityID: String
+    public let capability: Data
     public let commitPayload: Data
     public let requestNonce: Data
     public let createdAtMilliseconds: Int64
@@ -387,6 +392,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
         sessionID: String,
         requestID: String,
         capabilityID: String,
+        capability: Data,
         commitPayload: Data,
         requestNonce: Data,
         createdAtMilliseconds: Int64
@@ -394,6 +400,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
         guard let sessionID = AgentXPCValidation.uuid(sessionID),
               let requestID = AgentXPCValidation.uuid(requestID),
               let capabilityID = AgentXPCValidation.uuid(capabilityID),
+              Self.validCapabilityEnvelope(capability, expectedID: capabilityID),
               !commitPayload.isEmpty,
               commitPayload.count <= Self.maximumCommitPayloadBytes,
               (Self.minimumNonceBytes...Self.maximumNonceBytes).contains(requestNonce.count),
@@ -403,6 +410,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
         self.sessionID = sessionID
         self.requestID = requestID
         self.capabilityID = capabilityID
+        self.capability = capability
         self.commitPayload = commitPayload
         self.requestNonce = requestNonce
         self.createdAtMilliseconds = createdAtMilliseconds
@@ -414,6 +422,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
               let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
               let requestID = coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?,
               let capabilityID = coder.decodeObject(of: NSString.self, forKey: Keys.capabilityID) as String?,
+              let capability = coder.decodeObject(of: NSData.self, forKey: Keys.capability) as Data?,
               let commitPayload = coder.decodeObject(of: NSData.self, forKey: Keys.commitPayload) as Data?,
               let requestNonce = coder.decodeObject(of: NSData.self, forKey: Keys.requestNonce) as Data?,
               let createdAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value else {
@@ -423,6 +432,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
             sessionID: sessionID,
             requestID: requestID,
             capabilityID: capabilityID,
+            capability: capability,
             commitPayload: commitPayload,
             requestNonce: requestNonce,
             createdAtMilliseconds: createdAtMilliseconds
@@ -433,6 +443,7 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
         coder.encode(sessionID as NSString, forKey: Keys.sessionID)
         coder.encode(requestID as NSString, forKey: Keys.requestID)
         coder.encode(capabilityID as NSString, forKey: Keys.capabilityID)
+        coder.encode(capability as NSData, forKey: Keys.capability)
         coder.encode(commitPayload as NSData, forKey: Keys.commitPayload)
         coder.encode(requestNonce as NSData, forKey: Keys.requestNonce)
         coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
@@ -442,9 +453,26 @@ public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @uncheck
         static let sessionID = "session_id"
         static let requestID = "request_id"
         static let capabilityID = "capability_id"
+        static let capability = "capability"
         static let commitPayload = "commit_payload"
         static let requestNonce = "request_nonce"
         static let createdAtMilliseconds = "created_at_ms"
+    }
+
+    private static func validCapabilityEnvelope(_ data: Data, expectedID: String) -> Bool {
+        guard !data.isEmpty, data.count <= maximumCapabilityBytes,
+              let object = try? NativeStrictJSON.object(from: data, maxBytes: maximumCapabilityBytes, maxDepth: 16),
+              Set(object.keys) == Set([
+                "version", "capability_id", "nonce", "issuer", "key_id", "audience",
+                "scope", "not_before", "expires_at", "sequence", "signature"
+              ]),
+              object["version"] as? Int == 1,
+              let identifier = object["capability_id"] as? String,
+              AgentXPCValidation.uuid(identifier) == expectedID,
+              let canonical = try? NativeStrictJSON.data(object), canonical == data else {
+            return false
+        }
+        return true
     }
 }
 

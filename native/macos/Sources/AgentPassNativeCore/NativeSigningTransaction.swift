@@ -21,6 +21,7 @@ public struct NativeSigningTransactionRequest: Equatable, Sendable {
     public let requestID: String
     public let sessionID: String
     public let capabilityID: String
+    public let capabilityHash: String
     public let payloadHash: String
     public let requestDigest: String
     public let nonceHash: String
@@ -35,12 +36,14 @@ public struct NativeSigningTransactionRequest: Equatable, Sendable {
             throw NativeSigningTransactionError.invalidRequest
         }
         let payloadHash = Self.hex(SHA256.hash(data: request.commitPayload))
+        let capabilityHash = Self.hex(SHA256.hash(data: request.capability))
         let nonceHash = Self.hex(SHA256.hash(data: request.requestNonce))
         let unsigned: [String: Any] = [
             "operation": Self.operation,
             "session_id": request.sessionID.lowercased(),
             "request_id": request.requestID.lowercased(),
             "capability_id": request.capabilityID.lowercased(),
+            "capability_sha256": capabilityHash,
             "payload_sha256": payloadHash,
             "nonce_sha256": nonceHash,
             "created_at_ms": request.createdAtMilliseconds,
@@ -51,6 +54,7 @@ public struct NativeSigningTransactionRequest: Equatable, Sendable {
         self.requestID = request.requestID.lowercased()
         self.sessionID = request.sessionID.lowercased()
         self.capabilityID = request.capabilityID.lowercased()
+        self.capabilityHash = capabilityHash
         self.payloadHash = payloadHash
         self.nonceHash = nonceHash
         self.requestDigest = Self.hex(SHA256.hash(data: canonical))

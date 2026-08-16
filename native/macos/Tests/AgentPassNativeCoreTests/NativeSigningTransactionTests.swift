@@ -8,16 +8,42 @@ private let transactionRequestID = "22222222-2222-4222-8222-222222222222"
 private let transactionCapability = "33333333-3333-4333-8333-333333333333"
 private let transactionAgent = "44444444-4444-4444-8444-444444444444"
 
+private func transactionCapabilityData(_ capabilityID: String) throws -> Data {
+    try NativeStrictJSON.data([
+        "version": 1,
+        "capability_id": capabilityID,
+        "nonce": String(repeating: "N", count: 32),
+        "issuer": "agentpass-cloud",
+        "key_id": "capability-v1",
+        "audience": [
+            "agent_id": transactionAgent,
+            "device_id": "55555555-5555-4555-8555-555555555555",
+        ],
+        "scope": [
+            "operations": ["git.commit.sign"],
+            "repositories": ["/work/repo"],
+            "branches": ["allow": ["feature/*"], "deny": []],
+            "remotes": ["allow": ["git@example.test:repo.git"], "deny": []],
+        ],
+        "not_before": "2027-01-15T07:59:59.000Z",
+        "expires_at": "2027-01-15T08:00:30.000Z",
+        "sequence": 1,
+        "signature": String(repeating: "A", count: 86) + "==",
+    ])
+}
+
 private func transactionRequest(
     requestID: String = transactionRequestID,
     payload: Data = Data("commit payload".utf8),
     capabilityID: String = transactionCapability,
+    capabilityData: Data? = nil,
     nonce: Data = Data(repeating: 0x2a, count: 16)
 ) throws -> AgentPassAgentSignRequest {
     try #require(AgentPassAgentSignRequest(
         sessionID: transactionSession,
         requestID: requestID,
         capabilityID: capabilityID,
+        capability: try capabilityData ?? transactionCapabilityData(capabilityID),
         commitPayload: payload,
         requestNonce: nonce,
         createdAtMilliseconds: 1_800_000_000_000))
@@ -178,6 +204,14 @@ private func advanceToCompleted(
     #expect(throws: NativeSigningTransactionError.requestConflict) { _ = try store.lookup(request: changedPayload) }
     let changedCapability = try NativeSigningTransactionRequest(transactionRequest(capabilityID: "66666666-6666-4666-8666-666666666666"))
     #expect(throws: NativeSigningTransactionError.requestConflict) { _ = try store.lookup(request: changedCapability) }
+    var substitutedCapability = try #require(
+        JSONSerialization.jsonObject(with: transactionCapabilityData(transactionCapability)) as? [String: Any])
+    substitutedCapability["signature"] = String(repeating: "B", count: 86) + "=="
+    let changedCapabilityStatement = try NativeSigningTransactionRequest(transactionRequest(
+        capabilityData: try NativeStrictJSON.data(substitutedCapability)))
+    #expect(throws: NativeSigningTransactionError.requestConflict) {
+        _ = try store.lookup(request: changedCapabilityStatement)
+    }
 
     let substitutions: [NativeSigningTransactionAuthority] = [
         try transactionAuthority(request: original, binding: try transactionBinding(processByte: 0x44)),

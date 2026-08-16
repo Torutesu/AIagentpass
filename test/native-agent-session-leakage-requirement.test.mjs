@@ -8,6 +8,7 @@ const protocol = read("native/macos/Sources/AgentPassNativeCore/AgentXPCProtocol
 const denial = read("native/macos/Sources/AgentPassNativeCore/NativeAgentSessionDenial.swift");
 const dependencies = read("native/macos/Sources/AgentPassNativeCore/NativeAgentSessionDependencies.swift");
 const recovery = read("native/macos/Sources/AgentPassNativeCore/NativeAgentSessionConsumeRecoveryStore.swift");
+const signingTransaction = read("native/macos/Sources/AgentPassNativeCore/NativeSigningTransaction.swift");
 const service = read("native/macos/Sources/AgentPassNativeService/main.swift");
 
 function between(source, startMarker, endMarker) {
@@ -257,6 +258,7 @@ test("signGitCommit uses a durable sign-once transaction and returns only bounde
   const signMethod = between(endpoint, "func signGitCommit", "func closeAgentSession");
   const signBody = signMethod.slice(signMethod.indexOf("{") + 1);
   assert.match(signMethod, /runtime\.signingTransactions\.lookup\(request: transactionRequest\)/u);
+  assert.match(signMethod, /bindingObserver\.consumeSigningCapability/u);
   assert.match(signMethod, /runtime\.signingTransactions\.markProviderStarted/u);
   assert.match(signMethod, /runtime\.gitCommitSigner\.signGitCommitPayload/u);
   assert.match(signMethod, /runtime\.gitCommitSigner\.verifyGitCommitSignature/u);
@@ -267,6 +269,10 @@ test("signGitCommit uses a durable sign-once transaction and returns only bounde
   assert.match(protocol, /func signGitCommit\([\s\S]*AgentPassAgentSignResponse\?/u);
   assert.match(signMethod, /case \.providerStarted:[\s\S]*NativeSigningTransactionError\.uncertain/u);
   assert.match(signMethod, /case \.uncertain:[\s\S]*NativeSigningTransactionError\.uncertain/u);
+  assert.ok(signMethod.indexOf("consumeSigningCapability") < signMethod.indexOf("markProviderStarted"));
+  assert.ok(signMethod.indexOf("consumeSigningCapability") < signMethod.indexOf("signGitCommitPayload"));
+  assert.match(signingTransaction, /"capability_sha256": capabilityHash/u);
+  assert.doesNotMatch(signingTransaction, /"capability": request\.capability/u);
 });
 
 test("restart recovery persists only Grant and authority digests", () => {

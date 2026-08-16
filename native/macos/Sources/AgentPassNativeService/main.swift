@@ -3176,6 +3176,41 @@ private struct AgentConnectionSessionBindingObserver: NativeAgentSessionBindingO
         )
     }
 
+    func consumeSigningCapability(
+        request: AgentPassAgentSignRequest,
+        agentID: String,
+        verifier: NativeCapabilityVerifier,
+        nowMilliseconds: Int64
+    ) throws {
+        let binding = try observeSessionBinding(agentID: agentID)
+        let worktree = try worktreeObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        ).binding
+        guard binding.worktreeBindingDigest == worktree.digest,
+              case .branch(let branch) = worktree.head,
+              !worktree.remotes.isEmpty else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        let capability = try verifier.verifyAndConsume(
+            request.capability,
+            options: NativeCapabilityVerificationOptions(
+                nowMilliseconds: nowMilliseconds,
+                audience: NativeCapabilityAudience(
+                    agentID: binding.agentID,
+                    deviceID: binding.deviceID
+                )
+            ),
+            operation: NativeSigningTransactionRequest.operation,
+            repository: worktree.repositoryPath,
+            branch: branch,
+            remotes: worktree.remotes.map(\.url)
+        )
+        guard capability.capabilityID == request.capabilityID.lowercased() else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+    }
+
     private static func digest(_ value: String) -> Data? {
         guard value.count == 64 else { return nil }
         var bytes = [UInt8]()
@@ -3417,6 +3452,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let signingIntentStore: NativeAgentSigningIntentStore
     let signingTransactions: NativeSigningTransactionStore
     let gitCommitSigner: NativeAgentGitCommitSigner
+    let capabilityVerifier: NativeCapabilityVerifier
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
@@ -3425,11 +3461,13 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         authorityState: AgentRuntimeAuthorityState,
         deviceSigner: SecureEnclaveKeyStore,
         gitSigner: SecureEnclaveKeyStore,
+        capabilityVerifier: NativeCapabilityVerifier,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     ) throws {
         try Self.validatePrivateDirectory(authority.signingIntentDirectory)
         self.authority = authority
         self.authorityState = authorityState
+        self.capabilityVerifier = capabilityVerifier
         self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
             baseURL: authority.deviceAPIOrigin,
@@ -3774,6 +3812,18 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
 
                 let (reservation, reservedBinding) = try coordinator.reserveSigningRequest(request)
                 do {
+                    let now = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                    let (requestAge, ageOverflow) = now.subtractingReportingOverflow(
+                        request.createdAtMilliseconds)
+                    guard !ageOverflow, (-60_000...60_000).contains(requestAge) else {
+                        throw NativeAgentSessionCoordinatorError.sessionDenied
+                    }
+                    try bindingObserver.consumeSigningCapability(
+                        request: request,
+                        agentID: reservedBinding.agentID,
+                        verifier: runtime.capabilityVerifier,
+                        nowMilliseconds: now
+                    )
                     let authority = try bindingObserver.observeSigningAuthority(
                         request: transactionRequest,
                         agentID: reservedBinding.agentID,
@@ -4755,6 +4805,7 @@ do {
     case .enabled(let authority):
         guard let deviceSigner = controlV2DeviceSigner,
               let controlV2Manager,
+              let capabilityVerifier,
               let activeSigning else {
             throw AgentPassNativeError.invalidConfiguration("Agent runtime device and signing lifecycle authority is unavailable")
         }
@@ -4767,6 +4818,7 @@ do {
             authorityState: authorityState,
             deviceSigner: deviceSigner,
             gitSigner: keyStore,
+            capabilityVerifier: capabilityVerifier,
             qualificationFaultConsumer: qualificationFaultConsumer
         )
     }

@@ -7,6 +7,22 @@ private let harnessSessionID = "33333333-3333-4333-8333-333333333333"
 private let harnessRequestID = "55555555-5555-4555-8555-555555555555"
 private let harnessCapabilityID = "66666666-6666-4666-8666-666666666666"
 private let harnessErrorDomain = "dev.agentpass.agent.xpc.harness"
+
+private func harnessCapability() throws -> Data {
+    try NativeStrictJSON.data([
+        "version": 1, "capability_id": harnessCapabilityID,
+        "nonce": String(repeating: "N", count: 32), "issuer": "agentpass-cloud",
+        "key_id": "capability-v1",
+        "audience": ["agent_id": harnessSessionID, "device_id": harnessRequestID],
+        "scope": [
+            "operations": ["git.commit.sign"], "repositories": ["/work/repo"],
+            "branches": ["allow": ["feature/*"], "deny": []],
+            "remotes": ["allow": ["git@example.test:repo.git"], "deny": []],
+        ],
+        "not_before": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:00:30.000Z",
+        "sequence": 1, "signature": String(repeating: "A", count: 86) + "==",
+    ])
+}
 // The timeout runs on Dispatch rather than blocking a Swift cooperative-executor
 // thread, so the full parallel native suite cannot starve XPC and URLSession work.
 private let harnessReplyTimeout: DispatchTimeInterval = .seconds(15)
@@ -196,7 +212,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     let harness = AgentNegativeHarness(endpoint: DummyAgentEndpoint(denySigning: true))
     defer { harness.close() }
     let connection = harness.connection(interface: AgentPassAgentXPCInterface.make())
-    let request = try #require(AgentPassAgentSignRequest(sessionID: harnessSessionID, requestID: harnessRequestID, capabilityID: harnessCapabilityID, commitPayload: Data("tree abc\n\nmessage\n".utf8), requestNonce: Data(repeating: 1, count: 32), createdAtMilliseconds: 4_000_000_000_000))
+    let request = try #require(AgentPassAgentSignRequest(sessionID: harnessSessionID, requestID: harnessRequestID, capabilityID: harnessCapabilityID, capability: try harnessCapability(), commitPayload: Data("tree abc\n\nmessage\n".utf8), requestNonce: Data(repeating: 1, count: 32), createdAtMilliseconds: 4_000_000_000_000))
     let result = HarnessResultBox<NSError>()
     await withCheckedContinuation { continuation in
         let reply = HarnessContinuation(continuation)
