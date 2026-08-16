@@ -21,6 +21,9 @@ private final class LifecycleFixture: @unchecked Sendable {
     var waitError = false
     var waitOutcome: NativeAgentHostWaitOutcome = .exitedSuccessfully
     var closeError = false
+    var capturePrivateBridgeClient = false
+    private var capturedPrivateBridgeClientDescriptor: Int32?
+    var privateBridgeAuthorityObserved: DispatchSemaphore?
     var spawnEntered: DispatchSemaphore?
     var releaseSpawn: DispatchSemaphore?
 
@@ -49,7 +52,9 @@ private final class LifecycleFixture: @unchecked Sendable {
                 observedIdentities.append(identity)
                 events.append("observe")
                 let result = authorityResults.isEmpty ? .authorized : authorityResults.removeFirst()
+                let bridgeObservation = privateBridgeAuthorityObserved
                 lock.unlock()
+                bridgeObservation?.signal()
                 return result
             },
             close: { [self] identity, reason in
@@ -66,7 +71,25 @@ private final class LifecycleFixture: @unchecked Sendable {
 
     func supervisorHooks() -> NativeAgentHostChildSupervisorHooks {
         NativeAgentHostChildSupervisorHooks(
-            spawn: { [self] _ in
+            spawn: { [self] spec in
+                // The production spawn hook owns the reviewed FD3 file
+                // actions. Test hooks must install the same lease before the
+                // supervisor can commit a child endpoint.
+                try spec.installPrivateGitBridgeFileActions(
+                    addDuplicate: { [self] source, _ in
+                        lock.lock()
+                        let capture = capturePrivateBridgeClient
+                        lock.unlock()
+                        if capture {
+                            let duplicate = Darwin.dup(source)
+                            guard duplicate >= 0 else { throw FixtureError.failed }
+                            lock.lock()
+                            capturedPrivateBridgeClientDescriptor = duplicate
+                            lock.unlock()
+                        }
+                    },
+                    addClose: { _ in }
+                )
                 lock.lock()
                 spawnCount += 1
                 events.append("spawn")
@@ -100,6 +123,14 @@ private final class LifecycleFixture: @unchecked Sendable {
                 return result
             }
         )
+    }
+
+    func takeCapturedPrivateBridgeClientDescriptor() -> Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        let descriptor = capturedPrivateBridgeClientDescriptor
+        capturedPrivateBridgeClientDescriptor = nil
+        return descriptor
     }
 
     func snapshot() -> (
@@ -141,6 +172,19 @@ private final class ErrorBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var count = 0
+    private(set) var payload: Data?
+
+    func increment(_ payload: Data) {
+        lock.lock()
+        count += 1
+        self.payload = payload
+        lock.unlock()
     }
 }
 
@@ -382,6 +426,101 @@ private func activationProjection(_ activation: NativeAgentHostQualifiedSessionA
     #expect(snapshot.wait == 1)
     #expect(snapshot.reasons == [.childExited])
     #expect(coordinator.state == .closed)
+}
+
+@Test func lifecycleBridgeServesOneChildRequestThroughTheSupervisorEndpoint() throws {
+    let fixture = LifecycleFixture()
+    fixture.capturePrivateBridgeClient = true
+    let coordinator = try makeLifecycleCoordinator(fixture: fixture)
+    _ = try coordinator.bootstrap()
+
+    try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        let clientDescriptor = try #require(fixture.takeCapturedPrivateBridgeClientDescriptor())
+        let clientTransport = try NativeAgentPrivateFDTransport(
+            fd: clientDescriptor,
+            ownership: .owned
+        )
+        let client = NativeAgentPrivateGitBridgeClient(transport: clientTransport)
+        let payload = Data("tree abc\n\nmessage\n".utf8)
+        let expectedSignature = Data("signature\n".utf8)
+        let signer = LockedCounter()
+        let serveError = ErrorBox()
+        let serveFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            do {
+                try coordinator.servePrivateGitBridge { received in
+                    signer.increment(received)
+                    return expectedSignature
+                }
+            } catch {
+                serveError.set(error)
+            }
+            serveFinished.signal()
+        }
+
+        #expect(try client.sign(commitPayload: payload) == expectedSignature)
+        #expect(serveFinished.wait(timeout: .now() + .seconds(2)) == .success)
+        #expect(serveError.get() == nil)
+        #expect(signer.count == 1)
+        #expect(signer.payload == payload)
+        #expect(throws: NativeAgentHostPrivateGitBridgeError.alreadyAttempted) {
+            try coordinator.servePrivateGitBridge { _ in expectedSignature }
+        }
+    }
+
+    _ = try coordinator.close()
+}
+
+@Test func authorityLossCancelsBlockedLifecycleBridgeBeforeSignerInvocation() throws {
+    let fixture = LifecycleFixture()
+    fixture.capturePrivateBridgeClient = true
+    let coordinator = try makeLifecycleCoordinator(
+        fixture: fixture,
+        authority: [.authorized, .authorized, .lost]
+    )
+    _ = try coordinator.bootstrap()
+
+    try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        let bridgeAuthorityObserved = DispatchSemaphore(value: 0)
+        fixture.privateBridgeAuthorityObserved = bridgeAuthorityObserved
+        let clientDescriptor = try #require(fixture.takeCapturedPrivateBridgeClientDescriptor())
+        let clientTransport = try NativeAgentPrivateFDTransport(
+            fd: clientDescriptor,
+            ownership: .owned
+        )
+        let signer = LockedCounter()
+        let serveError = ErrorBox()
+        let serveFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            do {
+                try coordinator.servePrivateGitBridge { received in
+                    signer.increment(received)
+                    return Data("signature\n".utf8)
+                }
+            } catch {
+                serveError.set(error)
+            }
+            serveFinished.signal()
+        }
+
+        #expect(bridgeAuthorityObserved.wait(timeout: .now() + .seconds(2)) == .success)
+        // Keep the request direction open after its bounded payload. The
+        // Host must be waiting for EOF before signer invocation, which gives
+        // the authority-loss cancellation a deterministic blocked boundary.
+        try clientTransport.writeCommitPayload(Data("payload".utf8))
+        #expect(try coordinator.reobserveAndReconcileAuthority().outcome == .authorityLost)
+        #expect(serveFinished.wait(timeout: .now() + .seconds(2)) == .success)
+        #expect((serveError.get() as? NativeAgentHostPrivateGitBridgeError) == .cancelled)
+        #expect(signer.count == 0)
+        try clientTransport.close()
+    }
+
+    #expect(coordinator.state == .closed)
+    #expect(fixture.snapshot().reasons == [.authorityLost])
+    #expect(fixture.snapshot().wait == 1)
 }
 
 @Test func waitFailureStillClosesTheSessionWithBoundedError() throws {

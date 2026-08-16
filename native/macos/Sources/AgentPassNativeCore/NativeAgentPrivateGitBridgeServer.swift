@@ -78,6 +78,16 @@ public final class NativeAgentPrivateGitBridgeServer: @unchecked Sendable {
         return try finish(outcome)
     }
 
+    /// Cancels a pending or in-flight serve operation. Cancellation is
+    /// terminal: it marks this one-shot server used and aborts the transport
+    /// so a blocking helper read cannot survive child or authority loss.
+    public func cancel() {
+        stateLock.lock()
+        used = true
+        stateLock.unlock()
+        transport.abort()
+    }
+
     private func reserveOneShot() throws {
         stateLock.lock()
         defer { stateLock.unlock() }

@@ -24,11 +24,12 @@ public enum NativeAgentPrivateFDTransportError: Error, Equatable, Sendable {
 /// This type does not open, discover, or configure any other communication
 /// channel. A request is one bounded commit frame; a response is one bounded
 /// signature frame followed immediately by EOF.
-public final class NativeAgentPrivateFDTransport {
+public final class NativeAgentPrivateFDTransport: @unchecked Sendable {
     public typealias ReadClosure = @Sendable (Int32, UnsafeMutableRawPointer, Int) -> Int
     public typealias WriteClosure = @Sendable (Int32, UnsafeRawPointer, Int) -> Int
     public typealias CloseClosure = @Sendable (Int32) -> Int32
     public typealias ShutdownWriteClosure = @Sendable (Int32) -> Int32
+    public typealias ShutdownClosure = @Sendable (Int32) -> Int32
 
     private let descriptor: Int32
     private let ownership: NativeAgentPrivateFDTransportOwnership
@@ -36,8 +37,13 @@ public final class NativeAgentPrivateFDTransport {
     private let writeClosure: WriteClosure
     private let closeClosure: CloseClosure
     private let shutdownWriteClosure: ShutdownWriteClosure
+    private let shutdownClosure: ShutdownClosure
     private let stateLock = NSLock()
+    /// Serializes complete frame operations without preventing abort from
+    /// acquiring stateLock and issuing shutdown against a blocked syscall.
+    private let operationLock = NSLock()
     private var closed = false
+    private var physicallyClosed = false
 
     public convenience init(
         fd: Int32,
@@ -82,7 +88,10 @@ public final class NativeAgentPrivateFDTransport {
         read: @escaping ReadClosure,
         write: @escaping WriteClosure,
         close: @escaping CloseClosure,
-        shutdownWrite: @escaping ShutdownWriteClosure
+        shutdownWrite: @escaping ShutdownWriteClosure,
+        shutdown: @escaping ShutdownClosure = { descriptor in
+            Darwin.shutdown(descriptor, SHUT_RDWR)
+        }
     ) throws {
         guard fd >= 0 else {
             throw NativeAgentPrivateFDTransportError.invalidFileDescriptor
@@ -93,6 +102,7 @@ public final class NativeAgentPrivateFDTransport {
         self.writeClosure = write
         self.closeClosure = close
         self.shutdownWriteClosure = shutdownWrite
+        self.shutdownClosure = shutdown
     }
 
     /// Writes exactly one bounded commit-payload frame, retrying interrupted
@@ -227,38 +237,90 @@ public final class NativeAgentPrivateFDTransport {
         }
         closed = true
         let shouldClose = ownership == .owned
-        let result = shouldClose ? closeClosure(descriptor) : 0
-        let closeError = result == -1 ? Self.currentErrno() : nil
         stateLock.unlock()
 
-        if let closeError {
-            throw NativeAgentPrivateFDTransportError.closeFailed(closeError)
+        // Interrupt first, then wait for the serialized operation to leave
+        // the syscall. Closing an in-flight descriptor before that point can
+        // let the kernel reuse the number for an unrelated object. Borrowed
+        // descriptors remain the caller's OS-level responsibility and are
+        // therefore not shut down by ordinary close.
+        if shouldClose {
+            _ = shutdownClosure(descriptor)
+        }
+        operationLock.lock()
+        operationLock.unlock()
+        guard shouldClose else { return }
+        try finishPhysicalClose()
+    }
+
+    /// Interrupts an in-flight operation and makes the descriptor unusable.
+    /// The Host uses this when the supervised child or its authority fails
+    /// while the bridge server is blocked waiting for a helper frame.
+    public func abort() {
+        stateLock.lock()
+        guard !closed else {
+            stateLock.unlock()
+            return
+        }
+        closed = true
+        let shouldClose = ownership == .owned
+        stateLock.unlock()
+
+        _ = shutdownClosure(descriptor)
+        if shouldClose {
+            operationLock.lock()
+            operationLock.unlock()
+            try? finishPhysicalClose()
         }
     }
 
     deinit {
-        guard ownership == .owned, !closed else { return }
-        _ = closeClosure(descriptor)
+        abort()
     }
 
     private func withOpenDescriptor<T>(_ operation: () throws -> T) throws -> T {
+        operationLock.lock()
         stateLock.lock()
         guard !closed else {
             stateLock.unlock()
+            operationLock.unlock()
             throw NativeAgentPrivateFDTransportError.alreadyClosed
         }
+        stateLock.unlock()
 
         do {
             let result = try operation()
-            stateLock.unlock()
+            operationLock.unlock()
             return result
         } catch {
-            closed = true
-            if ownership == .owned {
-                _ = closeClosure(descriptor)
-            }
-            stateLock.unlock()
+            markClosedAndInterrupt()
+            operationLock.unlock()
+            try? finishPhysicalClose()
             throw error
+        }
+    }
+
+    private func markClosedAndInterrupt() {
+        stateLock.lock()
+        let shouldInterrupt = !closed
+        closed = true
+        stateLock.unlock()
+        if shouldInterrupt {
+            _ = shutdownClosure(descriptor)
+        }
+    }
+
+    private func finishPhysicalClose() throws {
+        guard ownership == .owned else { return }
+        stateLock.lock()
+        guard !physicallyClosed else {
+            stateLock.unlock()
+            return
+        }
+        physicallyClosed = true
+        stateLock.unlock()
+        guard closeClosure(descriptor) == 0 else {
+            throw NativeAgentPrivateFDTransportError.closeFailed(Self.currentErrno())
         }
     }
 

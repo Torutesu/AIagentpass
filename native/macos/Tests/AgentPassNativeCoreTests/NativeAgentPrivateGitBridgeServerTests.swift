@@ -83,6 +83,42 @@ private final class BlockingSigner: @unchecked Sendable {
     }
 }
 
+private final class BlockingReadIO: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private(set) var closeCallCount = 0
+
+    func read(_ descriptor: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> Int {
+        _ = descriptor
+        _ = buffer
+        _ = count
+        entered.signal()
+        _ = release.wait(timeout: .now() + .seconds(5))
+        return 0
+    }
+
+    func write(_ descriptor: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+        _ = descriptor
+        _ = buffer
+        return count
+    }
+
+    func shutdown(_ descriptor: Int32) -> Int32 {
+        _ = descriptor
+        release.signal()
+        return 0
+    }
+
+    func close(_ descriptor: Int32) -> Int32 {
+        _ = descriptor
+        lock.lock()
+        closeCallCount += 1
+        lock.unlock()
+        return 0
+    }
+}
+
 private func makeServer(
     io: PrivateGitBridgeServerTestIO,
     signer: @escaping NativeAgentPrivateGitBridgeServer.Signer
@@ -261,6 +297,45 @@ private func makeServer(
     #expect(firstFinished.wait(timeout: .now() + .seconds(15)) == .success)
     #expect(firstResult.value == .success)
     #expect(signer.callCount == 1)
+    #expect(io.closeCallCount == 1)
+    #expect(throws: NativeAgentPrivateGitBridgeServerError.alreadyUsed) {
+        try server.serve()
+    }
+}
+
+@Test func privateGitBridgeServerCancelInterruptsBlockedReadAndNeverSigns() throws {
+    let io = BlockingReadIO()
+    let signer = CountingSigner()
+    let transport = try NativeAgentPrivateFDTransport(
+        fd: 92,
+        ownership: .owned,
+        read: io.read,
+        write: io.write,
+        close: io.close,
+        shutdownWrite: { _ in 0 },
+        shutdown: io.shutdown
+    )
+    let server = NativeAgentPrivateGitBridgeServer(transport: transport, signer: signer.sign)
+    let finished = DispatchSemaphore(value: 0)
+    let result = LockedServerResult()
+
+    DispatchQueue.global().async {
+        do {
+            try server.serve()
+            result.record(.success)
+        } catch let error as NativeAgentPrivateGitBridgeServerError {
+            result.record(.failure(error))
+        } catch {
+            result.record(.unexpected)
+        }
+        finished.signal()
+    }
+
+    #expect(io.entered.wait(timeout: .now() + .seconds(2)) == .success)
+    server.cancel()
+    #expect(finished.wait(timeout: .now() + .seconds(2)) == .success)
+    #expect(result.value == .failure(.invalidRequest))
+    #expect(signer.callCount == 0)
     #expect(io.closeCallCount == 1)
     #expect(throws: NativeAgentPrivateGitBridgeServerError.alreadyUsed) {
         try server.serve()
