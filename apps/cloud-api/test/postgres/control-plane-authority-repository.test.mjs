@@ -43,6 +43,7 @@ class FakeClient {
     if (text.startsWith("SELECT id\n        FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT organization_id,generation")) return result([{ organization_id: ids.organization, generation: 3 }]);
     if (text.startsWith("SELECT generation\n")) return result([{ generation: 3 }]);
+    if (text.startsWith("SELECT enrollment.device_id,enrollment.proof_version")) return result([{ device_id: ids.device, proof_version: 2, possession_recorded: true }]);
     if (text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], refresh_nonce_key_id: params[4], refresh_nonce_digest: params[5], replayed: false }]);
     if (text.startsWith("SELECT state.organization_id")) return result([{ organization_id: ids.organization, device_id: ids.device, desired_generation: 3, refresh_state: "pending", outbox_id: "88888888-8888-4888-8888-888888888888", refresh_nonce_key_id: "refresh-nonce-v3", refresh_nonce_digest: crypto.createHash("sha256").update(Buffer.alloc(16, 0x42)).digest(), published_at: NOW, expires_at: LATER }]);
     if (text.startsWith("SELECT attempt_count,status,expires_at")) return result([{ attempt_count: 0, status: "pending", expires_at: LATER }]);
@@ -149,7 +150,8 @@ test("exposes a frozen control-plane authority API with migration 0011 gaps clos
   for (const method of [
     "createRevocation", "getRevocation", "listRevocations", "issueCapabilityMetadata", "listRevokedCapabilityIds",
     "assignBundleHead", "acknowledgeBundle", "getBundleAcknowledgement", "ingestDeviceAuditEvents",
-    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState"
+    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState",
+    "ensureInitialDeviceRefresh"
   ]) assert.equal(typeof api[method], "function", method);
   assert.deepEqual(CONTROL_PLANE_SCHEMA_GAPS, []);
   assert.deepEqual(Object.keys(DEVICE_REFRESH_POLL_RETURN_SHAPE), ["organization_id", "device_id", "desired_generation", "refresh_state", "outbox_id", "refresh_nonce_key_id", "refresh_nonce_digest", "published_at", "expires_at"]);
@@ -303,6 +305,47 @@ test("authority reduction derives a restart-safe nonce and sends only key id plu
   assert.equal(enqueue.params[4], "refresh-nonce-v3");
   assert.ok(client.calls.some(({ text }) => text.includes("pg_advisory_xact_lock")));
   assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("initial device activation queues only that device at its existing authority generation", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const queued = await api.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.device,
+    enrollment_id: "99999999-9999-4999-8999-999999999999",
+    requested_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z"
+  });
+  assert.equal(queued.organization_id, ids.organization);
+  assert.equal(queued.device_id, ids.device);
+  assert.equal(queued.desired_generation, 3);
+  assert.equal(queued.state, "queued");
+  assert.match(queued.outbox.outbox_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(queued.outbox.refresh_nonce_key_id, "refresh-nonce-v3");
+  const enqueue = client.calls.find(({ text }) => text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed"));
+  assert.ok(enqueue);
+  assert.equal(enqueue.params[1], ids.organization);
+  assert.equal(enqueue.params[2], ids.device);
+  assert.equal(enqueue.params[3], 3);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT organization_id,generation")), false);
+  assert.equal(client.calls.some(({ text }) => text.includes("agentpass_advance_authority_generation")), false);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("initial device refresh does not create another outbox after the generation is applied", async () => {
+  const client = new FakeClient();
+  client.refreshState = { ...client.refreshState, observed_generation: 3, refresh_state: "applied" };
+  const resultValue = await repository(client).ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.device,
+    enrollment_id: "99999999-9999-4999-8999-999999999999",
+    requested_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z"
+  });
+  assert.equal(resultValue.state, "already_applied");
+  assert.equal(resultValue.outbox, null);
+  assert.equal(client.calls.some(({ text }) => text.includes("agentpass_request_device_refresh")), false);
 });
 
 test("exact revocation replay returns the committed generation without advancing or enqueueing again", async () => {

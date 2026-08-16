@@ -8,12 +8,15 @@ import test from "node:test";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { canonicalJson } from "../lib/identity.mjs";
 import { DeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
+import { bundleAcknowledgementSigningData, normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 
 const enrollmentId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "22222222-2222-4222-8222-222222222222";
 const deviceId = "33333333-3333-4333-8333-333333333333";
 const nonce = "A".repeat(43);
 const expiresAt = "2099-01-02T03:04:05.000Z";
+const controlStatementHash = "d".repeat(64);
+const halfOrder = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
 
 function fingerprint(key) {
   return `SHA256:${crypto.createHash("sha256").update(key.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
@@ -125,18 +128,54 @@ function completedResponse(control, refreshHint) {
   };
 }
 
+function signedControlAcknowledgement(device, overrides = {}) {
+  const unsigned = {
+    version: 1,
+    type: "agentpass.bundle-ack",
+    organization_id: overrides.organization_id ?? organizationId,
+    device_id: overrides.device_id ?? deviceId,
+    device_key_epoch: overrides.device_key_epoch ?? 4,
+    format_epoch: overrides.format_epoch ?? 2,
+    sequence: overrides.sequence ?? 1,
+    statement_hash: overrides.statement_hash ?? controlStatementHash,
+    result: overrides.result ?? "applied",
+    ...(overrides.reason_code === undefined ? {} : { reason_code: overrides.reason_code }),
+    observed_at: overrides.observed_at ?? "2026-08-16T00:00:00.000Z",
+    nonce: overrides.nonce ?? "EREREREREREREREREREREQ",
+    signature_algorithm: "p256-sha256"
+  };
+  const placeholder = { ...unsigned, signature: Buffer.alloc(64, 1).toString("base64url") };
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const signature = crypto.sign("sha256", bundleAcknowledgementSigningData(placeholder), { key: device.privateKey, dsaEncoding: "ieee-p1363" });
+    if (signature.subarray(32).compare(halfOrder) <= 0) return normalizeOnboardingControlAcknowledgement({ ...unsigned, signature: signature.toString("base64url") });
+  }
+  throw new Error("could not create a canonical low-S Control ACK");
+}
+
+function controlRefreshEvidence(device, overrides = {}) {
+  return {
+    status: "enabled",
+    control_refreshed: true,
+    control_ack: {
+      acknowledgement: overrides.acknowledgement ?? signedControlAcknowledgement(device, overrides),
+      server_accepted: overrides.server_accepted ?? true,
+      observed_generation: overrides.observed_generation ?? 1,
+      refresh_state: overrides.refresh_state ?? "applied"
+    }
+  };
+}
+
 function commonOptions({ device, receiptSigner, credential, fetchImpl, baseUrl = "https://api.example.test/v1" } = {}) {
-  const binding = candidateBinding(device);
   return {
     runner: {
       publicKey: () => ({ algorithm: "p256-sha256", spki_pem: device.publicKey.export({ type: "spki", format: "pem" }).toString(), fingerprint: fingerprint(device) }),
       sign: ({ bytes }) => crypto.sign("sha256", bytes, { key: device.privateKey, dsaEncoding: "ieee-p1363" })
     },
     provisionControl: async () => ({ changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"A".repeat(43)}` }),
-    restartService: async () => ({ status: "enabled", control_refreshed: true }),
+    restartService: async () => controlRefreshEvidence(device),
     invitation: invitation(device, credential, receiptSigner),
     baseUrl,
-    loadConfig: () => ({}),
+    loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } }),
     saveConfig: () => {},
     fetchImpl
   };
@@ -188,11 +227,40 @@ function publicSetupOptions({ device, receiptSigner, credential, resume, fetchIm
     invitation: invitationValue ?? invitation(device, credential, receiptSigner),
     resumeStore: resume?.store,
     provisionControl: provisionControl ?? (async () => ({ changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"A".repeat(43)}` })),
-    restartService: restartService ?? (async () => ({ status: "enabled", control_refreshed: true })),
-    loadConfig: loadConfig ?? (() => ({})),
+    restartService: restartService ?? (async () => controlRefreshEvidence(device)),
+    loadConfig: loadConfig ?? (() => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } })),
     saveConfig: saveConfig ?? (() => {}),
     recoverEnrollment
   };
+}
+
+async function runFreshControlCase(buildRestart) {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const control = crypto.generateKeyPairSync("ed25519");
+  const refreshHint = crypto.generateKeyPairSync("ed25519");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
+  let receiptReads = 0;
+  const base = commonOptions({
+    device,
+    receiptSigner,
+    credential,
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") {
+        receiptReads += 1;
+        return receiptReads === 1
+          ? new Response("", { status: 401 })
+          : new Response(canonicalJson({ request_id: "receipt-1", receipt }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(canonicalJson(completedResponse(control, refreshHint)), { status: 201, headers: { "content-type": "application/json" } });
+    }
+  });
+  return createDeviceEnrollmentSetupHandler({
+    ...base,
+    restartService: async () => buildRestart(device),
+    loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } })
+  })(context());
 }
 
 test("uses the v2 invitation, verifies the receipt, and persists only non-secret control trust", async () => {
@@ -202,7 +270,7 @@ test("uses the v2 invitation, verifies the receipt, and persists only non-secret
   const refreshHint = crypto.generateKeyPairSync("ed25519");
   const credential = crypto.randomBytes(32).toString("base64url");
   const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
-  const original = { version: 4, native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: "/Applications/AgentPass.app/client" } };
+  const original = { version: 4, control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 }, native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: "/Applications/AgentPass.app/client" } };
   let saved;
   let provisioned;
   let receiptReads = 0;
@@ -310,6 +378,7 @@ test("durably records every pre-POST boundary and completes the resumed state ma
   let postCount = 0;
   let stateAtPost;
   let receiptReads = 0;
+  let acceptedControlAck;
   const base = commonOptions({
     device,
     receiptSigner,
@@ -327,12 +396,41 @@ test("durably records every pre-POST boundary and completes the resumed state ma
       return new Response(canonicalJson(completedResponse(control, refreshHint)), { status: 201, headers: { "content-type": "application/json" } });
     }
   });
-  const handler = createDeviceEnrollmentSetupHandler({ ...base, resumeStore: resume.store });
+  const handler = createDeviceEnrollmentSetupHandler({
+    ...base,
+    resumeStore: resume.store,
+    restartService: async () => {
+      const response = controlRefreshEvidence(device);
+      acceptedControlAck = response.control_ack;
+      return response;
+    }
+  });
   await handler(context());
 
   assert.equal(postCount, 1);
   assert.equal(stateAtPost, "enrollment_uncertain");
   assert.equal(resume.store.read().state, "control_acknowledged");
+  const exactAck = {
+    ...acceptedControlAck.acknowledgement,
+    server_accepted: true,
+    observed_generation: acceptedControlAck.observed_generation,
+    refresh_state: acceptedControlAck.refresh_state
+  };
+  const expectedAckEvidence = {
+    organization_id: organizationId,
+    device_id: deviceId,
+    enrollment_id: enrollmentId,
+    control_url: `https://api.example.test/v1/organizations/${organizationId}/bundles/${deviceId}`,
+    public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    key_id: "control-v1",
+    control_ack: exactAck
+  };
+  const expectedAckEvidenceHash = crypto.createHash("sha256").update(canonicalJson(expectedAckEvidence), "utf8").digest("hex");
+  assert.equal(resume.store.read().evidence.control.ack_evidence_hash, expectedAckEvidenceHash);
+  const signatureMutation = { ...expectedAckEvidence, control_ack: { ...exactAck, signature: "A".repeat(86) } };
+  const nonceMutation = { ...expectedAckEvidence, control_ack: { ...exactAck, nonce: "IiIiIiIiIiIiIiIiIiIiIg" } };
+  assert.notEqual(expectedAckEvidenceHash, crypto.createHash("sha256").update(canonicalJson(signatureMutation), "utf8").digest("hex"));
+  assert.notEqual(expectedAckEvidenceHash, crypto.createHash("sha256").update(canonicalJson(nonceMutation), "utf8").digest("hex"));
   const journal = JSON.parse(fs.readFileSync(`${resume.store.filePath}.journal`, "utf8"));
   assert.deepEqual(journal.entries.map((entry) => entry.state), ["prepared", "invitation_issued", "delivered", "enrollment_uncertain", "receipt_verified", "trust_installed", "control_acknowledged"]);
   const durable = JSON.stringify(resume.store.read());
@@ -399,8 +497,8 @@ test("response loss is interruptible and a fresh run recovers GET-only without P
       return recovered;
     },
     provisionControl: async () => ({ changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"B".repeat(43)}` }),
-    restartService: async () => ({ status: "enabled", control_refreshed: true }),
-    loadConfig: () => ({}),
+    restartService: async () => controlRefreshEvidence(device),
+    loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } }),
     saveConfig: (value) => { saved = value; }
   });
   const result = await resumed(context());
@@ -412,6 +510,27 @@ test("response loss is interruptible and a fresh run recovers GET-only without P
   assert.equal(serializedResult.includes(credential), false);
   assert.equal(serializedResult.includes(nonce), false);
   assert.doesNotMatch(serializedResult, /(?:"signature"|private.?key|"credential")/iu);
+});
+
+test("advances only with exact server-accepted signed Control ACK evidence", async () => {
+  const cases = [
+    ["absent evidence", async (device) => ({ status: "enabled", control_refreshed: true }), /server-accepted signed Control ACK/iu],
+    ["blocked result", async (device) => controlRefreshEvidence(device, { result: "blocked", reason_code: "bundle_expired" }), /installed ControlBundle expectations/iu],
+    ["non-applied server state", async (device) => controlRefreshEvidence(device, { refresh_state: "blocked" }), /accepted for an applied refresh/iu],
+    ["wrong organization", async (device) => controlRefreshEvidence(device, { organization_id: "44444444-4444-4444-8444-444444444444" }), /installed ControlBundle expectations/iu],
+    ["wrong device", async (device) => controlRefreshEvidence(device, { device_id: "55555555-5555-4555-8555-555555555555" }), /installed ControlBundle expectations/iu],
+    ["stale generation", async (device) => controlRefreshEvidence(device, { observed_generation: 0 }), /accepted for an applied refresh/iu],
+    ["future generation", async (device) => controlRefreshEvidence(device, { observed_generation: 2 }), /installed ControlBundle expectations/iu],
+    ["sequence mismatch", async (device) => controlRefreshEvidence(device, { sequence: 2 }), /installed ControlBundle expectations/iu],
+    ["statement hash mismatch", async (device) => controlRefreshEvidence(device, { statement_hash: "e".repeat(64) }), /installed ControlBundle expectations/iu],
+    ["unknown evidence field", async (device) => { const evidence = controlRefreshEvidence(device); return { ...evidence, control_ack: { ...evidence.control_ack, extra: true } }; }, /unknown or missing fields/iu],
+    ["unknown signed ACK field", async (device) => controlRefreshEvidence(device, { acknowledgement: { ...signedControlAcknowledgement(device), extra: true } }), /signed evidence is invalid/iu]
+  ];
+  for (const [label, buildRestart, message] of cases) {
+    await assert.rejects(() => runFreshControlCase(buildRestart), (error) => error.code === "CONTROL_RECONCILIATION_FAILED" && message.test(error.message), label);
+  }
+  const result = await runFreshControlCase((device) => controlRefreshEvidence(device));
+  assert.equal(result.evidence.proof.proof_version, 2, "the exact evidence shape remains completable");
 });
 
 test("fails closed when a durable descriptor is incomplete or bound to another device", async () => {

@@ -111,10 +111,20 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "admin completes real WebAuthn and wake mutation", async ({ open }) => {
     const page = await open("admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
     const card = deviceCard(page, "反映待ち Mac");
+    const diagnosis = observeWakeAttempt(page);
     try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
     catch { assert.fail("P0B_SAFE_ADMIN_WAKE_CLICK_FAILED"); }
-    try { assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u); }
-    catch { assert.fail("P0B_SAFE_ADMIN_WAKE_OUTCOME_FAILED"); }
+    try {
+      assert.match(await requireWakeStatus(card, "P0B_SAFE_ADMIN_WAKE_UI"), /依頼を受け付けました|既存の依頼へ統合し/u);
+    } catch (error) {
+      const refreshResponse = await diagnosis.refreshResponsePromise;
+      const uiFailure = error instanceof Error && error.message === "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED"
+        ? "alert"
+        : error instanceof Error && error.message === "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED"
+          ? "timeout"
+          : "copy_mismatch";
+      assert.fail(await adminWakeFailureMarker(refreshResponse, diagnosis.observation, uiFailure));
+    }
   });
 
   for (const role of ["auditor", "viewer"]) {
@@ -438,6 +448,54 @@ export async function wakeAcceptedFailureMarker(response, observation = {}) {
   if (payload.refresh_request.status === "no_pending_refresh") return "P0B_SAFE_WAKE_ACCEPTED_GOT_NO_PENDING_FAILED";
   if (payload.refresh_request.status !== "accepted") return "P0B_SAFE_WAKE_ACCEPTED_STATUS_MISMATCH_FAILED";
   return "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED";
+}
+
+export async function adminWakeFailureMarker(response, observation = {}, uiFailure = null) {
+  const recentAuth = observation?.recentAuthObservation ?? {};
+  const optionsFailure = adminRecentAuthPhaseFailureMarker("OPTIONS", recentAuth);
+  if (optionsFailure !== null) return optionsFailure;
+  const verifyFailure = adminRecentAuthPhaseFailureMarker("VERIFY", recentAuth);
+  if (verifyFailure !== null) return verifyFailure;
+
+  if (response === null || response === undefined) {
+    if (observation?.refreshRequestFailed === true) return "P0B_SAFE_ADMIN_WAKE_REFRESH_TRANSPORT_FAILED";
+    if (uiFailure === "alert") return "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED";
+    if (uiFailure === "timeout") return "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED";
+    return "P0B_SAFE_ADMIN_WAKE_REFRESH_RESPONSE_TIMEOUT_FAILED";
+  }
+  const status = response.status();
+  if (status < 200 || status >= 300) return adminRefreshHttpFailureMarker(status);
+  let payload;
+  try { payload = await response.json(); }
+  catch { return "P0B_SAFE_ADMIN_WAKE_REFRESH_2XX_RESPONSE_CONTRACT_FAILED"; }
+  if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_ADMIN_WAKE_REFRESH_2XX_RESPONSE_CONTRACT_FAILED";
+  if (uiFailure === "alert") return "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED";
+  if (uiFailure === "timeout") return "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED";
+  return "P0B_SAFE_ADMIN_WAKE_UI_COPY_MISMATCH_FAILED";
+}
+
+function adminRecentAuthPhaseFailureMarker(phase, observation) {
+  const prefix = `P0B_SAFE_ADMIN_WAKE_AUTH_${phase}`;
+  const key = phase.toLowerCase();
+  const observed = observation?.[`${key}Observed`] === true;
+  const failed = observation?.[`${key}Failed`] === true;
+  const status = observation?.[`${key}Status`];
+  if (phase === "VERIFY" && observation?.optionsObserved === true && observation?.optionsStatus !== null
+    && observation.optionsStatus >= 200 && observation.optionsStatus < 300 && !observed) {
+    return `${prefix}_TRANSPORT_FAILED`;
+  }
+  if (!observed) return null;
+  if (failed || !Number.isInteger(status)) return `${prefix}_TRANSPORT_FAILED`;
+  if (status >= 200 && status < 300) return null;
+  if (status >= 400 && status < 500) return `${prefix}_HTTP_4XX_FAILED`;
+  if (status >= 500 && status < 600) return `${prefix}_HTTP_5XX_FAILED`;
+  return `${prefix}_HTTP_OTHER_FAILED`;
+}
+
+function adminRefreshHttpFailureMarker(status) {
+  if (status >= 400 && status < 500) return "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_4XX_FAILED";
+  if (status >= 500 && status < 600) return "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_5XX_FAILED";
+  return "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_OTHER_FAILED";
 }
 
 export async function keyboardRecentAuthFailureMarker(observation) {

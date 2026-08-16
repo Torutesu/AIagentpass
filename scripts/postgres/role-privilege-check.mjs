@@ -174,6 +174,7 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_prune_shared_control_expired(integer)'),
     ('agentpass_prune_anonymous_rate_limits(integer)'),
     ('agentpass_prune_human_identity_assertion_replays(integer)'),
+    ('agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)'),
     ('agentpass_agent_signing_capability_reserve(uuid,uuid,uuid,uuid,bytea,uuid,uuid,bytea,text,text,boolean,integer,bigint)'),
     ('agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)'),
     ('agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)'),
@@ -229,6 +230,8 @@ signing_authority_table_allowlist(relname) AS (
   VALUES
     ('capabilities'),
     ('agent_session_signing_capability_reservations'),
+    ('agent_session_signing_capability_expiry_audit_events'),
+    ('agent_session_signing_capability_expiry_audit_heads'),
     ('agent_capability_sequence_heads')
 ),
 signing_authority_policy_contract(relname, policy_name, policy_command, using_expression, with_check_expression, policy_role) AS (
@@ -243,6 +246,12 @@ signing_authority_policy_contract(relname, policy_name, policy_command, using_ex
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_reservations_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
+    ('agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_events_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
+    ('agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_events_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
+    ('agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_events_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
+    ('agent_session_signing_capability_expiry_audit_heads', 'agent_session_signing_capability_expiry_audit_heads_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
+    ('agent_session_signing_capability_expiry_audit_heads', 'agent_session_signing_capability_expiry_audit_heads_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
+    ('agent_session_signing_capability_expiry_audit_heads', 'agent_session_signing_capability_expiry_audit_heads_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
@@ -445,34 +454,34 @@ table_privilege_observations AS (
         OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(t.relname, length('platform_')) = 'platform_'
         OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-        OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads') THEN 'authority'
+        OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads') THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
       CASE WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads')
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads')
         THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END
         ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete_missing' END END,
       CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN NULL ELSE 'app:truncate' END,

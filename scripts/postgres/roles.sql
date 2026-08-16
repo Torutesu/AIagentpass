@@ -136,6 +136,8 @@ BEGIN
       AND c.relname NOT IN (
         'schema_migrations', 'schema_migration_attempts', 'release_candidates',
         'capabilities', 'agent_session_signing_capability_reservations',
+        'agent_session_signing_capability_expiry_audit_events',
+        'agent_session_signing_capability_expiry_audit_heads',
         'agent_capability_sequence_heads'
       )
       AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
@@ -215,7 +217,9 @@ BEGIN
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
         OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
-        OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads')
+        OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
+          'agent_session_signing_capability_expiry_audit_events',
+          'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads')
       )
   LOOP
     EXECUTE format(
@@ -250,6 +254,7 @@ BEGIN
     'agentpass_prune_shared_control_expired(integer)',
     'agentpass_prune_anonymous_rate_limits(integer)',
     'agentpass_prune_human_identity_assertion_replays(integer)',
+    'agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)',
     'agentpass_agent_signing_capability_reserve(uuid,uuid,uuid,uuid,bytea,uuid,uuid,bytea,text,text,boolean,integer,bigint)',
     'agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)',
     'agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)',

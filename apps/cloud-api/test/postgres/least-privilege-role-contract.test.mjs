@@ -43,6 +43,7 @@ const SHARED_CONTROL_APP_FUNCTIONS = Object.freeze([
   'agentpass_prune_shared_control_expired(integer)',
   'agentpass_prune_anonymous_rate_limits(integer)',
   'agentpass_prune_human_identity_assertion_replays(integer)',
+  'agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)',
 ]);
 
 const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([

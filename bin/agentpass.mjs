@@ -37,6 +37,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
 import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
 import { unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -316,8 +317,15 @@ async function continueNativeSetup() {
         if (register.status !== 0) throw Object.assign(new Error("Native service registration failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
         const inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
         if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Native service requires approval after control provisioning"), { code: "SERVICE_APPROVAL_REQUIRED" });
-        await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
-        return { status: "enabled", control_refreshed: true };
+        let response;
+        try {
+          const brokerResponse = await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
+          response = JSON.parse(Buffer.from(brokerResponse.stdout_base64, "base64").toString("utf8"));
+        } catch {
+          throw Object.assign(new Error("Native control refresh response is unavailable"), { code: "SERVICE_RESTART_FAILED" });
+        }
+        try { return normalizeNativeControlRefreshResponse(response); }
+        catch { throw Object.assign(new Error("Native control refresh response is invalid"), { code: "SERVICE_RESTART_FAILED" }); }
       },
       invitation: enrollmentInvitation,
       baseUrl: enrollmentBaseUrl,
@@ -1339,7 +1347,38 @@ function launchContractFailure(error) {
   return true;
 }
 
-try {
+const NATIVE_CONTROL_REFRESH_RESPONSE_KEYS = new Set([
+  "status", "control_refreshed", "control_ack", "refresh_generation", "refresh_sequence", "control_statement_hash"
+]);
+const NATIVE_CONTROL_ACK_KEYS = new Set(["acknowledgement", "server_accepted", "observed_generation", "refresh_state"]);
+const HASH = /^[0-9a-f]{64}$/u;
+
+/**
+ * Decode the closed management response before it reaches onboarding. The
+ * native service is trusted only for transport; this boundary re-validates
+ * the public schema, canonical ACK, binding, and applied result.
+ */
+export function normalizeNativeControlRefreshResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.size || Object.keys(value).some((key) => !NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.has(key))) throw new Error("Native control refresh response is not a closed public schema");
+  if (value.status !== "enabled" || value.control_refreshed !== true || !value.control_ack || typeof value.control_ack !== "object" || Array.isArray(value.control_ack)) throw new Error("Native control refresh response is not enabled");
+  const ackEvidence = value.control_ack;
+  if (Object.keys(ackEvidence).length !== NATIVE_CONTROL_ACK_KEYS.size || Object.keys(ackEvidence).some((key) => !NATIVE_CONTROL_ACK_KEYS.has(key))) throw new Error("Native control ACK evidence is not a closed public schema");
+  if (ackEvidence.server_accepted !== true || ackEvidence.refresh_state !== "applied" || !Number.isSafeInteger(ackEvidence.observed_generation) || ackEvidence.observed_generation < 1) throw new Error("Native control ACK was not accepted as applied");
+  let acknowledgement;
+  try { acknowledgement = normalizeOnboardingControlAcknowledgement(ackEvidence.acknowledgement); }
+  catch { throw new Error("Native control ACK acknowledgement is invalid"); }
+  if (acknowledgement.result !== "applied" || !Number.isSafeInteger(value.refresh_generation) || value.refresh_generation < 1 || value.refresh_generation !== ackEvidence.observed_generation || !Number.isSafeInteger(value.refresh_sequence) || value.refresh_sequence < 1 || value.refresh_sequence !== acknowledgement.sequence || typeof value.control_statement_hash !== "string" || !HASH.test(value.control_statement_hash) || value.control_statement_hash !== acknowledgement.statement_hash) throw new Error("Native control ACK evidence binding is invalid");
+  return Object.freeze({
+    status: "enabled",
+    control_refreshed: true,
+    control_ack: Object.freeze({ acknowledgement, server_accepted: true, observed_generation: ackEvidence.observed_generation, refresh_state: "applied" }),
+    refresh_generation: value.refresh_generation,
+    refresh_sequence: value.refresh_sequence,
+    control_statement_hash: value.control_statement_hash
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
   if (command === undefined || command === "--help" || command === "-h") usage();
   else if (command === "launch") launchAgent();
   else if (command === "close") {

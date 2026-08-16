@@ -324,6 +324,21 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     if (audit) await authorityReductionAuditAppender.appendAuthorityReductionAudit({ ...audit, tx });
     return reduction;
   };
+  const onDeviceEnrollmentActivated = async ({ tx, organization_id, device_id, enrollment_id }) => {
+    const requestedAt = new Date().toISOString();
+    const authority = createControlPlaneAuthorityRepository({
+      client: transactionBoundClient(tx),
+      cursorSecret: auditCursorSecret,
+      refreshNonceCodec
+    });
+    return authority.ensureInitialDeviceRefresh({
+      organization_id,
+      device_id,
+      enrollment_id,
+      requested_at: requestedAt,
+      expires_at: new Date(Date.parse(requestedAt) + 5 * 60_000).toISOString()
+    });
+  };
   const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
   const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool, onAuthorityReduction });
   const auditExportSnapshotReader = createPostgresAuditExportSnapshotReader();
@@ -381,7 +396,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
         revoked_at: revocation.revoked_at
       });
     },
-    onAuthorityReduction
+    onAuthorityReduction,
+    onDeviceEnrollmentActivated
   });
   const runtime = Object.freeze({
     pool,

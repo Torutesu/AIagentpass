@@ -439,6 +439,76 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     }));
   }
 
+  async function ensureInitialDeviceRefresh(input = {}) {
+    const values = normalizeInitialDeviceRefreshInput(input, now);
+    const nonceCodec = requireRefreshNonceCodec(refreshNonceCodec);
+    return databaseOperation(() => transaction(client, async (tx) => {
+      await lockOrganization(tx, values.organizationId);
+      await lockOrganizationRow(tx, values.organizationId);
+      const enrollmentResult = await tx.query(`SELECT enrollment.device_id,enrollment.proof_version,
+          EXISTS (SELECT 1 FROM device_enrollment_possession_receipts AS receipt
+            WHERE receipt.organization_id=enrollment.organization_id
+              AND receipt.enrollment_id=enrollment.id
+              AND receipt.device_id=enrollment.device_id) AS possession_recorded
+        FROM device_enrollments AS enrollment
+        WHERE enrollment.organization_id=$1 AND enrollment.id=$2
+        FOR SHARE`, [values.organizationId, values.enrollmentId]);
+      if (rowCount(enrollmentResult) !== 1
+        || uuid(enrollmentResult.rows[0].device_id, "device_id") !== values.deviceId
+        || Number(enrollmentResult.rows[0].proof_version) !== 2
+        || enrollmentResult.rows[0].possession_recorded !== true) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_ENROLLMENT_BINDING", "initial device refresh is not bound to a completed v2 enrollment");
+      }
+      const stateResult = await tx.query(`SELECT desired_generation,observed_generation,refresh_state
+        FROM device_control_plane_state
+        WHERE organization_id=$1 AND device_id=$2
+        FOR UPDATE`, [values.organizationId, values.deviceId]);
+      if (rowCount(stateResult) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh state was not found");
+      const state = stateResult.rows[0];
+      const desiredGeneration = positiveInteger(state.desired_generation, "desired_generation");
+      const observedGeneration = state.observed_generation === null ? null : positiveInteger(state.observed_generation, "observed_generation");
+      if (state.refresh_state === "applied" && observedGeneration === desiredGeneration) {
+        return Object.freeze({
+          organization_id: values.organizationId,
+          device_id: values.deviceId,
+          desired_generation: desiredGeneration,
+          state: "already_applied",
+          outbox: null
+        });
+      }
+
+      // SQL serializes one active outbox per device/generation. A fresh UUID
+      // avoids colliding with an expired/failed historical attempt; exact
+      // response-loss replay returns the already-active row before insert.
+      const outboxId = crypto.randomUUID();
+      const derived = nonceCodec.derive({
+        organization_id: values.organizationId,
+        device_id: values.deviceId,
+        authority_generation: desiredGeneration,
+        outbox_id: outboxId,
+        key_id: nonceCodec.activeKeyId
+      });
+      const result = await tx.query(`SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed
+        FROM agentpass_request_device_refresh($1::uuid,$2::uuid,$3::uuid,$4::bigint,$5::text,$6::bytea,$7::timestamptz)`, [
+        outboxId, values.organizationId, values.deviceId, desiredGeneration,
+        derived.key_id, derived.nonce_digest_bytes, values.expiresAt
+      ]);
+      if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "initial device refresh enqueue did not return a row");
+      const row = result.rows[0];
+      return Object.freeze({
+        organization_id: values.organizationId,
+        device_id: values.deviceId,
+        desired_generation: positiveInteger(row.desired_generation, "desired_generation"),
+        state: row.replayed === true ? "already_queued" : "queued",
+        outbox: Object.freeze({
+          outbox_id: uuid(row.outbox_id, "outbox_id"),
+          refresh_nonce_key_id: normalizeRefreshNonceKeyId(row.refresh_nonce_key_id),
+          refresh_nonce_digest: decodeDigest(row.refresh_nonce_digest, "refresh_nonce_digest").toString("hex")
+        })
+      });
+    }));
+  }
+
   async function getDeviceRefreshState(input = {}) {
     const values = normalizeRefreshStateKey(input);
     return databaseOperation(async () => {
@@ -650,6 +720,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     appendDeviceAuditEvent,
     assignBundleHead,
     createRevocation,
+    ensureInitialDeviceRefresh,
     getAuditHealth,
     getBundleAcknowledgement,
     getDeviceRefreshState,
@@ -815,6 +886,19 @@ function refreshOutboxIdForDevice(values, deviceId) {
 function normalizeRefreshStateKey(input) {
   if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh state input must be an object");
   return { organizationId: tenant(input.organization_id ?? input.organizationId), deviceId: uuid(input.device_id ?? input.deviceId, "device_id") };
+}
+
+function normalizeInitialDeviceRefreshInput(input, clock) {
+  if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "initial device refresh input must be an object");
+  const organizationId = tenant(input.organization_id ?? input.organizationId);
+  const deviceId = uuid(input.device_id ?? input.deviceId, "device_id");
+  const enrollmentId = uuid(input.enrollment_id ?? input.enrollmentId, "enrollment_id");
+  const requestedAt = timestamp(input.requested_at ?? input.requestedAt ?? clock(), "requested_at");
+  const defaultExpiry = new Date(Date.parse(requestedAt) + MAX_REFRESH_TTL_MS).toISOString();
+  const expiresAt = timestamp(input.expires_at ?? input.expiresAt ?? defaultExpiry, "expires_at");
+  const ttl = Date.parse(expiresAt) - Date.parse(requestedAt);
+  if (ttl < 1 || ttl > MAX_REFRESH_TTL_MS) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", "initial device refresh expiry must be within five minutes");
+  return { organizationId, deviceId, enrollmentId, requestedAt, expiresAt };
 }
 
 function normalizeRefreshPollInput(input) {

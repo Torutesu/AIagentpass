@@ -25,6 +25,21 @@ private final class CoordinatorSnapshotStore: NativeDeviceRefreshSnapshotStore, 
     }
 }
 
+private final class CoordinatorEvidenceStore: NativeControlRefreshEvidenceStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: NativeControlRefreshEvidence?
+    private(set) var saves = 0
+
+    func load() throws -> NativeControlRefreshEvidence? { lock.withLock { value } }
+
+    func save(_ evidence: NativeControlRefreshEvidence) throws {
+        lock.withLock {
+            value = evidence
+            saves += 1
+        }
+    }
+}
+
 private final class CoordinatorBundleStore: NativeDeviceSyncBundleInstalling, @unchecked Sendable {
     private let lock = NSLock()
     private var snapshot: NativeAtomicControlBundleSnapshot?
@@ -196,6 +211,7 @@ private struct CoordinatorFixture {
         snapshot: CoordinatorSnapshotStore,
         bundles: CoordinatorBundleStore,
         activator: CoordinatorActivator,
+        evidenceStore: CoordinatorEvidenceStore? = nil,
         nowMilliseconds: @escaping @Sendable () -> Int64 = { coordinatorNow }
     ) throws -> NativeDeviceSyncCoordinator {
         try NativeDeviceSyncCoordinator(
@@ -209,9 +225,40 @@ private struct CoordinatorFixture {
             bundleStore: bundles,
             activator: activator,
             acknowledgementSigner: deviceSigner,
+            evidenceStore: evidenceStore,
             nowMilliseconds: nowMilliseconds
         )
     }
+}
+
+@Test func coordinatorReusesDurableAppliedEvidenceWithoutResigningOrResubmitting() async throws {
+    let fixture = CoordinatorFixture()
+    let transport = CoordinatorTransport(
+        polls: [.init(hint: try fixture.hint(generation: 1))],
+        fetches: [try fixture.bundle(generation: 1, sequence: 1)]
+    )
+    let snapshot = CoordinatorSnapshotStore(), bundles = CoordinatorBundleStore(), activator = CoordinatorActivator()
+    let evidence = CoordinatorEvidenceStore()
+    transport.failSnapshotAfterRemoteACK = snapshot
+    let first = try fixture.coordinator(transport: transport, snapshot: snapshot, bundles: bundles, activator: activator, evidenceStore: evidence)
+    await #expect(throws: NativeDeviceRefreshStateMachineError.self) {
+        try await first.synchronize()
+    }
+    #expect(evidence.saves == 1)
+    let stored = try #require(try evidence.load())
+    #expect(stored.isAcceptedApplied)
+    #expect(stored.matches(organizationID: coordinatorOrganization, deviceID: coordinatorDevice, deviceKeyEpoch: 3, formatEpoch: 2, generation: 1, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: fixture.nonce))
+    #expect(!stored.matches(organizationID: "33333333-3333-4333-8333-333333333333", deviceID: coordinatorDevice, deviceKeyEpoch: 3, formatEpoch: 2, generation: 1, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: fixture.nonce))
+    #expect(!stored.matches(organizationID: coordinatorOrganization, deviceID: "44444444-4444-4444-8444-444444444444", deviceKeyEpoch: 3, formatEpoch: 2, generation: 1, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: fixture.nonce))
+    #expect(!stored.matches(organizationID: coordinatorOrganization, deviceID: coordinatorDevice, deviceKeyEpoch: 4, formatEpoch: 2, generation: 1, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: fixture.nonce))
+    #expect(!stored.matches(organizationID: coordinatorOrganization, deviceID: coordinatorDevice, deviceKeyEpoch: 3, formatEpoch: 2, generation: 2, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: fixture.nonce))
+    #expect(!stored.matches(organizationID: coordinatorOrganization, deviceID: coordinatorDevice, deviceKeyEpoch: 3, formatEpoch: 2, generation: 1, sequence: 1, statementHash: stored.controlStatementHash, refreshState: .applied, refreshNonce: "QkJCQkJCQkJCQkJCQkJCQg"))
+
+    transport.failSnapshotAfterRemoteACK = nil
+    let restarted = try fixture.coordinator(transport: transport, snapshot: snapshot, bundles: bundles, activator: activator, evidenceStore: evidence)
+    #expect(try await restarted.synchronize() == .applied(generation: 1, sequence: 1))
+    #expect(transport.acknowledgements.count == 1)
+    #expect(evidence.saves == 1)
 }
 
 @Test func coordinatorCompletesAuthenticatedApplyAndExactACKCycle() async throws {

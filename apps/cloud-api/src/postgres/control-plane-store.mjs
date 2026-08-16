@@ -89,7 +89,7 @@ export function createPostgresControlPlaneStore(options = {}) {
   const cursorSecret = options.cursorSecret ?? options.auditCursorSecret;
 
   const organizationRepository = options.organizationRepository ?? options.organization ?? (client ? createPostgresOrganizationRepository({ client, now }) : undefined);
-  const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now, onAuthorityReduction: options.onAuthorityReduction }) : undefined);
+  const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now, onAuthorityReduction: options.onAuthorityReduction, onDeviceEnrollmentActivated: options.onDeviceEnrollmentActivated }) : undefined);
   const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec: options.refreshNonceCodec, now, onRevocation: options.onRevocation }) : undefined);
   const auditRepository = options.auditRepository ?? options.audit ?? (client && (cursorCodec || cursorSecret) ? createPostgresAuditRepository({ client, cursorCodec, cursorSecret, now: () => clockMillis(now) }) : undefined);
   const adminAuditRepository = options.adminAuditRepository ?? options.adminAudit ?? (client ? createPostgresAdminAuditRepository({ client, now }) : undefined);

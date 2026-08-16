@@ -20,7 +20,7 @@ test("0070 separates canonical signer and exact-byte provider digests", async ()
 test("0070 remains catalogued below the current schema head", async () => {
   const catalog = JSON.parse(await readFile(catalogUrl, "utf8"));
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0074_agent_session_signing_capability_reservations.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0076_refresh_outbox_wall_clock_expiry.sql");
   assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(catalog.entries.find((entry) => entry.version === 70)?.id, "migration.0070_platform_provider_digest_binding");
 });

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass.agent_session_signing_capability_maintenance_alert_policy",
+  "metric_namespace": "agentpass",
+  "label_policy": {
+    "mode": "none",
+    "labels": []
+  },
+  "alerts": [
+    {
+      "name": "agent_session_signing_capability_maintenance_staleness",
+      "metric": "agent_session_signing_capability_maintenance_success_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 2, "unit": "events", "window_seconds": 300, "comparison": "<" },
+        { "severity": "critical", "value": 1, "unit": "events", "window_seconds": 900, "comparison": "<" }
+      ]
+    },
+    {
+      "name": "agent_session_signing_capability_maintenance_failures",
+      "metric": "agent_session_signing_capability_maintenance_failure_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 3, "unit": "events", "window_seconds": 900, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "agent_session_signing_capability_maintenance_uncertain_recovery",
+      "metric": "agent_session_signing_capability_maintenance_uncertain_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 5, "unit": "events", "window_seconds": 900, "comparison": ">=" }
+      ]
+    }
+  ]
+}

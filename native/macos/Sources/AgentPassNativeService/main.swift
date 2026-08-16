@@ -832,6 +832,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
     private let controlV2Manager: NativeControlBundleV2Manager?
+    private let controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)?
     private let signingTransactions: NativeSigningTransactionStore
     private let keyLifecycle: NativeKeyLifecycleStore?
     private let keyCoordinator: NativeKeyLifecycleCoordinator?
@@ -856,7 +857,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var auditPruneLastError: String?
     private var auditPruneLastUpdatedAt: String?
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?) {
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?, controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)? = nil) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
@@ -880,6 +881,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         self.sessionManager = sessionManager
         self.controlManager = controlManager
         self.controlV2Manager = controlV2Manager
+        self.controlRefreshEvidenceStore = controlRefreshEvidenceStore
         self.signingTransactions = signingTransactions
         self.keyLifecycle = keyLifecycle
         self.keyCoordinator = keyCoordinator
@@ -2455,9 +2457,12 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
                     return
                 }
                 do {
-                    var object = try self.currentControlStatusObject()
-                    object.merge(self.refreshStatusObject(), uniquingKeysWith: { _, replacement in replacement })
-                    object["refreshed"] = true
+                    guard let evidenceStore = self.controlRefreshEvidenceStore,
+                          let evidence = try evidenceStore.load(),
+                          evidence.isAcceptedApplied else {
+                        throw AgentPassNativeError.invalidConfiguration("control_refresh_evidence_unavailable")
+                    }
+                    let object = try evidence.publicResponseObject()
                     reply.call(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
                 } catch { reply.call(nil, error as NSError) }
             }
@@ -4826,7 +4831,10 @@ do {
     }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
-    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
+    let controlRefreshEvidenceStore = try configuration.controlV2RefreshStatePath.map {
+        try NativeControlRefreshEvidencePOSIXStore(path: "\($0).control-ack")
+    }
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash, controlRefreshEvidenceStore: controlRefreshEvidenceStore)
     if controlV2Manager != nil {
         guard let apiBaseText = configuration.controlV2APIBaseURL,
               let apiBaseURL = URL(string: apiBaseText),
@@ -4863,6 +4871,9 @@ do {
             signer: deviceSigner
         )
         let snapshotStore = try NativeDeviceRefreshPOSIXSnapshotStore(path: refreshStatePath)
+        guard let evidenceStore = controlRefreshEvidenceStore else {
+            throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 refresh evidence storage is unavailable; reprovision the native service")
+        }
         let initialRefreshState: NativeDeviceRefreshMachineState
         if let snapshotData = try snapshotStore.load() {
             initialRefreshState = try NativeDeviceRefreshSnapshotCodec.decode(snapshotData).state
@@ -4879,7 +4890,8 @@ do {
             snapshotStore: snapshotStore,
             bundleStore: try NativeAtomicControlBundleStore(rootURL: URL(fileURLWithPath: bundleStorePath, isDirectory: true)),
             activator: endpoint.deviceSyncActivation(),
-            acknowledgementSigner: deviceSigner
+            acknowledgementSigner: deviceSigner,
+            evidenceStore: evidenceStore
         )
         let runner = NativeDeviceSyncRunner(
             coordinator: coordinator,
