@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` through `7ed5474`
+Planning baseline: `codex/agent-platform` through `1a9c027`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -699,6 +699,52 @@ one-SHA CI baseline, (2) implement the complete Claude Code install-to-revoke
 lifecycle without expanding the signing protocol, and (3) add the operator UX
 and Cursor parity matrix. KMS provisioning and Apple notarization preparation
 may run in parallel once their external credentials and accounts are available.
+
+### 12.3.4 Exact forward queue from `1a9c027`
+
+The current head freezes the public `agentpass launch` argument contract,
+implements the bounded private-FD Git bridge transport and one-shot native
+client, and requires a canonical Cloud-signed capability to be verified and
+atomically consumed before native key use. The durable signing transaction is
+bound to the capability-body digest, so an identifier-preserving capability
+substitution cannot replay a completed request. These are source-complete
+boundaries; they do not yet constitute a working Claude Code lifecycle.
+
+The remaining path is split into merge-sized units below. Each unit must land
+with its own negative tests and may not broaden the five-selector Agent XPC
+surface, introduce a public signer socket, or place Grant/Lease/capability
+material in argv, environment, URLs, Git configuration, child-visible file
+descriptors, logs, or durable Host state.
+
+| Order | Merge unit | Concrete implementation output | Required verification | Exit gate |
+| --- | --- | --- | --- | --- |
+| A0 | Exact-SHA CI checkpoint | Retain the complete GitHub Actions result for `1a9c027`, including root, Console/browser, P0-B, PostgreSQL integration, PostgreSQL 16/17, and native jobs. Classify any failure by owning boundary; do not count a sandbox-restricted local test as either product failure or qualification success. | Exact head SHA, terminal job conclusions, migration head, no replaced run, artifact secret scan. | Every non-external lane is green on one SHA; every external lane is explicitly `pending` with owner and required credential/hardware. |
+| A1 | Private launch-authority handoff | Add a bounded, canonical, one-time handoff from CLI/Console setup to the signed Host. It carries only the bootstrap proof and Cloud authority needed by the Host; the agent child receives opaque public session state only. Bind the handoff to device, agent, process policy, worktree digest, boot identity, nonce, expiry, and correlation ID. Consume it once and zero transient buffers after decoding. | Duplicate-key/unknown-field/noncanonical/oversize/expired/replayed/substituted handoff tests; argv/env/URL/log/state scans; connection and boot substitution; response-loss reconciliation. | The Host can start one bounded session without a reusable bearer crossing into Claude Code, Git, MCP, or shell state. |
+| A2 | Same-connection signed Host runner | Implement the Host lifecycle coordinator that bootstraps, starts, monitors, signs, queries status, and closes over one authenticated Agent XPC connection. Spawn Claude Code as a supervised child with a closed environment allowlist, explicit working directory, process group, inherited-private-FD allowlist, and deterministic signal/exit propagation. Reobserve connection/process/worktree authority before every key boundary. | Host unit/integration tests for exec drift, PID reuse, parent/child death, worktree move, branch/detached-HEAD and remote changes, service restart, sleep/wake, lease expiry, revoke, emergency stop, and XPC interruption. | One Host invocation owns exactly one child and one native session; child exit or authority drift closes the session and all private transports. |
+| A3 | Git helper end-to-end bridge | Wire `agentpass-git-sign` to the inherited private transport. The helper accepts Git's bounded payload only, writes one framed request, reads one bounded signature, closes immediately, and cannot select session, capability, key, algorithm, namespace, repository, branch, or remote. The Host constructs the native request and supplies the next single-use capability. | Real Git SSH signing protocol vectors; malformed/truncated/oversize frame tests; repeated/concurrent helper use; descriptor inheritance scan; unrelated child and sibling-process denial; no public socket/path fallback. | A supervised `git commit -S` reaches the existing sign-once transaction and returns a verifiable SSHSIG without exposing authority material. |
+| A4 | Lifecycle and ambiguous-outcome closure | Connect launch/status/close/revoke/doctor/uninstall to the Host and native lifecycle. Persist only public correlation and recovery evidence. Define stable user-facing states for unavailable, approval required, expired, revoked, process lost, worktree changed, budget exhausted, and `outcome_unknown`. Never retry after provider/key invocation unless the durable transaction proves the exact signature committed. | Kill/restart at every transaction boundary; exact completed replay; pre-key safe retry; post-key ambiguity; duplicate request/capability; budget race; clock rollback/advance; stale ControlBundle/key generation; bounded error and secret scans. | Every interruption converges to a documented terminal or recoverable state, and no ambiguous operation can cause a second key use. |
+| A5 | Claude Code clean-machine qualification | Finish idempotent setup, Git configuration backup/restore, `doctor`, revoke, and uninstall-preserve behavior. Run two unattended commits in a clean user account and independently verify both signatures and audit links. | Fresh install, existing custom Git config, repository/branch/remote/process substitution, two commits, `git verify-commit`, revoke between commits, uninstall/reinstall, shell history/argv/env/log/crash/state scans. | Claude Code completes two policy-bounded commits with no human prompt after session approval; revoke is effective and user configuration is recoverable. |
+| A6 | Console onboarding and Cursor parity | Make the Console the human setup/control surface for install status, device enrollment, agent approval, policy preview, session/activity, revoke, emergency stop, and remediation. Add Cursor only as a second child launcher using A1-A4 unchanged. | Owner/Admin/Auditor/Viewer matrix; WebAuthn recent-auth and response-loss; keyboard/screen reader/focus/live-region/200% reflow/reduced motion; Japanese/English copy; Claude/Cursor parity and browser-storage/history scans. | A non-engineer can install, approve, diagnose, revoke, and recover; Cursor adds no XPC selector, signer path, or authority field. |
+| A7 | Cloud signer and production authority | Complete PostgreSQL-backed Device API issuance/consumption and all eight purpose-separated managed signers. Pin provider version/fingerprint, enforce least-privilege identities, reconcile uncertain provider operations, and make readiness fail closed on fallback, alias drift, missing workers, stale rotation, or unavailable revocation publication. | PostgreSQL 16/17 contention and rollback; AWS/GCP allow/deny IAM matrix; outage/throttle/timeout/response loss; rotation/disable/drain; wrong-purpose/version denial; private-byte absence and tenant-isolation scans. | Every Cloud operation converges to one verified result or durable uncertainty, and production cannot start with local/file/environment-backed signing keys. |
+| A8 | Immutable distribution and production closure | Build one universal hardened-runtime PKG, sign nested code with Developer ID, notarize and staple it, then publish direct-download and Homebrew metadata pinned to the same digest. Deploy that immutable candidate to staging and run operational and independent security gates. | `codesign`, `spctl`, `pkgutil`, notarization/stapler, SBOM/provenance; Apple silicon and Intel/T2 install/upgrade/uninstall/rollback; migration/PITR/outage/emergency drills; SAST/DAST/dependency/container/IaC review. | One independently verifiable artifact digest passes both hardware classes, no critical/high finding remains, and a human signs the exact source/artifact/provider-version promotion record. |
+
+Dependency order is `A1 -> A2 -> A3 -> A4 -> A5 -> A6 -> A8`. `A0` runs
+whenever an integrated candidate is pushed. `A7` may proceed in parallel with
+`A2-A6` after its signing domains and schemas are frozen, but A5 qualification
+requires the real Device API path and A8 production promotion requires A7.
+
+Parallel implementation is capped at three disjoint lanes:
+
+1. native Host, private bridge, and agent lifecycle (`A1-A5`);
+2. Console, organization/session/WebAuthn UX, and Cursor parity (`A6`);
+3. PostgreSQL, Device API, managed signer, deployment, and evidence (`A7-A8`).
+
+The integration owner serializes changes to JSON Schema/OpenAPI/catalog
+versions, PostgreSQL migrations, signing domains, XPC selectors/DTO encoding,
+Mach service identifiers, entitlements, Developer ID identities, and promotion
+records. A merge unit is complete only when implementation, focused positive
+and negative tests, threat-model/operation documentation, and its declared
+evidence format land together.
 
 ### 12.4 Delivery sequence, parallel capacity, and effort bands
 
