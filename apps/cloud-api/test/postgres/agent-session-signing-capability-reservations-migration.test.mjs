@@ -91,6 +91,7 @@ test("0074 keeps agent_sessions as the sole two-signature budget authority", asy
   assert.doesNotMatch(table, /session_signature_budget|remaining_session_signatures|used_signatures|reserved_signatures/u);
   assert.match(sql, /session_row\.max_signatures <> 2/u);
   assert.match(sql, /used_signatures \+ session_row\.reserved_signatures >= session_row\.max_signatures/u);
+  assert.match(sql, /session_row\.status = 'signed'[\s\S]*?session_row\.used_signatures \+ session_row\.reserved_signatures < session_row\.max_signatures[\s\S]*?SET status = 'active'/u);
   assert.match(sql, /FROM public\.agent_sessions AS s[\s\S]*FOR UPDATE/u);
   assert.match(sql, /status = 'request_reserved'[\s\S]*reserved_signatures = reserved_signatures \+ 1/u);
   assert.match(sql, /status = 'signing_intent'/u);

@@ -58,6 +58,15 @@ function boundedSigningCapabilityDiagnostics(tableValue, functionValue) {
       failures: Array.isArray(item?.failures)
         ? item.failures.filter((failure) => typeof failure === 'string').slice(0, 16)
         : [],
+      policy_mismatches: Array.isArray(item?.policy_mismatches)
+        ? item.policy_mismatches.slice(0, 16).map((policy) => ({
+          policy: typeof policy?.policy === 'string' ? policy.policy.slice(0, maxName) : 'unknown',
+          actual_using: typeof policy?.actual_using === 'string' ? policy.actual_using.slice(0, 256) : null,
+          expected_using: typeof policy?.expected_using === 'string' ? policy.expected_using.slice(0, 256) : null,
+          actual_with_check: typeof policy?.actual_with_check === 'string' ? policy.actual_with_check.slice(0, 256) : null,
+          expected_with_check: typeof policy?.expected_with_check === 'string' ? policy.expected_with_check.slice(0, 256) : null,
+        }))
+        : [],
     }));
   const encoded = JSON.stringify({
     tables: normalize(tableValue, 'relation', MAX_RELATION_DIAGNOSTIC_NAME),
@@ -312,7 +321,39 @@ signing_authority_table_observations AS (
       CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN 'app:truncate' END,
       CASE WHEN has_table_privilege('agentpass_app', t.oid, 'REFERENCES') THEN 'app:references' END,
       CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRIGGER') THEN 'app:trigger' END
-    ]::text[], NULL::text) AS failures
+    ]::text[], NULL::text) AS failures,
+    COALESCE((
+      SELECT json_agg(json_build_object(
+        'policy', expected_policy.policy_name,
+        'actual_using', pg_get_expr(policy.polqual, policy.polrelid),
+        'expected_using', expected_policy.using_expression,
+        'actual_with_check', pg_get_expr(policy.polwithcheck, policy.polrelid),
+        'expected_with_check', expected_policy.with_check_expression
+      ) ORDER BY expected_policy.policy_name)
+      FROM signing_authority_policy_contract AS expected_policy
+      LEFT JOIN pg_policy AS policy
+        ON policy.polrelid = t.oid AND policy.polname = expected_policy.policy_name
+      WHERE expected_policy.relname = t.relname
+        AND (
+          policy.oid IS NULL
+          OR policy.polcmd::text IS DISTINCT FROM expected_policy.policy_command
+          OR policy.polpermissive IS DISTINCT FROM true
+          OR (expected_policy.policy_role IS NULL AND policy.polroles IS DISTINCT FROM ARRAY[0::oid])
+          OR (expected_policy.policy_role IS NOT NULL AND policy.polroles IS DISTINCT FROM ARRAY[(
+            SELECT oid FROM role_ids WHERE rolname = expected_policy.policy_role
+          )])
+          OR regexp_replace(
+              replace(regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '[[:space:]]+', '', 'g'),
+                'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
+              '^\\((.*)\\)$', '\\1'
+            ) IS DISTINCT FROM expected_policy.using_expression
+          OR regexp_replace(
+              replace(regexp_replace(pg_get_expr(policy.polwithcheck, policy.polrelid), '[[:space:]]+', '', 'g'),
+                'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
+              '^\\((.*)\\)$', '\\1'
+            ) IS DISTINCT FROM expected_policy.with_check_expression
+        )
+    ), '[]'::json) AS policy_mismatches
   FROM tables AS t
   JOIN signing_authority_table_allowlist AS expected
     ON expected.relname = t.relname
@@ -531,11 +572,12 @@ SELECT json_build_object(
   'sequence_privileges_ok', (SELECT value FROM sequence_privileges_ok),
   'function_privileges_ok', (SELECT value FROM function_privileges_ok),
   'signing_capability_boundary_ok', (SELECT value FROM signing_capability_boundary_ok),
-  'signing_capability_table_diagnostics', COALESCE((SELECT json_agg(json_build_object(
-      'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
-      'failures', failures
-    ) ORDER BY relname)
-    FROM (SELECT relname, failures
+      'signing_capability_table_diagnostics', COALESCE((SELECT json_agg(json_build_object(
+          'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
+          'failures', failures,
+          'policy_mismatches', policy_mismatches
+        ) ORDER BY relname)
+        FROM (SELECT relname, failures, policy_mismatches
       FROM signing_authority_table_observations
       WHERE cardinality(failures) > 0
       ORDER BY relname

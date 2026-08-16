@@ -626,7 +626,9 @@ BEGIN
       - session_row.reserved_signatures, 0);
     RETURN public.agentpass_agent_signing_capability_record(existing_row, remaining_value, true);
   END IF;
-  IF session_row.status = 'signed' THEN
+  IF session_row.status = 'signed'
+     AND session_row.used_signatures + session_row.reserved_signatures < session_row.max_signatures
+  THEN
     UPDATE public.agent_sessions SET status = 'active'
       WHERE organization_id = session_row.organization_id AND session_id = session_row.session_id;
     session_row.status := 'active';

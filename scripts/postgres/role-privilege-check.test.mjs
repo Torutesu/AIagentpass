@@ -70,4 +70,6 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /signing_capability_boundary_ok/u);
   assert.match(checker, /signing_capability_table_diagnostics/u);
   assert.match(checker, /signing_capability_function_diagnostics/u);
+  assert.match(checker, /policy_mismatches/u);
+  assert.match(checker, /actual_with_check/u);
 });
