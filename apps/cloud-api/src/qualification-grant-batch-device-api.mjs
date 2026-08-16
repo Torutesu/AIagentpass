@@ -296,7 +296,7 @@ async function verifyBatchManifest(batch, manifestVerifier, route, request, cloc
     throw mapManifestVerificationError(error);
   }
 
-  const candidate = extractVerifiedManifest(verified, batch.manifest);
+  const candidate = extractVerifiedManifest(verified);
   if (!candidate) {
     throw new QualificationGrantBatchDeviceHttpError(
       QUALIFICATION_GRANT_BATCH_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED,
@@ -322,10 +322,8 @@ async function verifyBatchManifest(batch, manifestVerifier, route, request, cloc
   return manifest;
 }
 
-function extractVerifiedManifest(result, input) {
-  if (result === true) return input;
+function extractVerifiedManifest(result) {
   if (!isObject(result) || result.verified === false) return undefined;
-  if (result.verified === true && !result.manifest && !result.verified_manifest && !result.normalized_manifest) return input;
   if (isManifestEnvelope(result)) return result;
   for (const key of ["manifest", "verified_manifest", "normalized_manifest"]) {
     if (isManifestEnvelope(result[key])) return result[key];

@@ -402,6 +402,20 @@ test("requires and verifies the repository manifest before any 200 response", as
   assert.equal((await verifiedResult.api.handle(request())).status, 200);
 });
 
+test("rejects unbound manifest verifier success results before any Grant verification", async () => {
+  for (const manifestVerifier of [
+    async () => true,
+    async () => ({ verified: true }),
+    async () => ({ verified: true, normalized_manifest: undefined })
+  ]) {
+    const f = await fixture({ manifestVerifier });
+    const result = await f.api.handle(request());
+    assertError(result, 403, QUALIFICATION_GRANT_BATCH_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
+    assert.equal(f.calls.repository.length, 1, "the repository must be claimed before verifier output is inspected");
+    assert.equal(f.calls.grants.length, 0, "manifest denial must precede Grant verification");
+  }
+});
+
 test("fails closed when the signed manifest is substituted or does not bind all seven Grants", async () => {
   const substitutedManifest = batch();
   substitutedManifest.manifest = {
