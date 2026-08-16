@@ -895,6 +895,12 @@ function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
 
 type IssuedEnrollmentSummary = Readonly<{ enrollmentId: string; deviceId: string; label: string; candidateId: string; deviceKeyFingerprint: string; expiresAt: string }>;
 
+type SummaryRefreshResult = "ready" | "unavailable";
+type EnrollmentReconciliationState = "checking" | "pending" | "enrolled" | "response-loss" | "timed-out";
+const ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS = 5;
+const ENROLLMENT_RECONCILIATION_INITIAL_DELAY_MS = 250;
+const ENROLLMENT_RECONCILIATION_RETRY_DELAY_MS = 2_500;
+
 function enrollmentProgress(device: AgentPassInitialData["devices"][number] | undefined): "pending" | "enrolled" | "recovery-proven" {
   if (!device || device.lifecycleStatus === "pending") return "pending";
   // A signed device ACK proves that the enrolled device observed control state,
@@ -903,8 +909,75 @@ function enrollmentProgress(device: AgentPassInitialData["devices"][number] | un
   return device.lifecycleStatus === "active" && device.lastAckAt ? "enrolled" : "enrolled";
 }
 
-function enrollmentProgressLabel(progress: "pending" | "enrolled" | "recovery-proven"): string {
-  return progress === "pending" ? "登録待ち" : progress === "enrolled" ? "enrollment proven" : "recovery-proven";
+function EnrollmentReconciliationCard({ progress, refresh }: { progress: "pending" | "enrolled" | "recovery-proven"; refresh: () => Promise<SummaryRefreshResult> }) {
+  const [state, setState] = useState<EnrollmentReconciliationState>(progress === "pending" ? "checking" : "enrolled");
+  const [cycle, setCycle] = useState(0);
+  const [attempts, setAttempts] = useState(0);
+  const attemptRef = useRef(0);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (progress !== "pending") return;
+    if (attemptRef.current >= ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS) return;
+
+    let cancelled = false;
+    const delay = attemptRef.current === 0 ? ENROLLMENT_RECONCILIATION_INITIAL_DELAY_MS : ENROLLMENT_RECONCILIATION_RETRY_DELAY_MS;
+    const timer = window.setTimeout(() => {
+      if (cancelled || inFlightRef.current) return;
+      inFlightRef.current = true;
+      attemptRef.current += 1;
+      setAttempts(attemptRef.current);
+      setState("checking");
+      void refresh().then((result) => {
+        if (cancelled) return;
+        if (result !== "ready") {
+          setState("response-loss");
+          return;
+        }
+        setState("pending");
+        setCycle((value) => value + 1);
+      }).finally(() => {
+        inFlightRef.current = false;
+      });
+    }, delay);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [cycle, progress, refresh]);
+
+  const retry = () => {
+    if (inFlightRef.current) return;
+    attemptRef.current = 0;
+    setAttempts(0);
+    setState("checking");
+    setCycle((value) => value + 1);
+  };
+
+  const effectiveState: EnrollmentReconciliationState = progress !== "pending"
+    ? "enrolled"
+    : attempts >= ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS && state === "pending"
+      ? "timed-out"
+      : state;
+  const failure = effectiveState === "response-loss" || effectiveState === "timed-out";
+  const message = effectiveState === "enrolled"
+    ? "Cloudで端末登録の完了を確認しました。"
+    : effectiveState === "checking"
+      ? "Cloudで端末登録の完了を確認しています。"
+      : effectiveState === "response-loss"
+        ? "最新状態の応答を確認できませんでした。操作は再送していません。"
+        : effectiveState === "timed-out"
+          ? "一定時間内に端末登録を確認できませんでした。操作は再送していません。"
+          : "まだCloudで端末登録の完了を確認できません。";
+
+  return <div className="enrollment-reconciliation" data-reconciliation-state={effectiveState} role={failure ? "alert" : "status"} aria-live={failure ? "assertive" : "polite"} aria-atomic="true">
+    <p className="row-title">{message}</p>
+    {effectiveState === "pending" ? <p className="row-description">端末が受け入れを完了するまで待機します。短期招待の再発行は行いません。</p> : null}
+    {effectiveState === "checking" ? <p className="row-description">最新のsummaryを読み込んでいます。登録操作そのものは再送しません。</p> : null}
+    {effectiveState === "enrolled" ? <p className="row-description">この表示はCloudの端末状態に基づく確認です。署名済みpossession receiptをConsole側で推測しません。</p> : null}
+    {failure ? <button className="text-button" type="button" onClick={retry}>状態を再確認</button> : null}
+  </div>;
 }
 
 type InstallGuidanceState = "not-detected" | "checking" | "connected" | "delivered" | "failed";
@@ -961,7 +1034,7 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
   );
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
+function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<SummaryRefreshResult>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [preflightText, setPreflightText] = useState("");
   const [preflight, setPreflight] = useState<PublicEnrollmentPreflight | null>(null);
@@ -1097,7 +1170,6 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   const enrollmentJson = enrollmentPayload ? JSON.stringify({ enrollment: enrollmentPayload }, null, 2) : "";
   const issuedDevice = issuedEnrollment ? data.devices.find((device) => device.deviceId === issuedEnrollment.deviceId) : undefined;
   const progress = enrollmentProgress(issuedDevice);
-  const progressLabel = enrollmentProgressLabel(progress);
   useEffect(() => () => clearEnrollmentStore(enrollmentStoreId), [enrollmentStoreId]);
   useEffect(() => {
     if (!enrollmentVisible) return;
@@ -1157,7 +1229,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           </div>
           <details className="advanced-enrollment"><summary>上級者向け：preflight JSONを使えない場合の手入力</summary><p className="field-help">互換性のためのfallbackです。値は同じ厳格な形式で検証し、公開キー指紋以外は受け付けません。</p><div className="form-grid"><label>リリース候補ID<input maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /></label><label>端末キーのフィンガープリント<input maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">秘密鍵ではなく、P-256公開キーのSHA-256指紋。</span></label></div><button className="text-button" type="button" onClick={() => { setAdvancedEnrollment(true); setPreflight(null); setPreflightSource("manual"); setPreflightText(""); setPreflightError(""); }}>手入力を使う</button></details>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
-          {issuedEnrollment ? <div className="enrollment-progress" aria-live="polite" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><button className="text-button" type="button" disabled={enrollmentPending} onClick={() => void refresh()}>状態を再確認</button></div> : null}
+          {issuedEnrollment ? <div className="enrollment-progress" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel(progress)}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><EnrollmentReconciliationCard key={`${issuedEnrollment.enrollmentId}:${progress}`} progress={progress} refresh={refresh} /></div> : null}
           {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
         </article> : null}
         {canManage ? <article className="surface-card">
@@ -1341,7 +1413,7 @@ export function AgentPassConsole() {
     scrollConsoleToTop();
   };
 
-  const refreshSummary = useCallback(async (signal?: AbortSignal) => {
+  const refreshSummary = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
@@ -1351,7 +1423,7 @@ export function AgentPassConsole() {
       if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
       if (!response.ok) throw new Error("summary unavailable");
       const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }), session);
-      if (epoch !== summaryEpoch.current) return;
+      if (epoch !== summaryEpoch.current) return "unavailable";
       organizationIdRef.current = organizationId;
       setSessionRole(session.role);
       setAuditSession(session);
@@ -1359,9 +1431,10 @@ export function AgentPassConsole() {
       setSessionState("active");
       setSummaryState("ready");
       setLastSynced("たった今");
+      return "ready";
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      if (epoch !== summaryEpoch.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
+      if (epoch !== summaryEpoch.current) return "unavailable";
       organizationIdRef.current = null;
       setSessionRole(null);
       setAuditSession(null);
@@ -1371,6 +1444,7 @@ export function AgentPassConsole() {
       }
       setSummaryState("error");
       setData(emptyConsoleData());
+      return "unavailable";
     } finally {
       if (!signal?.aborted && epoch === summaryEpoch.current) setRefreshing(false);
     }
@@ -1669,7 +1743,7 @@ export function AgentPassConsole() {
         <main id="main-content" tabIndex={-1} aria-labelledby="console-page-heading" className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
           {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
-          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffEvent={advanceLiveHandoff} /> : null}
+          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={refreshSummary} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffEvent={advanceLiveHandoff} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
