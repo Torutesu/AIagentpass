@@ -99,8 +99,7 @@ async function assertPasskeyManagement(repository, fixture) {
     idempotency_key: "h21-passkey-revoke-01"
   });
   assert.equal(revoke.id, fixture.management.revokeCredential);
-  assert.equal(revoke.revoked_at instanceof Date, true);
-  assert.equal(revoke.revoked_at.toISOString(), "2026-08-16T00:01:00.000Z");
+  assert.equal(revoke.revoked_at, "2026-08-16T00:01:00.000Z");
   assert.equal(revoke.version, 2);
 
   const revokeReplay = await repository.revokeCredential({
