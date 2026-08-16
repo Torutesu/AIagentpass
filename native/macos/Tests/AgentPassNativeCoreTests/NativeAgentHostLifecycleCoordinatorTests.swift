@@ -188,6 +188,20 @@ private final class LockedCounter: @unchecked Sendable {
     }
 }
 
+private final class LifecycleGitSigner: NativeAgentGitCommitSigning, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var calls = 0
+    private(set) var payload: Data?
+
+    func signGitCommitPayload(_ payload: Data) throws -> Data {
+        lock.lock()
+        calls += 1
+        self.payload = payload
+        lock.unlock()
+        return Data("-----BEGIN SSH SIGNATURE-----\ncoordinator\n-----END SSH SIGNATURE-----\n".utf8)
+    }
+}
+
 private enum FixtureError: Error {
     case failed
 }
@@ -467,6 +481,57 @@ private func activationProjection(_ activation: NativeAgentHostQualifiedSessionA
         #expect(signer.payload == payload)
         #expect(throws: NativeAgentHostPrivateGitBridgeError.alreadyAttempted) {
             try coordinator.servePrivateGitBridge { _ in expectedSignature }
+        }
+    }
+
+    _ = try coordinator.close()
+}
+
+@Test func fixedGitHelperInvocationReachesCoordinatorRunnerExactlyOnce() throws {
+    let fixture = LifecycleFixture()
+    fixture.capturePrivateBridgeClient = true
+    let coordinator = try makeLifecycleCoordinator(fixture: fixture)
+    _ = try coordinator.bootstrap()
+
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agentpass-coordinator-helper-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let payloadPath = directory.appendingPathComponent("commit-payload").path
+    let payload = Data("tree coordinator\n\nmessage\n".utf8)
+    try payload.write(to: URL(fileURLWithPath: payloadPath))
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: payloadPath)
+
+    try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        let helperDescriptor = try #require(fixture.takeCapturedPrivateBridgeClientDescriptor())
+        let signer = LifecycleGitSigner()
+        let runner = NativeAgentHostGitBridgeRunner(coordinator: coordinator, signer: signer)
+        let runnerError = ErrorBox()
+        let runnerFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            do { try runner.serveOne() }
+            catch { runnerError.set(error) }
+            runnerFinished.signal()
+        }
+
+        try NativeAgentGitSigningHelper.run(
+            arguments: [
+                "-Y", "sign", "-n", "git", "-f",
+                NativeAgentGitSigningInvocation.fixedSignerReference,
+                payloadPath
+            ],
+            bridgeFileDescriptor: helperDescriptor
+        )
+
+        #expect(runnerFinished.wait(timeout: .now() + .seconds(2)) == .success)
+        #expect(runnerError.get() == nil)
+        #expect(signer.calls == 1)
+        #expect(signer.payload == payload)
+        #expect(FileManager.default.fileExists(atPath: payloadPath + ".sig"))
+        #expect(throws: NativeAgentHostPrivateGitBridgeError.alreadyAttempted) {
+            try runner.serveOne()
         }
     }
 
