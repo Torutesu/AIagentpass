@@ -14,7 +14,11 @@ const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
 
-test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
+// Thirteen authority scenarios each own a fresh TLS PostgreSQL/Cloud/Console
+// stack. A complete successful matrix is longer than the earlier failure-
+// masked 14-minute ceiling on hosted runners; per-scenario 120-second bounds
+// remain the owning hang detector.
+test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 1_200_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
     const page = await open("owner");
     await Promise.all([
