@@ -35,6 +35,7 @@ import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal }
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
+import { unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -61,7 +62,9 @@ Commands:
                     configure the native bridge and project MCP integration
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
-  status            show policy and revocation status
+  launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  close             reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  status            show legacy local policy and revocation status
   check             evaluate the current repository
   doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
                     diagnose production installation without changing state
@@ -1315,7 +1318,12 @@ function xmlEscape(value) {
 }
 
 try {
-  if (command === "install") installProduction();
+  if (command === undefined || command === "--help" || command === "-h") usage();
+  else if (command === "launch" || command === "close") {
+    console.log(JSON.stringify(unavailableAgentLifecycle(command)));
+    process.exitCode = 1;
+  }
+  else if (command === "install") installProduction();
   else if (command === "setup") await setupNativeBridge();
   else if (command === "uninstall") await uninstallProduction();
   else if (command === "init") init();
@@ -1340,7 +1348,10 @@ try {
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);
   else if (command === "audit") await auditCommand();
-  else usage();
+  else {
+    console.error("agentpass: unknown command");
+    process.exitCode = 2;
+  }
 } catch (error) {
   console.error(`agentpass: ${error.message}`);
   process.exitCode = 1;
