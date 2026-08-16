@@ -473,7 +473,9 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       member_id: scope.memberId,
       session_id: scope.sessionId,
       credential_id: input?.credential_id ?? input?.credentialId,
-      expected_version: expectedVersion
+      expected_version: expectedVersion,
+      revoked_at: revokedAt,
+      reason: reason ?? null
     });
     try {
       return await inTransaction(async (transactionClient) => {
