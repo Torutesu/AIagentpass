@@ -513,22 +513,22 @@ ALTER TABLE public.agent_session_signing_capability_expiry_audit_events FORCE RO
 ALTER TABLE public.agent_session_signing_capability_expiry_audit_heads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.agent_session_signing_capability_expiry_audit_heads FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY agent_session_signing_capability_expiry_audit_events_tenant_select
+CREATE POLICY cap_expiry_events_tenant_select
   ON public.agent_session_signing_capability_expiry_audit_events FOR SELECT
   USING (organization_id = public.agentpass_current_organization_id());
-CREATE POLICY agent_session_signing_capability_expiry_audit_events_migrator_authority
+CREATE POLICY cap_expiry_events_migrator_authority
   ON public.agent_session_signing_capability_expiry_audit_events FOR ALL TO agentpass_migrator
   USING (true) WITH CHECK (true);
-CREATE POLICY agent_session_signing_capability_expiry_audit_events_backup_select
+CREATE POLICY cap_expiry_events_backup_select
   ON public.agent_session_signing_capability_expiry_audit_events FOR SELECT TO agentpass_backup
   USING (true);
-CREATE POLICY agent_session_signing_capability_expiry_audit_heads_tenant_select
+CREATE POLICY cap_expiry_heads_tenant_select
   ON public.agent_session_signing_capability_expiry_audit_heads FOR SELECT
   USING (organization_id = public.agentpass_current_organization_id());
-CREATE POLICY agent_session_signing_capability_expiry_audit_heads_migrator_authority
+CREATE POLICY cap_expiry_heads_migrator_authority
   ON public.agent_session_signing_capability_expiry_audit_heads FOR ALL TO agentpass_migrator
   USING (true) WITH CHECK (true);
-CREATE POLICY agent_session_signing_capability_expiry_audit_heads_backup_select
+CREATE POLICY cap_expiry_heads_backup_select
   ON public.agent_session_signing_capability_expiry_audit_heads FOR SELECT TO agentpass_backup
   USING (true);
 

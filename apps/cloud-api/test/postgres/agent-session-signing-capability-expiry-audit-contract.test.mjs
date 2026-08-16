@@ -39,8 +39,11 @@ test("0075 is forward-only, tenant-qualified, append-only, and secret-free", asy
   assert.match(sql, /ENABLE ROW LEVEL SECURITY/u);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
   assert.match(sql, /organization_id = public\.agentpass_current_organization_id\(\)/u);
-  assert.match(sql, /agent_session_signing_capability_expiry_audit_events_backup_select[\s\S]*FOR SELECT TO agentpass_backup[\s\S]*USING \(true\)/u);
-  assert.match(sql, /agent_session_signing_capability_expiry_audit_heads_backup_select[\s\S]*FOR SELECT TO agentpass_backup[\s\S]*USING \(true\)/u);
+  assert.match(sql, /cap_expiry_events_backup_select[\s\S]*FOR SELECT TO agentpass_backup[\s\S]*USING \(true\)/u);
+  assert.match(sql, /cap_expiry_heads_backup_select[\s\S]*FOR SELECT TO agentpass_backup[\s\S]*USING \(true\)/u);
+  for (const [, policyName] of sql.matchAll(/CREATE POLICY ([a-z0-9_]+)/gu)) {
+    assert.ok(Buffer.byteLength(policyName, "utf8") <= 63, `${policyName} exceeds PostgreSQL's identifier limit`);
+  }
   const auditSection = sql.slice(0, sql.indexOf("CREATE OR REPLACE FUNCTION public.agentpass_agent_signing_capability_reserve"));
   assert.doesNotMatch(auditSection, /\b(?:member_id|claim_token|scope_json|response_json|provider_request|signature)\b/iu);
   assert.match(auditSection, /does not require a Human member actor/iu);
