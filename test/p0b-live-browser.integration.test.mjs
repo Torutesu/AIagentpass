@@ -40,23 +40,30 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       verifyObserved: false,
       verifyFailed: false,
       verifyStatus: null,
+      sessionObserved: false,
+      sessionFailed: false,
+      sessionStatus: null,
+      webAuthnSupported: await page.evaluate(() => typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function"),
     };
     page.on("request", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
       const phase = keyboardRecentAuthPhase(request);
       if (phase === "options") recentAuthObservation.optionsObserved = true;
       if (phase === "verify") recentAuthObservation.verifyObserved = true;
+      if (isKeyboardSessionRequest(request)) recentAuthObservation.sessionObserved = true;
     });
     page.on("requestfailed", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestFailed = true;
       const phase = keyboardRecentAuthPhase(request);
       if (phase === "options") recentAuthObservation.optionsFailed = true;
       if (phase === "verify") recentAuthObservation.verifyFailed = true;
+      if (isKeyboardSessionRequest(request)) recentAuthObservation.sessionFailed = true;
     });
     page.on("response", (response) => {
       const phase = keyboardRecentAuthPhase(response.request());
       if (phase === "options") recentAuthObservation.optionsStatus = response.status();
       if (phase === "verify") recentAuthObservation.verifyStatus = response.status();
+      if (isKeyboardSessionRequest(response.request())) recentAuthObservation.sessionStatus = response.status();
     });
     const refreshResponsePromise = page.waitForResponse((response) => {
       return isKeyboardRefreshRequest(response.request());
@@ -369,7 +376,15 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
 }
 
 export function keyboardRecentAuthFailureMarker(observation) {
-  if (!observation || observation.optionsObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED";
+  if (!observation || observation.optionsObserved !== true) {
+    if (observation?.webAuthnSupported === false) return "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED";
+    if (observation?.sessionFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED";
+    if (observation?.sessionObserved === true) {
+      const sessionFailure = keyboardPhaseStatusMarker("SESSION", observation.sessionStatus);
+      return sessionFailure ?? "P0B_SAFE_KEYBOARD_AUTH_SESSION_SUCCEEDED_NO_OPTIONS_FAILED";
+    }
+    return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED";
+  }
   if (observation.optionsFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED";
   const optionsFailure = keyboardPhaseStatusMarker("OPTIONS", observation.optionsStatus);
   if (optionsFailure !== null) return optionsFailure;
@@ -417,6 +432,12 @@ function keyboardRecentAuthPhase(request) {
   if (pathname === "/api/auth/webauthn/options") return "options";
   if (pathname === "/api/auth/webauthn/verify") return "verify";
   return null;
+}
+
+function isKeyboardSessionRequest(request) {
+  if (request.method() !== "POST") return false;
+  const pathname = new URL(request.url()).pathname;
+  return pathname === "/api/auth/session" || pathname === "/api/auth/session/resume";
 }
 
 function deviceCard(page, name) { return page.getByRole("article").filter({ has: page.getByRole("heading", { name }) }); }
