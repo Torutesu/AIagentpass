@@ -128,9 +128,7 @@ internal struct NativeAgentHostExecutableTrustHooks: @unchecked Sendable {
             try NativeCursorAgentRuntimeDigest.sha256(path: path)
         },
         loadRuntimeManifest: {
-            // Installer/provisioner integration is intentionally not guessed
-            // here. Until it supplies a trusted manifest, Cursor is denied.
-            throw NativeCursorAgentRuntimeTrustError.manifestUnavailable
+            try NativeCursorAgentRuntimeManifestLoader.load()
         },
         verifyCodeIdentity: { path, claim in
             try NativeCursorSystemCodeIdentityVerifier.verify(path: path, claim: claim)
@@ -524,9 +522,9 @@ private enum NativeCursorAgentRuntimeACL {
     static func hasEntries(path: String) -> Bool {
         let acl = path.withCString { acl_get_file($0, ACL_TYPE_EXTENDED) }
         guard let acl else {
-            // Failure to inspect an ACL is not proof that no write grant
-            // exists, including when the Host itself is privileged.
-            return true
+            // ENOENT/ENOATTR means this path has no extended ACL. Any other
+            // inspection failure is not proof that no write grant exists.
+            return errno != ENOENT && errno != ENOATTR
         }
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         var entry: acl_entry_t?

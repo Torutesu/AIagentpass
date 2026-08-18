@@ -10,7 +10,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, new RegExp(`validated 55 schemas, 2 OpenAPI documents, 24 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
+  assert.match(result.stdout, new RegExp(`validated 57 schemas, 2 OpenAPI documents, 24 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
