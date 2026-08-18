@@ -20,6 +20,14 @@ if [[ "${AGENTPASS_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
   SWIFT_BUILD_OPTIONS+=(--disable-sandbox)
 fi
 
+swift_build() {
+  if [[ "${#SWIFT_BUILD_OPTIONS[@]}" -gt 0 ]]; then
+    swift build "${SWIFT_BUILD_OPTIONS[@]}" "$@"
+  else
+    swift build "$@"
+  fi
+}
+
 usage() {
   echo "Usage: build-app.sh [--output-dir DIR] [--identity IDENTITY --team-id TEAMID --app-identifier-prefix PREFIX --service-profile FILE --client-profile FILE --agent-profile FILE --qualification-client-profile FILE] [--universal] [--adhoc] [--force]" >&2
   exit 2
@@ -119,13 +127,13 @@ ENTITLEMENT_DIR="$TEMP_DIR/entitlements"
 mkdir -p "$MACOS_DIR" "$RESOURCE_BIN_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$QUALIFICATION_CLIENT_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
 
 for architecture in "${ARCHITECTURES[@]}"; do
-  MACOSX_DEPLOYMENT_TARGET=14.0 swift build "${SWIFT_BUILD_OPTIONS[@]}" -c release --package-path "$PACKAGE_DIR" --arch "$architecture" >&2
+  MACOSX_DEPLOYMENT_TARGET=14.0 swift_build -c release --package-path "$PACKAGE_DIR" --arch "$architecture" >&2
 done
 
 install_product() {
   local product="$1" destination="$2" slices=() architecture bin_dir
   for architecture in "${ARCHITECTURES[@]}"; do
-    bin_dir="$(swift build "${SWIFT_BUILD_OPTIONS[@]}" -c release --package-path "$PACKAGE_DIR" --arch "$architecture" --show-bin-path)"
+    bin_dir="$(swift_build -c release --package-path "$PACKAGE_DIR" --arch "$architecture" --show-bin-path)"
     slices+=("$bin_dir/$product")
   done
   if [[ "${#slices[@]}" -eq 1 ]]; then
