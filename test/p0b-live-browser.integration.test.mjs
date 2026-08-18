@@ -179,8 +179,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
               return Object.freeze({ phase: "fetch_failed", status: null });
             }
           });
-        } catch {
-          assert.fail("P0B_SAFE_STALE_AUTH_CEREMONY_FAILED");
+        } catch (error) {
+          assert.fail(staleAuthCeremonyFailureMarker(error));
         }
         const marker = staleAuthorizationFailureMarker(outcome);
         if (marker !== null) assert.fail(marker);
@@ -237,6 +237,14 @@ export function staleAuthorizationFailureMarker(outcome) {
   if (outcome.status >= 400 && outcome.status < 500) return "P0B_SAFE_STALE_AUTH_HTTP_4XX_FAILED";
   if (outcome.status >= 500 && outcome.status < 600) return "P0B_SAFE_STALE_AUTH_HTTP_5XX_FAILED";
   return "P0B_SAFE_STALE_AUTH_HTTP_OTHER_FAILED";
+}
+
+export function staleAuthCeremonyFailureMarker(error) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code.startsWith("recent_auth_options_")) return "P0B_SAFE_STALE_AUTH_CEREMONY_OPTIONS_FAILED";
+  if (code.startsWith("recent_auth_verify_")) return "P0B_SAFE_STALE_AUTH_CEREMONY_VERIFY_FAILED";
+  if (code === "recent_auth_response_invalid") return "P0B_SAFE_STALE_AUTH_CEREMONY_RESPONSE_FAILED";
+  return "P0B_SAFE_STALE_AUTH_CEREMONY_FAILED";
 }
 
 async function scenario(parent, name, callback) {

@@ -318,7 +318,7 @@ export async function startP0BLiveBrowserFixture({
             for (const byte of bytes) binary += String.fromCharCode(byte);
             return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
           };
-          const json = async (path, body) => {
+          const json = async (phase, path, body) => {
             const response = await fetch(path, {
               method: "POST",
               headers: { accept: "application/json", "content-type": "application/json", "agentpass-csrf": csrfToken },
@@ -435,10 +435,11 @@ export async function startP0BLiveBrowserFixture({
               cache: "no-store"
             });
             const value = await response.json();
-            if (!response.ok) throw new Error("recent-auth request failed");
+            if (!response.ok) return { failure: phase, status: response.status };
             return value;
           };
-          const issued = await json("/api/auth/webauthn/options", { organization_id: organizationId, operation });
+          const issued = await json("options", "/api/auth/webauthn/options", { organization_id: organizationId, operation });
+          if (issued?.failure) return issued;
           const options = issued?.options;
           if (!options || typeof options.challenge !== "string") throw new Error("recent-auth options are invalid");
           const publicKey = {
@@ -462,17 +463,27 @@ export async function startP0BLiveBrowserFixture({
             },
             clientExtensionResults: credential.getClientExtensionResults()
           };
-          const verified = await json("/api/auth/webauthn/verify", {
+          const verified = await json("verify", "/api/auth/webauthn/verify", {
             organization_id: organizationId,
             operation,
             challenge_id: issued.challenge_id,
             credential: browserCredential
           });
-          if (typeof verified?.authorization_id !== "string" || !verified.authorization_id) throw new Error("recent-auth authorization is invalid");
-          return verified.authorization_id;
+          if (verified?.failure) return verified;
+          if (typeof verified?.authorization_id !== "string" || !verified.authorization_id) return { failure: "verify_response", status: 200 };
+          return { authorizationId: verified.authorization_id };
         }, { organizationId: safeSeed.organizationId, csrfToken: state.csrfToken, operation });
       } catch {
         throw new P0BLiveBrowserFixtureError("recent_auth_failed", "P0-B recent WebAuthn authentication failed");
+      }
+      if (authorizationId?.failure) {
+        const phase = authorizationId.failure === "options" ? "options" : authorizationId.failure === "verify" ? "verify" : "verify_response";
+        const status = Number.isInteger(authorizationId.status) ? authorizationId.status : 0;
+        throw new P0BLiveBrowserFixtureError(`recent_auth_${phase}_http_${status}`, "P0-B recent WebAuthn authentication failed");
+      }
+      authorizationId = authorizationId?.authorizationId;
+      if (typeof authorizationId !== "string" || authorizationId.length === 0) {
+        throw new P0BLiveBrowserFixtureError("recent_auth_response_invalid", "P0-B recent WebAuthn authentication failed");
       }
       try {
         return await action(Object.freeze({
