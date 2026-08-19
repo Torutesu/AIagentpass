@@ -10,6 +10,12 @@ private let coordinatorOrganizationID = "66666666-6666-4666-8666-666666666666"
 private let coordinatorSessionID = "11111111-1111-4111-8111-111111111111"
 private let coordinatorToken = String(repeating: "a", count: 64)
 private let coordinatorWall = Int64(1_786_615_200_000)
+private let coordinatorCapabilityPublicKeyPEM = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=
+-----END PUBLIC KEY-----
+"""
+private let coordinatorCapabilityKeyID = "capability-v1"
 
 private struct CoordinatorRandom: NativeAgentRandomBytesGenerating {
   let byte: UInt8
@@ -550,7 +556,9 @@ private func coordinatorAuthority() throws -> NativeAgentRuntimeAuthorityConfigu
     deviceKeyTag: NativeEnrollmentKeyMaterial.fixedApplicationTag,
     signingIntentDirectory: "/var/db/com.agentpass.service/agent-signing-intents",
     globalSessionLimit: 8, perAgentSessionLimit: 4, perWorktreeSessionLimit: 2,
-    bootstrapAttemptLimit: 3, worktreeObservationPolicyVersion: 2)
+    bootstrapAttemptLimit: 3, worktreeObservationPolicyVersion: 2,
+    capabilityPublicKeyPEM: coordinatorCapabilityPublicKeyPEM,
+    capabilityKeyID: coordinatorCapabilityKeyID)
   return try #require(configuration.authority)
 }
 

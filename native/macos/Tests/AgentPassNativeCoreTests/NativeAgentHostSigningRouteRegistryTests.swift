@@ -12,6 +12,12 @@ private let routeRequestID = "22222222-2222-4222-8222-222222222222"
 private let routeCapabilityID = "88888888-8888-4888-8888-888888888888"
 private let routeToken = String(repeating: "a", count: 64)
 private let routeNow: Int64 = 1_786_615_201_000
+private let routeCapabilityPublicKeyPEM = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=
+-----END PUBLIC KEY-----
+"""
+private let routeCapabilityKeyID = "capability-v1"
 
 private struct RouteRandom: NativeAgentRandomBytesGenerating {
     func randomBytes(count: Int) throws -> Data { Data(repeating: 9, count: count) }
@@ -227,7 +233,9 @@ private func routeRuntimeAuthority(directory: URL) throws -> NativeAgentRuntimeA
         perAgentSessionLimit: 4,
         perWorktreeSessionLimit: 2,
         bootstrapAttemptLimit: 3,
-        worktreeObservationPolicyVersion: 2)
+        worktreeObservationPolicyVersion: 2,
+        capabilityPublicKeyPEM: routeCapabilityPublicKeyPEM,
+        capabilityKeyID: routeCapabilityKeyID)
     return try #require(configuration.authority)
 }
 
