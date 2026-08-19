@@ -138,7 +138,8 @@ BEGIN
         'capabilities', 'agent_session_signing_capability_reservations',
         'agent_session_signing_capability_expiry_audit_events',
         'agent_session_signing_capability_expiry_audit_heads',
-        'agent_capability_sequence_heads'
+        'agent_capability_sequence_heads',
+        'agent_session_launch_authority_handoffs'
       )
       AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
       AND left(c.relname, length('platform_')) <> 'platform_'
@@ -219,7 +220,8 @@ BEGIN
         OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
         OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
           'agent_session_signing_capability_expiry_audit_events',
-          'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads')
+          'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads',
+          'agent_session_launch_authority_handoffs')
       )
   LOOP
     EXECUTE format(
@@ -263,7 +265,8 @@ BEGIN
     'agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)',
     'agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)',
     'agentpass_capability_reservation_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,text,text,jsonb,timestamptz,bytea)',
-    'agentpass_capability_reservation_list(uuid,integer)'
+    'agentpass_capability_reservation_list(uuid,integer)',
+    'agentpass_agent_launch_authority_handoff(uuid,uuid,uuid,uuid,uuid,text,uuid,text,uuid,bytea,timestamptz,timestamptz,bigint,bigint,bytea,bytea,bytea)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
