@@ -1,6 +1,5 @@
 import Foundation
 import AgentPassNativeCore
-import AgentPassNativeCore
 
 /// Stable failures for the service-owned coordinator-session association
 /// boundary. The registry intentionally does not expose a session-only lookup
