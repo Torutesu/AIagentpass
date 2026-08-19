@@ -73,6 +73,14 @@ export {
 } from "./agent-session-authority-repository.mjs";
 export { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 export {
+  AGENT_LAUNCH_AUTHORITY_HANDOFF_FUNCTION,
+  AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES,
+  AGENT_LAUNCH_AUTHORITY_HANDOFF_SQL,
+  AgentLaunchAuthorityHandoffRepositoryError,
+  createAgentLaunchAuthorityHandoffRepository,
+  createPostgresAgentLaunchAuthorityHandoffRepository
+} from "./agent-launch-authority-handoff-repository.mjs";
+export {
   AGENT_SESSION_LIFECYCLE_ERROR_CODES,
   AgentSessionLifecycleRepositoryError,
   createPostgresAgentSessionLifecycleRepository

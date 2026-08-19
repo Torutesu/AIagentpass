@@ -6,6 +6,7 @@ import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import { agentSessionGrantSigningData, agentSessionGrantStatementHash } from "../../src/agent-session-grant.mjs";
 import {
   AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES,
+  AGENT_LAUNCH_AUTHORITY_HANDOFF_SQL,
   createPostgresAgentLaunchAuthorityHandoffRepository
 } from "../../src/postgres/agent-launch-authority-handoff-repository.mjs";
 
@@ -84,6 +85,105 @@ test("the explicit atomic production seam receives only the exact public digest 
     createPostgresAgentLaunchAuthorityHandoffRepository({ atomicHandoff: async () => ({ state: "already_returned" }) }).issueAgentLaunchAuthorityHandoff(BINDING),
     { code: AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.REPLAYED }
   );
+});
+
+test("the explicit PostgreSQL client path uses one transaction and sends only typed digests", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params = []) {
+      calls.push({ text, params });
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rowCount: 0, rows: [] };
+      if (text.startsWith("SELECT set_config")) return { rowCount: 1, rows: [{ organization_id: BINDING.organization_id }] };
+      if (text === AGENT_LAUNCH_AUTHORITY_HANDOFF_SQL) return { rowCount: 1, rows: [{ result: { state: "issued" } }] };
+      throw new Error("unexpected SQL");
+    }
+  };
+  const result = await createPostgresAgentLaunchAuthorityHandoffRepository({ client })
+    .issueAgentLaunchAuthorityHandoff(BINDING);
+  assert.deepEqual(result, { state: "issued", grant: GRANT });
+  assert.deepEqual(calls.map(({ text }) => text), [
+    "BEGIN",
+    "SELECT set_config('agentpass.organization_id',$1,true) AS organization_id",
+    AGENT_LAUNCH_AUTHORITY_HANDOFF_SQL,
+    "COMMIT"
+  ]);
+  const sqlCall = calls.find(({ text }) => text === AGENT_LAUNCH_AUTHORITY_HANDOFF_SQL);
+  assert.equal(sqlCall.params.length, 17);
+  assert.deepEqual(sqlCall.params.slice(0, 9), [
+    BINDING.request_id,
+    BINDING.grant_id,
+    BINDING.organization_id,
+    BINDING.device_id,
+    BINDING.agent_id,
+    BINDING.agent_kind,
+    BINDING.adapter_id,
+    BINDING.adapter_version,
+    BINDING.session_id
+  ]);
+  for (const value of sqlCall.params.slice(9)) assert.notEqual(value, BINDING.grant);
+  assert.equal(Buffer.isBuffer(sqlCall.params[9]), true);
+  assert.equal(Buffer.isBuffer(sqlCall.params[14]), true);
+  assert.equal(Buffer.isBuffer(sqlCall.params[15]), true);
+  assert.equal(Buffer.isBuffer(sqlCall.params[16]), true);
+});
+
+test("the PostgreSQL client path maps one-time replay and unavailable SQL states without returning a grant", async () => {
+  for (const state of ["already_returned", "unavailable"]) {
+    const client = {
+      async query(text, params = []) {
+        if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rowCount: 0, rows: [] };
+        if (text.startsWith("SELECT set_config")) return { rowCount: 1, rows: [{ organization_id: params[0] }] };
+        return { rowCount: 1, rows: [{ result: { state } }] };
+      }
+    };
+    await assert.rejects(
+      createPostgresAgentLaunchAuthorityHandoffRepository({ client }).issueAgentLaunchAuthorityHandoff(BINDING),
+      { code: state === "already_returned"
+        ? AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.REPLAYED
+        : AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.NATIVE_PROOF_UNAVAILABLE }
+    );
+  }
+});
+
+test("the PostgreSQL client path fails closed and rolls back on SQL or result failure", async () => {
+  for (const mode of ["database", "result"]) {
+    const calls = [];
+    const client = {
+      async query(text, params = []) {
+        calls.push({ text, params });
+        if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rowCount: 0, rows: [] };
+        if (text.startsWith("SELECT set_config")) return { rowCount: 1, rows: [{ organization_id: params[0] }] };
+        if (mode === "database") throw Object.assign(new Error("password=should-not-escape"), { code: "XX000" });
+        return { rowCount: 1, rows: [{ result: { state: "unexpected", secret: "should-not-escape" } }] };
+      }
+    };
+    await assert.rejects(
+      createPostgresAgentLaunchAuthorityHandoffRepository({ client }).issueAgentLaunchAuthorityHandoff(BINDING),
+      (error) => {
+        assert.equal(error.code, mode === "result"
+          ? AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.RESULT
+          : AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.NATIVE_PROOF_UNAVAILABLE);
+        assert.doesNotMatch(error.message, /password|should-not-escape|secret/iu);
+        return true;
+      }
+    );
+    assert.equal(calls.at(-1).text, "ROLLBACK");
+  }
+});
+
+test("rejects ambiguous adapter configuration before any SQL can run", () => {
+  const client = { query: async () => ({ rows: [] }) };
+  for (const options of [
+    { client, atomicHandoff: async () => ({ state: "issued" }) },
+    { client, transaction: "not-a-function" },
+    { client: { query: "not-a-function" } },
+    null
+  ]) {
+    assert.throws(
+      () => createPostgresAgentLaunchAuthorityHandoffRepository(options),
+      { code: AGENT_LAUNCH_AUTHORITY_HANDOFF_REPOSITORY_ERROR_CODES.CONFIG }
+    );
+  }
 });
 
 test("rejects malformed or authority-bearing repository input without exposing values", async () => {
