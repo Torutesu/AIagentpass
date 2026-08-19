@@ -7,6 +7,16 @@ private func childArchive(_ object: NSSecureCoding) throws -> Data {
     try NSKeyedArchiver.archivedData(withRootObject: object, requiringSecureCoding: true)
 }
 
+private func childArchiveWithAuthorityKey(_ key: String) throws -> Data {
+    let archiver = NSKeyedArchiver(requiringSecureCoding: true)
+    archiver.encode(NSNumber(value: 1), forKey: "protocol_version")
+    archiver.encode(NSNumber(value: 1), forKey: "request_sequence")
+    archiver.encode(Data([1, 2, 3]) as NSData, forKey: "commit_payload")
+    archiver.encode(Data([9]) as NSData, forKey: key)
+    archiver.finishEncoding()
+    return archiver.encodedData
+}
+
 @Test func childGitProtocolHasOnlyTheSigningSelector() {
     var count: UInt32 = 0
     let descriptions = protocol_copyMethodDescriptionList(AgentPassChildGitXPCProtocol.self, true, true, &count)
@@ -35,6 +45,15 @@ private func childArchive(_ object: NSSecureCoding) throws -> Data {
     #expect(AgentPassChildGitSignResponse(responseSequence: 0, signature: Data([1])) == nil)
     #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data()) == nil)
     #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumSignatureBytes + 1)) == nil)
+}
+
+@Test func childGitDTOsRejectUnknownAuthorityFieldsAndUnsupportedVersions() throws {
+    let authority = try childArchiveWithAuthorityKey("session_id")
+    let authorityDecoded = try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassChildGitSignRequest.self, from: authority)
+    #expect(authorityDecoded == nil)
+
+    #expect(AgentPassChildGitSignRequest(protocolVersion: 2, requestSequence: 1, commitPayload: Data([1])) == nil)
+    #expect(AgentPassChildGitSignResponse(protocolVersion: 2, responseSequence: 1, signature: Data([1])) == nil)
 }
 
 @Test func childGitInterfaceRegistersOnlyItsDTOs() {

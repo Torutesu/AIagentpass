@@ -281,6 +281,7 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
     private let connectionBinding: NativeAgentHostConnectionBinding
     private let context: NativeAgentHostLifecycleBootstrapContext
     private let supervisor: NativeAgentHostChildSupervisor
+    private let gitTransport: NativeAgentHostGitTransport
     private let hooks: NativeAgentHostLifecycleCoordinatorHooks
     private let lock = NSLock()
     private var storageState: StorageState = .new
@@ -294,7 +295,8 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         connectionBinding: NativeAgentHostConnectionBinding,
         handoff: NativeAgentLaunchAuthorityHandoff,
         supervisor: NativeAgentHostChildSupervisor,
-        hooks: NativeAgentHostLifecycleCoordinatorHooks
+        hooks: NativeAgentHostLifecycleCoordinatorHooks,
+        gitTransport: NativeAgentHostGitTransport = .legacyFD3
     ) throws {
         guard handoff.agentID == connectionBinding.agentID else {
             throw NativeAgentHostLifecycleError.invalidHandoff
@@ -303,6 +305,7 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         self.context = try NativeAgentHostLifecycleBootstrapContext(handoff: handoff)
         self.supervisor = supervisor
         self.hooks = hooks
+        self.gitTransport = gitTransport
     }
 
     public var state: NativeAgentHostLifecycleState {
@@ -420,7 +423,8 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
             request = try NativeAgentHostChildLaunchRequest(
                 adapter: context.adapter,
                 projectDirectory: projectDirectory,
-                trustedEnvironment: trustedEnvironment
+                trustedEnvironment: trustedEnvironment,
+                gitTransport: gitTransport
             )
         } catch {
             let cleanupError = finishStartingFailure(
@@ -488,11 +492,15 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
             lock.unlock()
             throw NativeAgentHostPrivateGitBridgeError.alreadyAttempted
         }
+        guard let transport = child.privateGitBridgeHostEndpoint else {
+            lock.unlock()
+            throw NativeAgentHostPrivateGitBridgeError.notRunning
+        }
         privateGitBridgeAttempted = true
         privateGitBridgeCancelRequested = false
         privateGitBridgeAuthorityFailure = nil
         server = NativeAgentPrivateGitBridgeServer(
-            transport: child.privateGitBridgeHostEndpoint,
+            transport: transport,
             signer: { [weak self] payload in
                 guard let self else {
                     throw NativeAgentHostPrivateGitBridgeError.cancelled

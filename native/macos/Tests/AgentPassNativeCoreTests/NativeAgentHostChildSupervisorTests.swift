@@ -369,6 +369,7 @@ private func withTemporaryProjectDirectory<T>(
 private func makeRequest(
     adapter: NativeAgentHostAdapterKind = .claudeCode,
     projectDirectory: NativeAgentHostProjectDirectory,
+    gitTransport: NativeAgentHostGitTransport = .legacyFD3,
     environment: [String: String] = [
         "HOME": "/Users/tester",
         "TMPDIR": "/private/tmp/",
@@ -380,7 +381,8 @@ private func makeRequest(
     try NativeAgentHostChildLaunchRequest(
         adapter: adapter,
         projectDirectory: projectDirectory,
-        trustedEnvironment: environment
+        trustedEnvironment: environment,
+        gitTransport: gitTransport
     )
 }
 
@@ -685,6 +687,39 @@ private func makeHookedProjectDirectory(
     }
 }
 
+@Test func authenticatedXPCUsesTheXPCGitHelperWithoutCreatingAnFD3Handoff() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        fixture.installPrivateBridgeActions = true
+        fixture.rejectPrivateBridgeActions = true
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let request = try makeRequest(
+            projectDirectory: project,
+            gitTransport: .authenticatedXPC,
+            environment: [
+                "HOME": "/Users/tester",
+                "GIT_CONFIG_COUNT": "99",
+                "GIT_CONFIG_KEY_1": "user.signingkey",
+                "GIT_CONFIG_VALUE_1": "/tmp/attacker-git-helper"
+            ]
+        )
+
+        let session = try supervisor.start(request)
+        let spec = try #require(fixture.snapshot().spec)
+        let actions = fixture.privateBridgeActions()
+
+        #expect(spec.gitTransport == .authenticatedXPC)
+        #expect(spec.hasPrivateGitBridgeHandoff == false)
+        #expect(session.privateGitBridgeHostEndpoint == nil)
+        #expect(actions.duplicates.isEmpty)
+        #expect(actions.closes.isEmpty)
+        #expect(spec.environment["GIT_CONFIG_VALUE_1"]
+            == NativeAgentHostGitConfiguration.authenticatedXPCHelperExecutablePath)
+
+        _ = try session.wait()
+    }
+}
+
 @Test func claudeChildReceivesOnlyTheReviewedPrivateBridgeAtFD3() throws {
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
@@ -705,7 +740,7 @@ private func makeHookedProjectDirectory(
         _ = try session.wait()
         // The child lifecycle owns transport cleanup. Closing the borrowed
         // view again must be harmless and cannot resurrect the endpoint.
-        try hostEndpoint.close()
+        try hostEndpoint?.close()
     }
 }
 

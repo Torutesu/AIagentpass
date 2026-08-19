@@ -12,6 +12,12 @@ public enum NativeAgentHostAdapterKind: String, Codable, CaseIterable, Sendable 
     case cursor
 }
 
+/// Explicit child Git transport. XPC mode never creates or inherits FD3.
+public enum NativeAgentHostGitTransport: String, Codable, CaseIterable, Sendable {
+    case legacyFD3 = "legacy_fd3"
+    case authenticatedXPC = "authenticated_xpc"
+}
+
 public enum NativeAgentHostProjectDirectoryError: Error, Equatable, Sendable {
     case notAbsolute
     case notCanonical
@@ -376,13 +382,15 @@ public struct NativeAgentHostChildLaunchRequest: Equatable, Sendable {
     public static let maximumEnvironmentValueBytes = 4_096
 
     public let adapter: NativeAgentHostAdapterKind
+    public let gitTransport: NativeAgentHostGitTransport
     public let projectDirectory: NativeAgentHostProjectDirectory
     public let trustedEnvironment: [String: String]
 
     public init(
         adapter: NativeAgentHostAdapterKind,
         projectDirectory: NativeAgentHostProjectDirectory,
-        trustedEnvironment: [String: String] = ProcessInfo.processInfo.environment
+        trustedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        gitTransport: NativeAgentHostGitTransport = .legacyFD3
     ) throws {
         guard trustedEnvironment.count <= Self.maximumEnvironmentEntries else {
             throw NativeAgentHostChildLaunchRequestError.invalidEnvironment
@@ -403,6 +411,7 @@ public struct NativeAgentHostChildLaunchRequest: Equatable, Sendable {
         self.adapter = adapter
         self.projectDirectory = projectDirectory
         self.trustedEnvironment = trustedEnvironment
+        self.gitTransport = gitTransport
     }
 }
 
@@ -467,6 +476,7 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
     /// parent on every return path; it is never an argv or environment value.
     public let workingDirectoryFD: Int32
     public let useOwnedProcessGroup: Bool
+    public let gitTransport: NativeAgentHostGitTransport
 
     /// The one-use child-only FD3 handoff. The source descriptor is never
     /// exposed as a field; the system spawn hook installs its reviewed
@@ -485,7 +495,8 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
         environment: [String: String],
         workingDirectory: String,
         workingDirectoryFD: Int32,
-        privateGitBridgeHandoff: NativeAgentPrivateGitBridgeChildEndpointHandoff?
+        privateGitBridgeHandoff: NativeAgentPrivateGitBridgeChildEndpointHandoff?,
+        gitTransport: NativeAgentHostGitTransport
     ) {
         self.executablePath = executablePath
         self.arguments = arguments
@@ -493,6 +504,7 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
         self.workingDirectory = workingDirectory
         self.workingDirectoryFD = workingDirectoryFD
         self.useOwnedProcessGroup = true
+        self.gitTransport = gitTransport
         self.privateGitBridgeHandoff = privateGitBridgeHandoff
     }
 
@@ -503,6 +515,7 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
             && lhs.workingDirectory == rhs.workingDirectory
             && lhs.workingDirectoryFD == rhs.workingDirectoryFD
             && lhs.useOwnedProcessGroup == rhs.useOwnedProcessGroup
+            && lhs.gitTransport == rhs.gitTransport
             && lhs.hasPrivateGitBridgeHandoff == rhs.hasPrivateGitBridgeHandoff
     }
 
@@ -560,14 +573,14 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
 
     private let process: NativeAgentHostProcessHandle
     private let hooks: NativeAgentHostChildSupervisorHooks
-    private let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair
+    private let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
     private let lock = NSLock()
     private var state: State = .running
 
     fileprivate init(
         process: NativeAgentHostProcessHandle,
         hooks: NativeAgentHostChildSupervisorHooks,
-        privateGitBridge: NativeAgentPrivateGitBridgeSocketPair
+        privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
     ) {
         self.process = process
         self.hooks = hooks
@@ -577,8 +590,8 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
     /// Host-side endpoint for the fixed child FD3 Git bridge. The caller may
     /// wrap this endpoint in `NativeAgentPrivateGitBridgeServer`; it carries
     /// no session, key, capability, or policy selector.
-    public var privateGitBridgeHostEndpoint: NativeAgentPrivateFDTransport {
-        privateGitBridge.hostEndpoint
+    public var privateGitBridgeHostEndpoint: NativeAgentPrivateFDTransport? {
+        privateGitBridge?.hostEndpoint
     }
 
     /// Forwards only TERM or INT to the owned process group.
@@ -617,7 +630,7 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
             let outcome = try hooks.wait(process)
             let result = Self.classification(for: outcome)
             do {
-                try privateGitBridge.close()
+            try privateGitBridge?.close()
             } catch {
                 lock.lock()
                 state = .failed
@@ -629,7 +642,7 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
             lock.unlock()
             return result
         } catch {
-            try? privateGitBridge.close()
+            try? privateGitBridge?.close()
             lock.lock()
             state = .failed
             lock.unlock()
@@ -658,7 +671,7 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
         // best-effort cleanup path; normal callers should explicitly wait.
         try? hooks.signal(process, .terminate)
         _ = try? hooks.wait(process)
-        try? privateGitBridge.close()
+        try? privateGitBridge?.close()
     }
 }
 
@@ -733,30 +746,34 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
             for: request.adapter,
             cursorExecutableResolver: cursorExecutableResolver
         )
-        let environment = try NativeAgentHostStrictEnvironment.make(
+        var environment = try NativeAgentHostStrictEnvironment.make(
             from: request.trustedEnvironment,
             projectDirectory: request.projectDirectory.path,
             fixedEnvironment: adapter.fixedEnvironment
         )
-        let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair
-        do {
-            privateGitBridge = try NativeAgentPrivateGitBridgeSocketPair()
-        } catch {
-            throw NativeAgentHostChildSupervisorError.launchFailed
+        if request.gitTransport == .authenticatedXPC {
+            environment.merge(NativeAgentHostGitConfiguration.authenticatedXPCEnvironment) { _, fixed in fixed }
         }
-        let privateGitBridgeHandoff: NativeAgentPrivateGitBridgeChildEndpointHandoff
-        do {
-            privateGitBridgeHandoff = try privateGitBridge.prepareChildEndpointHandoff()
-        } catch {
-            try? privateGitBridge.close()
-            throw NativeAgentHostChildSupervisorError.launchFailed
+        let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
+        let privateGitBridgeHandoff: NativeAgentPrivateGitBridgeChildEndpointHandoff?
+        if request.gitTransport == .legacyFD3 {
+            do {
+                let bridge = try NativeAgentPrivateGitBridgeSocketPair()
+                privateGitBridge = bridge
+                privateGitBridgeHandoff = try bridge.prepareChildEndpointHandoff()
+            } catch {
+                throw NativeAgentHostChildSupervisorError.launchFailed
+            }
+        } else {
+            privateGitBridge = nil
+            privateGitBridgeHandoff = nil
         }
 
         let projectBinding: NativeAgentHostProjectDirectoryBinding
         do {
             projectBinding = try request.projectDirectory.openForSpawn()
         } catch {
-            try? privateGitBridge.close()
+            try? privateGitBridge?.close()
             throw error
         }
         let spec = NativeAgentHostSpawnSpec(
@@ -765,7 +782,8 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
             environment: environment,
             workingDirectory: request.projectDirectory.path,
             workingDirectoryFD: projectBinding.descriptor,
-            privateGitBridgeHandoff: privateGitBridgeHandoff
+            privateGitBridgeHandoff: privateGitBridgeHandoff,
+            gitTransport: request.gitTransport
         )
 
         do {
@@ -787,7 +805,7 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
                     try? hooks.terminateProcess(process)
                     _ = try? hooks.wait(process)
                 }
-                try? privateGitBridgeHandoff.abort()
+                try? privateGitBridgeHandoff?.abort()
                 try? projectBinding.close()
                 throw NativeAgentHostChildSupervisorError.processGroupNotOwned
             }
@@ -796,7 +814,7 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
                 // The file actions have already been installed by the spawn
                 // hook. Commit the child endpoint only after posix_spawn has
                 // returned a process with an owned process group.
-                try privateGitBridgeHandoff.commit()
+                try privateGitBridgeHandoff?.commit()
             } catch {
                 try? hooks.signal(process, .terminate)
                 _ = try? hooks.wait(process)
@@ -811,7 +829,7 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
                 // caller sees the bounded failure.
                 try? hooks.signal(process, .terminate)
                 _ = try? hooks.wait(process)
-                try? privateGitBridge.close()
+                try? privateGitBridge?.close()
                 throw NativeAgentHostChildSupervisorError.projectDirectoryCloseFailed
             }
             return NativeAgentHostChildSession(
@@ -820,13 +838,13 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
                 privateGitBridge: privateGitBridge
             )
         } catch let error as NativeAgentHostChildSupervisorError {
-            try? privateGitBridgeHandoff.abort()
-            try? privateGitBridge.close()
+            try? privateGitBridgeHandoff?.abort()
+            try? privateGitBridge?.close()
             try? projectBinding.close()
             throw error
         } catch {
-            try? privateGitBridgeHandoff.abort()
-            try? privateGitBridge.close()
+            try? privateGitBridgeHandoff?.abort()
+            try? privateGitBridge?.close()
             try? projectBinding.close()
             throw NativeAgentHostChildSupervisorError.launchFailed
         }

@@ -56,6 +56,38 @@ private func childTestObservation() throws -> NativeProcessObservation {
     }
 }
 
+@Test func childRegistryRejectsARepeatedPayloadAsReplay() throws {
+    let identity = NativeProcessIdentity(observation: try childTestObservation())
+    let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
+    try registry.register(
+        sessionID: "session-replay",
+        identity: identity,
+        worktreeBindingDigest: Data(repeating: 0x61, count: 32),
+        signer: NativeAgentAuthenticatedChildClosureSigner { $0 }
+    )
+    let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([7, 7, 7])))
+
+    _ = try registry.sign(
+        identity: identity,
+        worktreeBindingDigest: Data(repeating: 0x61, count: 32),
+        request: request
+    )
+    #expect(throws: NativeAgentAuthenticatedChildGitError.replay) {
+        _ = try registry.sign(
+            identity: identity,
+            worktreeBindingDigest: Data(repeating: 0x61, count: 32),
+            request: request
+        )
+    }
+    #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
+        _ = try registry.sign(
+            identity: identity,
+            worktreeBindingDigest: Data(repeating: 0x61, count: 32),
+            request: request
+        )
+    }
+}
+
 @Test func childRegistryClosesWhenSignerFails() throws {
     let identity = NativeProcessIdentity(observation: try childTestObservation())
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()

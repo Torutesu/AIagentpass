@@ -26,6 +26,8 @@ private final class LifecycleFixture: @unchecked Sendable {
     var privateBridgeAuthorityObserved: DispatchSemaphore?
     var spawnEntered: DispatchSemaphore?
     var releaseSpawn: DispatchSemaphore?
+    var lastGitTransport: NativeAgentHostGitTransport?
+    var lastHadPrivateGitBridgeHandoff = false
 
     func hooks() -> NativeAgentHostLifecycleCoordinatorHooks {
         NativeAgentHostLifecycleCoordinatorHooks(
@@ -72,6 +74,10 @@ private final class LifecycleFixture: @unchecked Sendable {
     func supervisorHooks() -> NativeAgentHostChildSupervisorHooks {
         NativeAgentHostChildSupervisorHooks(
             spawn: { [self] spec in
+                lock.lock()
+                lastGitTransport = spec.gitTransport
+                lastHadPrivateGitBridgeHandoff = spec.hasPrivateGitBridgeHandoff
+                lock.unlock()
                 // The production spawn hook owns the reviewed FD3 file
                 // actions. Test hooks must install the same lease before the
                 // supervisor can commit a child endpoint.
@@ -141,7 +147,9 @@ private final class LifecycleFixture: @unchecked Sendable {
         reasons: [NativeAgentHostLifecycleCloseReason],
         spawn: Int,
         signal: Int,
-        wait: Int
+        wait: Int,
+        gitTransport: NativeAgentHostGitTransport?,
+        hadPrivateGitBridgeHandoff: Bool
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -153,7 +161,9 @@ private final class LifecycleFixture: @unchecked Sendable {
             closeReasons,
             spawnCount,
             signalCount,
-            waitCount
+            waitCount,
+            lastGitTransport,
+            lastHadPrivateGitBridgeHandoff
         )
     }
 }
@@ -270,7 +280,8 @@ private func withLifecycleProject<T>(
 
 private func makeLifecycleCoordinator(
     fixture: LifecycleFixture,
-    authority: [NativeAgentHostAuthorityObservation] = [.authorized]
+    authority: [NativeAgentHostAuthorityObservation] = [.authorized],
+    gitTransport: NativeAgentHostGitTransport = .legacyFD3
 ) throws -> NativeAgentHostLifecycleCoordinator {
     fixture.authorityResults = authority
     fixture.activation = try lifecycleActivation()
@@ -278,7 +289,8 @@ private func makeLifecycleCoordinator(
         connectionBinding: try lifecycleConnection(),
         handoff: try lifecycleHandoff(),
         supervisor: NativeAgentHostChildSupervisor(hooks: fixture.supervisorHooks()),
-        hooks: fixture.hooks()
+        hooks: fixture.hooks(),
+        gitTransport: gitTransport
     )
 }
 
@@ -307,6 +319,24 @@ private func activationProjection(_ activation: NativeAgentHostQualifiedSessionA
     #expect(snapshot.closed.map(identityProjection) == [activationProjection(activation)])
     #expect(snapshot.bootstrapBindings.first?.agentID == lifecycleAgentID)
     #expect(coordinator.state == .closed)
+}
+
+@Test func authenticatedXPCTransportDoesNotCreateFD3Handoff() throws {
+    let fixture = LifecycleFixture()
+    let coordinator = try makeLifecycleCoordinator(
+        fixture: fixture,
+        gitTransport: .authenticatedXPC
+    )
+
+    _ = try coordinator.bootstrap()
+    _ = try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        _ = try coordinator.close()
+    }
+
+    let snapshot = fixture.snapshot()
+    #expect(snapshot.gitTransport == .authenticatedXPC)
+    #expect(snapshot.hadPrivateGitBridgeHandoff == false)
 }
 
 @Test func bootstrapRejectsActivationSubstitutionForAnotherAgent() throws {
