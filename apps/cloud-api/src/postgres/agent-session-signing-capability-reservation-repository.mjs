@@ -93,14 +93,24 @@ export const AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_FUNCTIONS = Object.fre
 
 export const AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL = `SELECT
   s.organization_id,s.session_id,s.grant_id,s.device_id,s.agent_id,s.status,
-  s.max_signatures,s.used_signatures,s.reserved_signatures,s.not_before,s.expires_at,
-  s.control_sequence,s.authority_generation
+  s.adapter_id,s.adapter_version,s.process_binding_sha256,s.ancestry_binding_sha256,
+  s.worktree_binding_sha256,s.max_signatures,s.used_signatures,s.not_before,s.expires_at,
+  s.control_sequence,s.authority_generation,
+  gr.agent_kind AS grant_agent_kind,gr.adapter_id AS grant_adapter_id,
+  gr.adapter_version AS grant_adapter_version,gr.worktree_binding_sha256 AS grant_worktree_binding_sha256,
+  gr.process_binding_policy_id,gr.scope_json,gr.issuer,gr.signer_key_id,
+  gr.statement_hash,gr.grant_hash,gr.signature_base64url
 FROM public.agent_sessions AS s
 JOIN public.devices AS d ON d.organization_id=s.organization_id AND d.id=s.device_id
 JOIN public.agents AS a ON a.organization_id=s.organization_id AND a.id=s.agent_id
-JOIN public.control_plane_authority_generations AS g
-  ON g.organization_id=s.organization_id AND g.generation=s.authority_generation
-  AND g.superseded_at IS NULL
+JOIN public.agent_session_grants AS gr
+  ON gr.organization_id=s.organization_id AND gr.grant_id=s.grant_id
+  AND gr.device_id=s.device_id AND gr.agent_id=s.agent_id
+  AND gr.grant_hash=s.grant_hash AND gr.status='consumed'
+  AND gr.consumed_session_id=s.session_id
+JOIN public.control_plane_authority_generations AS authority
+  ON authority.organization_id=s.organization_id AND authority.generation=s.authority_generation
+  AND authority.superseded_at IS NULL
 WHERE s.organization_id=$1::uuid AND s.device_id=$2::uuid AND s.session_id=$3::uuid
   AND s.status IN ('active','signed','request_reserved','signing_intent')
   AND s.max_signatures=2 AND s.used_signatures+s.reserved_signatures<=s.max_signatures
@@ -113,7 +123,7 @@ WHERE s.organization_id=$1::uuid AND s.device_id=$2::uuid AND s.session_id=$3::u
         OR (r.target_type='device' AND r.target_id=s.device_id)
         OR (r.target_type='agent' AND r.target_id=s.agent_id))
   )
-FOR SHARE OF s,d,a,g`;
+  FOR SHARE OF s,d,a,gr,authority`;
 
 export const AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_CONFIG",
@@ -297,13 +307,57 @@ export function createPostgresAgentSessionSigningCapabilitySessionBinder({ clien
           const result = await tx.query(AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL, [organizationId, deviceId, sessionId, observedAt]);
           if (Number(result?.rowCount ?? result?.rows?.length ?? 0) !== 1) throw repoError("CONFLICT");
           const row = result.rows[0];
-          return deepFreeze({
-            authorized: true,
-            organization_id: uuid(row.organization_id, "organization_id"),
+          const lease = {
+            version: 1,
+            type: "agentpass.agent-session-lease",
             session_id: uuid(row.session_id, "session_id"),
             grant_id: uuid(row.grant_id, "grant_id"),
+            organization_id: uuid(row.organization_id, "organization_id"),
             device_id: uuid(row.device_id, "device_id"),
-            agent_id: uuid(row.agent_id, "agent_id")
+            agent_id: uuid(row.agent_id, "agent_id"),
+            agent_kind: row.grant_agent_kind,
+            adapter_id: uuid(row.adapter_id, "adapter_id"),
+            adapter_version: row.adapter_version,
+            process_binding_sha256: digestHex(row.process_binding_sha256),
+            ancestry_binding_sha256: digestHex(row.ancestry_binding_sha256),
+            worktree_binding_sha256: digestHex(row.worktree_binding_sha256),
+            max_signatures: nonNegativeInteger(row.max_signatures),
+            used_signatures: nonNegativeInteger(row.used_signatures),
+            not_before: databaseTimestamp(row.not_before),
+            expires_at: databaseTimestamp(row.expires_at),
+            control_sequence: positiveInteger(row.control_sequence),
+            authority_generation: positiveInteger(row.authority_generation)
+          };
+          const grant = {
+            version: 1,
+            type: "agentpass.agent-session-grant",
+            statement: {
+              version: 1,
+              grant_id: lease.grant_id,
+              organization_id: lease.organization_id,
+              device_id: lease.device_id,
+              agent_id: lease.agent_id,
+              agent_kind: row.grant_agent_kind,
+              adapter_id: uuid(row.grant_adapter_id, "grant_adapter_id"),
+              adapter_version: row.grant_adapter_version,
+              worktree_binding_sha256: digestHex(row.grant_worktree_binding_sha256),
+              process_binding_policy_id: row.process_binding_policy_id,
+              scope: typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json,
+              max_signatures: lease.max_signatures,
+              not_before: lease.not_before,
+              expires_at: lease.expires_at,
+              control_sequence: lease.control_sequence,
+              authority_generation: lease.authority_generation,
+              issuer: row.issuer,
+              key_id: row.signer_key_id
+            },
+            statement_hash: digestHex(row.statement_hash),
+            signature: row.signature_base64url
+          };
+          return deepFreeze({
+            authorized: true,
+            lease,
+            grant
           });
         });
       } catch (error) {
@@ -518,8 +572,15 @@ function requestDigestForRequest(requestId) {
 }
 
 function digestText(value) { return crypto.createHash("sha256").update(value, "utf8").digest(); }
+function digestHex(value) {
+  const hex = Buffer.isBuffer(value) ? value.toString("hex") : value;
+  if (typeof hex !== "string" || !DIGEST_HEX.test(hex)) throw new Error("digest");
+  return hex;
+}
 function uuid(value, field) { if (typeof value !== "string" || !UUID.test(value)) throw new Error(field); return value.toLowerCase(); }
 function positiveInteger(value) { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 1) throw new Error("integer"); return number; }
+function nonNegativeInteger(value) { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 0) throw new Error("integer"); return number; }
+function databaseTimestamp(value) { const date = value instanceof Date ? value : new Date(value); if (!Number.isFinite(date.getTime())) throw new Error("timestamp"); return date.toISOString(); }
 function boundedRemaining(value) { if (!Number.isSafeInteger(value) || value < 0 || value > 1) throw new Error("remaining"); return value; }
 function timestamp(value) { const date = new Date(value); if (!(date instanceof Date) || !Number.isFinite(date.getTime()) || date.toISOString() !== value || !TIMESTAMP.test(value)) throw new Error("timestamp"); return value; }
 function exactObject(value, keys) {

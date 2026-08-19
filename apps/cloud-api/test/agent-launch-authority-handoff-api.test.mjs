@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
+import { agentSessionGrantSigningData, agentSessionGrantStatementHash } from "../src/agent-session-grant.mjs";
 import { createReplayCache, signDeviceRequest, verifyDeviceRequest } from "../src/auth.mjs";
 import {
   AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES,
@@ -25,6 +26,7 @@ const PROCESS = "a".repeat(64);
 const ANCESTRY = "b".repeat(64);
 const WORKTREE = "c".repeat(64);
 const PATH = `/v1/organizations/${IDS.organization}/devices/${IDS.device}/agent-sessions/${IDS.session}/launch-authority-handoff`;
+const GRANT_KEYS = crypto.generateKeyPairSync("ed25519");
 
 function lease(overrides = {}) {
   return {
@@ -63,7 +65,37 @@ function requestBody(overrides = {}) {
   }), "utf8");
 }
 
-function fixture({ binder = async () => ({ authorized: true, lease: lease() }), repository = undefined, verifier = undefined } = {}) {
+function grant(leaseValue = lease()) {
+  const statement = {
+    version: 1,
+    grant_id: leaseValue.grant_id,
+    organization_id: leaseValue.organization_id,
+    device_id: leaseValue.device_id,
+    agent_id: leaseValue.agent_id,
+    agent_kind: leaseValue.agent_kind,
+    adapter_id: leaseValue.adapter_id,
+    adapter_version: leaseValue.adapter_version,
+    worktree_binding_sha256: leaseValue.worktree_binding_sha256,
+    process_binding_policy_id: "claude-code-default",
+    scope: { operations: ["git.commit.sign"], repositories: ["/work/project"], branches: { allow: ["feature/*"], deny: [] }, remotes: { allow: ["origin"], deny: [] } },
+    max_signatures: leaseValue.max_signatures,
+    not_before: leaseValue.not_before,
+    expires_at: leaseValue.expires_at,
+    control_sequence: leaseValue.control_sequence,
+    authority_generation: leaseValue.authority_generation,
+    issuer: "agentpass-cloud",
+    key_id: "agent-session-2026-08"
+  };
+  return {
+    version: 1,
+    type: "agentpass.agent-session-grant",
+    statement,
+    statement_hash: agentSessionGrantStatementHash(statement),
+    signature: crypto.sign(null, agentSessionGrantSigningData(statement), GRANT_KEYS.privateKey).toString("base64url")
+  };
+}
+
+function fixture({ binder = async () => ({ authorized: true, lease: lease(), grant: grant() }), repository = undefined, verifier = undefined, grantVerifier = undefined } = {}) {
   const deviceKeys = crypto.generateKeyPairSync("ed25519");
   const replayCache = createReplayCache();
   const calls = { auth: [], bind: [], repository: [] };
@@ -88,6 +120,7 @@ function fixture({ binder = async () => ({ authorized: true, lease: lease() }), 
         device_public_key: deviceKeys.publicKey.export({ type: "spki", format: "pem" }).toString()
       }], { ...options, replayCache });
     },
+    grantVerifier: grantVerifier ?? (async (value) => ({ grant: value })),
     sessionBinder: async (input) => {
       calls.bind.push(structuredClone(input));
       return binder(input);
@@ -136,8 +169,8 @@ test("authenticates the raw request, binds the complete Lease, and fails closed 
   });
   assert.equal(f.calls.repository.length, 1);
   assert.deepEqual(Object.keys(f.calls.repository[0]).sort(), [
-    "adapter_id", "adapter_version", "agent_id", "agent_kind", "device_id", "expires_at",
-    "lease_sha256", "nonce_sha256", "not_before", "organization_id", "request_id", "session_id", "type", "version"
+    "adapter_id", "adapter_version", "agent_id", "agent_kind", "authority_generation", "control_sequence", "device_id", "expires_at", "grant_id",
+    "grant", "grant_hash", "lease_sha256", "nonce_sha256", "not_before", "organization_id", "request_id", "session_id", "type", "version", "worktree_binding_sha256"
   ].sort());
   assert.equal(f.calls.repository[0].organization_id, IDS.organization);
   assert.equal(f.calls.repository[0].device_id, IDS.device);
@@ -145,6 +178,9 @@ test("authenticates the raw request, binds the complete Lease, and fails closed 
   assert.equal(f.calls.repository[0].adapter_id, IDS.adapter);
   assert.equal(f.calls.repository[0].session_id, IDS.session);
   assert.equal(f.calls.repository[0].expires_at, lease().expires_at);
+  assert.equal(f.calls.repository[0].worktree_binding_sha256, WORKTREE);
+  assert.equal(f.calls.repository[0].authority_generation, 7);
+  assert.equal(f.calls.repository[0].grant.statement.grant_id, lease().grant_id);
   assert.equal(f.calls.repository[0].nonce_sha256, crypto.createHash("sha256").update(Buffer.from(BODY_NONCE, "base64url")).digest("hex"));
   assert.equal(Object.hasOwn(f.calls.repository[0], "nonce"), false);
   assert.equal(Object.hasOwn(result.body, "handoff"), false);
@@ -185,8 +221,29 @@ test("rejects unknown, duplicate, noncanonical, authority-bearing, bearer, and q
 test("does not return a repository-supplied token-shaped result", async () => {
   const f = fixture({ repository: { async issueAgentLaunchAuthorityHandoff() { return { token: "not-a-native-proof" }; } } });
   const result = await f.api.handle(requestFor(f));
-  assertError(result, 503, AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES.NATIVE_PROOF_UNAVAILABLE);
+  assertError(result, 503, AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES.UNAVAILABLE);
   assert.equal(Object.hasOwn(result.body, "token"), false);
+});
+
+test("returns the exact already-issued Grant once through a no-store response", async () => {
+  const f = fixture({ repository: {
+    async issueAgentLaunchAuthorityHandoff(input) {
+      assert.equal(Object.hasOwn(input, "nonce"), false);
+      return { state: "issued", grant: input.grant };
+    }
+  } });
+  const result = await f.api.handle(requestFor(f));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.grant, f.calls.bind.length === 1 ? grant() : undefined);
+  assert.match(result.headers["Cache-Control"], /no-store/u);
+  assert.equal(Object.hasOwn(result.body, "token"), false);
+});
+
+test("does not return the Grant again after an atomic replay decision", async () => {
+  const f = fixture({ repository: { async issueAgentLaunchAuthorityHandoff() { return { state: "already_returned" }; } } });
+  const result = await f.api.handle(requestFor(f));
+  assertError(result, 409, AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES.REPLAYED);
+  assert.equal(Object.hasOwn(result.body, "grant"), false);
 });
 
 test("rejects expired and exhausted Lease authority before handoff persistence", async () => {
@@ -197,6 +254,15 @@ test("rejects expired and exhausted Lease authority before handoff persistence",
     const f = fixture({ binder: async () => ({ authorized: true, lease: lease(changed) }) });
     const result = await f.api.handle(requestFor(f));
     assertError(result, 503, AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES.UNAVAILABLE);
+    assert.equal(f.calls.repository.length, 0);
+  }
+});
+
+test("requires the cryptographic verifier to attest the exact bound Grant envelope", async () => {
+  for (const verifier of [async () => true, async (value) => ({ grant: { ...value, signature: "A".repeat(86) } })]) {
+    const f = fixture({ grantVerifier: verifier });
+    const result = await f.api.handle(requestFor(f));
+    assertError(result, 403, AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED);
     assert.equal(f.calls.repository.length, 0);
   }
 });

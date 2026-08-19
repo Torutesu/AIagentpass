@@ -227,7 +227,17 @@ test("Session binder installs tenant context and returns only the locked server 
       if (text.startsWith("SELECT set_config")) return result([{ organization_id: IDS.organization_id }]);
       if (text === AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL) return result([{
         organization_id: IDS.organization_id, session_id: IDS.session_id,
-        grant_id: IDS.grant_id, device_id: IDS.device_id, agent_id: IDS.agent_id
+        grant_id: IDS.grant_id, device_id: IDS.device_id, agent_id: IDS.agent_id,
+        adapter_id: "66666666-6666-4666-8666-666666666666", adapter_version: "1.2.3",
+        process_binding_sha256: Buffer.alloc(32, 0xaa), ancestry_binding_sha256: Buffer.alloc(32, 0xbb),
+        worktree_binding_sha256: Buffer.alloc(32, 0xcc), max_signatures: 2, used_signatures: 0,
+        not_before: new Date(TIMES.issued_at), expires_at: new Date("2026-08-16T03:05:00.000Z"),
+        control_sequence: 12, authority_generation: 7,
+        grant_agent_kind: "claude-code", grant_adapter_id: "66666666-6666-4666-8666-666666666666",
+        grant_adapter_version: "1.2.3", grant_worktree_binding_sha256: Buffer.alloc(32, 0xcc),
+        process_binding_policy_id: "claude-code-default", scope_json: SCOPE,
+        issuer: "agentpass-cloud", signer_key_id: "agent-session-2026-08",
+        statement_hash: "d".repeat(64), grant_hash: "e".repeat(64), signature_base64url: "A".repeat(86)
       }]);
       throw new Error("unexpected SQL");
     }
@@ -237,9 +247,24 @@ test("Session binder installs tenant context and returns only the locked server 
     organization_id: IDS.organization_id, device_id: IDS.device_id,
     session_id: IDS.session_id, now: Date.parse(TIMES.issued_at)
   });
-  assert.deepEqual(value, {
-    authorized: true, organization_id: IDS.organization_id, session_id: IDS.session_id,
-    grant_id: IDS.grant_id, device_id: IDS.device_id, agent_id: IDS.agent_id
+  assert.equal(value.authorized, true);
+  assert.deepEqual(value.lease, {
+    version: 1, type: "agentpass.agent-session-lease", session_id: IDS.session_id, grant_id: IDS.grant_id,
+    organization_id: IDS.organization_id, device_id: IDS.device_id, agent_id: IDS.agent_id, agent_kind: "claude-code",
+    adapter_id: "66666666-6666-4666-8666-666666666666", adapter_version: "1.2.3",
+    process_binding_sha256: "aa".repeat(32), ancestry_binding_sha256: "bb".repeat(32), worktree_binding_sha256: "cc".repeat(32),
+    max_signatures: 2, used_signatures: 0, not_before: TIMES.issued_at, expires_at: "2026-08-16T03:05:00.000Z",
+    control_sequence: 12, authority_generation: 7
+  });
+  assert.deepEqual(value.grant, {
+    version: 1, type: "agentpass.agent-session-grant",
+    statement: {
+      version: 1, grant_id: IDS.grant_id, organization_id: IDS.organization_id, device_id: IDS.device_id,
+      agent_id: IDS.agent_id, agent_kind: "claude-code", adapter_id: "66666666-6666-4666-8666-666666666666",
+      adapter_version: "1.2.3", worktree_binding_sha256: "cc".repeat(32), process_binding_policy_id: "claude-code-default",
+      scope: SCOPE, max_signatures: 2, not_before: TIMES.issued_at, expires_at: "2026-08-16T03:05:00.000Z",
+      control_sequence: 12, authority_generation: 7, issuer: "agentpass-cloud", key_id: "agent-session-2026-08"
+    }, statement_hash: "d".repeat(64), signature: "A".repeat(86)
   });
   assert.deepEqual(calls.find(({ text }) => text === AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL).params,
     [IDS.organization_id, IDS.device_id, IDS.session_id, TIMES.issued_at]);

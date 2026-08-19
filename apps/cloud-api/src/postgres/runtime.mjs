@@ -18,6 +18,7 @@ import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.
 import { normalizeOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
 import { createSharedControlMaintenanceWorker } from "./shared-control-maintenance-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
+import { createPostgresAgentLaunchAuthorityHandoffRepository } from "./agent-launch-authority-handoff-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
@@ -293,6 +294,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   const agentSessionLifecycleRepository = createPostgresAgentSessionLifecycleRepository({ client: pool, metrics: operationalMetrics });
   const agentSessionSigningCapabilitySessionBinder = createPostgresAgentSessionSigningCapabilitySessionBinder({ client: pool });
+  // No migration-owned atomic handoff function exists yet. Keep the explicit
+  // production seam visible to composition while its default remains closed.
+  const agentLaunchAuthorityHandoffRepository = createPostgresAgentLaunchAuthorityHandoffRepository();
   const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
@@ -408,6 +412,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionConsumptionRepository,
     agentSessionLifecycleRepository,
     agentSessionSigningCapabilitySessionBinder,
+    agentLaunchAuthorityHandoffRepository,
     createAgentSessionSigningCapabilityReservationRepository: (context) =>
       createPostgresAgentSessionSigningCapabilityReservationRepository({ client: pool, context }),
     agentSessionSigningCapabilityMaintenanceRepository,

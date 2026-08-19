@@ -640,11 +640,13 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       };
       agentLaunchAuthorityHandoffApi = createAgentLaunchAuthorityHandoffApi({
         deviceRequestVerifier,
+        grantVerifier: agentSessionGrantVerifier,
         sessionBinder: postgresRuntime.agentSessionSigningCapabilitySessionBinder ?? (async () => {
           const unavailable = new Error("full Agent Session Lease binding is unavailable");
           unavailable.code = "ERR_SESSION_BINDING_UNAVAILABLE";
           throw unavailable;
         }),
+        repository: postgresRuntime.agentLaunchAuthorityHandoffRepository,
         rateLimiter: hostedRateLimiter
       });
       if (agentSessionSigningCapabilitySigner !== undefined) {
