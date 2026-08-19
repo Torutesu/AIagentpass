@@ -116,6 +116,7 @@ public enum NativeAgentSessionCoordinatorSigningAdapterPhase: String, Equatable,
     case ready
     case reserved
     case intent
+    case providerStarted
     case recorded
     case finalized
     case released
@@ -132,6 +133,7 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     private let handoff: NativeAgentSessionCoordinatorSigningHandoff
     private let coordinator: NativeAgentSessionCoordinator
     private let transactions: NativeSigningTransactionStore
+    private let operationLock = NSLock()
     private let lock = NSLock()
     private var phase: NativeAgentSessionCoordinatorSigningAdapterPhase = .ready
     private var reservation: NativeAgentSessionReservation?
@@ -158,6 +160,12 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// durably admits the exact transaction with the same budget sequence.
     @discardableResult
     public func reserve() throws -> NativeAgentSessionReservation {
+        try operationLock.withLock {
+            try reserveLocked()
+        }
+    }
+
+    private func reserveLocked() throws -> NativeAgentSessionReservation {
         try lock.withLock {
             guard phase == .ready else { throw Self.transitionError() }
 
@@ -201,6 +209,12 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// allowed before this method succeeds.
     @discardableResult
     public func begin() throws -> NativeSigningTransactionRecord {
+        try operationLock.withLock {
+            try beginLocked()
+        }
+    }
+
+    private func beginLocked() throws -> NativeSigningTransactionRecord {
         try lock.withLock {
             guard phase == .reserved, let reservation else {
                 throw Self.transitionError()
@@ -214,7 +228,7 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
                 throw Self.mapCoordinator(error)
             }
             guard binding == handoff.sessionBinding else {
-                failAfterIntent(reservation: reservation)
+                failAfterProvider(reservation: reservation)
                 throw NativeAgentSessionCoordinatorSigningAdapterError.invalidHandoff
             }
 
@@ -223,10 +237,75 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
                     requestID: handoff.transactionIdentity.requestID,
                     authority: handoff.transactionAuthority)
             } catch {
-                failAfterIntent(reservation: reservation)
+                failAfterProvider(reservation: reservation)
                 throw Self.mapTransaction(error)
             }
             phase = .intent
+            return record!
+        }
+    }
+
+    /// Runs one complete signing transaction. The provider receives only the
+    /// already-bound commit payload and returns only signature bytes; all
+    /// session, budget, binding, lease, and transaction authority remains
+    /// inside this adapter and its Core dependencies.
+    ///
+    /// `provider_started` is persisted before the closure is invoked. Once the
+    /// closure has been entered, every provider error or invalid result is
+    /// terminalized as outcome-unknown: the reservation is never released and
+    /// the provider is never retried.
+    @discardableResult
+    public func execute(
+        provider: @escaping @Sendable (Data) throws -> Data
+    ) throws -> NativeSigningTransactionRecord {
+        try operationLock.withLock {
+            _ = try reserveLocked()
+            _ = try beginLocked()
+            _ = try markProviderStartedLocked()
+
+            let signature: Data
+            do {
+                signature = try provider(handoff.signingRequest.commitPayload)
+            } catch {
+                terminalizeProviderFailure()
+                throw NativeAgentSessionCoordinatorSigningAdapterError.outcomeUnknown
+            }
+
+            do {
+                _ = try recordLocked(signature: signature)
+            } catch {
+                // The provider boundary has already been crossed. Never
+                // release or expose a retryable transaction after this point.
+                terminalizeProviderFailure()
+                throw NativeAgentSessionCoordinatorSigningAdapterError.outcomeUnknown
+            }
+
+            do {
+                _ = try finalizeLocked()
+            } catch {
+                // Finalization failure after provider invocation is also
+                // ambiguous to the caller, even if Core did consume the
+                // reservation before the failure was observed.
+                throw NativeAgentSessionCoordinatorSigningAdapterError.outcomeUnknown
+            }
+            return record!
+        }
+    }
+
+    @discardableResult
+    private func markProviderStartedLocked() throws -> NativeSigningTransactionRecord {
+        try lock.withLock {
+            guard phase == .intent, let reservation else {
+                throw Self.transitionError()
+            }
+            do {
+                record = try transactions.markProviderStarted(
+                    requestID: handoff.transactionIdentity.requestID)
+            } catch {
+                failAfterProvider(reservation: reservation)
+                throw Self.mapTransaction(error)
+            }
+            phase = .providerStarted
             return record!
         }
     }
@@ -235,14 +314,36 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// that transition into the coordinator's in-memory session state.
     @discardableResult
     public func record(signature: Data) throws -> NativeSigningTransactionRecord {
+        try operationLock.withLock {
+            try recordLocked(signature: signature)
+        }
+    }
+
+    private func recordLocked(signature: Data) throws -> NativeSigningTransactionRecord {
         try lock.withLock {
-            guard phase == .intent, let reservation else {
+            guard (phase == .intent || phase == .providerStarted), let reservation else {
                 throw Self.transitionError()
             }
+
+            // Keep the split Core API source-compatible, but the complete
+            // execute(provider:) path marks this phase before entering the
+            // provider. A caller using record() directly has already crossed
+            // the provider boundary and is treated conservatively.
+            if phase == .intent {
+                do {
+                    record = try transactions.markProviderStarted(
+                        requestID: handoff.transactionIdentity.requestID)
+                } catch {
+                    failAfterProvider(reservation: reservation)
+                    throw Self.mapTransaction(error)
+                }
+                phase = .providerStarted
+            }
+
             guard !signature.isEmpty,
                   signature.count <= AgentPassAgentSignResponse.maximumSignatureBytes,
                   let text = String(data: signature, encoding: .utf8), !text.isEmpty else {
-                failAfterIntent(reservation: reservation)
+                failAfterProvider(reservation: reservation)
                 throw NativeAgentSessionCoordinatorSigningAdapterError.transactionUnavailable
             }
 
@@ -251,7 +352,7 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
                     requestID: handoff.transactionIdentity.requestID,
                     signature: text)
             } catch {
-                failAfterIntent(reservation: reservation)
+                failAfterProvider(reservation: reservation)
                 throw Self.mapTransaction(error)
             }
 
@@ -275,6 +376,13 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// signature.
     @discardableResult
     public func finalize() throws -> NativeAgentSessionRegistryStatus {
+        try operationLock.withLock {
+            try finalizeLocked()
+        }
+    }
+
+    @discardableResult
+    private func finalizeLocked() throws -> NativeAgentSessionRegistryStatus {
         try lock.withLock {
             guard phase == .recorded, let reservation else {
                 throw Self.transitionError()
@@ -311,6 +419,13 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// reservation atomically.
     @discardableResult
     public func release() throws -> NativeSigningTransactionRecord {
+        try operationLock.withLock {
+            try releaseLocked()
+        }
+    }
+
+    @discardableResult
+    private func releaseLocked() throws -> NativeSigningTransactionRecord {
         try lock.withLock {
             guard phase == .reserved, let reservation else {
                 throw Self.transitionError()
@@ -339,8 +454,15 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     /// budget before the durable record is marked uncertain.
     @discardableResult
     public func unknown() throws -> NativeSigningTransactionRecord {
+        try operationLock.withLock {
+            try unknownLocked()
+        }
+    }
+
+    @discardableResult
+    private func unknownLocked() throws -> NativeSigningTransactionRecord {
         try lock.withLock {
-            guard (phase == .intent || phase == .recorded), let reservation else {
+            guard (phase == .intent || phase == .providerStarted || phase == .recorded), let reservation else {
                 throw Self.transitionError()
             }
 
@@ -412,15 +534,30 @@ public final class NativeAgentSessionCoordinatorSigningAdapter: @unchecked Senda
     private func failBeforeProvider(reservation: NativeAgentSessionReservation) {
         _ = try? transactions.markUncertain(
             requestID: handoff.transactionIdentity.requestID)
-        _ = try? coordinator.releaseSigningBeforeKey(reservation)
-        phase = .released
+        do {
+            try coordinator.releaseSigningBeforeKey(reservation)
+            phase = .released
+        } catch {
+            // If the intent boundary was crossed despite the failure being
+            // observed before the closure could run, never claim that the
+            // budget was released. Preserve the reservation as unknown.
+            _ = try? coordinator.markSigningOutcomeUnknown(reservation)
+            phase = .unknown
+        }
     }
 
-    private func failAfterIntent(reservation: NativeAgentSessionReservation) {
+    private func failAfterProvider(reservation: NativeAgentSessionReservation) {
         _ = try? transactions.markUncertain(
             requestID: handoff.transactionIdentity.requestID)
         _ = try? coordinator.markSigningOutcomeUnknown(reservation)
         phase = .unknown
+    }
+
+    private func terminalizeProviderFailure() {
+        lock.withLock {
+            guard phase == .providerStarted, let reservation else { return }
+            failAfterProvider(reservation: reservation)
+        }
     }
 
     private static func transitionError() -> NativeAgentSessionCoordinatorSigningAdapterError {

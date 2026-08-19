@@ -206,3 +206,26 @@ func hostAndChildPayloadsDoNotAppearInTheCoreAuthorityAdapter() throws {
     #expect(source.contains("NativeAgentSessionCoordinator"))
     #expect(source.contains("NativeSigningTransactionStore"))
 }
+
+@Test("execute keeps the provider as a payload-only final boundary")
+func executeProviderBoundaryContractIsAdversariallyPinned() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let sourceURL = testDirectory
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent(
+            "Sources/AgentPassNativeCore/NativeAgentSessionCoordinatorSigningAdapter.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+    #expect(source.contains("provider: @escaping @Sendable (Data) throws -> Data"))
+    #expect(source.contains("provider(handoff.signingRequest.commitPayload)"))
+    #expect(source.contains("transactions.markProviderStarted"))
+    #expect(source.contains("terminalizeProviderFailure()"))
+    #expect(source.contains("throw NativeAgentSessionCoordinatorSigningAdapterError.outcomeUnknown"))
+    #expect(source.contains("provider: @escaping @Sendable (NativeAgentSessionBinding) throws -> Data") == false)
+    #expect(source.contains("provider: @escaping @Sendable (NativeSigningTransactionAuthority) throws -> Data") == false)
+
+    let providerStarted = try #require(source.range(of: "_ = try markProviderStartedLocked()"))
+    let providerCall = try #require(source.range(of: "signature = try provider("))
+    #expect(providerStarted.lowerBound < providerCall.lowerBound)
+}
