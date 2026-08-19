@@ -1,0 +1,32 @@
+name: Release preflight
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      evidence_path:
+        description: "Workspace-relative release evidence JSON"
+        required: false
+        default: ".release/evidence.json"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify candidate-bound production evidence
+        env:
+          CANDIDATE_COMMIT_SHA: ${{ github.sha }}
+          EVIDENCE_PATH: ${{ inputs.evidence_path || '.release/evidence.json' }}
+        run: >-
+          node scripts/ops/verify-release-preflight.mjs "$EVIDENCE_PATH"
+          --candidate-commit-sha "$CANDIDATE_COMMIT_SHA"

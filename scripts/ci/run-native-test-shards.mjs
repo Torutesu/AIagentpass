@@ -41,6 +41,14 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
+function identifiersForTarget(target, identifiers) {
+  if (!Array.isArray(identifiers)) throw new TypeError("native test identifiers are invalid");
+  const prefix = `${target}.`;
+  return [...new Set(identifiers)].filter((identifier) => (
+    typeof identifier === "string" && identifier.startsWith(prefix) && identifier.length > prefix.length
+  ));
+}
+
 export async function listNativeTestIdentifiers({ target, cwd = ROOT, timeoutMs = 15 * 60 * 1000 } = {}) {
   if (!NATIVE_TEST_TARGETS.includes(target)) throw new TypeError("unknown native test target");
   const { stdout, stderr } = await execFileAsync("swift", ["test", "list", "--package-path", "native/macos"], {
@@ -61,7 +69,11 @@ export function nativeTestIdentifierCommand(identifier) {
     args: Object.freeze([
       path.join(ROOT, "scripts/ci/run-native-tests.mjs"), "--",
       "swift", "test", "--package-path", "native/macos", "--no-parallel",
-      "--filter", `^${escapeRegex(identifier)}$`
+      // Swift Testing's filter matcher does not honor an end anchor for the
+      // fully-qualified identifier emitted by `swift test list`; retain the
+      // closed start anchor and allow its runtime suffix (for example,
+      // parameterized cases) to be selected.
+      "--filter", `^${escapeRegex(identifier)}.*$`
     ])
   });
 }
@@ -83,12 +95,13 @@ export async function runNativeTestShards({
     let result = await run(command.command, command.args, {
       cwd,
       timeoutMs,
-      onDiagnostic
+      onDiagnostic,
+      expectTests: true
     });
     if (result.exitCode !== 0) {
       let identifiers;
       try {
-        identifiers = await listTests({ target, cwd, timeoutMs });
+        identifiers = identifiersForTarget(target, await listTests({ target, cwd, timeoutMs }));
       } catch {
         // Preserve the original bounded failure and continue the remaining
         // closed shards; never turn a diagnostic-list failure into a false
@@ -98,13 +111,22 @@ export async function runNativeTestShards({
       const fallback = [];
       for (const identifier of identifiers) {
         const individual = nativeTestIdentifierCommand(identifier);
-        fallback.push(await run(individual.command, individual.args, { cwd, timeoutMs, onDiagnostic }));
+        fallback.push(await run(individual.command, individual.args, { cwd, timeoutMs, onDiagnostic, expectTests: true }));
       }
-      if (fallback.length > 0 && fallback.every((value) => value.exitCode === 0)) {
+      const fallbackPassed = fallback.length > 0 && fallback.every((value) => (
+        value && value.exitCode === 0 && value.signal == null && value.timedOut !== true && value.interrupted !== true
+          && (value.testCasesObserved === undefined || value.testCasesObserved > 0)
+      ));
+      if (fallbackPassed) {
         result = { ...result, exitCode: 0, reason: "native_test_passed_after_fallback", recovered: true, fallbackCount: fallback.length };
         onDiagnostic?.({ phase: "recovered", code: "native_test_shard_recovered", target, fallback_count: fallback.length });
       } else {
-        result = { ...result, recovered: false, fallbackCount: fallback.length };
+        result = {
+          ...result,
+          recovered: false,
+          fallbackCount: fallback.length,
+          fallbackReason: fallback.length === 0 ? "no_test_identifiers" : "fallback_test_failed"
+        };
       }
     }
     results.push(Object.freeze({ target, ...result }));

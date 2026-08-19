@@ -26,7 +26,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   nonzero: "native_test_exit_nonzero",
   unknown: "native_test_exit_unknown",
   spawnFailed: "native_test_spawn_failed",
-  environment: "native_test_environment"
+  environment: "native_test_environment",
+  noTests: "native_test_no_tests"
 });
 
 const SIGNAL_NUMBERS = Object.freeze(os.constants.signals ?? {});
@@ -115,11 +116,15 @@ function normalizeOptions(options = {}) {
   if (options.onDiagnostic !== undefined && typeof options.onDiagnostic !== "function") {
     throw new TypeError("onDiagnostic must be a function");
   }
+  if (options.expectTests !== undefined && typeof options.expectTests !== "boolean") {
+    throw new TypeError("expectTests must be a boolean");
+  }
   return {
     timeoutMs,
     cwd: options.cwd,
     env: options.env,
-    onDiagnostic: options.onDiagnostic
+    onDiagnostic: options.onDiagnostic,
+    expectTests: options.expectTests === true
   };
 }
 
@@ -189,11 +194,12 @@ function signalExitCode(signal) {
   return Number.isInteger(number) ? 128 + number : 1;
 }
 
-function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed }) {
+function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed, noTests }) {
   if (spawnFailed) return DIAGNOSTIC_CODES.spawnFailed;
   if (timedOut) return DIAGNOSTIC_CODES.timeout;
   if (teardownFailed) return DIAGNOSTIC_CODES.teardown;
   if (signal) return DIAGNOSTIC_CODES.signal;
+  if (noTests) return DIAGNOSTIC_CODES.noTests;
   if (exitCode === 0) return DIAGNOSTIC_CODES.passed;
   if (Number.isInteger(exitCode)) return DIAGNOSTIC_CODES.nonzero;
   return DIAGNOSTIC_CODES.unknown;
@@ -208,7 +214,7 @@ function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed 
  */
 export function runNativeTest(command, args = [], options = {}) {
   assertCommand(command, args);
-  const { cwd, env, onDiagnostic, timeoutMs } = normalizeOptions(options);
+  const { cwd, env, onDiagnostic, timeoutMs, expectTests } = normalizeOptions(options);
   const startedAt = process.hrtime.bigint();
 
   return new Promise((resolve) => {
@@ -221,6 +227,8 @@ export function runNativeTest(command, args = [], options = {}) {
     let timedOut = false;
     let interruptedSignal = null;
     let teardownFailed = false;
+    let testCasesObserved = 0;
+    let outputWindow = "";
     let timeoutHandle;
     let graceHandle;
     let settleHandle;
@@ -244,15 +252,24 @@ export function runNativeTest(command, args = [], options = {}) {
           ? signalExitCode(interruptedSignal)
           : (timedOut ? TIMEOUT_EXIT_CODE : (closeSignal ? signalExitCode(closeSignal) : null)));
       const signal = closeSignal ?? interruptedSignal;
+      const noTests = expectTests && exitCode === 0 && testCasesObserved === 0;
       resolve(Object.freeze({
-        exitCode,
+        exitCode: noTests ? ENVIRONMENT_EXIT_CODE : exitCode,
         signal,
         timedOut,
         interrupted: interruptedSignal !== null,
         teardownFailed,
+        testCasesObserved,
         durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
-        reason: resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed })
+        reason: resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed, noTests })
       }));
+    };
+
+    const forwardAndInspect = (stream, chunk) => {
+      const text = chunk.toString();
+      outputWindow = `${outputWindow}${text}`.slice(-512);
+      if (/(?:◇ Test (?!run started\.)(?:.*) started\.|Test Case .* started)/u.test(outputWindow)) testCasesObserved = 1;
+      stream.write(chunk);
     };
 
     const finishAfterTeardown = () => {
@@ -296,8 +313,12 @@ export function runNativeTest(command, args = [], options = {}) {
         env,
         shell: false,
         detached: process.platform !== "win32",
-        stdio: "inherit"
+        stdio: expectTests ? ["ignore", "pipe", "pipe"] : "inherit"
       });
+      if (expectTests) {
+        child.stdout.on("data", (chunk) => forwardAndInspect(process.stdout, chunk));
+        child.stderr.on("data", (chunk) => forwardAndInspect(process.stderr, chunk));
+      }
     } catch {
       spawnFailed = true;
       emit(onDiagnostic, { phase: "spawn", code: DIAGNOSTIC_CODES.spawnFailed });

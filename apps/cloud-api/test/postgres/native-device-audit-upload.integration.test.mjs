@@ -4,6 +4,7 @@ import test from "node:test";
 import { Pool } from "pg";
 
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import { createControlPlaneAuthorityRepository } from "../../src/postgres/control-plane-authority-repository.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 
@@ -150,12 +151,149 @@ test("live PostgreSQL Native Device audit upload rejects an agent used by the wr
   });
 });
 
+test("live PostgreSQL Native Device audit upload enforces forced tenant RLS for events, heads, and gaps", { skip: postgresSkipReason }, async (t) => {
+  const fixture = await createLiveFixture(t);
+  const other = await createOtherTenant(fixture.pool);
+  const otherEvent = auditEvent(other.agent, { deviceTimestamp: NOW, previousHash: ZERO_HASH });
+  await insertAuditEvent(fixture.pool, other.organization, other.device, otherEvent);
+
+  for (const table of ["device_audit_events", "device_audit_heads", "device_audit_gaps"]) {
+    const relation = await fixture.pool.query(`
+      SELECT c.relrowsecurity, c.relforcerowsecurity,
+             (SELECT count(*)::int FROM pg_policies p WHERE p.schemaname='public' AND p.tablename=c.relname) AS policy_count
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND c.relname=$1`, [table]);
+    assert.equal(relation.rowCount, 1, `${table} must exist in the live schema`);
+    assert.equal(relation.rows[0].relrowsecurity, true, `${table} must enable RLS`);
+    assert.equal(relation.rows[0].relforcerowsecurity, true, `${table} must force RLS for the table owner`);
+    assert.equal(relation.rows[0].policy_count, 4, `${table} must expose explicit CRUD tenant policies`);
+
+    const policies = await fixture.pool.query(`
+      SELECT policyname,cmd,qual,with_check
+      FROM pg_policies
+      WHERE schemaname='public' AND tablename=$1
+      ORDER BY policyname`, [table]);
+    assert.deepEqual(policies.rows.map((row) => row.cmd).sort(), ["DELETE", "INSERT", "SELECT", "UPDATE"]);
+    for (const policy of policies.rows) {
+      assert.match(`${policy.qual ?? ""} ${policy.with_check ?? ""}`, /organization_id\s*=\s*agentpass_current_organization_id\(\)/u,
+        `${table}.${policy.policyname} must bind access to the transaction tenant`);
+    }
+  }
+
+  await withSessionAuthorization(fixture.pool, "agentpass_app", async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("SELECT set_config('agentpass.organization_id',$1,true)", [fixture.organization]);
+      const visible = {};
+      for (const table of ["device_audit_events", "device_audit_heads", "device_audit_gaps"]) {
+        const result = await client.query(`SELECT count(*)::int AS count FROM public.${table}`);
+        visible[table] = result.rows[0].count;
+      }
+      assert.deepEqual(visible, {
+        device_audit_events: 0,
+        device_audit_heads: 2,
+        device_audit_gaps: 0
+      }, "agentpass_app must not see another tenant's device audit rows");
+
+      const crossTenantEvent = auditEvent(other.agent, { deviceTimestamp: "2026-08-20T00:00:04.000Z", previousHash: otherEvent.event_hash });
+      await client.query("SAVEPOINT native_audit_cross_tenant_insert");
+      try {
+        await assert.rejects(
+          () => client.query(`INSERT INTO public.device_audit_events
+            (organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at)
+            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::timestamptz)`, [
+            other.organization, other.device, crossTenantEvent.event_id, crossTenantEvent.previous_hash,
+            crossTenantEvent.event_hash, crossTenantEvent, "2026-08-20T00:00:04.000Z"
+          ]),
+          (error) => error?.code === "42501"
+        );
+      } finally {
+        await client.query("ROLLBACK TO SAVEPOINT native_audit_cross_tenant_insert");
+      }
+    } finally {
+      await client.query("ROLLBACK");
+    }
+  });
+});
+
+test("live PostgreSQL Native Device audit upload makes concurrent identical retries one accepted event and one duplicate", { skip: postgresSkipReason }, async (t) => {
+  const fixture = await createLiveFixture(t);
+  const authorityA = createControlPlaneAuthorityRepository({ client: fixture.pool, cursorSecret: Buffer.alloc(32, 0x67), now: () => NOW });
+  const authorityB = createControlPlaneAuthorityRepository({ client: fixture.pool, cursorSecret: Buffer.alloc(32, 0x67), now: () => NOW });
+  const event = auditEvent(fixture.agentA, { deviceTimestamp: NOW, previousHash: ZERO_HASH });
+  const input = { organization_id: fixture.organization, device_id: fixture.deviceA, events: [event], received_at: NOW };
+
+  const results = await Promise.all([
+    authorityA.ingestDeviceAuditEvents(input),
+    authorityB.ingestDeviceAuditEvents(input)
+  ]);
+
+  assert.equal(results.filter((result) => result.accepted.length === 1).length, 1);
+  assert.equal(results.filter((result) => result.duplicates.length === 1).length, 1);
+  assert.deepEqual(results.flatMap((result) => result.gaps), []);
+  assert.deepEqual(await head(fixture.pool, fixture.organization, fixture.deviceA), {
+    sequence: 1,
+    last_event_id: event.event_id,
+    last_event_hash: event.event_hash,
+    chain_status: "continuous",
+    gap_count: 0
+  });
+  assert.equal(await countEvents(fixture.pool, fixture.organization, fixture.deviceA), 1);
+});
+
+test("live PostgreSQL Native Device audit upload serializes concurrent appends and preserves the committed head and gap evidence", { skip: postgresSkipReason }, async (t) => {
+  const fixture = await createLiveFixture(t);
+  const authorities = [
+    createControlPlaneAuthorityRepository({ client: fixture.pool, cursorSecret: Buffer.alloc(32, 0x67), now: () => NOW }),
+    createControlPlaneAuthorityRepository({ client: fixture.pool, cursorSecret: Buffer.alloc(32, 0x67), now: () => NOW })
+  ];
+  const events = [
+    auditEvent(fixture.agentA, { deviceTimestamp: NOW, previousHash: ZERO_HASH }),
+    auditEvent(fixture.agentA, { deviceTimestamp: "2026-08-20T00:00:01.000Z", previousHash: ZERO_HASH })
+  ];
+
+  const results = await Promise.all(events.map((event, index) => authorities[index].ingestDeviceAuditEvents({
+    organization_id: fixture.organization,
+    device_id: fixture.deviceA,
+    events: [event],
+    received_at: event.device_timestamp
+  })));
+  assert.deepEqual(results.flatMap((result) => result.duplicates), []);
+  assert.equal(results.flatMap((result) => result.accepted).length, 2);
+  const gap = results.flatMap((result) => result.gaps);
+  assert.equal(gap.length, 1);
+
+  const acceptedIds = results.flatMap((result) => result.accepted);
+  const firstEvent = events.find((event) => event.event_id === acceptedIds[0]);
+  const secondEvent = events.find((event) => event.event_id === acceptedIds[1]);
+  assert.ok(firstEvent && secondEvent);
+  assert.deepEqual(gap[0], {
+    gap_id: secondEvent.event_id,
+    organization_id: fixture.organization,
+    device_id: fixture.deviceA,
+    event_id: secondEvent.event_id,
+    expected_previous_hash: firstEvent.event_hash,
+    received_previous_hash: ZERO_HASH,
+    recorded_at: secondEvent.device_timestamp
+  });
+  assert.deepEqual(await head(fixture.pool, fixture.organization, fixture.deviceA), {
+    sequence: 2,
+    last_event_id: secondEvent.event_id,
+    last_event_hash: secondEvent.event_hash,
+    chain_status: "gap",
+    gap_count: 1
+  });
+  assert.equal(await countEvents(fixture.pool, fixture.organization, fixture.deviceA), 2);
+});
+
 async function createLiveFixture(t) {
   const pool = new Pool({ connectionString: databaseUrl, max: 4, connectionTimeoutMillis: 2_000, statement_timeout: 10_000, query_timeout: 12_000 });
   t.after(() => pool.end());
   const migrationClient = await pool.connect();
   try {
-    await createMigrationRunner({ client: migrationClient, applicationVersion: "native-device-audit-upload-integration" }).run();
+    const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "native-device-audit-upload-integration" }).run();
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version, "live Native audit qualification must use the complete PostgreSQL schema head");
   } finally {
     migrationClient.release();
   }
@@ -172,6 +310,8 @@ async function createLiveFixture(t) {
            ($1,$4,'Native audit B','ed25519',$5,'active','{}'::jsonb)`, [organization, deviceA, publicKeyA, deviceB, publicKeyB]);
   await pool.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
     VALUES ($1,$2,$3,'cli','Native audit agent',$4,'active')`, [organization, agentA, deviceA, publicKeyA]);
+  await pool.query(`INSERT INTO device_audit_heads (organization_id,device_id)
+    VALUES ($1,$2),($1,$3)`, [organization, deviceA, deviceB]);
 
   return {
     pool,
@@ -181,6 +321,40 @@ async function createLiveFixture(t) {
     deviceB,
     agentA
   };
+}
+
+async function createOtherTenant(pool) {
+  const organization = crypto.randomUUID();
+  const device = crypto.randomUUID();
+  const agent = crypto.randomUUID();
+  const publicKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
+  await pool.query("INSERT INTO organizations (id,name) VALUES ($1,$2)", [organization, "Native audit PostgreSQL other tenant"]);
+  await pool.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status,metadata)
+    VALUES ($1,$2,'Native audit other','ed25519',$3,'active','{}'::jsonb)`, [organization, device, publicKey]);
+  await pool.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
+    VALUES ($1,$2,$3,'cli','Native audit other agent',$4,'active')`, [organization, agent, device, publicKey]);
+  return { organization, device, agent };
+}
+
+async function insertAuditEvent(pool, organizationId, deviceId, event) {
+  await pool.query(`INSERT INTO device_audit_events
+    (organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at)
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::timestamptz)`, [
+    organizationId, deviceId, event.event_id, event.previous_hash, event.event_hash, event, NOW
+  ]);
+}
+
+async function withSessionAuthorization(pool, roleName, callback) {
+  const client = await pool.connect();
+  try {
+    await client.query(`SET SESSION AUTHORIZATION ${roleName}`);
+    const identity = await client.query("SELECT session_user,current_user");
+    assert.equal(identity.rows[0].session_user, roleName);
+    assert.equal(identity.rows[0].current_user, roleName);
+    return await callback(client);
+  } finally {
+    client.release(true);
+  }
 }
 
 async function head(pool, organizationId, deviceId) {
@@ -226,6 +400,7 @@ function auditEvent(agentId, { deviceTimestamp, previousHash }) {
 }
 
 function withHash(event) {
-  const { event_hash: _eventHash, ...preimage } = event;
+  const preimage = { ...event };
+  delete preimage.event_hash;
   return { ...event, event_hash: crypto.createHash("sha256").update(canonicalJson(preimage), "utf8").digest("hex") };
 }

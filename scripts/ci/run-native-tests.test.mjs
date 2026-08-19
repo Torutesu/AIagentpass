@@ -81,6 +81,30 @@ test("preserves a successful and nonzero child exit status", async () => {
   assert.equal(signalled.reason, DIAGNOSTIC_CODES.signal);
 });
 
+test("expectTests fails closed when a zero-test command exits successfully", async () => {
+  const result = await runNativeTest(node, script("console.log('warning: No matching test cases were run')"), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    expectTests: true
+  });
+  assert.equal(result.exitCode, ENVIRONMENT_EXIT_CODE);
+  assert.equal(result.testCasesObserved, 0);
+  assert.equal(result.reason, DIAGNOSTIC_CODES.noTests);
+});
+
+test("expectTests accepts a command that emits a test-start marker", async () => {
+  const result = await runNativeTest(node, script("console.log('◇ Test \\\"one\\\" started.')"), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    expectTests: true
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.testCasesObserved, 1);
+  assert.equal(result.reason, DIAGNOSTIC_CODES.passed);
+});
+
 test("kills a timed-out process group, including a descendant", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-native-runner-test-"));
   const marker = path.join(directory, "descendant-survived");

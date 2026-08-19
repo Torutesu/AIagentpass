@@ -260,7 +260,15 @@
           "403": { "$ref": "#/components/responses/Forbidden" }
         }
       },
-      "post": { "operationId": "appendDeviceAuditEvents", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } }
+      "post": {
+        "operationId": "appendDeviceAuditEvents",
+        "summary": "Upload a device audit event batch",
+        "description": "Accepts a device-authenticated, content-addressed batch of ordered audit events. batch_id is the stable retry identity; organization_id is the path tenant binding and device_id is derived from the authenticated device signature.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceAuditUpload" },
+        "responses": { "202": { "$ref": "#/components/responses/DeviceAuditIngestionAccepted" } }
+      }
     }
   },
   "components": {
@@ -299,6 +307,11 @@
         "required": true,
         "description": "Only the public request_id is accepted. Organization, device, and session are path/authentication bindings; operation, scope, signer purpose, key, algorithm, lifetime, budget, and generations are server-derived.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionSigningCapabilityRequest" } } }
+      },
+      "DeviceAuditUpload": {
+        "required": true,
+        "description": "A stable, content-addressed device audit batch. The authenticated device and organization path are authoritative and are not repeated in the body.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditUploadV1" } } }
       }
     },
     "responses": {
@@ -312,6 +325,7 @@
       "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect. It includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
       "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
       "DeviceAuditList": { "description": "A bounded, tenant/device-scoped audit page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditListResponse" } } } },
+      "DeviceAuditIngestionAccepted": { "description": "The device audit batch was ingested, with accepted event IDs, idempotent duplicates, any visible chain gaps, and the committed device head.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditIngestionResponseV1" } } } },
       "InvalidCursor": { "description": "The cursor is malformed, tampered, expired, or bound to another tenant/device/resource.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvalidCursorEnvelope" } } } },
       "BadRequest": { "description": "Stable 400 error for malformed, out-of-range, or body/path-inconsistent input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "Authentication is required or invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -360,6 +374,8 @@
         }
       },
       "ControlBundleV2": { "$ref": "../schemas/control-bundle-v2.schema.json" },
+      "DeviceAuditUploadV1": { "$ref": "../schemas/device-audit-upload-v1.schema.json" },
+      "DeviceAuditIngestionResponseV1": { "$ref": "../schemas/device-audit-ingestion-response-v1.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Server-generated correlation identifier added to every non-204 response." },
       "DeviceEnrollmentControlTrust": {
         "type": "object",

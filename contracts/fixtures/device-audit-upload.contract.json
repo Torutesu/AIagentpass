@@ -1,0 +1,41 @@
+{
+  "batch_id": "audit-d32c88f7188b45306469bb20fe777c76f0a25e9593033d2a014332e9452506a9",
+  "events": [
+    {
+      "version": 1,
+      "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "operation": "git.commit.sign",
+      "decision": "allow",
+      "reason": "allowed",
+      "policy_sequence": 7,
+      "capability_sequence": 11,
+      "repository": "/work/project",
+      "branch": "feature/activity",
+      "remote": "git@example.test:project.git",
+      "payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "device_timestamp": "2026-08-12T00:00:00.000Z",
+      "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "event_hash": "96ddb8eb34a41b47068155d392e328d67bdd036b181e7c6a9e6f9732a6cad9cf"
+    },
+    {
+      "version": 1,
+      "event_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "request_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "operation": "git.commit.sign",
+      "decision": "allow",
+      "reason": "allowed",
+      "policy_sequence": 7,
+      "capability_sequence": 11,
+      "repository": "/work/project",
+      "branch": "feature/activity",
+      "remote": "git@example.test:project.git",
+      "payload_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "device_timestamp": "2026-08-12T00:00:01.000Z",
+      "previous_hash": "96ddb8eb34a41b47068155d392e328d67bdd036b181e7c6a9e6f9732a6cad9cf",
+      "event_hash": "c654c3f267a6e1a4faf1a4adef726712c4b0400bd5a89fa2c626797e73001ef3"
+    }
+  ]
+}
