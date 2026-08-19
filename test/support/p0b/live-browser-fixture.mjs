@@ -318,7 +318,7 @@ export async function startP0BLiveBrowserFixture({
             for (const byte of bytes) binary += String.fromCharCode(byte);
             return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
           };
-          const json = async (phase, path, body) => {
+          const json = async (path, body) => {
             const response = await fetch(path, {
               method: "POST",
               headers: { accept: "application/json", "content-type": "application/json", "agentpass-csrf": csrfToken },
@@ -407,11 +407,17 @@ export async function startP0BLiveBrowserFixture({
      */
     async withRecentAuth(page, operation, action) {
       assertPage(page);
-      const state = pageState.get(page);
-      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
-      if (!state.registered) throw new P0BLiveBrowserFixtureError("credential_required", "P0-B page has no registered WebAuthn credential");
+      const initialState = pageState.get(page);
+      if (!initialState) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      if (!initialState.registered) throw new P0BLiveBrowserFixtureError("credential_required", "P0-B page has no registered WebAuthn credential");
       if (typeof action !== "function") throw new TypeError("recent-auth action must be a function");
       if (!OPERATION.test(operation)) throw new TypeError("recent-auth operation is invalid");
+      // Console hydration may rotate the cookie/CSRF pair after the page was
+      // opened. Adopt one fresh, correlated rotation immediately before the
+      // ceremony so the browser transport and fixture state share a session
+      // generation. This does not weaken the real WebAuthn boundary.
+      await fixture.reloadAndAdoptSession(page);
+      const state = pageState.get(page);
       let authorizationId;
       try {
         authorizationId = await page.evaluate(async ({ organizationId, csrfToken, operation }) => {
@@ -435,11 +441,10 @@ export async function startP0BLiveBrowserFixture({
               cache: "no-store"
             });
             const value = await response.json();
-            if (!response.ok) return { failure: phase, status: response.status };
+            if (!response.ok) throw new Error("recent-auth request failed");
             return value;
           };
-          const issued = await json("options", "/api/auth/webauthn/options", { organization_id: organizationId, operation });
-          if (issued?.failure) return issued;
+          const issued = await json("/api/auth/webauthn/options", { organization_id: organizationId, operation });
           const options = issued?.options;
           if (!options || typeof options.challenge !== "string") throw new Error("recent-auth options are invalid");
           const publicKey = {
@@ -463,27 +468,17 @@ export async function startP0BLiveBrowserFixture({
             },
             clientExtensionResults: credential.getClientExtensionResults()
           };
-          const verified = await json("verify", "/api/auth/webauthn/verify", {
+          const verified = await json("/api/auth/webauthn/verify", {
             organization_id: organizationId,
             operation,
             challenge_id: issued.challenge_id,
             credential: browserCredential
           });
-          if (verified?.failure) return verified;
-          if (typeof verified?.authorization_id !== "string" || !verified.authorization_id) return { failure: "verify_response", status: 200 };
-          return { authorizationId: verified.authorization_id };
+          if (typeof verified?.authorization_id !== "string" || !verified.authorization_id) throw new Error("recent-auth authorization is invalid");
+          return verified.authorization_id;
         }, { organizationId: safeSeed.organizationId, csrfToken: state.csrfToken, operation });
       } catch {
         throw new P0BLiveBrowserFixtureError("recent_auth_failed", "P0-B recent WebAuthn authentication failed");
-      }
-      if (authorizationId?.failure) {
-        const phase = authorizationId.failure === "options" ? "options" : authorizationId.failure === "verify" ? "verify" : "verify_response";
-        const status = Number.isInteger(authorizationId.status) ? authorizationId.status : 0;
-        throw new P0BLiveBrowserFixtureError(`recent_auth_${phase}_http_${status}`, "P0-B recent WebAuthn authentication failed");
-      }
-      authorizationId = authorizationId?.authorizationId;
-      if (typeof authorizationId !== "string" || authorizationId.length === 0) {
-        throw new P0BLiveBrowserFixtureError("recent_auth_response_invalid", "P0-B recent WebAuthn authentication failed");
       }
       try {
         return await action(Object.freeze({
