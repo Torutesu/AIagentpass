@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BROWSER_CLI_HANDOFF_ERRORS,
   BROWSER_CLI_HANDOFF_EVENTS,
+  BROWSER_CLI_HANDOFF_LIMITS,
   BrowserCliHandoffClientError,
   buildBrowserCliHandoffEnvelope,
   createBrowserCliHandoffDelivery,
@@ -90,6 +91,37 @@ test("GETs preflight with no-store and validates the response before exposing pu
   assert.deepEqual(publicEnrollmentPreflight(value).candidate_id, "candidate-2026-08");
   await assert.rejects(fetchBrowserCliHandoffPreflight({ handoff, fetchImpl: async () => response(preflight({ correlation_id: "E".repeat(43) })) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_PREFLIGHT);
   await assert.rejects(fetchBrowserCliHandoffPreflight({ handoff, fetchImpl: async () => { throw new Error("CORS"); } }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE);
+});
+
+test("binds every request to the parsed loopback descriptor and bounds stalled requests", async () => {
+  const substituted = { ...handoff, url: "http://127.0.0.1:49153/v1/browser-cli-handoffs/" + correlationId };
+  await assert.rejects(
+    fetchBrowserCliHandoffPreflight({ handoff: substituted, fetchImpl: async () => response(preflight()) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_FRAGMENT
+  );
+  await assert.rejects(
+    postBrowserCliHandoff({ handoff, correlation_id: "E".repeat(43), nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: true }) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED
+  );
+
+  assert.equal(BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs, 10_000);
+  let preflightSignal;
+  await assert.rejects(
+    fetchBrowserCliHandoffPreflight({
+      handoff,
+      timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.minTimeoutMs,
+      fetchImpl: async (_input, init) => {
+        preflightSignal = init.signal;
+        return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("timed out", "AbortError")), { once: true }));
+      },
+    }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE
+  );
+  assert.equal(preflightSignal.aborted, true);
+  await assert.rejects(
+    postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.minTimeoutMs, fetchImpl: async (_input, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("timed out", "AbortError")), { once: true })) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED
+  );
 });
 
 test("POSTs exactly the bound envelope and accepts only the exact ACK", async () => {

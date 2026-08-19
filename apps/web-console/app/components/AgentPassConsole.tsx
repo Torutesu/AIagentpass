@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
-import { BROWSER_CLI_HANDOFF_EVENTS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
+import { BROWSER_CLI_HANDOFF_EVENTS, BROWSER_CLI_HANDOFF_LIMITS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
 import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
@@ -1524,7 +1524,7 @@ export function AgentPassConsole() {
     queueMicrotask(() => {
       advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH);
     });
-    void fetchBrowserCliHandoffPreflight({ handoff }).then((preflight) => {
+    void fetchBrowserCliHandoffPreflight({ handoff, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs }).then((preflight) => {
       if (!liveHandoffMountedRef.current) return;
       liveHandoffRef.current = {
         ...handoff,

@@ -8,6 +8,12 @@ const LAUNCH_FRAGMENT = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/v1\/browser-cli-hando
 const PREFLIGHT_KEYS = Object.freeze(["version", "correlation_id", "nonce", "platform", "candidate_id", "device_key_fingerprint"]);
 const ACK_KEYS = Object.freeze(["version", "ok", "consumed"]);
 
+export const BROWSER_CLI_HANDOFF_LIMITS = Object.freeze({
+  defaultTimeoutMs: 10_000,
+  minTimeoutMs: 100,
+  maxTimeoutMs: 30_000,
+});
+
 export const BROWSER_CLI_HANDOFF_ERRORS = Object.freeze({
   INVALID_FRAGMENT: "ERR_BROWSER_CLI_HANDOFF_FRAGMENT",
   INVALID_PREFLIGHT: "ERR_BROWSER_CLI_HANDOFF_PREFLIGHT",
@@ -133,11 +139,12 @@ export function publicEnrollmentPreflight(value) {
   });
 }
 
-export async function fetchBrowserCliHandoffPreflight({ handoff, fetchImpl = globalThis.fetch, signal } = {}) {
-  if (!plainObject(handoff) || typeof handoff.preflight_url !== "string" || typeof handoff.correlation_id !== "string") {
+export async function fetchBrowserCliHandoffPreflight({ handoff, fetchImpl = globalThis.fetch, signal, timeoutMs = BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs } = {}) {
+  if (!validHandoffDescriptor(handoff)) {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_FRAGMENT, "The local setup handoff is unavailable");
   }
   if (typeof fetchImpl !== "function") throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE, "The local setup handoff is unavailable");
+  const request = createBoundedRequestSignal(signal, timeoutMs, BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE, "The local setup handoff is unavailable");
   let response;
   try {
     response = await fetchImpl(handoff.preflight_url, {
@@ -147,20 +154,24 @@ export async function fetchBrowserCliHandoffPreflight({ handoff, fetchImpl = glo
       credentials: "omit",
       mode: "cors",
       redirect: "error",
-      signal,
+      signal: request.signal,
     });
   } catch (error) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE, "The local setup handoff is unavailable", { cause: error });
   }
   if (!response || response.status !== 200 || !response.ok) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE, "The local setup handoff is unavailable");
   }
   let body;
   try {
     body = await response.json();
   } catch (error) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_PREFLIGHT, "The local setup preflight is unavailable", { cause: error });
   }
+  request.cleanup();
   return parseBrowserCliHandoffPreflight(body, handoff.correlation_id);
 }
 
@@ -178,12 +189,13 @@ export function buildBrowserCliHandoffEnvelope(input = {}) {
 }
 
 /** @returns {Promise<true>} */
-export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, invitation, fetchImpl = globalThis.fetch, signal } = {}) {
-  if (!plainObject(handoff) || typeof handoff.url !== "string") {
+export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, invitation, fetchImpl = globalThis.fetch, signal, timeoutMs = BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs } = {}) {
+  if (!validHandoffDescriptor(handoff) || correlation_id !== handoff.correlation_id) {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered");
   }
   const body = buildBrowserCliHandoffEnvelope({ correlation_id, nonce, invitation });
   if (typeof fetchImpl !== "function") throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered");
+  const request = createBoundedRequestSignal(signal, timeoutMs, BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered");
   let response;
   try {
     response = await fetchImpl(handoff.url, {
@@ -194,20 +206,24 @@ export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, in
       credentials: "omit",
       mode: "cors",
       redirect: "error",
-      signal,
+      signal: request.signal,
     });
   } catch (error) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered", { cause: error });
   }
   if (!response || response.status !== 200 || !response.ok) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered");
   }
   let ack;
   try {
     ack = await response.json();
   } catch (error) {
+    request.cleanup();
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK, "The local setup handoff acknowledgement is invalid", { cause: error });
   }
+  request.cleanup();
   if (!plainObject(ack) || !exactKeys(ack, ACK_KEYS) || ack.version !== HANDOFF_VERSION || ack.ok !== true || ack.consumed !== true) {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK, "The local setup handoff acknowledgement is invalid");
   }
@@ -219,12 +235,12 @@ export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, in
  * preflight. The controller never exposes the nonce or invitation and refuses
  * every second send, including after a response-loss/invalid-ACK outcome.
  *
- * @param {{ handoff?: { url?: string, correlation_id?: string }, preflight?: { correlation_id?: string, nonce?: string }, fetchImpl?: typeof globalThis.fetch }} options
+ * @param {{ handoff?: { url?: string, preflight_url?: string, correlation_id?: string }, preflight?: { correlation_id?: string, nonce?: string }, fetchImpl?: typeof globalThis.fetch, timeoutMs?: number }} options
  * @returns {{ deliver: (invitation: Record<string, unknown>, options?: { signal?: AbortSignal }) => Promise<true> }}
  */
 export function createBrowserCliHandoffDelivery(options = {}) {
-  const { handoff, preflight, fetchImpl = globalThis.fetch } = options;
-  if (!plainObject(handoff) || typeof handoff.url !== "string" || typeof handoff.correlation_id !== "string"
+  const { handoff, preflight, fetchImpl = globalThis.fetch, timeoutMs = BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs } = options;
+  if (!validHandoffDescriptor(handoff)
     || !plainObject(preflight) || preflight.correlation_id !== handoff.correlation_id
     || typeof preflight.nonce !== "string" || !SAFE_TOKEN.test(preflight.nonce)) {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be prepared");
@@ -243,9 +259,43 @@ export function createBrowserCliHandoffDelivery(options = {}) {
         invitation,
         fetchImpl,
         signal,
+        timeoutMs,
       });
     },
   });
+}
+
+function validHandoffDescriptor(value) {
+  if (!plainObject(value) || !exactKeys(value, ["url", "preflight_url", "correlation_id"])) return false;
+  try {
+    const parsed = parseBrowserCliHandoffLaunchFragment(`#${value.url}`);
+    return parsed !== null
+      && parsed.url === value.url
+      && parsed.preflight_url === value.preflight_url
+      && parsed.correlation_id === value.correlation_id;
+  } catch {
+    return false;
+  }
+}
+
+function createBoundedRequestSignal(signal, timeoutMs, errorCode, message) {
+  if (!Number.isSafeInteger(timeoutMs)
+    || timeoutMs < BROWSER_CLI_HANDOFF_LIMITS.minTimeoutMs
+    || timeoutMs > BROWSER_CLI_HANDOFF_LIMITS.maxTimeoutMs) {
+    throw new BrowserCliHandoffClientError(errorCode, message);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) controller.abort();
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
 }
 
 function exactKeys(value, expected) {

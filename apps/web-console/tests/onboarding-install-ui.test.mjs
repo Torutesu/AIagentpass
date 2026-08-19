@@ -38,6 +38,7 @@ test("install states are advanced by the handoff contract and the loopback is on
   assert.match(source, /liveHandoff\.delivery\.deliver\(invitation\)/);
   assert.match(source, /BROWSER_CLI_HANDOFF_EVENTS\.PREFLIGHT_SUCCEEDED/);
   assert.match(source, /BROWSER_CLI_HANDOFF_EVENTS\.DELIVERY_SUCCEEDED/);
+  assert.match(source, /BROWSER_CLI_HANDOFF_LIMITS\.defaultTimeoutMs/);
   assert.doesNotMatch(source, /setLiveHandoffStatus\("(?:connected|delivered|failed)"\)/);
   assert.doesNotMatch(source, /postBrowserCliHandoff\(/);
 });
