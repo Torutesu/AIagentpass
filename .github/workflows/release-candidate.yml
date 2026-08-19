@@ -13,9 +13,11 @@ permissions:
 
 jobs:
   verify-source:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
       commit: ${{ steps.verify.outputs.commit }}
+      tree: ${{ steps.verify.outputs.tree }}
       tag: ${{ steps.verify.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,18 +40,22 @@ jobs:
           [[ "$(git cat-file -t "$RELEASE_TAG")" == tag ]] || { echo "Release tag must be annotated" >&2; exit 1; }
           git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$allowed_signers" verify-tag "$RELEASE_TAG"
           commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          tree="$(git rev-parse "$RELEASE_TAG^{tree}")"
           git merge-base --is-ancestor "$commit" origin/main
           [[ "$(git show "$commit:package.json" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(`v${JSON.parse(s).version}`))')" == "$RELEASE_TAG" ]] || { echo "Tag and package version disagree" >&2; exit 1; }
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
   signed-candidate:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
     needs: verify-source
     runs-on: macos-15
     environment: production-signing
     env:
       AGENTPASS_RELEASE_TAG: ${{ needs.verify-source.outputs.tag }}
       AGENTPASS_RELEASE_COMMIT: ${{ needs.verify-source.outputs.commit }}
+      AGENTPASS_RELEASE_TREE: ${{ needs.verify-source.outputs.tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +66,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: CI release boundary preflight (before protected credentials)
+        run: |
+          node --input-type=module <<'NODE'
+          import { assertWorkflowBoundary, assertCleanCheckout } from './scripts/release/ci-preflight.mjs';
+          assertWorkflowBoundary({ eventName: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, repository: process.env.GITHUB_REPOSITORY });
+          assertCleanCheckout(process.env.GITHUB_WORKSPACE);
+          NODE
       - name: Require protected signing inputs
         env:
           AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64 }}
@@ -283,6 +296,18 @@ jobs:
           node scripts/release/sign-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig"
           node scripts/release/verify-release.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT"
           scripts/release/verify-macos-release.sh "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT" "$AGENTPASS_TEAM_ID"
+      - name: CI candidate/source digest preflight
+        env:
+          MANIFEST: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}.release-manifest.json
+        run: |
+          node scripts/release/ci-preflight.mjs \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --manifest "$MANIFEST" \
+            --expected-commit "$AGENTPASS_RELEASE_COMMIT" \
+            --expected-tree "$AGENTPASS_RELEASE_TREE" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --repository "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: notarized-release-candidate

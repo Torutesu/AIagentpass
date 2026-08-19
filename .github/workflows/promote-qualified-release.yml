@@ -167,6 +167,14 @@ jobs:
           [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
           mkdir -m 0700 -p "$PROMOTION_ROOT/candidate" "$PROMOTION_ROOT/apple" "$PROMOTION_ROOT/intel" "$PROMOTION_ROOT/summary" "$PROMOTION_ROOT/output"
 
+      - name: CI promotion boundary preflight (before artifact processing)
+        run: |
+          node --input-type=module <<'NODE'
+          import { assertWorkflowBoundary, assertCleanCheckout } from './scripts/release/ci-preflight.mjs';
+          assertWorkflowBoundary({ eventName: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, repository: process.env.GITHUB_REPOSITORY });
+          assertCleanCheckout(process.env.GITHUB_WORKSPACE);
+          NODE
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: notarized-release-candidate
@@ -440,6 +448,27 @@ jobs:
           if (summary.ok !== true || summary.qualified !== true || summary.production !== true || summary.source_commit !== manifest.source.commit || summary.artifact_name !== product.name || summary.artifact_sha256 !== expectedPackageDigest || summary.release_manifest_sha256 !== expectedManifestDigest) throw new Error('qualification summary is not bound to the selected release');
           if (summary.artifact_sha256 !== product.sha256) throw new Error('qualification summary product digest differs from signed manifest');
           NODE
+
+      - name: CI candidate/source/gate preflight
+        env:
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          MANIFEST_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          MANIFEST_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
+          QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
+        run: |
+          node scripts/release/ci-preflight.mjs \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --manifest "$MANIFEST" \
+            --source-ref "$RELEASE_TAG" \
+            --expected-commit "$MANIFEST_SOURCE_COMMIT" \
+            --expected-tree "$MANIFEST_SOURCE_TREE" \
+            --gate-file "$QUALIFICATION_SUMMARY" \
+            --require qualified=true \
+            --require production=true \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --repository "$GITHUB_REPOSITORY"
 
       - name: Refuse an existing release before creating the public release
         env:

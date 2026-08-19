@@ -482,6 +482,18 @@ test("response loss is interruptible and a fresh run recovers GET-only without P
       public_key: refreshHint.publicKey.export({ type: "spki", format: "pem" }).toString()
     }
   }, refreshHint, receipt, requestDigest);
+  const rejected = createDeviceEnrollmentSetupHandler({
+    runner: base.runner,
+    resumeStore: resume.store,
+    recoverEnrollment: async () => ({ ...recovered, possession_receipt: undefined }),
+    provisionControl: async () => { throw new Error("recovery must not provision unverified trust"); },
+    restartService: async () => { throw new Error("recovery must not restart unverified trust"); },
+    loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } }),
+    saveConfig: () => {}
+  });
+  await assert.rejects(() => rejected(context()), (error) => error.code === "ENROLLMENT_RECOVERY_UNVERIFIED");
+  assert.equal(postCount, 1, "unverified recovery must not replay the enrollment POST");
+
   let recoveryCalls = 0;
   let saved;
   const runner = base.runner;

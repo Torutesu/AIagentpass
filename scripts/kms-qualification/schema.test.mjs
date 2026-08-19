@@ -311,7 +311,12 @@ test("rejects noncanonical bytes, digest tampering, signature tampering, and sou
   }));
   const wrongSource = structuredClone(report);
   wrongSource.source.source_commit = "0".repeat(40);
-  assertCode("source_commit_mismatch", () => verifyKmsQualificationReport(wrongSource, { repositoryRoot: root }));
+  for (const instance of wrongSource.postgres_binding.instances) instance.source_commit = wrongSource.source.source_commit;
+  const { signature: _wrongSourceSignature, report_digest: _wrongSourceDigest, ...wrongSourceCore } = wrongSource;
+  void _wrongSourceSignature;
+  void _wrongSourceDigest;
+  wrongSource.report_digest = digest(canonicalJson(wrongSourceCore));
+  assertCode("source_commit_mismatch", () => verifyKmsQualificationReport(wrongSource, { repositoryRoot: root, requireProduction: false }));
 });
 
 test("production verification rejects a self-asserted or differently pinned signing key", async () => {
@@ -328,6 +333,32 @@ test("production verification rejects a self-asserted or differently pinned sign
     trustedPublicKeyDer: qualificationEvidencePublicKeyDer,
     trustedKeyId: "attacker-key"
   }));
+});
+
+test("direct verifier revalidates the closed candidate-bound evidence envelope", async () => {
+  const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
+  const cases = [
+    ["unknown_field", (value) => { value.purpose_bindings[0].raw_response = "provider output"; }],
+    ["iam_matrix_failed", (value) => { value.iam_matrix.find((entry) => entry.expected === "deny").observed = "allow"; }],
+    ["rotation_not_proven", (value) => { value.scenario_results.find((entry) => entry.scenario === "rotation").current_key_version = "6"; }],
+    ["scenario_failed", (value) => { value.scenario_results.find((entry) => entry.scenario === "disable").observed = "fail_closed"; }],
+    ["response_loss_not_proven", (value) => { value.scenario_results.find((entry) => entry.scenario === "response_loss").replay_safe = false; }],
+    ["protection_not_proven", (value) => { value.purpose_bindings[0].protection.non_exportable = false; }]
+  ];
+  for (const [code, mutate] of cases) {
+    const tampered = structuredClone(report);
+    mutate(tampered);
+    const { signature: _signature, report_digest: _digest, ...core } = tampered;
+    void _signature;
+    void _digest;
+    tampered.report_digest = digest(canonicalJson(core));
+    assertCode(code, () => verifyKmsQualificationReport(tampered, {
+      repositoryRoot: root,
+      requireProduction: false,
+      trustedPublicKeyDer: qualificationEvidencePublicKeyDer,
+      trustedKeyId: qualificationEvidenceKeyId
+    }));
+  }
 });
 
 test("verifier CLI emits only stable codes and never diagnostics", async () => {

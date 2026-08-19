@@ -20,6 +20,13 @@ through every row:
 | Product SHA-256 | ` ____________________ ` |
 | Release-key fingerprint | ` ____________________ ` |
 
+The CI preflight is a required gate before protected credentials are used and
+again before promotion. It fails closed when the checkout is dirty, the
+manifest source commit/tree or product SHA-256 differs from the selected
+candidate, any supplied gate document contains `not_proven`, or the workflow
+is not a manual dispatch on canonical protected `main`. The preflight does
+not create Apple evidence and does not turn offline evidence into a pass.
+
 ## Gate matrix
 
 | Gate | Evidence required | Validation | Status |
@@ -33,6 +40,7 @@ through every row:
 | Aggregate hardware promotion | Both lane reports, approved operator policy, and aggregate evidence for the same candidate | `node scripts/release/verify-hardware-qualification-set.mjs ...` | `not_proven` |
 | Protected release environment | Manual protected job configuration with short-lived signing/notary credentials and no PR secret path | Review the protected workflow/environment configuration and record the run URL | `not_proven` |
 | Dedicated Host/Child XPC identity gate | Candidate-bound closed projection with live audit-token digest, Child-specific requirement digest/evaluation, authenticated-XPC activation, and four denial-before-sign cases | `node scripts/release/xpc/verify-xpc-qualification.mjs XPC-EVIDENCE.json` | `not_proven` |
+| CI release preflight binding | Clean checkout, exact source commit/tree, product candidate SHA-256, manual protected dispatch, and no PR credential path | `node scripts/release/ci-preflight.mjs ...` in `release-candidate.yml` and `promote-qualified-release.yml` | `not_proven` |
 
 ## Promotion rule
 
@@ -42,6 +50,11 @@ the same candidate hash, and the evidence files are retained with the release.
 Do not write `accepted_stapled`, `qualified`, or `production` into a report
 unless the corresponding external evidence has actually been collected and
 validated. In particular, this repository artifact makes no notarization claim.
+
+The CI preflight is a provenance and boundary check, not a substitute for the
+Apple or hardware rows. Without real protected Apple credentials, accepted
+notary output, stapler/Gatekeeper results, and both physical hardware lanes,
+the release remains blocked as `not_proven`.
 
 ## Operator record
 

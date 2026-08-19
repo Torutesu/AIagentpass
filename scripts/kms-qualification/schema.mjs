@@ -575,6 +575,12 @@ export function verifyKmsQualificationReport(report, {
   trustedKeyId
 } = {}) {
   if (!report || typeof report !== "object") invalid("invalid_report", "report is invalid");
+  // A caller may pass a materialized object instead of report bytes. Reparse
+  // the canonical representation before any gate check so this API enforces
+  // the same closed evidence envelope as the CLI: exact eight purposes,
+  // 64-pair IAM matrix, 40 lifecycle scenarios, non-exportability, and all
+  // candidate/source bindings cannot be bypassed by a forged projection.
+  report = parseKmsQualificationReport(Buffer.from(`${canonicalJson(report)}\n`, "utf8"));
   const currentCommit = resolveHeadCommit(repositoryRoot ?? path.resolve(import.meta.dirname, "../.."));
   if (report.source.source_commit !== currentCommit) invalid("source_commit_mismatch", "report source commit does not match the verifier checkout");
   if (requireProduction && report.production !== true) invalid("not_production", "report is not production evidence");

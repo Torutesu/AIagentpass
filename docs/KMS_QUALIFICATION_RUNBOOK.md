@@ -88,6 +88,13 @@ node scripts/kms-qualification/report.mjs \
 
 report CLIのstdoutは`sha256:...`だけ、失敗時のstderrはstable error codeだけです。
 
+`verifyKmsQualificationReport()`も、呼び出し元が渡したJavaScript objectを信頼しません。
+CLIのcanonical JSON parseと同じ閉じたnormalizationを最初に再実行してから、candidateの
+source commit/image/config、8 purpose、64 IAM pair（cross-purpose denial）、40 scenario、
+HSM/non-exportability、response-loss、2 instance binding、overall digest、detached signatureを
+検証します。既にmaterializeされたobjectの`overall`や署名だけを差し替えてproduction passに
+することはできません。
+
 ## detached signatureとproduction verification
 
 report生成直後は`signature.status=unsigned_ready`です。運用上の専用署名鍵で
