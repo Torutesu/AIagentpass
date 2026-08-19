@@ -111,6 +111,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     public typealias ContextObserver = @Sendable () throws -> NativeConnectionContext
     public typealias ProcessObserver = @Sendable () throws -> NativeProcessObservation
     public typealias ChildObserver = @Sendable (_ pid: Int32, _ pidVersion: UInt64) throws -> NativeAgentAuthenticatedHostChildObservation
+    public typealias ChildRegistrar = @Sendable (_ sessionID: String, _ observation: NativeAgentAuthenticatedHostChildObservation) throws -> Void
+    public typealias ChildUnregistrar = @Sendable (_ processBindingHash: String) -> Void
     public typealias MillisecondClock = @Sendable () -> Int64
 
     private static let errorDomain = "com.agentpass.native-authenticated-host"
@@ -120,6 +122,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let peerContextObserver: ContextObserver
     private let peerProcessObserver: ProcessObserver
     private let childObserver: ChildObserver
+    private let childRegistrar: ChildRegistrar?
+    private let childUnregistrar: ChildUnregistrar?
     private let signer: any NativeAgentAuthenticatedHostSigning
     private let nowMilliseconds: MillisecondClock
     private let sessionLifetimeMilliseconds: Int64
@@ -129,6 +133,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private var session: NativeAgentAuthenticatedGitBridgeSession?
     private var expirationMilliseconds: Int64?
     private var expirationWasObserved = false
+    private var registeredChildBindingHash: String?
 
     /// `connectionContext` and `initialPeerObservation` must be captured from
     /// the accepted NSXPC connection. The observer closures must independently
@@ -145,7 +150,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         nowMilliseconds: @escaping MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         },
-        sessionLifetimeMilliseconds: Int64 = NativeAgentAuthenticatedHostEndpoint.defaultLifetimeMilliseconds
+        sessionLifetimeMilliseconds: Int64 = NativeAgentAuthenticatedHostEndpoint.defaultLifetimeMilliseconds,
+        childRegistrar: ChildRegistrar? = nil,
+        childUnregistrar: ChildUnregistrar? = nil
     ) throws {
         guard sessionLifetimeMilliseconds > 0 else {
             throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
@@ -159,6 +166,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.peerContextObserver = observeConnectionContext
         self.peerProcessObserver = observePeerProcess
         self.childObserver = observeChild
+        self.childRegistrar = childRegistrar
+        self.childUnregistrar = childUnregistrar
         self.signer = signer
         self.nowMilliseconds = nowMilliseconds
         self.sessionLifetimeMilliseconds = sessionLifetimeMilliseconds
@@ -231,6 +240,13 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             }
 
             let attached = try session.attach(childIdentity: observation.identity)
+            do {
+                try childRegistrar?(attached.sessionID, observation)
+                registeredChildBindingHash = observation.identity.canonicalBindingHash
+            } catch {
+                _ = session.close()
+                throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
+            }
             guard let response = AgentPassHostAttachChildResponse(
                 sessionID: attached.sessionID,
                 attachedAtMilliseconds: try validTimestamp(nowMilliseconds()),
@@ -335,6 +351,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             try revalidatePeer()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
             let snapshot = session.close()
+            unregisterRegisteredChild()
             expirationWasObserved = false
             guard let response = AgentPassHostCloseResponse(
                 sessionID: snapshot.sessionID,
@@ -346,6 +363,21 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         } catch {
             reply(nil, makeError(error))
         }
+    }
+
+    /// Called by the NSXPC invalidation handler. Connection loss is terminal
+    /// for the child registration and must not leave a signing entry alive.
+    public func invalidateConnection() {
+        stateLock.lock()
+        _ = session?.close()
+        unregisterRegisteredChild()
+        stateLock.unlock()
+    }
+
+    private func unregisterRegisteredChild() {
+        guard let bindingHash = registeredChildBindingHash else { return }
+        registeredChildBindingHash = nil
+        childUnregistrar?(bindingHash)
     }
 
     private func revalidatePeer() throws {

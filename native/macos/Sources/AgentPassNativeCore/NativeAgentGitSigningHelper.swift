@@ -71,6 +71,29 @@ public struct NativeAgentGitSigningInvocation: Equatable, Sendable {
 public enum NativeAgentGitSigningHelper {
     public static let fixedBridgeFileDescriptor: Int32 = 3
 
+    /// XPC migration path. The invocation and payload handling are identical
+    /// to the legacy helper, but no inherited descriptor is inspected or used.
+    /// The caller must only enable this after the Host has registered the
+    /// child in the service-side child session registry.
+    public static func runOverAuthenticatedXPC(
+        arguments: [String],
+        machServiceName: String = NativeAgentChildGitXPCClient.defaultMachServiceName
+    ) throws {
+        let invocation = try NativeAgentGitSigningInvocation(arguments: arguments)
+        let payload = try readPayload(at: invocation.payloadPath)
+        try reserveSignaturePath(invocation.signaturePath)
+        let signature: Data
+        do {
+            signature = try NativeAgentChildGitXPCClient(machServiceName: machServiceName).sign(payload: payload)
+        } catch {
+            throw NativeAgentGitSigningHelperError.bridgeUnavailable
+        }
+        guard isArmoredGitSignature(signature) else {
+            throw NativeAgentGitSigningHelperError.invalidSignature
+        }
+        try writeSignature(signature, at: invocation.signaturePath)
+    }
+
     public static func run(
         arguments: [String],
         bridgeFileDescriptor: Int32 = fixedBridgeFileDescriptor

@@ -270,6 +270,7 @@ private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let agentMachServiceName: String
     let hostMachServiceName: String
+    let childMachServiceName: String
     let keyTag: String
     let keychainAccessGroup: String?
     let keyLifecycleDirectory: String?
@@ -346,6 +347,7 @@ private struct ServiceConfiguration: Decodable {
         case machServiceName = "mach_service_name"
         case agentMachServiceName = "agent_mach_service_name"
         case hostMachServiceName = "host_mach_service_name"
+        case childMachServiceName = "child_mach_service_name"
         case keyTag = "key_tag"
         case keychainAccessGroup = "keychain_access_group"
         case keyLifecycleDirectory = "key_lifecycle_directory"
@@ -429,12 +431,17 @@ private struct ServiceConfiguration: Decodable {
         guard !value.machServiceName.isEmpty,
               !value.agentMachServiceName.isEmpty,
               !value.hostMachServiceName.isEmpty,
+              !value.childMachServiceName.isEmpty,
               value.machServiceName == "dev.agentpass.native-service",
               value.agentMachServiceName == "dev.agentpass.agent-session",
               value.hostMachServiceName == "dev.agentpass.agent-host",
+              value.childMachServiceName == "dev.agentpass.child-git",
               value.machServiceName != value.agentMachServiceName,
               value.hostMachServiceName != value.machServiceName,
               value.hostMachServiceName != value.agentMachServiceName,
+              value.childMachServiceName != value.machServiceName,
+              value.childMachServiceName != value.agentMachServiceName,
+              value.childMachServiceName != value.hostMachServiceName,
               !value.keyTag.isEmpty, !value.auditKeyTag.isEmpty, value.policyPath.hasPrefix("/"), value.auditLogPath.hasPrefix("/"), value.auditCheckpointPath.hasPrefix("/"),
               !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !value.agentClientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -4845,6 +4852,7 @@ do {
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
     let hostListener = NSXPCListener(machServiceName: configuration.hostMachServiceName)
+    let childListener = NSXPCListener(machServiceName: configuration.childMachServiceName)
     let controlRefreshEvidenceStore = try configuration.controlV2RefreshStatePath.map {
         try NativeControlRefreshEvidencePOSIXStore(path: "\($0).control-ack")
     }
@@ -4949,6 +4957,13 @@ do {
         }
         return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload.payload)
     }
+    let childRegistry = NativeAgentAuthenticatedChildGitSessionRegistry()
+    let childSigner = NativeAgentAuthenticatedChildClosureSigner { payload in
+        guard let agentRuntime else {
+            throw NativeAgentAuthenticatedChildGitError.signerFailed
+        }
+        return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
+    }
     let worktreeObserver = NativeDarwinGitWorktreeObserver()
     let hostDelegate = NativeAgentAuthenticatedHostListenerDelegate(
         allowedClientUID: configuration.allowedClientUID,
@@ -4974,14 +4989,33 @@ do {
             let worktree = try worktreeObserver.observe(pid: pid, expectedUserID: configuration.allowedClientUID)
             return (processObservation, worktree.binding.digest)
         },
-        signer: hostSigner
+        signer: hostSigner,
+        childRegistrar: { sessionID, observation in
+            try childRegistry.register(
+                sessionID: sessionID,
+                identity: observation.identity,
+                worktreeBindingDigest: observation.worktreeBindingDigest,
+                signer: childSigner
+            )
+        },
+        childUnregistrar: { bindingHash in
+            childRegistry.unregister(identityBindingHash: bindingHash)
+        }
+    )
+    let childDelegate = NativeAgentAuthenticatedChildGitListenerDelegate(
+        allowedClientUID: configuration.allowedClientUID,
+        codeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+        registry: childRegistry,
+        worktreeObserver: worktreeObserver
     )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
     hostListener.delegate = hostDelegate
+    childListener.delegate = childDelegate
     managementListener.resume()
     agentListener.resume()
     hostListener.resume()
+    childListener.resume()
     qualificationRuntime?.resume()
     RunLoop.current.run()
 } catch {

@@ -100,6 +100,10 @@ let package = Package(
             dependencies: ["AgentPassNativeServiceSupport", "AgentPassNativeCore"]
         ),
         .testTarget(
+            name: "AgentPassNativeServiceTests",
+            dependencies: ["AgentPassNativeService", "AgentPassNativeCore"]
+        ),
+        .testTarget(
             name: "AgentPassQualificationGrantClientTests",
             dependencies: ["AgentPassQualificationGrantClient", "AgentPassNativeCore"]
         )

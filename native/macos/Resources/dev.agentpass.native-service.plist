@@ -12,6 +12,7 @@
     <key>dev.agentpass.native-service</key><true/>
     <key>dev.agentpass.agent-session</key><true/>
     <key>dev.agentpass.agent-host</key><true/>
+    <key>dev.agentpass.child-git</key><true/>
     <key>dev.agentpass.n3e-qualification</key><true/>
   </dict>
   <key>RunAtLoad</key><true/>

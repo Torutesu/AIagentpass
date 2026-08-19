@@ -18,6 +18,8 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
     private let contextFactory: PeerContextFactory
     private let childFactory: ChildObservationFactory?
     private let signer: any NativeAgentAuthenticatedHostSigning
+    private let childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar?
+    private let childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar?
     private let nowMilliseconds: NativeAgentAuthenticatedHostEndpoint.MillisecondClock
     private let endpointLock = NSLock()
     private var endpoints: [ObjectIdentifier: NativeAgentAuthenticatedHostEndpoint] = [:]
@@ -37,6 +39,8 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         },
         childFactory: ChildObservationFactory?,
         signer: any NativeAgentAuthenticatedHostSigning,
+        childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar? = nil,
+        childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar? = nil,
         nowMilliseconds: @escaping NativeAgentAuthenticatedHostEndpoint.MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         }
@@ -48,6 +52,8 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         self.contextFactory = contextFactory
         self.childFactory = childFactory
         self.signer = signer
+        self.childRegistrar = childRegistrar
+        self.childUnregistrar = childUnregistrar
         self.nowMilliseconds = nowMilliseconds
         super.init()
     }
@@ -100,7 +106,9 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                     )
                 },
                 signer: signer,
-                nowMilliseconds: nowMilliseconds
+                nowMilliseconds: nowMilliseconds,
+                childRegistrar: childRegistrar,
+                childUnregistrar: childUnregistrar
             )
             connection.exportedInterface = AgentPassHostXPCInterface.make()
             connection.exportedObject = endpoint
@@ -109,7 +117,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
             endpoints[key] = endpoint
             endpointLock.unlock()
             connection.invalidationHandler = { [weak self, weak endpoint, weak connection] in
-                _ = endpoint?.closeHostSession(AgentPassHostCloseRequest(reason: .clientShutdown)!, withReply: { _, _ in })
+                endpoint?.invalidateConnection()
                 guard let self, let connection else { return }
                 self.endpointLock.lock()
                 self.endpoints.removeValue(forKey: ObjectIdentifier(connection))

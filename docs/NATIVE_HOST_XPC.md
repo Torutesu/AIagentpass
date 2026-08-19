@@ -1,6 +1,6 @@
 # Authenticated Host XPC bridge
 
-AgentPass now has a dedicated Host Mach service, `dev.agentpass.agent-host`, separate from the existing Agent activation service.
+AgentPass now has a dedicated Host Mach service, `dev.agentpass.agent-host`, and a child signing service, `dev.agentpass.child-git`, separate from the existing Agent activation service.
 
 The intended lifecycle is:
 
@@ -10,9 +10,13 @@ prepare -> attach child -> sign payload (max 2) -> status/close
 
 The service binds each accepted connection to the observed peer process and revalidates that process before every protected operation. Child attachment compares independently observed process identity, ancestry, and Git worktree binding against the request hints. The request itself is never treated as an authority source.
 
+The child channel is registered only by a successful Host attach. A child connection with no matching process-binding hash and worktree digest is rejected. Each helper invocation uses a one-shot child connection; duplicate payload digests and attempts after the two-signature budget are rejected.
+
 ## Configuration
 
 `host_mach_service_name` must be `dev.agentpass.agent-host` and must be present in the launchd `MachServices` dictionary.
+
+`child_mach_service_name` must be `dev.agentpass.child-git` and must also be present in `MachServices`.
 
 `host_child_code_directory_hash` is the SHA-256 code-directory hash of the allowed child executable. It is intentionally `null` in the example configuration: when it is absent, the Host listener rejects connections rather than enabling an unqualified child signer.
 
@@ -20,6 +24,6 @@ Before enabling the Host path in production, provision this hash from an indepen
 
 ## Current security boundary
 
-The listener and endpoint are fail-closed adapters. The existing inherited-FD3 Git bridge is still present for the legacy lifecycle and remains a migration blocker. It must not be considered replaced until the child supervisor and Git helper use this XPC path end-to-end and the FD3 fallback is removed.
+The listener, registry, and endpoint are fail-closed adapters. The Git helper has an authenticated-XPC client path, but the legacy inherited-FD3 path is still the default lifecycle path and remains a migration blocker. It must not be considered replaced until the child supervisor selects the XPC mode end-to-end and the FD3 fallback is removed.
 
 The local proof currently covers the Core state machine, endpoint adapter, Host listener build, contract validation, and runtime materializer tests. It does not prove macOS audit-token extraction, Developer ID/notarization, real launchd behavior, or production child provisioning.
