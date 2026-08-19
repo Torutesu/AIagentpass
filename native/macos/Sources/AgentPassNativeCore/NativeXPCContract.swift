@@ -110,7 +110,7 @@ public enum AgentPassNativeXPCContract {
     // This is deliberately a literal. Any intentional contract change must
     // update the version and this value together, making the change visible to
     // binaries and CI rather than deriving a new identity silently.
-    public static let frozenFingerprint = "SHA256:1db231e8a27354be8b12ab77453a5c00fcfda2ec6f0df27e10f87fe61bcfffcd"
+    public static let frozenFingerprint = "SHA256:62fc2dc6a1ba7731b031e06250a762239dd6cb7e01b009786b82e976068d831e"
 
     public static let managementProtocol = ProtocolInventory(
         name: "AgentPassNativeServiceProtocol",

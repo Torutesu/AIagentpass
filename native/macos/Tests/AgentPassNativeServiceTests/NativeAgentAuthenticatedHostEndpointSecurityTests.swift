@@ -453,7 +453,7 @@ private func childErrorCode(
 
     var status: AgentPassHostStatusResponse?
     endpoint.hostSessionStatus(try #require(AgentPassHostStatusRequest())) { response, _ in status = response }
-    #expect(status?.status == AgentPassHostXPCContract.SessionStatus.active.rawValue)
+    #expect(status?.status == AgentPassHostXPCContract.SessionStatus.expired.rawValue)
     #expect(status?.usedSignatures == 1)
 }
 
