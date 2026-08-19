@@ -80,6 +80,8 @@ test('exact-SHA qualification requires all six terminal CI lanes and one workflo
   });
   assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree).slice(0, 5), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /exactly 6 lanes/);
   assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree, { test: { source_tree: 'f'.repeat(40) } }), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /exact source SHA\/tree/);
+  assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree, { test: { workflow_tree: 'f'.repeat(40) } }), expectedCommit: fixture.commit, expectedTree: fixture.tree, workflowTree: 'e'.repeat(40) }), /exact workflow tree/);
+  assert.throws(() => assertTerminalResults({ results: [...terminalResults(fixture.commit, fixture.tree).slice(0, 5), { ...terminalResults(fixture.commit, fixture.tree)[0] }], expectedCommit: fixture.commit, expectedTree: fixture.tree }), /duplicate lane/);
   assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree, { test: { conclusion: 'failure' } }), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /terminal success/);
 });
 
