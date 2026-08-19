@@ -13,6 +13,7 @@ import {
   CURSOR_AGENT_RUNTIME_SIGNATURE_DOMAIN,
   CURSOR_AGENT_RUNTIME_TRUST_CONFIG_NAME,
   CursorRuntimeMaterializerError,
+  createCursorAgentRuntimeManifest,
   materializeCursorAgentRuntime
 } from "./materialize.mjs";
 
@@ -25,6 +26,7 @@ function fixture({ files = { node: { bytes: ORIGINAL_AGENT, executable: true }, 
   const trustParent = path.join(root, "trust");
   const manifest = path.join(root, "runtime-manifest.input.json");
   const trustedKeyFile = path.join(root, "trusted-public-key.der");
+  const privateKeyFile = path.join(root, "runtime-signing-key.pk8.der");
   fs.mkdirSync(source, { mode: 0o700 });
   fs.mkdirSync(destinationParent, { mode: 0o700 });
   fs.mkdirSync(trustParent, { mode: 0o700 });
@@ -39,8 +41,10 @@ function fixture({ files = { node: { bytes: ORIGINAL_AGENT, executable: true }, 
   const trusted = trustedKey ?? signingKey;
   fs.writeFileSync(trustedKeyFile, trusted.publicKey.export({ type: "spki", format: "der" }), { mode: 0o444 });
   fs.chmodSync(trustedKeyFile, 0o444);
+  fs.writeFileSync(privateKeyFile, signingKey.privateKey.export({ type: "pkcs8", format: "der" }), { mode: 0o600 });
+  fs.chmodSync(privateKeyFile, 0o600);
   writeManifest({ source, manifest, signingKey, files, runtimeVersion, keyId, sizeOverrides });
-  return { root, source, destinationParent, trustParent, manifest, trustedKeyFile, signingKey, trusted, keyId, runtimeVersion };
+  return { root, source, destinationParent, trustParent, manifest, trustedKeyFile, privateKeyFile, signingKey, trusted, keyId, runtimeVersion };
 }
 
 function writeManifest({ source, manifest, signingKey, files, runtimeVersion = "2026.08.17", keyId = "cursor-runtime-release-2026-08", sizeOverrides = {} }) {
@@ -135,6 +139,37 @@ test("materializes a valid closed runtime tree with exact destination modes", ()
     assert.deepEqual(fs.readFileSync(result.trustConfigFile), expectedTrustConfig(value));
     assert.equal(fs.readFileSync(result.trustConfigFile).at(-1), 0x7d);
     assert.equal(result.runtimeVersion, "2026.08.17");
+  } finally { cleanup(value); }
+});
+
+test("creates a signed manifest from the closed source tree and materializes it", () => {
+  const value = fixture();
+  const generatedManifest = path.join(value.root, "generated-manifest.json");
+  try {
+    const generated = createCursorAgentRuntimeManifest({
+      sourceRuntimeDirectory: value.source,
+      outputFile: generatedManifest,
+      privateKeyFile: value.privateKeyFile,
+      keyId: value.keyId,
+      runtimeVersion: value.runtimeVersion,
+      releaseDigest: `sha256:${"c".repeat(64)}`,
+      materializationEpoch: 7
+    });
+    assert.equal(generated.publicKeyDER.length, 44);
+    assert.equal(fs.readFileSync(generatedManifest).at(-1), 0x0a);
+    const result = materialize(value, { signedManifestFile: generatedManifest });
+    assert.equal(result.runtimeVersion, value.runtimeVersion);
+    assert.equal(result.releaseDigest, `sha256:${"c".repeat(64)}`);
+    assert.equal(result.materializationEpoch, 7);
+    assert.throws(() => createCursorAgentRuntimeManifest({
+      sourceRuntimeDirectory: value.source,
+      outputFile: generatedManifest,
+      privateKeyFile: value.privateKeyFile,
+      keyId: value.keyId,
+      runtimeVersion: value.runtimeVersion,
+      releaseDigest: `sha256:${"c".repeat(64)}`,
+      materializationEpoch: 7
+    }), (error) => error instanceof CursorRuntimeMaterializerError && error.code === "manifest_exists");
   } finally { cleanup(value); }
 });
 

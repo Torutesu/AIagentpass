@@ -108,6 +108,21 @@ modify an existing destination.
 
 ## Production command
 
+Release signing first creates the manifest from the closed runtime tree. The
+PKCS#8 DER private key is an offline release secret and is never copied into
+the runtime or printed by the command:
+
+```sh
+node scripts/cursor-runtime/sign-manifest.mjs \
+  /absolute/path/to/cursor-agent-runtime \
+  /absolute/path/to/runtime-manifest.json \
+  /absolute/path/to/ed25519-signing-key.pk8.der \
+  cursor-runtime-release-2026-08 \
+  2026.08.17 \
+  sha256:<64 lowercase hex characters> \
+  1
+```
+
 The CLI is intentionally fixed to macOS/root and does not accept a destination
 override:
 

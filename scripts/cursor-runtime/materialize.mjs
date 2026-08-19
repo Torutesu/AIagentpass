@@ -23,6 +23,7 @@ export const CURSOR_AGENT_RUNTIME_MAX_FILE_BYTES = 256 * 1024 * 1024;
 export const CURSOR_AGENT_RUNTIME_MAX_BYTES = 512 * 1024 * 1024;
 export const CURSOR_AGENT_RUNTIME_MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 export const CURSOR_AGENT_RUNTIME_PUBLIC_KEY_BYTES = 44;
+export const CURSOR_AGENT_RUNTIME_PRIVATE_KEY_MAX_BYTES = 16 * 1024;
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
@@ -336,6 +337,132 @@ function derivedDirectories(files) {
     }
   }
   return directories;
+}
+
+function hashSourceFile(sourceFile) {
+  let descriptor;
+  try { descriptor = fs.openSync(sourceFile.absolute, fs.constants.O_RDONLY | NOFOLLOW); }
+  catch { fail("source_unavailable", "source file could not be opened"); }
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size > BigInt(CURSOR_AGENT_RUNTIME_MAX_FILE_BYTES)
+      || before.size > BigInt(Number.MAX_SAFE_INTEGER) || (before.mode & 0o022n) !== 0n) {
+      fail("source_invalid", "source file is unsafe");
+    }
+    const digest = crypto.createHash("sha256");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let total = 0;
+    while (total < Number(before.size)) {
+      const count = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, Number(before.size) - total), null);
+      if (count === 0) fail("source_changed", "source file ended while hashing");
+      digest.update(buffer.subarray(0, count));
+      total += count;
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (statIdentity(before) !== statIdentity(after) || total !== Number(before.size)) {
+      fail("source_changed", "source file changed while hashing");
+    }
+    return { sha256: digest.digest("hex"), size: Number(before.size) };
+  } finally { fs.closeSync(descriptor); }
+}
+
+function privateSigningKey(bytes) {
+  let key;
+  try { key = crypto.createPrivateKey({ key: bytes, format: "der", type: "pkcs8" }); }
+  catch { fail("invalid_signing_key", "signing key is not valid Ed25519 PKCS8 DER"); }
+  if (key.asymmetricKeyType !== "ed25519") fail("invalid_signing_key", "signing key is not Ed25519");
+  let publicKey;
+  try { publicKey = crypto.createPublicKey(key); }
+  catch { fail("invalid_signing_key", "signing key public projection is unavailable"); }
+  const publicKeyDER = publicKey.export({ format: "der", type: "spki" });
+  validateTrustedKey(publicKeyDER);
+  return { key, publicKeyDER };
+}
+
+function writeExclusiveCanonicalFile(outputFile, bytes) {
+  const file = absolutePath(outputFile, "manifest output file");
+  const parent = path.dirname(file);
+  validateDirectoryPath(parent);
+  let descriptor;
+  try { descriptor = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600); }
+  catch (error) {
+    if (error?.code === "EEXIST") fail("manifest_exists", "manifest output already exists");
+    fail("manifest_output_unavailable", "manifest output could not be created");
+  }
+  try {
+    let offset = 0;
+    while (offset < bytes.length) offset += fs.writeSync(descriptor, bytes, offset, bytes.length - offset);
+    fsyncFileDescriptor(descriptor);
+    fs.fchmodSync(descriptor, 0o444);
+    fsyncFileDescriptor(descriptor);
+  } catch (error) {
+    if (error instanceof CursorRuntimeMaterializerError) throw error;
+    fail("manifest_output_failed", "manifest output could not be written");
+  } finally { fs.closeSync(descriptor); }
+  fsyncDirectory(parent);
+  return file;
+}
+
+/**
+ * Creates the signed release manifest consumed by the root-only materializer.
+ * The private key is read once from a caller-owned PKCS#8 DER file and is never
+ * included in the returned document or diagnostic output.
+ */
+export function createCursorAgentRuntimeManifest(options = {}) {
+  const sourceRuntimeDirectory = absolutePath(options.sourceRuntimeDirectory, "source runtime directory");
+  const outputFile = absolutePath(options.outputFile, "manifest output file");
+  const privateKeyFile = absolutePath(options.privateKeyFile, "private signing key file");
+  const runtimeVersion = safeText(options.runtimeVersion, SAFE_RUNTIME_VERSION, "runtime_version");
+  const releaseDigest = safeText(options.releaseDigest, RELEASE_DIGEST, "release_digest");
+  const materializationEpoch = options.materializationEpoch;
+  positiveInteger(materializationEpoch, "materialization_epoch");
+  safeText(options.keyId, SAFE_KEY_ID, "signing key_id");
+
+  const source = scanSourceTree(sourceRuntimeDirectory);
+  const files = [...source.files.values()].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const coreFiles = files.map((file) => {
+    const digest = hashSourceFile(file);
+    return {
+      relative_path: file.relativePath,
+      sha256: digest.sha256,
+      size: digest.size,
+      executable: file.executable
+    };
+  });
+  const total = coreFiles.reduce((sum, file) => sum + file.size, 0);
+  if (total > CURSOR_AGENT_RUNTIME_MAX_BYTES) fail("runtime_too_large", "runtime exceeds the size bound");
+
+  const privateKeyBytes = readRegularFile(privateKeyFile, CURSOR_AGENT_RUNTIME_PRIVATE_KEY_MAX_BYTES, { requireNonWritable: true });
+  const signing = privateSigningKey(privateKeyBytes);
+  const core = {
+    schema_version: CURSOR_AGENT_RUNTIME_SCHEMA_VERSION,
+    runtime_id: CURSOR_AGENT_RUNTIME_ID,
+    runtime_version: runtimeVersion,
+    release_digest: releaseDigest,
+    materialization_epoch: materializationEpoch,
+    files: coreFiles
+  };
+  const signature = crypto.sign(null, signatureInput(core), signing.key).toString("base64url");
+  const manifest = {
+    core,
+    signature: {
+      algorithm: "ed25519",
+      domain: CURSOR_AGENT_RUNTIME_SIGNATURE_DOMAIN,
+      key_id: options.keyId,
+      signature_base64url: signature
+    }
+  };
+  const bytes = Buffer.from(`${canonicalJson(manifest)}\n`, "utf8");
+  if (bytes.length > CURSOR_AGENT_RUNTIME_MAX_MANIFEST_BYTES) fail("manifest_too_large", "signed manifest exceeds the size bound");
+  const writtenFile = writeExclusiveCanonicalFile(outputFile, bytes);
+  return Object.freeze({
+    manifestFile: writtenFile,
+    manifestBytes: bytes,
+    publicKeyDER: signing.publicKeyDER,
+    runtimeVersion,
+    releaseDigest,
+    materializationEpoch
+  });
 }
 
 function compareInventory(source, coreFiles) {
