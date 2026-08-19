@@ -12,6 +12,9 @@ on:
       - "package-lock.json"
       - "scripts/ops/verify-cloud-deployment.mjs"
       - "scripts/ops/verify-cloud-promotion.mjs"
+      - "scripts/ops/produce-cloud-deployment-evidence.mjs"
+      - "scripts/ops/verify-cloud-deployment.test.mjs"
+      - "scripts/ops/produce-cloud-deployment-evidence.test.mjs"
   workflow_dispatch:
 
 permissions:

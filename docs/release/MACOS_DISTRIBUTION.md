@@ -53,3 +53,35 @@ browser/CLI handoff:
 Homebrew or a copied app bundle is an evaluation path, not production
 distribution. Production onboarding must not continue when any artifact or
 evidence check is unknown or fails.
+
+## Physical hardware qualification evidence
+
+The separate `macOS hardware qualification evidence` workflow must run once on
+an Apple Silicon runner and once on an Intel runner for the exact release
+commit. It emits one canonical JSON report per architecture. The report binds
+the signed artifact byte digest to the observed machine architecture and to
+three fixed physical probes: launchd Host/Child identity, an NSXPC authorization
+round trip, and crash/restart recovery. Each probe must emit a single JSON
+object with `status: "passed"`; a missing probe, a non-zero exit, malformed
+output, an architecture mismatch, or an unverified signature aborts the run.
+
+Verify a retained report independently with:
+
+```sh
+node native/macos/Qualification/hardware-qualification.mjs --verify REPORT.json
+```
+
+The verifier checks canonical JSON, the exact artifact byte count and SHA-256,
+and requires all three checks to be passing. There is no `skipped`, `unknown`,
+or dry-run success state in this contract; absence of either architecture's
+report keeps release status `not_proven`.
+
+The protected runners must be physical macOS machines, not VMs or Rosetta,
+with the release artifact already installed or otherwise available at the
+supplied absolute path. The three runner-local probe executables must exercise
+the real signed launchd service and Host/Child NSXPC path, intentionally crash
+the supervised process, observe launchd restart it, and report only bounded,
+redacted JSON. Configure their absolute paths as the protected repository
+variables `AGENTPASS_LAUNCHD_HOST_CHILD_PROBE`, `AGENTPASS_NSXPC_PROBE`, and
+`AGENTPASS_CRASH_RESTART_PROBE`. The workflow does not manufacture probes or
+claim hardware evidence when those prerequisites are absent.

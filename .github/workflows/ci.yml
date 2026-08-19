@@ -456,6 +456,35 @@ jobs:
             assert.equal(scenario.history.status, "clean");
           }
           NODE
+      - name: Run remaining real-service PostgreSQL qualification gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AGENTPASS_TEST_DATABASE_URL="$N1_ADMIN_DATABASE_URL"
+          export AGENTPASS_TEST_POSTGRES_URL="$N1_ADMIN_DATABASE_URL"
+          export AGENTPASS_TEST_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL"
+          export AGENTPASS_TEST_APP_DATABASE_URL="$N1_APP_DATABASE_URL"
+          export AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT"
+          export AGENTPASS_QUALIFICATION_SOURCE_COMMIT="$GITHUB_SHA"
+          export AGENTPASS_QUALIFICATION_CANDIDATE_ID="ci-${GITHUB_SHA}"
+          export AGENTPASS_QUALIFICATION_POSTGRES_IMAGE_ID="$N1_POSTGRES_IMAGE_ID"
+          tap="$N1_EVIDENCE_DIR/qualification-real-service.tap"
+          status=0
+          node --test --test-concurrency=1 --test-reporter=tap \
+            scripts/postgres/device-audit-postgres-qualification.integration.test.mjs \
+            apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs >"$tap" 2>&1 || status=$?
+          cat "$tap"
+          if (( status != 0 )); then exit "$status"; fi
+          if grep -Eq '(^|[[:space:]])# (SKIP|TODO)([[:space:]]|$)|^Bail out!' "$tap"; then
+            echo "real-service PostgreSQL qualification must not contain skipped tests" >&2
+            exit 1
+          fi
+          grep -Eq '^1\.\.[1-9][0-9]*$' "$tap"
+          node scripts/postgres/postgres-qualification-evidence.mjs write \
+            "$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json" "$tap"
+          node scripts/postgres/postgres-qualification-evidence.mjs verify \
+            "$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json" "$GITHUB_SHA"
       - name: Create and verify source-SHA-bound N1 evidence
         shell: bash
         run: |
@@ -601,8 +630,25 @@ jobs:
         run: |
           set -euo pipefail
           artifact="$N1_EVIDENCE_DIR/postgres-n1-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json"
+          real_artifact="$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json"
           [[ -f "$artifact" && ! -L "$artifact" ]] || { echo "N1 evidence artifact is missing or symlinked" >&2; exit 1; }
+          [[ -f "$real_artifact" && ! -L "$real_artifact" ]] || { echo "real-service PostgreSQL evidence artifact is missing or symlinked" >&2; exit 1; }
           [[ "$(stat -c '%a' "$artifact")" == 600 ]] || { echo "N1 evidence artifact permissions are too broad" >&2; exit 1; }
+          [[ "$(stat -c '%a' "$real_artifact")" == 600 ]] || { echo "real-service PostgreSQL evidence permissions are too broad" >&2; exit 1; }
+          jq -e --arg source "$GITHUB_SHA" '
+            (.kind == "agentpass.postgres.real-service.qualification") and
+            (.candidate_id | type == "string") and
+            (.source_commit == $source) and
+            (.schema.head == 80) and
+            (.schema.migration_count == 80) and
+            (.service.ssl == true) and
+            ((.service.roles | length) == 5) and
+            (.service.forced_rls_relations == 3) and
+            (.service.device_audit_triggers == 2) and
+            (.skipped_tests == 0) and
+            (.status == "passed") and
+            (.suites.tap.tests > 0) and
+            (.suites.tap.tap_sha256 | test("^[0-9a-f]{64}$"))' "$real_artifact" >/dev/null
           jq -e \
             --arg source "$GITHUB_SHA" \
             --arg major "$N1_POSTGRES_MAJOR" \

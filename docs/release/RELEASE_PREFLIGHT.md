@@ -74,9 +74,14 @@ never uses the dry-run flag.
 In this checkout, the release workflows implement the protected candidate,
 notarization, hardware-qualification, and public GitHub Release promotion
 boundaries. They do not prove those external gates locally, and no workflow in
-`.github/workflows` deploys the hosted Cloud/API production environment. The
-`promote-qualified-release.yml` workflow publishes a fully qualified public
-release; it is not a Cloud deployment mechanism.
+`.github/workflows/cloud-production-qualification.yml` is the protected
+`production-cloud` environment gate for the hosted Cloud/API production
+environment. It does not deploy an image: the provider operator deploys the
+exact digest, produces signed evidence, and then dispatches this gate. The
+workflow downloads only HTTPS evidence and fails closed unless the deployment
+attestation and independently signed AWS/GCP KMS report bind to the requested
+commit and digest. `promote-qualified-release.yml` publishes a fully qualified
+public release; it is not a Cloud deployment mechanism.
 
 Therefore the current production status remains `not_proven` until a protected
 macOS run supplies real Developer ID signatures, an Accepted notary submission,
@@ -95,7 +100,7 @@ node scripts/ops/verify-cloud-deployment.mjs \
   PINNED_PUBLIC_KEY_SHA256
 ```
 
-The command also requires the path to the pinned deployment-attestation public
+The command requires the path to the pinned deployment-attestation public
 key as its second argument and the exact SHA-256 fingerprint of that key as its
 third argument. The evidence JSON contains an Ed25519 signature
 over the exact canonical unsigned payload. The validator requires the
@@ -120,6 +125,41 @@ node scripts/ops/verify-cloud-promotion.mjs \
 This command is provider-neutral and performs no deployment itself. It fails
 closed unless both evidence chains verify and their commit/image bindings are
 identical.
+
+The live evidence producer is:
+
+```sh
+node scripts/ops/produce-cloud-deployment-evidence.mjs \
+  https://api.example.com/health/ready FULL_SOURCE_SHA sha256:IMAGE_DIGEST \
+  deployment-attestation-private.pem cloud-deployment-evidence.json
+```
+
+Set `AGENTPASS_CLOUD_HEALTH_AUTHORIZATION` to a short-lived Bearer credential
+for that invocation; the producer sends it only to the HTTPS health endpoint
+and never includes it in evidence.
+
+The endpoint must return exactly `{"status":"ready","revision":...,"commit_sha":...,
+"artifact_digest":"sha256:..."}`. The producer compares the endpoint's commit
+and digest with the requested immutable release, signs the canonical evidence
+with Ed25519, and creates the output file with exclusive creation and mode 0600.
+It never treats a local fixture, a floating tag, or a health status without
+deployment identity as evidence.
+
+Before enabling the protected environment, operators must configure:
+
+* `AGENTPASS_CLOUD_DEPLOYMENT_KEY_FINGERPRINT` and
+  `AGENTPASS_CLOUD_DEPLOYMENT_PUBLIC_KEY_PEM` for the independently held
+  deployment-attestation key;
+* `AGENTPASS_KMS_TRUSTED_KEY_ID` and `AGENTPASS_KMS_PUBLIC_KEY_DER_B64` for the
+  independently pinned production AWS/GCP KMS qualification signer;
+* a provider deployment identity capable of deploying the exact GHCR digest,
+  querying authenticated HTTPS `/health/ready`, and producing the signed
+  evidence; and
+* a protected GitHub `production-cloud` environment with required reviewers.
+
+The workflow itself does not receive AWS/GCP credentials and cannot prove a
+deployment merely because the image workflow passed. Real provider deployment,
+health, KMS/IAM, and PostgreSQL qualification evidence remain prerequisites.
 
 ## Matrix relationship
 

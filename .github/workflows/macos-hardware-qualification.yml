@@ -1,0 +1,82 @@
+name: macOS hardware qualification evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character commit being qualified
+        required: true
+        type: string
+      artifact_path:
+        description: Absolute path to the installed/signed artifact on each runner
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-hardware-qualification-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: ${{ matrix.architecture }}
+    if: ${{ github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: agentpass-hardware-apple-silicon
+          - architecture: x86_64
+            runner: agentpass-hardware-intel
+    runs-on: ["self-hosted", "macOS", "${{ matrix.runner }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+      - name: Bind checkout to the requested source commit
+        env:
+          REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SOURCE_COMMIT" ]] || { echo "checkout is not the requested source commit" >&2; exit 1; }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+      - name: Require fixed physical probes
+        env:
+          AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
+          AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
+          AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+        run: |
+          set -euo pipefail
+          for value in "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "$AGENTPASS_NSXPC_PROBE" "$AGENTPASS_CRASH_RESTART_PROBE"; do
+            [[ -n "$value" && "$value" == /* && -x "$value" && ! -L "$value" ]] || { echo "all three fixed physical probes must exist as non-symlink executables" >&2; exit 1; }
+          done
+          [[ "$AGENTPASS_QUALIFICATION_ARTIFACT" == /* && -e "$AGENTPASS_QUALIFICATION_ARTIFACT" && ! -L "$AGENTPASS_QUALIFICATION_ARTIFACT" ]] || { echo "signed artifact path is missing or symlinked" >&2; exit 1; }
+      - name: Run fail-closed qualification and write canonical evidence
+        env:
+          AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
+          AGENTPASS_QUALIFICATION_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          AGENTPASS_QUALIFICATION_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          AGENTPASS_QUALIFICATION_OUTPUT: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
+          AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
+          AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+        run: native/macos/scripts/qualification/run-hardware-qualification.sh
+      - name: Independently verify canonical evidence and artifact digest
+        run: node native/macos/Qualification/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-hardware-qualification-${{ matrix.architecture }}-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
+          if-no-files-found: error
+          retention-days: 14

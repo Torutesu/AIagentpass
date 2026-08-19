@@ -80,6 +80,23 @@ test("PostgreSQL device-audit qualification is guarded by AGENTPASS_TEST_DATABAS
     ]);
     const head = await pool.query("SELECT sequence, gap_count, chain_status FROM device_audit_heads WHERE organization_id=$1 AND device_id=$2", [organizationId, deviceId]);
     assert.deepEqual(head.rows, [{ sequence: "2", gap_count: "1", chain_status: "gap" }]);
+
+    // Bypass the repository and prove the migration-owned validation trigger
+    // rejects a forged stored hash before it can advance any projection.
+    const forgedEventId = id("forged-event");
+    await assert.rejects(
+      () => pool.query(`INSERT INTO public.device_audit_events
+        (organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::timestamptz)`, [
+        organizationId, deviceId, forgedEventId, "0".repeat(64), "0".repeat(64),
+        { event_id: forgedEventId, previous_hash: "0".repeat(64), event_hash: "0".repeat(64) }, NOW
+      ]),
+      (error) => error?.code === "23514"
+    );
+    assert.equal((await pool.query(
+      "SELECT count(*)::int AS count FROM device_audit_events WHERE organization_id=$1 AND event_id=$2",
+      [organizationId, forgedEventId]
+    )).rows[0].count, 0);
   } finally {
     await pool.query("DELETE FROM organizations WHERE id = $1", [organizationId]).catch(() => {});
     await pool.end();
