@@ -17,6 +17,8 @@ export const CURSOR_AGENT_RUNTIME_TRUST_CONFIG_PATH = `${CURSOR_AGENT_RUNTIME_TR
 export const CURSOR_AGENT_RUNTIME_DIRECTORY_NAME = "runtime";
 export const CURSOR_AGENT_RUNTIME_MANIFEST_NAME = "runtime-manifest.json";
 export const CURSOR_AGENT_RUNTIME_MAX_FILES = 4_096;
+export const CURSOR_AGENT_RUNTIME_MAX_DIRECTORIES = 4_096;
+export const CURSOR_AGENT_RUNTIME_MAX_INVENTORY_ENTRIES = 8_192;
 export const CURSOR_AGENT_RUNTIME_MAX_FILE_BYTES = 256 * 1024 * 1024;
 export const CURSOR_AGENT_RUNTIME_MAX_BYTES = 512 * 1024 * 1024;
 export const CURSOR_AGENT_RUNTIME_MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
@@ -235,7 +237,7 @@ function buildTrustConfigBytes(trustedKeyBytes, trustedKeyId) {
     key_id: trustedKeyId,
     public_key_der_base64url: trustedKeyBytes.toString("base64url")
   };
-  return Buffer.from(`${canonicalJson(value)}\n`, "utf8");
+  return Buffer.from(canonicalJson(value), "utf8");
 }
 
 function lstatOrFail(target, code = "unsafe_input") {
@@ -277,6 +279,10 @@ function scanSourceTree(sourceRoot, { production = false } = {}) {
     if (beforeDirectory.isSymbolicLink()) fail("source_symlink", "source symlinks are not accepted");
     validateDirectoryStat(beforeDirectory, { production });
     directories.add(current.relative);
+    if (directories.size > CURSOR_AGENT_RUNTIME_MAX_DIRECTORIES
+      || directories.size + files.size > CURSOR_AGENT_RUNTIME_MAX_INVENTORY_ENTRIES) {
+      fail("runtime_too_large", "runtime directory inventory exceeds the bound");
+    }
     let names;
     try { names = fs.readdirSync(current.absolute, { encoding: "utf8" }).sort(); }
     catch { fail("source_unavailable", "source directory cannot be read"); }
@@ -303,6 +309,9 @@ function scanSourceTree(sourceRoot, { production = false } = {}) {
           executable: (stat.mode & 0o111n) !== 0n,
           identity: statIdentity(stat)
         });
+        if (directories.size + files.size > CURSOR_AGENT_RUNTIME_MAX_INVENTORY_ENTRIES) {
+          fail("runtime_too_large", "runtime inventory exceeds the bound");
+        }
       } else {
         fail("source_invalid", "source contains a special file");
       }
@@ -321,6 +330,9 @@ function derivedDirectories(files) {
     for (const component of components) {
       current = current ? `${current}/${component}` : component;
       directories.add(current);
+      if (directories.size > CURSOR_AGENT_RUNTIME_MAX_DIRECTORIES) {
+        fail("runtime_too_large", "runtime directory inventory exceeds the bound");
+      }
     }
   }
   return directories;

@@ -55,15 +55,17 @@ symlinks, hard-linked files, special files, writable source objects, credential
 paths, or log paths. It must contain exactly the required `node` and `index.js`
 files; `node` is executable and `index.js` is non-executable. Runtime paths use
 relative ASCII components from `[A-Za-z0-9._@+-]+` and are at most 1,024
-characters. Each file is at most 256 MiB; the aggregate limits are 4,096 files
-and 512 MiB total, and the signed manifest is at most 2 MiB. A
+bytes. Each file is at most 256 MiB; the aggregate limits are 4,096 files,
+4,096 directories, 8,192 observed inventory entries, and 512 MiB total. The
+signed manifest is at most 2 MiB. A
 changed source file is read and hashed through one no-follow descriptor, then
 the whole source inventory is checked again before publication.
 
 ## Independent trust config
 
 The separately supplied public DER and key ID are materialized as this
-canonical JSON file before the runtime is published:
+canonical JSON file, with no trailing LF or other whitespace, before the
+runtime is published:
 
 `/Library/Application Support/AgentPass/Trust/cursor-agent-runtime-key-v1.json`
 

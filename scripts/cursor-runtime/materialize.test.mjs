@@ -97,11 +97,11 @@ function trustConfigPath(value) {
 }
 
 function expectedTrustConfig(value) {
-  return Buffer.from(`${canonicalJson({
+  return Buffer.from(canonicalJson({
     schema_version: 1,
     key_id: value.keyId,
     public_key_der_base64url: value.trusted.publicKey.export({ type: "spki", format: "der" }).toString("base64url")
-  })}\n`);
+  }));
 }
 
 function assertCode(code, operation) {
@@ -133,6 +133,7 @@ test("materializes a valid closed runtime tree with exact destination modes", ()
     assert.equal(fs.statSync(path.join(result.runtimeDirectory, "index.js")).mode & 0o777, 0o444);
     assert.deepEqual(fs.readFileSync(result.manifestFile), fs.readFileSync(value.manifest));
     assert.deepEqual(fs.readFileSync(result.trustConfigFile), expectedTrustConfig(value));
+    assert.equal(fs.readFileSync(result.trustConfigFile).at(-1), 0x7d);
     assert.equal(result.runtimeVersion, "2026.08.17");
   } finally { cleanup(value); }
 });
@@ -143,7 +144,6 @@ test("requires executable node and non-executable index.js", () => {
 
   const executableIndex = fixture({ files: { node: { bytes: ORIGINAL_AGENT, executable: true }, "index.js": { bytes: Buffer.from("module.exports = 1;\n"), executable: true } } });
   try { assertCode("invalid_manifest", () => materialize(executableIndex)); } finally { cleanup(executableIndex); }
-
   const nonExecutableNode = fixture({ files: { node: { bytes: ORIGINAL_AGENT, executable: false }, "index.js": { bytes: Buffer.from("module.exports = 1;\n"), executable: false } } });
   try { assertCode("invalid_manifest", () => materialize(nonExecutableNode)); } finally { cleanup(nonExecutableNode); }
 });
@@ -171,6 +171,34 @@ test("uses the closed manifest path and per-file size bounds", () => {
 
   const oversizedFile = fixture({ sizeOverrides: { node: CURSOR_AGENT_RUNTIME_MAX_FILE_BYTES + 1 } });
   try { assertCode("invalid_manifest", () => materialize(oversizedFile)); } finally { cleanup(oversizedFile); }
+});
+
+test("rejects non-ASCII and overlong runtime paths", () => {
+  const nonASCII = fixture({ files: {
+    node: { bytes: ORIGINAL_AGENT, executable: true },
+    "index.js": { bytes: Buffer.from("module.exports = 1;\n"), executable: false },
+    "chunks/é.js": { bytes: Buffer.from("x"), executable: false }
+  } });
+  try { assertCode("invalid_manifest", () => materialize(nonASCII)); } finally { cleanup(nonASCII); }
+
+  const longPath = `${"abcdefgh/".repeat(114)}payload.js`;
+  assert.ok(Buffer.byteLength(longPath) > 1024);
+  const overlong = fixture();
+  try {
+    const envelope = JSON.parse(fs.readFileSync(overlong.manifest, "utf8"));
+    envelope.core.files[0].relative_path = longPath;
+    envelope.core.files.sort((left, right) => left.relative_path.localeCompare(right.relative_path));
+    envelope.signature.signature_base64url = crypto.sign(
+      null,
+      Buffer.concat([
+        Buffer.from(CURSOR_AGENT_RUNTIME_SIGNATURE_DOMAIN, "utf8"),
+        Buffer.from(canonicalJson(envelope.core), "utf8")
+      ]),
+      overlong.signingKey.privateKey
+    ).toString("base64url");
+    fs.writeFileSync(overlong.manifest, `${canonicalJson(envelope)}\n`);
+    assertCode("invalid_manifest", () => materialize(overlong));
+  } finally { cleanup(overlong); }
 });
 
 test("rejects an extra source file and never creates a destination", () => {
