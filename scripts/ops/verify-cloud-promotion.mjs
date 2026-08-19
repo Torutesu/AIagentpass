@@ -18,7 +18,7 @@ export async function verifyCloudPromotion({
   repositoryRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url))),
   kmsVerifier = verifyKmsQualificationReport
 } = {}) {
-  const { evidence, publicKey } = readCloudDeploymentEvidence(deploymentEvidencePath, deploymentPublicKeyPath);
+  const { evidence, publicKey } = await readCloudDeploymentEvidence(deploymentEvidencePath, deploymentPublicKeyPath);
   const deployment = verifyCloudDeploymentEvidence(evidence, { publicKey, expectedFingerprint: deploymentPublicKeyFingerprint });
   const reportBytes = await fs.readFile(kmsReportPath);
   const report = parseKmsQualificationReport(reportBytes);
