@@ -1,0 +1,8 @@
+{
+  "name": "@agentpass/cursor-adapter",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentpass-cursor": "bin/agentpass-cursor.mjs"
+  }
+}

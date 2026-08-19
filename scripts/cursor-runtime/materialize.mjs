@@ -16,6 +16,8 @@ export const CURSOR_AGENT_RUNTIME_TRUST_CONFIG_NAME = "cursor-agent-runtime-key-
 export const CURSOR_AGENT_RUNTIME_TRUST_CONFIG_PATH = `${CURSOR_AGENT_RUNTIME_TRUST_PARENT}/${CURSOR_AGENT_RUNTIME_TRUST_CONFIG_NAME}`;
 export const CURSOR_AGENT_RUNTIME_DIRECTORY_NAME = "runtime";
 export const CURSOR_AGENT_RUNTIME_MANIFEST_NAME = "runtime-manifest.json";
+export const CURSOR_AGENT_RUNTIME_NODE_NAME = "node";
+export const CURSOR_AGENT_RUNTIME_INDEX_NAME = "index.js";
 export const CURSOR_AGENT_RUNTIME_MAX_FILES = 4_096;
 export const CURSOR_AGENT_RUNTIME_MAX_DIRECTORIES = 4_096;
 export const CURSOR_AGENT_RUNTIME_MAX_INVENTORY_ENTRIES = 8_192;
@@ -111,8 +113,8 @@ function parseSignatureBytes(value) {
 }
 
 function requireCursorLaunchFiles(files) {
-  const node = files.find((file) => file.relative_path === "node");
-  const index = files.find((file) => file.relative_path === "index.js");
+  const node = files.find((file) => file.relative_path === CURSOR_AGENT_RUNTIME_NODE_NAME);
+  const index = files.find((file) => file.relative_path === CURSOR_AGENT_RUNTIME_INDEX_NAME);
   if (!node || !node.executable || !index || index.executable) {
     fail("invalid_manifest", "runtime must contain executable node and non-executable index.js");
   }
