@@ -81,7 +81,21 @@ release; it is not a Cloud deployment mechanism.
 Therefore the current production status remains `not_proven` until a protected
 macOS run supplies real Developer ID signatures, an Accepted notary submission,
 a stapled ticket, Gatekeeper results, both physical hardware reports, and the
-separately operated hosted deployment evidence. Ad-hoc artifacts, missing
+separately operated hosted deployment evidence. The Cloud API image workflow
+(`.github/workflows/cloud-image.yml`) now creates an immutable GHCR image for
+each exact commit, with provenance and SBOM attestations. It intentionally does
+not choose an AWS/GCP deployment target or receive provider credentials.
+The target operator must deploy the exact `sha256:` image digest and produce a
+strict evidence JSON, then validate it with:
+
+```sh
+node scripts/ops/verify-cloud-deployment.mjs cloud-deployment-evidence.json
+```
+
+The validator requires the production service revision, full source commit,
+immutable image digest, and an authenticated HTTPS `/health/ready` result. It
+does not contact the provider and cannot turn an absent or fabricated provider
+record into proof. Ad-hoc artifacts, missing
 credentials, offline-only evidence, or a green local test suite cannot close
 these rows.
 
