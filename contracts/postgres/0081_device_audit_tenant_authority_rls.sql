@@ -9,9 +9,11 @@ CREATE TABLE public.platform_device_audit_tenant_context (
   backend_pid integer NOT NULL CHECK (backend_pid > 0),
   transaction_id bigint NOT NULL CHECK (transaction_id > 0),
   organization_id uuid NOT NULL REFERENCES public.organizations(id),
-  member_id uuid NOT NULL REFERENCES public.members(id),
+  member_id uuid REFERENCES public.members(id),
+  device_id uuid REFERENCES public.devices(id),
   authorized_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (backend_pid, transaction_id)
+  PRIMARY KEY (backend_pid, transaction_id),
+  CHECK ((member_id IS NOT NULL) <> (device_id IS NOT NULL))
 );
 
 CREATE INDEX platform_device_audit_tenant_context_transaction
@@ -71,6 +73,7 @@ BEGIN
   IF FOUND THEN
     IF existing_context.organization_id IS DISTINCT FROM asserted_organization_id
        OR existing_context.member_id IS DISTINCT FROM p_member_id
+       OR existing_context.device_id IS NOT NULL
     THEN
       RETURN NULL;
     END IF;
@@ -80,8 +83,47 @@ BEGIN
   INSERT INTO public.platform_device_audit_tenant_context (
     backend_pid, transaction_id, organization_id, member_id
   ) VALUES (
-    pg_backend_pid(), current_transaction_id, asserted_organization_id, p_member_id
+    pg_backend_pid(), current_transaction_id, asserted_organization_id, p_member_id, NULL
   );
+  RETURN asserted_organization_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.agentpass_authorize_device_audit_device(
+  p_organization_id uuid,
+  p_device_id uuid
+)
+RETURNS uuid
+LANGUAGE plpgsql
+VOLATILE
+PARALLEL UNSAFE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  current_transaction_id bigint := txid_current();
+  existing_context public.platform_device_audit_tenant_context%ROWTYPE;
+  asserted_organization_id uuid;
+BEGIN
+  SELECT devices.organization_id INTO asserted_organization_id
+    FROM public.devices AS devices
+   WHERE devices.organization_id = p_organization_id
+     AND devices.id = p_device_id
+     AND devices.status = 'active'
+   FOR SHARE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  SELECT context.* INTO existing_context
+    FROM public.platform_device_audit_tenant_context AS context
+   WHERE context.backend_pid = pg_backend_pid() AND context.transaction_id = current_transaction_id
+   FOR UPDATE;
+  IF FOUND THEN
+    IF existing_context.organization_id IS DISTINCT FROM asserted_organization_id
+       OR existing_context.device_id IS DISTINCT FROM p_device_id
+       OR existing_context.member_id IS NOT NULL THEN RETURN NULL; END IF;
+    RETURN asserted_organization_id;
+  END IF;
+  INSERT INTO public.platform_device_audit_tenant_context (backend_pid, transaction_id, organization_id, member_id, device_id)
+  VALUES (pg_backend_pid(), current_transaction_id, asserted_organization_id, NULL, p_device_id);
   RETURN asserted_organization_id;
 END;
 $$;
@@ -112,6 +154,7 @@ $$;
 
 ALTER TABLE public.platform_device_audit_tenant_context OWNER TO agentpass_migrator;
 ALTER FUNCTION public.agentpass_authorize_device_audit_tenant(uuid, uuid) OWNER TO agentpass_migrator;
+ALTER FUNCTION public.agentpass_authorize_device_audit_device(uuid, uuid) OWNER TO agentpass_migrator;
 ALTER FUNCTION public.agentpass_device_audit_current_organization_id() OWNER TO agentpass_migrator;
 
 REVOKE ALL PRIVILEGES ON TABLE public.platform_device_audit_tenant_context
@@ -120,9 +163,12 @@ GRANT ALL PRIVILEGES ON TABLE public.platform_device_audit_tenant_context TO age
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_authorize_device_audit_tenant(uuid, uuid)
   FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_authorize_device_audit_device(uuid, uuid)
+  FROM PUBLIC, agentpass_signer, agentpass_backup, agentpass_maintenance;
 REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_device_audit_current_organization_id()
   FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 GRANT EXECUTE ON FUNCTION public.agentpass_authorize_device_audit_tenant(uuid, uuid) TO agentpass_app;
+GRANT EXECUTE ON FUNCTION public.agentpass_authorize_device_audit_device(uuid, uuid) TO agentpass_app;
 GRANT EXECUTE ON FUNCTION public.agentpass_device_audit_current_organization_id()
   TO agentpass_app, agentpass_backup, agentpass_migrator;
 

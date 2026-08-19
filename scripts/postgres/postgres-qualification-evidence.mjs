@@ -114,7 +114,7 @@ async function queryEvidence(databaseUrl, appDatabaseUrl) {
     assert.equal(row.forced_rls_relations, 3);
     assert.equal(row.device_audit_triggers, 2);
     assert.equal(row.tenant_authority_relations, 1);
-    assert.equal(row.tenant_authority_functions, 2);
+    assert.equal(row.tenant_authority_functions, 3);
     assert.equal(row.app_can_select_tenant_authority, false);
     assert.equal(row.ssl, true);
     const adminRole = process.env.AGENTPASS_QUALIFICATION_ADMIN_ROLE ?? "postgres";
@@ -195,7 +195,7 @@ export function verifyEvidence(file, sourceCommit) {
   assert.equal(report.service.device_audit_triggers, 2);
   assert.deepEqual(report.service.tenant_authority, {
     relation: "platform_device_audit_tenant_context",
-    security_definer_functions: 2,
+        security_definer_functions: 3,
     app_can_select_relation: false
   });
   assert.equal(report.skipped_tests, 0);

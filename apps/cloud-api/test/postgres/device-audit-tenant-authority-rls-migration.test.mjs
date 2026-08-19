@@ -35,6 +35,7 @@ test("0081 replaces caller-controlled tenant GUC RLS with transaction-bound memb
 
   assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE public\.platform_device_audit_tenant_context[\s\S]*?agentpass_app/u);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_authorize_device_audit_tenant\(uuid, uuid\) TO agentpass_app/u);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_authorize_device_audit_device\(uuid, uuid\) TO agentpass_app/u);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_device_audit_current_organization_id\(\)[\s\S]*?agentpass_app, agentpass_backup, agentpass_migrator/u);
 });
 
@@ -71,7 +72,9 @@ test("0081 is contiguous, catalog-registered, and included in the derived schema
       required: true,
       paths: [
         "tables.platform_device_audit_tenant_context.member_id",
+        "tables.platform_device_audit_tenant_context.device_id",
         "tables.memberships.member_id",
+        "tables.devices.id",
       ],
     },
     implementation_refs: [

@@ -139,6 +139,13 @@ function validateProbeExpectations(expectedSha256, expectedSigningIdentity, labe
 }
 
 function probeSnapshot(command, label) {
+  let directory = path.dirname(command);
+  while (directory !== path.dirname(directory)) {
+    let directoryStat;
+    try { directoryStat = fs.lstatSync(directory); } catch { fail(`${label} parent directory is missing`); }
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || directoryStat.uid !== 0 || (directoryStat.mode & 0o022) !== 0) fail(`${label} parent directory is not protected`);
+    directory = path.dirname(directory);
+  }
   const snapshot = snapshotFile(command, { maximum: 256 * 1024 * 1024, protectedOwner: true, label });
   if ((snapshot.mode & 0o222) !== 0) fail(`${label} is writable`);
   if ((snapshot.mode & 0o111) === 0) fail(`${label} is not executable`);

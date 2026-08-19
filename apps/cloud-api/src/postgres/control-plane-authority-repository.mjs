@@ -88,7 +88,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   async function createRevocation(input = {}) {
     const values = normalizeRevocationInput(input, now);
     return databaseOperation(() => transaction(client, async (tx) => {
-      await establishTenantContext(tx, values.organizationId);
+      await establishTenantContext(tx, values.organizationId, values.createdBy, undefined);
       await lockOrganization(tx, values.organizationId);
       await assertActiveMember(tx, values.organizationId, values.createdBy);
       await assertRevocationTarget(tx, values);
@@ -211,7 +211,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const statementHashFactory = input.statement_hash_factory ?? input.statementHashFactory;
     if (typeof statementHashFactory !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "bundle statement hash factory is required");
     return databaseOperation(() => transaction(client, async (tx) => {
-      await establishTenantContext(tx, values.organizationId);
+      await establishTenantContext(tx, values.organizationId, values.principalId ?? values.createdBy, values.deviceId);
       await lockOrganization(tx, values.organizationId);
       await lockOrganizationRow(tx, values.organizationId);
       await assertDevice(tx, values.organizationId, values.deviceId);
@@ -611,7 +611,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   async function ingestDeviceAuditEvents(input = {}) {
     const values = normalizeAuditInput(input);
     return databaseOperation(() => transaction(client, async (tx) => {
-      await establishTenantContext(tx, values.organizationId);
+      await establishTenantContext(tx, values.organizationId, values.memberId, values.deviceId);
       await lockDevice(tx, values.organizationId, values.deviceId);
       await assertDevice(tx, values.organizationId, values.deviceId);
       await assertAuditAgents(tx, values.organizationId, values.deviceId, values.events);
@@ -678,8 +678,10 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
 
   async function listDeviceAuditEvents(input = {}) {
     const organizationId = tenant(input.organization_id ?? input.organizationId);
+    const memberId = uuid(input.principal_id ?? input.principalId ?? input.member_id ?? input.memberId, "member_id");
     const page = normalizeAuditPageInput(input);
-    return databaseOperation(async () => {
+    return databaseOperation(() => transaction(client, async (tx) => {
+      await establishTenantContext(tx, organizationId, memberId, undefined);
       const position = page.cursor === undefined ? null : auditCursor.decode(page.cursor, auditCursorBinding(organizationId, page.device_id));
       const params = [organizationId, page.device_id];
       const clauses = ["organization_id=$1", "device_id=$2"];
@@ -689,7 +691,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         clauses.push(`((redacted_json ->> 'device_timestamp'), device_id, event_id) < ($${base}::timestamptz,$${base + 1}::uuid,$${base + 2}::uuid)`);
       }
       params.push(page.limit + 1);
-      const result = await client.query(`SELECT organization_id,device_id,event_id,redacted_json,received_at
+      const result = await tx.query(`SELECT organization_id,device_id,event_id,redacted_json,received_at
         FROM device_audit_events WHERE ${clauses.join(" AND ")}
         ORDER BY (redacted_json ->> 'device_timestamp') DESC,device_id DESC,event_id DESC LIMIT $${params.length}`, params);
       const rows = (result.rows ?? []).map(publicAuditRow);
@@ -699,18 +701,20 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         ? auditCursor.encode({ organization_id: organizationId, device_id: page.device_id, device_timestamp: last.event.device_timestamp, event_id: last.event_id })
         : null;
       return Object.freeze({ events: Object.freeze(events), next_cursor });
-    });
+    }));
   }
 
   async function getAuditHealth(input = {}) {
     const organizationId = tenant(input.organization_id ?? input.organizationId);
-    return databaseOperation(async () => {
-      const result = await client.query(`SELECT d.id AS device_id,h.last_event_id,h.last_event_hash,h.chain_status,h.gap_count
+    const memberId = uuid(input.principal_id ?? input.principalId ?? input.member_id ?? input.memberId, "member_id");
+    return databaseOperation(() => transaction(client, async (tx) => {
+      await establishTenantContext(tx, organizationId, memberId, undefined);
+      const result = await tx.query(`SELECT d.id AS device_id,h.last_event_id,h.last_event_hash,h.chain_status,h.gap_count
         FROM devices d LEFT JOIN device_audit_heads h
           ON h.organization_id=d.organization_id AND h.device_id=d.id
         WHERE d.organization_id=$1 ORDER BY d.id ASC`, [organizationId]);
       return Object.freeze((result.rows ?? []).map((row) => Object.freeze({ device_id: uuid(row.device_id, "device_id"), ...durableHead(row) })));
-    });
+    }));
   }
 
   return Object.freeze({
@@ -741,13 +745,11 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   });
 }
 
-async function establishTenantContext(tx, organizationId) {
-  const configured = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+async function establishTenantContext(tx, organizationId, memberId, deviceId) {
+  const configured = memberId !== undefined
+    ? await tx.query("SELECT public.agentpass_authorize_device_audit_tenant($1::uuid,$2::uuid) AS organization_id", [organizationId, memberId])
+    : await tx.query("SELECT public.agentpass_authorize_device_audit_device($1::uuid,$2::uuid) AS organization_id", [organizationId, deviceId]);
   if (rowCount(configured) !== 1 || configured.rows[0]?.organization_id !== organizationId) {
-    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "tenant context is unavailable");
-  }
-  const verified = await tx.query("SELECT current_setting('agentpass.organization_id',true) AS organization_id", []);
-  if (rowCount(verified) !== 1 || verified.rows[0]?.organization_id !== organizationId) {
     throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "tenant context is unavailable");
   }
 }
@@ -1001,7 +1003,9 @@ function normalizeAuditInput(input) {
   try { assertDeviceAuditChainOrdered(events); }
   catch (error) { throw new ControlPlaneAuthorityRepositoryError("ERR_AUDIT_CHAIN_ORDER", error.message); }
   const receivedAt = timestamp(input.received_at ?? input.receivedAt ?? new Date().toISOString(), "received_at");
-  return { organizationId, deviceId, events, receivedAt };
+  const memberInput = input.principal_id ?? input.principalId ?? input.member_id ?? input.memberId;
+  const memberId = memberInput === undefined ? undefined : uuid(memberInput, "member_id");
+  return { organizationId, deviceId, events, receivedAt, memberId };
 }
 
 function normalizeAndVerifyAuditEvent(input) {

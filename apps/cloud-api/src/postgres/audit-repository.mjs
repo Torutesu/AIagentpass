@@ -1,4 +1,5 @@
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "../audit-pagination.mjs";
+import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -24,6 +25,7 @@ export function createPostgresAuditRepository({ client, cursorCodec, cursorSecre
 
   async function listDeviceAuditEvents(input = {}) {
     const organizationId = requiredUuid(input.organization_id ?? input.organizationId);
+    const memberId = requiredUuid(input.principal_id ?? input.principalId ?? input.member_id ?? input.memberId);
     const page = normalizeAuditPageInput(input);
     const position = page.cursor === undefined ? null : codec.decode(page.cursor, auditCursorBinding(organizationId, page.device_id));
     const params = [organizationId];
@@ -38,11 +40,15 @@ export function createPostgresAuditRepository({ client, cursorCodec, cursorSecre
       clauses.push(`((redacted_json ->> 'device_timestamp'), device_id, event_id) < ($${timestampParameter}, $${timestampParameter + 1}::uuid, $${timestampParameter + 2}::uuid)`);
     }
     params.push(page.limit + 1);
-    const result = await client.query(`SELECT organization_id,device_id,event_id,redacted_json,received_at
+    const result = await withTransaction(client, async (tx) => {
+      const asserted = await tx.query("SELECT public.agentpass_authorize_device_audit_tenant($1::uuid,$2::uuid) AS organization_id", [organizationId, memberId]);
+      if (asserted.rowCount !== 1 || asserted.rows[0]?.organization_id !== organizationId) throw new PostgresAuditRepositoryError("ERR_DATABASE", "tenant context is unavailable");
+      return tx.query(`SELECT organization_id,device_id,event_id,redacted_json,received_at
       FROM device_audit_events
       WHERE ${clauses.join(" AND ")}
       ORDER BY (redacted_json ->> 'device_timestamp') DESC,device_id DESC,event_id DESC
       LIMIT $${params.length}`, params);
+    });
     const records = (result.rows ?? []).map(safeAuditRow);
     const hasNext = records.length > page.limit;
     const events = records.slice(0, page.limit);

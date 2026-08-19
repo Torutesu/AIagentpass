@@ -115,7 +115,7 @@ test("P2 canonical evidence rejects missing or mismatched role assertions", () =
         device_audit_triggers: 2,
         tenant_authority: {
           relation: "platform_device_audit_tenant_context",
-          security_definer_functions: 2,
+          security_definer_functions: 3,
           app_can_select_relation: false,
         },
       },

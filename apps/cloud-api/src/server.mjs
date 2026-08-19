@@ -952,18 +952,18 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return { status: 201, body: { revocation } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/revocations$`), "viewer", async ({ organizationId, url }) => ({ body: { revocations: (await store.listRevocations({ organizationId })).slice(-optionalLimit(url)) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url }) => {
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url, principal }) => {
         requireExactQueryKeys(url, new Set(["device_id", "cursor", "limit"]));
-        const page = await activitySource.listDeviceAuditEvents({ organizationId, deviceId: requiredUuidQuery(url, "device_id"), cursor: optionalQuery(url, "cursor"), limit: optionalLimit(url) });
+        const page = await activitySource.listDeviceAuditEvents({ organizationId, principalId: principal.member_id, deviceId: requiredUuidQuery(url, "device_id"), cursor: optionalQuery(url, "cursor"), limit: optionalLimit(url) });
         if (!page || typeof page !== "object" || !Array.isArray(page.events) || (page.next_cursor !== null && typeof page.next_cursor !== "string")) throw new Error("audit repository returned an invalid page");
         return { body: { events: page.events, next_cursor: page.next_cursor } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/admin-events$`), "auditor", async ({ organizationId, url }) => ({ body: { events: await store.listAdminAuditEvents({ organizationId, limit: optionalLimit(url) }) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId }) => ({ body: { health: await store.getAuditHealth({ organizationId }) } })),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId, principal }) => ({ body: { health: await store.getAuditHealth({ organizationId, principalId: principal.member_id }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), null, async ({ organizationId, principal, body }) => {
         rejectUnknown(body, new Set(["batch_id", "events"]), "audit_ingestion");
         const upload = normalizeDeviceAuditUpload({ organizationId, deviceId: principal.device_id, batchId: body.batch_id, events: body.events });
-        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id }) }, omitRequestId: true };
+        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, ...(principal.member_id ? { principalId: principal.member_id } : {}), deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id }) }, omitRequestId: true };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");
@@ -1006,6 +1006,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           let preparedStatement;
           const authority = await store.snapshotAndAssignBundleHead({
             organizationId,
+            principalId: principal.member_id,
             deviceId: match.deviceId,
             minimumSequence: 1,
             issuedAt: new Date(issuedMs).toISOString(),
