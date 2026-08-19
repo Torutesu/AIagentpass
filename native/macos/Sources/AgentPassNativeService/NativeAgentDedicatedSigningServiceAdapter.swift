@@ -42,6 +42,7 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
     /// be able to select or masquerade as a Coordinator session.
     public let coordinatorSessionID: String
     public let binding: NativeAgentSessionBinding
+    public let worktree: NativeAgentWorktreeBinding
     public let capabilityRequest: NativeAgentSigningCapabilityRequest
     public let verificationContext: NativeAgentSigningCapabilityVerificationContext
 
@@ -53,6 +54,7 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
         dedicatedSessionID: String,
         coordinatorSessionID: String,
         binding: NativeAgentSessionBinding,
+        worktree: NativeAgentWorktreeBinding,
         capabilityRequest: NativeAgentSigningCapabilityRequest,
         verificationContext: NativeAgentSigningCapabilityVerificationContext,
         association: NativeAgentDedicatedSigningAssociation,
@@ -67,6 +69,7 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
         self.dedicatedSessionID = dedicatedSessionID
         self.coordinatorSessionID = coordinatorSessionID
         self.binding = binding
+        self.worktree = worktree
         self.capabilityRequest = capabilityRequest
         self.verificationContext = verificationContext
         self.association = association
@@ -214,6 +217,15 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
         guard serviceRequest.sessionID == context.coordinatorSessionID,
               serviceRequest.commitPayload == payload.payload,
               serviceRequest.capabilityID == serviceRequest.capability.statement.capabilityID else {
+            throw NativeAgentDedicatedSigningServiceAdapterError.requestMaterializationFailed
+        }
+
+        do {
+            try NativeAgentDedicatedSigningScopeEvaluator.evaluate(
+                capability: serviceRequest.capability.statement,
+                worktree: context.worktree
+            )
+        } catch {
             throw NativeAgentDedicatedSigningServiceAdapterError.requestMaterializationFailed
         }
 

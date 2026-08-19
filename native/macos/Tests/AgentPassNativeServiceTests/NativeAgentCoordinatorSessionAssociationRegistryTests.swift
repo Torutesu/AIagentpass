@@ -74,6 +74,15 @@ private func associationSessionID(_ index: Int) -> String {
     for changed in changedFields {
         #expect(registry.lookup(binding: changed) == nil)
     }
+
+    #expect(registry.lookup(
+        processBindingDigest: binding.processBindingDigest,
+        ancestryBindingDigest: binding.ancestryBindingDigest,
+        worktreeBindingDigest: binding.worktreeBindingDigest) === registered)
+    #expect(registry.lookup(
+        processBindingDigest: Data(repeating: 0xff, count: 32),
+        ancestryBindingDigest: binding.ancestryBindingDigest,
+        worktreeBindingDigest: binding.worktreeBindingDigest) == nil)
 }
 
 @Test func associationRegistryRejectsInvalidAndReusedSessionIDs() throws {

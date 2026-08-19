@@ -152,6 +152,27 @@ internal final class NativeAgentCoordinatorSessionAssociationRegistry: @unchecke
         }
     }
 
+    /// Looks up a live association from the complete OS-observed binding
+    /// projection when the caller does not yet know the Agent identity.  A
+    /// match is returned only when exactly one active association has the
+    /// same process, ancestry, and worktree digests; session ID alone is
+    /// never sufficient.
+    func lookup(
+        processBindingDigest: Data,
+        ancestryBindingDigest: Data,
+        worktreeBindingDigest: Data
+    ) -> NativeAgentCoordinatorSessionAssociation? {
+        lock.withLock {
+            let matches = entries.values.filter { association in
+                association.isActive
+                    && association.binding.processBindingDigest == processBindingDigest
+                    && association.binding.ancestryBindingDigest == ancestryBindingDigest
+                    && association.binding.worktreeBindingDigest == worktreeBindingDigest
+            }
+            return matches.count == 1 ? matches[0] : nil
+        }
+    }
+
     /// Atomically removes a live association and retires its session ID so the
     /// same coordinator session cannot be registered again after cleanup.
     @discardableResult
