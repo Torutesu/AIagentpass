@@ -16,13 +16,48 @@ function read(file) { return fs.readFileSync(file); }
 function fail(message) { throw new Error(message); }
 
 export function validateTap(tap) {
-  const text = tap.toString("utf8");
-  if (/^Bail out!/mu.test(text) || /(^|[\t\r\n ])# (?:SKIP|TODO)([\t\r\n ]|$)/mu.test(text)) {
-    fail("PostgreSQL qualification TAP contains a skipped or TODO test");
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(tap);
+  } catch {
+    fail("PostgreSQL qualification TAP is not valid UTF-8");
   }
-  const tests = [...text.matchAll(/^ok\s+/gmu)].length;
-  if (!/^1\.\.[1-9][0-9]*$/mu.test(text) || tests < 1) fail("PostgreSQL qualification TAP is incomplete");
-  return { tests, tap_sha256: digest(tap) };
+
+  const lines = text.split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+  if (lines[0] !== "TAP version 13") fail("PostgreSQL qualification TAP is missing TAP version 13");
+
+  let plan;
+  let observedTests = 0;
+  let okTests = 0;
+  for (const [index, line] of lines.entries()) {
+    if (index > 0 && /^[ \t]*TAP version\b/u.test(line)) fail("PostgreSQL qualification TAP has a duplicate TAP version");
+    if (/^[ \t]*Bail out!/u.test(line)) fail("PostgreSQL qualification TAP contains a bailout");
+    if (/^[ \t]*not ok(?:[ \t]|$)/u.test(line)) fail("PostgreSQL qualification TAP contains a failing test");
+    if (/(^|[ \t])# (?:SKIP|TODO)(?:[ \t]|$)/u.test(line)) {
+      fail("PostgreSQL qualification TAP contains a skipped or TODO test");
+    }
+
+    if (/^1\.\./u.test(line)) {
+      const match = /^1\.\.([1-9][0-9]*)(?:[ \t]+#.*)?$/u.exec(line);
+      if (!match) fail("PostgreSQL qualification TAP has an invalid plan");
+      if (plan !== undefined) fail("PostgreSQL qualification TAP has multiple top-level plans");
+      plan = Number(match[1]);
+      if (!Number.isSafeInteger(plan)) fail("PostgreSQL qualification TAP plan is too large");
+      continue;
+    }
+
+    // The outer plan describes only top-level test points; nested subtests
+    // have their own indented plans and test points.
+    if (/^(ok)(?:[ \t]|$)/u.test(line)) {
+      observedTests += 1;
+      okTests += 1;
+    }
+  }
+
+  if (plan === undefined || plan !== observedTests || plan !== okTests || observedTests < 1) {
+    fail("PostgreSQL qualification TAP has an incomplete or inconsistent envelope");
+  }
+  return { tests: observedTests, tap_sha256: digest(tap) };
 }
 
 async function queryIdentity(databaseUrl, expectedRole, connection) {
@@ -62,15 +97,25 @@ async function queryEvidence(databaseUrl, appDatabaseUrl) {
                 WHERE n.nspname='public' AND c.relname IN ('device_audit_events','device_audit_heads','device_audit_gaps')
                   AND c.relrowsecurity AND c.relforcerowsecurity) AS forced_rls_relations,
              (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE n.nspname='public' AND t.tgenabled <> 'D' AND t.tgname IN ('device_audit_events_validate_insert','device_audit_events_record_head')) AS device_audit_triggers`, [ROLE_NAMES]);
+                WHERE n.nspname='public' AND t.tgenabled <> 'D' AND t.tgname IN ('device_audit_events_validate_insert','device_audit_events_record_head')) AS device_audit_triggers,
+             (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='public' AND c.relname='platform_device_audit_tenant_context') AS tenant_authority_relations,
+             (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname='public'
+                  AND p.oid IN (to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)'), to_regprocedure('public.agentpass_device_audit_current_organization_id()'))
+                  AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog, public']) AS tenant_authority_functions,
+             has_table_privilege('agentpass_app', 'public.platform_device_audit_tenant_context', 'SELECT') AS app_can_select_tenant_authority`, [ROLE_NAMES]);
     assert.equal(result.rowCount, 1);
     const row = result.rows[0];
     assert.equal(row.schema_head, POSTGRES_SCHEMA_HEAD.version);
-    assert.equal(row.migration_count, 80);
-    assert.deepEqual(row.migration_versions, Array.from({ length: 80 }, (_, index) => index + 1));
+    assert.equal(row.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
+    assert.deepEqual(row.migration_versions, Array.from({ length: POSTGRES_SCHEMA_HEAD.migration_count }, (_, index) => index + 1));
     assert.equal(row.roles?.length, ROLE_NAMES.length);
     assert.equal(row.forced_rls_relations, 3);
     assert.equal(row.device_audit_triggers, 2);
+    assert.equal(row.tenant_authority_relations, 1);
+    assert.equal(row.tenant_authority_functions, 2);
+    assert.equal(row.app_can_select_tenant_authority, false);
     assert.equal(row.ssl, true);
     const adminRole = process.env.AGENTPASS_QUALIFICATION_ADMIN_ROLE ?? "postgres";
     const roleAssertions = [
@@ -116,7 +161,12 @@ async function writeEvidence(output, tapFile) {
       roles: server.roles,
       role_assertions: server.roleAssertions,
       forced_rls_relations: server.forced_rls_relations,
-      device_audit_triggers: server.device_audit_triggers
+      device_audit_triggers: server.device_audit_triggers,
+      tenant_authority: {
+        relation: "platform_device_audit_tenant_context",
+        security_definer_functions: server.tenant_authority_functions,
+        app_can_select_relation: server.app_can_select_tenant_authority
+      }
     },
     suites: { tap: tapEvidence },
     skipped_tests: 0,
@@ -133,8 +183,8 @@ export function verifyEvidence(file, sourceCommit) {
   const report = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.equal(report.kind, "agentpass.postgres.real-service.qualification");
   assert.equal(report.source_commit, sourceCommit);
-  assert.equal(report.schema.head, 80);
-  assert.equal(report.schema.migration_count, 80);
+  assert.equal(report.schema.head, POSTGRES_SCHEMA_HEAD.version);
+  assert.equal(report.schema.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(report.service.ssl, true);
   assert.equal(report.service.roles.length, ROLE_NAMES.length);
   assert.deepEqual(report.service.role_assertions, [
@@ -143,6 +193,11 @@ export function verifyEvidence(file, sourceCommit) {
   ]);
   assert.equal(report.service.forced_rls_relations, 3);
   assert.equal(report.service.device_audit_triggers, 2);
+  assert.deepEqual(report.service.tenant_authority, {
+    relation: "platform_device_audit_tenant_context",
+    security_definer_functions: 2,
+    app_can_select_relation: false
+  });
   assert.equal(report.skipped_tests, 0);
   assert.equal(report.status, "passed");
   assert.ok(SHA256.test(report.schema.head_checksum));

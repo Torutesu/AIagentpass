@@ -23,6 +23,10 @@ test("P2 qualification contract keeps security probes on agentpass_app", () => {
   assert.match(integration, /assertIdentity\(appPool, "agentpass_app"\)/u);
   assert.match(integration, /has_table_privilege\(current_user/u);
   assert.match(integration, /await appClient\.query\("BEGIN"\)/u);
+  assert.match(integration, /agentpass_authorize_device_audit_tenant/u);
+  assert.match(integration, /other-tenant-populated-event/u);
+  assert.match(integration, /cross-tenant-write/u);
+  assert.match(integration, /set_config\('agentpass\.organization_id'/u);
   assert.match(integration, /const insertEvent = \(values\) => appClient\.query\(`/u);
   assert.match(integration, /await appClient\.query\("SELECT count\(\*\)::int AS count FROM device_audit_events"\)/u);
   assert.doesNotMatch(integration, /const pool = new Pool\(\{ connectionString: DATABASE_URL/u);
@@ -35,22 +39,54 @@ test("P2 evidence contract records exact administrator and application identitie
   assert.match(evidence, /role_assertions/u);
   assert.match(evidence, /agentpass_app/u);
   assert.match(evidence, /report\.service\.role_assertions/u);
+  assert.match(evidence, /platform_device_audit_tenant_context/u);
+  assert.match(evidence, /tenant_authority_functions/u);
   assert.match(ci, /AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"/u);
   assert.match(ci, /\.service\.role_assertions/u);
   assert.match(ci, /scripts\/postgres\/p2-qualification-contract\.test\.mjs/u);
 });
 
-test("P2 TAP validation fails closed on skips, TODOs, and missing plans", () => {
+test("P2 TAP validation requires a complete, passing, count-consistent envelope", () => {
   const passingTap = Buffer.from("TAP version 13\n1..1\nok 1 - app role\n");
   assert.deepEqual(validateTap(passingTap), { tests: 1, tap_sha256: digest(passingTap) });
+
+  const nestedPassingTap = Buffer.from([
+    "TAP version 13",
+    "# Subtest: app role",
+    "    1..1",
+    "    ok 1 - identity",
+    "ok 1 - Subtest: app role",
+    "# Subtest: RLS",
+    "    1..1",
+    "    ok 1 - tenant isolation",
+    "ok 2 - Subtest: RLS",
+    "1..2",
+    "# tests 2",
+    "# pass 2",
+    ""
+  ].join("\n"));
+  assert.equal(validateTap(nestedPassingTap).tests, 2);
+
   for (const invalidTap of [
     "TAP version 13\n1..1\nok 1 - skipped # SKIP missing app URL\n",
     "TAP version 13\n1..1\nok 1 - incomplete # TODO\n",
-    "TAP version 13\nok 1 - no plan\n",
+    "TAP version 13\n1..1\nnot ok 1 - failed\n",
+    "TAP version 13\n    not ok 1 - nested failure\n1..1\nok 1 - wrapper\n",
+    "TAP version 13\n1..2\nok 1 - only one\n",
+    "TAP version 13\n1..1\nok 1 - one\n1..1\n",
+    "1..1\nok 1 - no TAP version\n",
     "Bail out! connection failed\n",
   ]) {
     assert.throws(() => validateTap(Buffer.from(invalidTap)));
   }
+});
+
+test("P2 TAP evidence hashes the exact valid input bytes deterministically", () => {
+  const tap = Buffer.from("TAP version 13\r\n1..1\r\nok 1 - app role\r\n", "utf8");
+  const first = validateTap(tap);
+  const second = validateTap(Buffer.from(tap));
+  assert.deepEqual(first, second);
+  assert.equal(first.tap_sha256, digest(tap));
 });
 
 test("P2 canonical evidence rejects missing or mismatched role assertions", () => {
@@ -77,6 +113,11 @@ test("P2 canonical evidence rejects missing or mismatched role assertions", () =
         ],
         forced_rls_relations: 3,
         device_audit_triggers: 2,
+        tenant_authority: {
+          relation: "platform_device_audit_tenant_context",
+          security_definer_functions: 2,
+          app_can_select_relation: false,
+        },
       },
       suites: { tap: { tests: 1, tap_sha256: digest(tap) } },
       skipped_tests: 0,

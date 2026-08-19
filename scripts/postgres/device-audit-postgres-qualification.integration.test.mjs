@@ -42,6 +42,13 @@ async function inSavepoint(client, operation) {
   }
 }
 
+function auditEvent({ organizationId, deviceId, agentId, label, previousHash }) {
+  const eventId = id(label);
+  const evidence = { agent_id: agentId, event_id: eventId, previous_hash: previousHash };
+  const eventHash = crypto.createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+  return [organizationId, deviceId, eventId, previousHash, eventHash, { ...evidence, event_hash: eventHash }];
+}
+
 test("P2 PostgreSQL device-audit qualification uses the application role for security probes", {
   skip: ADMIN_DATABASE_URL && APP_DATABASE_URL
     ? false
@@ -56,6 +63,8 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
   const otherDeviceId = id("other-device");
   const agentId = id("agent");
   const otherAgentId = id("other-agent");
+  const memberId = id("member");
+  const membershipId = id("membership");
   try {
     // The administrator identity is limited to schema migration and fixture
     // setup. All online authorization, DML, RLS, and trigger probes below use
@@ -89,12 +98,43 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
       organizationId, agentId, deviceId, "-----BEGIN PUBLIC KEY-----\nqualification-agent\n-----END PUBLIC KEY-----",
       otherOrganizationId, otherAgentId, otherDeviceId, "-----BEGIN PUBLIC KEY-----\nother-qualification-agent\n-----END PUBLIC KEY-----"
     ]);
+    await adminPool.query(
+      "INSERT INTO members (id, github_subject, display_name) VALUES ($1, $2, $3)",
+      [memberId, `device-audit-qualification-${memberId}`, "device-audit qualification member"]
+    );
+    await adminPool.query(
+      `INSERT INTO memberships (organization_id, id, member_id, role, status)
+       VALUES ($1, $2, $3, 'auditor', 'active')`,
+      [organizationId, membershipId, memberId]
+    );
+
+    // A real row in the second organization makes the negative read probe
+    // meaningful; an empty tenant can hide a broken policy by accident.
+    const otherEvent = auditEvent({
+      organizationId: otherOrganizationId,
+      deviceId: otherDeviceId,
+      agentId: otherAgentId,
+      label: "other-tenant-populated-event",
+      previousHash: "0".repeat(64),
+    });
+    await adminPool.query(`
+      INSERT INTO device_audit_events
+        (organization_id, device_id, event_id, previous_hash, event_hash, redacted_json)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, otherEvent);
+    assert.equal((await adminPool.query(
+      "SELECT count(*)::int AS count FROM device_audit_events WHERE organization_id=$1",
+      [otherOrganizationId]
+    )).rows[0].count, 1);
 
     const appClient = await appPool.connect();
     try {
       await assertIdentity(appClient, "agentpass_app");
       await appClient.query("BEGIN");
-      await appClient.query("SELECT set_config('agentpass.organization_id', $1, true)", [organizationId]);
+      const authority = await appClient.query(
+        "SELECT public.agentpass_authorize_device_audit_tenant($1::uuid, $2::uuid) AS organization_id",
+        [organizationId, memberId]
+      );
+      assert.deepEqual(authority.rows, [{ organization_id: organizationId }]);
 
       // Query effective privileges and trigger ownership from the online
       // connection itself. An administrator must not be able to mask an ACL
@@ -128,19 +168,41 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
         assert.equal(row.app_cannot_execute_trigger, true);
       }
 
-      const event = (label, previousHash) => {
-        const eventId = id(label);
-        const evidence = { agent_id: agentId, event_id: eventId, previous_hash: previousHash };
-        const eventHash = crypto.createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
-        return [organizationId, deviceId, eventId, previousHash, eventHash, { ...evidence, event_hash: eventHash }];
-      };
+      const authorityCatalog = await appClient.query(`
+        SELECT has_table_privilege(current_user, 'public.platform_device_audit_tenant_context', 'SELECT') AS context_select,
+               has_table_privilege(current_user, 'public.platform_device_audit_tenant_context', 'INSERT') AS context_insert,
+               has_table_privilege(current_user, 'public.platform_device_audit_tenant_context', 'UPDATE') AS context_update,
+               has_table_privilege(current_user, 'public.platform_device_audit_tenant_context', 'DELETE') AS context_delete,
+               has_function_privilege(current_user, to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)'), 'EXECUTE') AS app_can_assert,
+               has_function_privilege(current_user, to_regprocedure('public.agentpass_device_audit_current_organization_id()'), 'EXECUTE') AS app_can_read_context,
+               assertion.prosecdef AS assertion_secdef,
+               assertion.proconfig AS assertion_proconfig,
+               selector.prosecdef AS selector_secdef,
+               selector.proconfig AS selector_proconfig
+          FROM pg_proc AS assertion
+          CROSS JOIN pg_proc AS selector
+         WHERE assertion.oid = to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)')
+           AND selector.oid = to_regprocedure('public.agentpass_device_audit_current_organization_id()')`);
+      assert.deepEqual(authorityCatalog.rows, [{
+        context_select: false,
+        context_insert: false,
+        context_update: false,
+        context_delete: false,
+        app_can_assert: true,
+        app_can_read_context: true,
+        assertion_secdef: true,
+        assertion_proconfig: ["search_path=pg_catalog, public"],
+        selector_secdef: true,
+        selector_proconfig: ["search_path=pg_catalog, public"],
+      }]);
+
       const insertEvent = (values) => appClient.query(`
         INSERT INTO device_audit_events
           (organization_id, device_id, event_id, previous_hash, event_hash, redacted_json)
         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, values);
       await Promise.all([
-        insertEvent(event("one", "0".repeat(64))),
-        insertEvent(event("two", "0".repeat(64))),
+        insertEvent(auditEvent({ organizationId, deviceId, agentId, label: "one", previousHash: "0".repeat(64) })),
+        insertEvent(auditEvent({ organizationId, deviceId, agentId, label: "two", previousHash: "0".repeat(64) })),
       ]);
       const head = await appClient.query("SELECT sequence, gap_count, chain_status FROM device_audit_heads WHERE organization_id=$1 AND device_id=$2", [organizationId, deviceId]);
       assert.deepEqual(head.rows, [{ sequence: "2", gap_count: "1", chain_status: "gap" }]);
@@ -156,12 +218,35 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
         [organizationId, deviceId]
       )));
 
-      // A tenant switch on the same authenticated app session cannot expose
-      // evidence belonging to another organization.
+      // A caller-controlled tenant GUC is no longer an authority input. The
+      // transaction-bound membership assertion remains organization A even
+      // after an adversarial switch attempt to organization B.
       await appClient.query("SELECT set_config('agentpass.organization_id', $1, true)", [otherOrganizationId]);
-      assert.equal((await appClient.query("SELECT count(*)::int AS count FROM device_audit_events")).rows[0].count, 0);
-      await appClient.query("SELECT set_config('agentpass.organization_id', $1, true)", [organizationId]);
       assert.equal((await appClient.query("SELECT count(*)::int AS count FROM device_audit_events")).rows[0].count, 2);
+      assert.equal((await appClient.query(
+        "SELECT count(*)::int AS count FROM device_audit_events WHERE organization_id=$1",
+        [otherOrganizationId]
+      )).rows[0].count, 0);
+
+      // An unbound tenant cannot install an authority context, and a direct
+      // cross-tenant INSERT is denied before the validation/head triggers.
+      const otherAuthority = await appClient.query(
+        "SELECT public.agentpass_authorize_device_audit_tenant($1::uuid, $2::uuid) AS organization_id",
+        [otherOrganizationId, memberId]
+      );
+      assert.deepEqual(otherAuthority.rows, [{ organization_id: null }]);
+      const crossTenantEvent = auditEvent({
+        organizationId: otherOrganizationId,
+        deviceId: otherDeviceId,
+        agentId: otherAgentId,
+        label: "cross-tenant-write",
+        previousHash: "0".repeat(64),
+      });
+      await inSavepoint(appClient, () => expectPermissionDenied(() => insertEvent(crossTenantEvent)));
+      assert.equal((await appClient.query(
+        "SELECT count(*)::int AS count FROM device_audit_events WHERE organization_id=$1 AND event_id=$2",
+        [otherOrganizationId, crossTenantEvent[2]]
+      )).rows[0].count, 0);
 
       // Bypass the repository and prove the migration-owned validation trigger
       // rejects a forged stored hash before it can advance any projection.
@@ -189,6 +274,11 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
   } finally {
     // Fixture teardown is administrative cleanup after the app transaction
     // has rolled back all security-sensitive writes.
+    await adminPool.query("DELETE FROM memberships WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
+    await adminPool.query("DELETE FROM members WHERE id = $1", [memberId]).catch(() => {});
+    await adminPool.query("DELETE FROM device_audit_gaps WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
+    await adminPool.query("DELETE FROM device_audit_heads WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
+    await adminPool.query("DELETE FROM device_audit_events WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
     await adminPool.query("DELETE FROM agents WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
     await adminPool.query("DELETE FROM devices WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
     await adminPool.query("DELETE FROM organizations WHERE id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});

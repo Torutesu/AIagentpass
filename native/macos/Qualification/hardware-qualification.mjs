@@ -10,6 +10,7 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const TEAM_ID = /^[A-Z0-9]{10}$/u;
 const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
+const DEVELOPER_ID_APPLICATION = /^Developer ID Application: [^\r\n()]+ \([A-Z0-9]{10}\)$/u;
 const SAFE_NAME = /^[0-9A-Za-z][0-9A-Za-z._-]*$/u;
 const MAX_OUTPUT = 128 * 1024;
 const MAX_INPUT = 16 * 1024 * 1024 * 1024;
@@ -51,7 +52,7 @@ function snapshotFile(input, { maximum = MAX_INPUT, protectedOwner = false, labe
     }
     const after = fs.fstatSync(descriptor, { bigint: true });
     if (statIdentity(before) !== statIdentity(after)) fail(`${label} changed while reading`);
-    return { path: input, bytes, size, sha256: sha256(bytes), mode: Number(before.mode & 0o777n), uid: Number(before.uid) };
+    return { path: input, bytes, size, sha256: sha256(bytes), mode: Number(before.mode & 0o777n), uid: Number(before.uid), identity: statIdentity(before) };
   } finally { fs.closeSync(descriptor); }
 }
 
@@ -128,17 +129,64 @@ function validateReleaseManifest(manifestSnapshot, signatureSnapshot, publicKeyS
   return { path: manifestSnapshot.path, bytes: manifestSnapshot.size, sha256: manifestSnapshot.sha256, signature_path: signatureSnapshot.path, signature_sha256: verified.signature_sha256, public_key_path: publicKeySnapshot.path, public_key_fingerprint: verified.fingerprint, signed: true, source_commit: manifest.source.commit, source_tree: manifest.source.tree, artifact_name: product.name, artifact_bytes: product.bytes, artifact_sha256: product.sha256, release_attestation_sha256: releaseAttestation.sha256 };
 }
 
-function commandResult(command, label) {
-  absolute(command, label);
-  let stat;
-  try { stat = fs.lstatSync(command); } catch { fail(`${label} is missing`); }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o022) !== 0 || (stat.mode & 0o111) === 0) fail(`${label} is not a protected executable`);
+function validateProbeExpectations(expectedSha256, expectedSigningIdentity, label) {
+  const digest = expectedSha256 ?? null;
+  const identity = expectedSigningIdentity ?? null;
+  if (digest !== null && !DIGEST.test(digest)) fail(`${label} expected SHA-256 is invalid`);
+  if (identity !== null && !DEVELOPER_ID_APPLICATION.test(identity)) fail(`${label} expected signing identity is invalid`);
+  if (digest === null && identity === null) fail(`${label} has no protected digest or signing identity binding`);
+  return { expected_sha256: digest, expected_signing_identity: identity };
+}
+
+function probeSnapshot(command, label) {
+  const snapshot = snapshotFile(command, { maximum: 256 * 1024 * 1024, protectedOwner: true, label });
+  if ((snapshot.mode & 0o222) !== 0) fail(`${label} is writable`);
+  if ((snapshot.mode & 0o111) === 0) fail(`${label} is not executable`);
+  return snapshot;
+}
+
+function signedProbeIdentity(command, expectedSigningIdentity, label) {
+  const verification = spawnSync("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", command], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }, shell: false, timeout: 60_000, maxBuffer: MAX_OUTPUT });
+  if (verification.error || verification.status !== 0 || verification.signal) fail(`${label} code signature verification failed`);
+  const details = spawnSync("/usr/bin/codesign", ["-dv", "--verbose=4", command], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }, shell: false, timeout: 60_000, maxBuffer: MAX_OUTPUT });
+  const text = `${details.stdout ?? ""}\n${details.stderr ?? ""}`;
+  const match = text.match(/^Authority=(Developer ID Application: [^\r\n]+)$/mu);
+  if (details.error || details.status !== 0 || details.signal || !match || !DEVELOPER_ID_APPLICATION.test(match[1]) || match[1] !== expectedSigningIdentity) fail(`${label} Developer ID signing identity mismatch`);
+  return match[1];
+}
+
+function validateProbeSnapshot(snapshot, expected, label) {
+  if (expected.expected_sha256 !== null && snapshot.sha256 !== expected.expected_sha256) fail(`${label} SHA-256 does not match the protected expectation`);
+  return snapshot;
+}
+
+function commandResult(command, label, expectedSha256, expectedSigningIdentity) {
+  const expected = validateProbeExpectations(expectedSha256, expectedSigningIdentity, label);
+  const before = validateProbeSnapshot(probeSnapshot(command, label), expected, label);
+  const beforeSigningIdentity = expected.expected_signing_identity === null ? null : signedProbeIdentity(command, expected.expected_signing_identity, label);
+  const executionBinding = probeSnapshot(command, label);
+  if (executionBinding.identity !== before.identity || executionBinding.sha256 !== before.sha256) fail(`${label} changed before execution`);
   const result = spawnSync(command, [], { cwd: "/", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }, encoding: "buffer", timeout: 60_000, maxBuffer: MAX_OUTPUT, shell: false });
+  const after = validateProbeSnapshot(probeSnapshot(command, label), expected, label);
+  if (after.identity !== before.identity || after.sha256 !== before.sha256) fail(`${label} changed after execution`);
+  const afterSigningIdentity = expected.expected_signing_identity === null ? null : signedProbeIdentity(command, expected.expected_signing_identity, label);
+  if (afterSigningIdentity !== beforeSigningIdentity) fail(`${label} signing identity changed after execution`);
   const stdout = Buffer.from(result.stdout ?? ""); const stderr = Buffer.from(result.stderr ?? "");
   if (result.error || result.status !== 0 || result.signal || stdout.length === 0) fail(`${label} did not pass`);
   let observed; try { observed = JSON.parse(stdout.toString("utf8")); } catch { fail(`${label} did not emit JSON`); }
   if (!observed || observed.status !== "passed" || typeof observed.observed !== "object" || Array.isArray(observed.observed)) fail(`${label} emitted a non-passing result`);
-  return { status: "passed", exit_code: 0, stdout_sha256: sha256(stdout), stderr_sha256: sha256(stderr), observed: observed.observed };
+  return { status: "passed", exit_code: 0, executable_sha256: after.sha256, stdout_sha256: sha256(stdout), stderr_sha256: sha256(stderr), probe: { path: after.path, owner_uid: after.uid, mode: after.mode, sha256: after.sha256, expected_sha256: expected.expected_sha256, signing_identity: afterSigningIdentity, expected_signing_identity: expected.expected_signing_identity, verified_before_execution: true, verified_after_execution: true }, observed: observed.observed };
+}
+
+export function validateProbeTrustEvidence(value, label = "probe trust") {
+  exact(value, ["path", "owner_uid", "mode", "sha256", "expected_sha256", "signing_identity", "expected_signing_identity", "verified_before_execution", "verified_after_execution"], label);
+  if (!path.isAbsolute(value.path) || value.owner_uid !== 0 || !Number.isSafeInteger(value.mode) || (value.mode & 0o222) !== 0 || (value.mode & 0o111) === 0 || !DIGEST.test(value.sha256)) fail(`${label} protection is invalid`);
+  const expected = validateProbeExpectations(value.expected_sha256, value.expected_signing_identity, label);
+  if (expected.expected_sha256 !== null && value.sha256 !== expected.expected_sha256) fail(`${label} digest is not bound to the protected expectation`);
+  if (value.signing_identity !== null && (typeof value.signing_identity !== "string" || !DEVELOPER_ID_APPLICATION.test(value.signing_identity))) fail(`${label} signing identity is invalid`);
+  if (expected.expected_signing_identity !== null && value.signing_identity !== expected.expected_signing_identity) fail(`${label} signing identity is not bound to the protected expectation`);
+  if (value.verified_before_execution !== true || value.verified_after_execution !== true) fail(`${label} was not verified before and after execution`);
+  return value;
 }
 
 function validateObserved(name, observed) {
@@ -208,12 +256,20 @@ export function validate(report) {
   validateMachine(report.machine);
   if (report.runner_attestation.architecture !== report.machine.architecture || report.runner_attestation.hardware_class !== report.machine.hardware_class || report.runner_attestation.model_identifier !== report.machine.model_identifier || report.runner_attestation.native_execution !== report.machine.native_execution || report.runner_attestation.vm_detected !== report.machine.vm_detected || report.runner_attestation.rosetta_detected !== report.machine.rosetta_detected) fail("runner attestation does not bind machine evidence");
   exact(report.checks, CHECKS, "checks");
-  for (const name of CHECKS) { const check = report.checks[name]; exact(check, ["status", "exit_code", "stdout_sha256", "stderr_sha256", "observed"], `${name} check`); if (check.status !== "passed" || check.exit_code !== 0 || !DIGEST.test(check.stdout_sha256) || !DIGEST.test(check.stderr_sha256) || !check.observed || typeof check.observed !== "object" || Array.isArray(check.observed)) fail(`${name} check is not passing evidence`); validateObserved(name, check.observed); }
+  for (const name of CHECKS) { const check = report.checks[name]; exact(check, ["status", "exit_code", "executable_sha256", "stdout_sha256", "stderr_sha256", "probe", "observed"], `${name} check`); if (check.status !== "passed" || check.exit_code !== 0 || !DIGEST.test(check.executable_sha256) || !DIGEST.test(check.stdout_sha256) || !DIGEST.test(check.stderr_sha256) || !check.observed || typeof check.observed !== "object" || Array.isArray(check.observed)) fail(`${name} check is not passing evidence`); validateProbeTrustEvidence(check.probe, `${name} probe`); if (check.executable_sha256 !== check.probe.sha256) fail(`${name} executable digest is not bound to probe trust evidence`); validateObserved(name, check.observed); }
   return report;
 }
 
 function compareEvidence(report, actual, label) {
   for (const key of Object.keys(actual)) if (report[key] !== actual[key]) fail(`${label} changed after qualification`);
+}
+
+function verifyProbeEvidence(value, label) {
+  validateProbeTrustEvidence(value, label);
+  const current = validateProbeSnapshot(probeSnapshot(value.path, label), { expected_sha256: value.expected_sha256, expected_signing_identity: value.expected_signing_identity }, label);
+  if (current.uid !== value.owner_uid || current.mode !== value.mode || current.sha256 !== value.sha256) fail(`${label} changed after qualification`);
+  const identity = value.expected_signing_identity === null ? null : signedProbeIdentity(value.path, value.expected_signing_identity, label);
+  if (identity !== value.signing_identity) fail(`${label} signing identity changed after qualification`);
 }
 
 function verifyEvidence(report) {
@@ -227,10 +283,11 @@ function verifyEvidence(report) {
   compareEvidence(report.artifact, artifact, "artifact evidence");
   const runner = readRunnerAttestation(report.runner_attestation.path, report.runner_attestation.signature_path, report.runner_attestation.public_key_path, report.runner_attestation.public_key_fingerprint);
   compareEvidence(report.runner_attestation, runner, "runner attestation evidence");
+  for (const name of CHECKS) verifyProbeEvidence(report.checks[name].probe, `${name} probe`);
   return report;
 }
 
-export function qualify({ artifact, releaseManifest, releaseManifestSignature, releaseManifestPublicKey, releaseManifestFingerprint, sourceCommit, sourceTree, expectedTeamId, runnerAttestation, runnerAttestationSignature, runnerAttestationPublicKey, runnerAttestationFingerprint, expectedArchitecture, launchdProbe, nsxpcProbe, crashRestartProbe } = {}) {
+export function qualify({ artifact, releaseManifest, releaseManifestSignature, releaseManifestPublicKey, releaseManifestFingerprint, sourceCommit, sourceTree, expectedTeamId, runnerAttestation, runnerAttestationSignature, runnerAttestationPublicKey, runnerAttestationFingerprint, expectedArchitecture, launchdProbe, launchdProbeSha256, launchdProbeSigningIdentity, nsxpcProbe, nsxpcProbeSha256, nsxpcProbeSigningIdentity, crashRestartProbe, crashRestartProbeSha256, crashRestartProbeSigningIdentity } = {}) {
   if (!COMMIT.test(sourceCommit ?? "") || !COMMIT.test(sourceTree ?? "")) fail("source commit and source tree must be full lowercase SHA-1 identities");
   if (!TEAM_ID.test(expectedTeamId ?? "")) fail("expected Developer ID Team ID is invalid");
   const manifest = snapshotFile(releaseManifest, { maximum: 16 * 1024 * 1024, label: "release manifest" });
@@ -243,7 +300,7 @@ export function qualify({ artifact, releaseManifest, releaseManifestSignature, r
   const machineEvidence = machine();
   if (expectedArchitecture !== null && machineEvidence.architecture !== expectedArchitecture) fail("runner architecture does not match the requested qualification lane");
   if (runnerEvidence.architecture !== machineEvidence.architecture || runnerEvidence.hardware_class !== machineEvidence.hardware_class || runnerEvidence.model_identifier !== machineEvidence.model_identifier || runnerEvidence.native_execution !== machineEvidence.native_execution || runnerEvidence.vm_detected !== machineEvidence.vm_detected || runnerEvidence.rosetta_detected !== machineEvidence.rosetta_detected) fail("protected runner attestation does not match live native machine evidence");
-  const checks = { launchd_host_child_identity: commandResult(launchdProbe, "launchd host-child probe"), nsxpc: commandResult(nsxpcProbe, "NSXPC probe"), crash_restart: commandResult(crashRestartProbe, "crash/restart probe") };
+  const checks = { launchd_host_child_identity: commandResult(launchdProbe, "launchd host-child probe", launchdProbeSha256, launchdProbeSigningIdentity), nsxpc: commandResult(nsxpcProbe, "NSXPC probe", nsxpcProbeSha256, nsxpcProbeSigningIdentity), crash_restart: commandResult(crashRestartProbe, "crash/restart probe", crashRestartProbeSha256, crashRestartProbeSigningIdentity) };
   const report = { schema_version: REPORT_SCHEMA_VERSION, kind: "agentpass.macos.hardware-qualification", source_commit: sourceCommit, source_tree: sourceTree, release_manifest: manifestEvidence, artifact: artifactEvidence, machine: machineEvidence, runner_attestation: runnerEvidence, checks, qualified: true };
   validate(report);
   return report;
@@ -274,7 +331,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       process.stdout.write('{"ok":true,"status":"verified"}\n');
     } else {
       const output = absolute(required(value.output, "--output"), "output");
-      const report = qualify({ artifact: absolute(required(value.artifact, "--artifact"), "artifact"), releaseManifest: absolute(required(value["release-manifest"], "--release-manifest"), "release manifest"), releaseManifestSignature: absolute(required(value["release-manifest-signature"], "--release-manifest-signature"), "release manifest signature"), releaseManifestPublicKey: absolute(required(value["release-manifest-public-key"], "--release-manifest-public-key"), "release manifest public key"), releaseManifestFingerprint: required(value["release-manifest-fingerprint"], "--release-manifest-fingerprint"), sourceCommit: required(value["source-commit"], "--source-commit"), sourceTree: required(value["source-tree"], "--source-tree"), expectedTeamId: required(value["expected-team-id"], "--expected-team-id"), runnerAttestation: absolute(required(value["runner-attestation"], "--runner-attestation"), "runner attestation"), runnerAttestationSignature: absolute(required(value["runner-attestation-signature"], "--runner-attestation-signature"), "runner attestation signature"), runnerAttestationPublicKey: absolute(required(value["runner-attestation-public-key"], "--runner-attestation-public-key"), "runner attestation public key"), runnerAttestationFingerprint: required(value["runner-attestation-fingerprint"], "--runner-attestation-fingerprint"), expectedArchitecture: required(value["expected-architecture"], "--expected-architecture"), launchdProbe: absolute(required(value["launchd-probe"], "--launchd-probe"), "launchd probe"), nsxpcProbe: absolute(required(value["nsxpc-probe"], "--nsxpc-probe"), "NSXPC probe"), crashRestartProbe: absolute(required(value["crash-restart-probe"], "--crash-restart-probe"), "crash/restart probe") });
+      const report = qualify({ artifact: absolute(required(value.artifact, "--artifact"), "artifact"), releaseManifest: absolute(required(value["release-manifest"], "--release-manifest"), "release manifest"), releaseManifestSignature: absolute(required(value["release-manifest-signature"], "--release-manifest-signature"), "release manifest signature"), releaseManifestPublicKey: absolute(required(value["release-manifest-public-key"], "--release-manifest-public-key"), "release manifest public key"), releaseManifestFingerprint: required(value["release-manifest-fingerprint"], "--release-manifest-fingerprint"), sourceCommit: required(value["source-commit"], "--source-commit"), sourceTree: required(value["source-tree"], "--source-tree"), expectedTeamId: required(value["expected-team-id"], "--expected-team-id"), runnerAttestation: absolute(required(value["runner-attestation"], "--runner-attestation"), "runner attestation"), runnerAttestationSignature: absolute(required(value["runner-attestation-signature"], "--runner-attestation-signature"), "runner attestation signature"), runnerAttestationPublicKey: absolute(required(value["runner-attestation-public-key"], "--runner-attestation-public-key"), "runner attestation public key"), runnerAttestationFingerprint: required(value["runner-attestation-fingerprint"], "--runner-attestation-fingerprint"), expectedArchitecture: required(value["expected-architecture"], "--expected-architecture"), launchdProbe: absolute(required(value["launchd-probe"], "--launchd-probe"), "launchd probe"), launchdProbeSha256: value["launchd-probe-sha256"] ?? null, launchdProbeSigningIdentity: value["launchd-probe-signing-identity"] ?? null, nsxpcProbe: absolute(required(value["nsxpc-probe"], "--nsxpc-probe"), "NSXPC probe"), nsxpcProbeSha256: value["nsxpc-probe-sha256"] ?? null, nsxpcProbeSigningIdentity: value["nsxpc-probe-signing-identity"] ?? null, crashRestartProbe: absolute(required(value["crash-restart-probe"], "--crash-restart-probe"), "crash/restart probe"), crashRestartProbeSha256: value["crash-restart-probe-sha256"] ?? null, crashRestartProbeSigningIdentity: value["crash-restart-probe-signing-identity"] ?? null });
       fs.writeFileSync(output, canonicalJSON(report), { mode: 0o600, flag: "wx" });
       process.stdout.write('{"ok":true,"qualified":true}\n');
     }

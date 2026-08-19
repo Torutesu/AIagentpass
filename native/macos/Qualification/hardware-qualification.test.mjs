@@ -21,7 +21,7 @@ const base = () => {
     artifact: { path: "/opt/agentpass/release/AgentPass-v1.2.3-macos-universal.pkg", name: "AgentPass-v1.2.3-macos-universal.pkg", bytes: 42, sha256: digest, signed: true, signing_identity: "Developer ID Installer: AgentPass (ABCDE12345)", team_id: "ABCDE12345" },
     machine: { architecture: "arm64", hardware_class: "apple_silicon", model_identifier: "Mac15,7", os_version: "15.6.1", os_build: "24G90", native_execution: true, vm_detected: false, rosetta_detected: false },
     runner_attestation: { path: "/opt/agentpass/macos/runner-attestation.json", bytes: 200, sha256: digest, signature_path: "/opt/agentpass/macos/runner-attestation.sig", signature_sha256: digest, public_key_path: "/opt/agentpass/macos/runner-attestation.pem", public_key_fingerprint: fingerprint, signed: true, owner_uid: 0, mode: 0o600, ...runner },
-    checks: Object.fromEntries(Object.keys(observations).map((name) => [name, { status: "passed", exit_code: 0, stdout_sha256: digest, stderr_sha256: digest, observed: observations[name] }])),
+    checks: Object.fromEntries(Object.keys(observations).map((name) => [name, { status: "passed", exit_code: 0, executable_sha256: digest, stdout_sha256: digest, stderr_sha256: digest, probe: { path: `/opt/agentpass/probes/${name}`, owner_uid: 0, mode: 0o555, sha256: digest, expected_sha256: digest, signing_identity: null, expected_signing_identity: null, verified_before_execution: true, verified_after_execution: true }, observed: observations[name] }])),
     qualified: true
   };
 };
@@ -33,3 +33,32 @@ test("rejects an unsigned or wrong-Team-ID package identity", () => { const valu
 test("rejects VM, Rosetta, or non-native runner evidence", () => { for (const field of ["vm_detected", "rosetta_detected"]) { const value = base(); value.runner_attestation[field] = true; assert.throws(() => validate(value), /runner attestation facts|runner attestation does not bind/u); } const native = base(); native.machine.native_execution = false; assert.throws(() => validate(native), /machine identity/u); });
 test("rejects an unprotected or mismatched runner attestation", () => { const owner = base(); owner.runner_attestation.owner_uid = 501; assert.throws(() => validate(owner), /protection/u); const machine = base(); machine.runner_attestation.model_identifier = "Mac14,2"; assert.throws(() => validate(machine), /does not bind/u); });
 test("rejects missing or not-run probe evidence", () => { const value = base(); delete value.checks.nsxpc; assert.throws(() => validate(value), /checks|missing/u); const notRun = base(); notRun.checks.crash_restart.status = "not_run"; assert.throws(() => validate(notRun), /crash_restart/u); });
+test("rejects probes that are not root-owned, non-writable, and execution-rechecked", () => {
+  for (const mutation of [
+    (probe) => { probe.owner_uid = 501; },
+    (probe) => { probe.mode = 0o755; },
+    (probe) => { probe.mode = 0o575; },
+    (probe) => { probe.verified_before_execution = false; },
+    (probe) => { probe.verified_after_execution = false; },
+    (probe) => { probe.expected_sha256 = "f".repeat(64); }
+  ]) {
+    const value = base();
+    mutation(value.checks.nsxpc.probe);
+    assert.throws(() => validate(value), /probe|protection|digest|verified/u);
+  }
+});
+test("rejects probes without a protected digest or valid Developer ID identity", () => {
+  const unbound = base();
+  unbound.checks.nsxpc.probe.expected_sha256 = null;
+  assert.throws(() => validate(unbound), /digest or signing identity|expected/u);
+  const invalidIdentity = base();
+  invalidIdentity.checks.nsxpc.probe.expected_sha256 = null;
+  invalidIdentity.checks.nsxpc.probe.expected_signing_identity = "Ad Hoc";
+  invalidIdentity.checks.nsxpc.probe.signing_identity = "Ad Hoc";
+  assert.throws(() => validate(invalidIdentity), /identity/u);
+  const mismatchedIdentity = base();
+  mismatchedIdentity.checks.nsxpc.probe.expected_sha256 = null;
+  mismatchedIdentity.checks.nsxpc.probe.expected_signing_identity = "Developer ID Application: AgentPass (ABCDE12345)";
+  mismatchedIdentity.checks.nsxpc.probe.signing_identity = "Developer ID Application: Other (ABCDE12345)";
+  assert.throws(() => validate(mismatchedIdentity), /identity/u);
+});

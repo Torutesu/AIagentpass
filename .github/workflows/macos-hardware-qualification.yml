@@ -112,11 +112,30 @@ jobs:
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
           AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
           AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256 }}
+          AGENTPASS_NSXPC_PROBE_SHA256: ${{ vars.AGENTPASS_NSXPC_PROBE_SHA256 }}
+          AGENTPASS_CRASH_RESTART_PROBE_SHA256: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SHA256 }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           for value in "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "$AGENTPASS_NSXPC_PROBE" "$AGENTPASS_CRASH_RESTART_PROBE"; do
             [[ -n "$value" && "$value" == /* && -f "$value" && -x "$value" && ! -L "$value" ]] || { echo "all three fixed physical probes must exist as non-symlink executables" >&2; exit 1; }
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "fixed probes must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "fixed probes must not be writable" >&2; exit 1;; esac
           done
+          developer_id_re='^Developer ID Application: [^()]+ \([A-Z0-9]{10}\)$'
+          check_probe_binding() {
+            local digest="$1" identity="$2" label="$3"
+            [[ -n "$digest" || -n "$identity" ]] || { echo "$label has no protected digest or signing identity binding" >&2; exit 1; }
+            [[ -z "$digest" || "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "$label expected SHA-256 is invalid" >&2; exit 1; }
+            [[ -z "$identity" || "$identity" =~ $developer_id_re ]] || { echo "$label expected signing identity is invalid" >&2; exit 1; }
+          }
+          check_probe_binding "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256" "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY" "launchd host-child probe"
+          check_probe_binding "$AGENTPASS_NSXPC_PROBE_SHA256" "$AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY" "NSXPC probe"
+          check_probe_binding "$AGENTPASS_CRASH_RESTART_PROBE_SHA256" "$AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY" "crash/restart probe"
       - name: Run fail-closed qualification and write canonical evidence
         env:
           AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
@@ -136,6 +155,12 @@ jobs:
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
           AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
           AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256 }}
+          AGENTPASS_NSXPC_PROBE_SHA256: ${{ vars.AGENTPASS_NSXPC_PROBE_SHA256 }}
+          AGENTPASS_CRASH_RESTART_PROBE_SHA256: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SHA256 }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
         run: native/macos/scripts/qualification/run-hardware-qualification.sh
       - name: Independently verify canonical evidence and all bound digests
         run: node native/macos/Qualification/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
