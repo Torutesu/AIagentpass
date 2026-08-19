@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass.operations-readiness-checklist-policy",
+  "evidence_kind": "agentpass.operations-readiness-checklist",
+  "execution_mode": "protected_external",
+  "evidence_origin": "protected_external",
+  "checks": {
+    "rollback": ["authority_not_widened", "deployment_rollback_verified", "health_gate_verified", "previous_revision_rejected", "rollback_artifact_digest"],
+    "pitr": ["backup_artifact_digest", "backup_manifest_verified", "pitr_restore_verified", "recovery_target_bound", "schema_head_match", "tenant_integrity_verified"],
+    "revoke_emergency_stop": ["ack_quorum_verified", "emergency_stop_propagation_verified", "existing_capability_denied", "new_capability_denied", "revoke_propagation_verified", "terminal_state_verified"],
+    "alerting": ["alert_rules_verified", "counter_reset_fail_closed", "delivery_verified", "escalation_verified", "policy_digest", "secret_free_evidence"],
+    "tenant_isolation": ["admin_scope_verified", "cross_tenant_denied", "no_cross_tenant_rows", "pair_count", "rls_policy_verified", "same_tenant_allowed", "tenant_pair_matrix_verified"]
+  },
+  "closure_rules": ["all_five_checks_verified", "all_checks_protected_external", "candidate_and_source_bound_at_root_and_check", "canonical_json_without_duplicate_or_unknown_fields", "missing_or_fixture_evidence_is_not_proven"]
+}
