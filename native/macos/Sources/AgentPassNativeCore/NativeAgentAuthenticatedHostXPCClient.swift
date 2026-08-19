@@ -93,6 +93,7 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
     private var nextRequestSequence: UInt32 = 1
     private var maxSignatures: Int?
     private var usedSignatures: Int?
+    private var signingInFlight = false
 
     public init(
         machServiceName: String = NativeAgentAuthenticatedHostXPCClient.defaultMachServiceName,
@@ -187,8 +188,16 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
     }
 
     public func sign(payload: Data) throws -> (signature: Data, remainingSignatures: Int) {
+        guard !payload.isEmpty,
+              payload.count <= AgentPassHostXPCContract.maximumCommitPayloadBytes else {
+            throw Error.invalidRequest
+        }
         lock.lock()
         guard state == .attached else {
+            lock.unlock()
+            throw Error.invalidState
+        }
+        guard !signingInFlight else {
             lock.unlock()
             throw Error.invalidState
         }
@@ -200,13 +209,25 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
             lock.unlock()
             throw Error.invalidState
         }
-        nextRequestSequence += 1
+        signingInFlight = true
         lock.unlock()
         guard let request = AgentPassHostSignRequest(requestSequence: sequence, commitPayload: payload) else {
+            lock.lock()
+            signingInFlight = false
+            lock.unlock()
             throw Error.invalidRequest
         }
-        let response: AgentPassHostSignResponse = try invoke { proxy, reply in
-            proxy.signHostPayload(request, withReply: reply)
+        let response: AgentPassHostSignResponse
+        do {
+            response = try invoke { proxy, reply in
+                proxy.signHostPayload(request, withReply: reply)
+            }
+        } catch {
+            lock.lock()
+            signingInFlight = false
+            state = .closed
+            lock.unlock()
+            throw error
         }
         lock.lock()
         let priorUsedSignatures = usedSignatures
@@ -220,12 +241,15 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
               !response.signature.isEmpty,
               response.signature.count <= AgentPassHostXPCContract.maximumSignatureBytes else {
             lock.lock()
+            signingInFlight = false
             state = .closed
             lock.unlock()
             throw Error.invalidResponse
         }
         lock.lock()
         self.usedSignatures = response.usedSignatures
+        nextRequestSequence += 1
+        signingInFlight = false
         lock.unlock()
         return (response.signature, response.remainingSignatures)
     }
