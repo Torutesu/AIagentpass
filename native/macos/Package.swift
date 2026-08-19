@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"]),
         .executable(name: "agentpass-native-agent-host", targets: ["AgentPassNativeAgentHost"]),
         .executable(name: "agentpass-git-sign", targets: ["AgentPassGitSigningHelper"]),
+        .executable(name: "agentpass-git-sign-xpc", targets: ["AgentPassGitSigningXPCHelper"]),
         .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"]),
         .executable(name: "agentpass-legacy-service-migration", targets: ["AgentPassLegacyServiceMigration"]),
         .executable(name: "agentpass-legacy-approval-migration", targets: ["AgentPassLegacyApprovalMigration"]),
@@ -56,6 +57,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AgentPassGitSigningHelper",
+            dependencies: ["AgentPassNativeCore"]
+        ),
+        .executableTarget(
+            name: "AgentPassGitSigningXPCHelper",
             dependencies: ["AgentPassNativeCore"]
         ),
         .executableTarget(
