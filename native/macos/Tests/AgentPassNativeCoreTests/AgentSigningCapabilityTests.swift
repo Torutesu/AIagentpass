@@ -298,6 +298,36 @@ private func agentSigningSignedData(
     }
 }
 
+@Test func agentSigningCapabilityVerificationContextCanBindAnObservedSession() throws {
+    let binding = try NativeAgentSessionBinding(
+        agentID: agentSigningFixtureIDs["agent"]!,
+        deviceID: agentSigningFixtureIDs["device"]!,
+        processBindingDigest: Data(repeating: 0x11, count: NativeAgentSessionBinding.digestByteCount),
+        ancestryBindingDigest: Data(repeating: 0x22, count: NativeAgentSessionBinding.digestByteCount),
+        worktreeBindingDigest: Data(repeating: 0x33, count: NativeAgentSessionBinding.digestByteCount),
+        controlSequence: 12,
+        authorityGeneration: 7,
+        keyGeneration: 99
+    )
+    let context = try NativeAgentSigningCapabilityVerificationContext(
+        nowMilliseconds: try agentSigningEpochMilliseconds("2026-08-16T00:00:10.000Z"),
+        allowedClockSkewMilliseconds: 0,
+        maximumTTLMilliseconds: 60_000,
+        organizationID: agentSigningFixtureIDs["organization"]!,
+        sessionID: agentSigningFixtureIDs["session"]!,
+        binding: binding,
+        keyID: "git-commit-signing-v1",
+        sequence: 13
+    )
+
+    #expect(context.agentID == binding.agentID)
+    #expect(context.deviceID == binding.deviceID)
+    #expect(context.controlSequence == binding.controlSequence)
+    #expect(context.authorityGeneration == binding.authorityGeneration)
+    #expect(context.sequence == 13)
+    #expect(context.keyID == "git-commit-signing-v1")
+}
+
 @Test func agentSigningCapabilityCodecRejectsEpochAndAllowsIssuedAtBeforeNotBefore() throws {
     var issuedEpochStatement = try agentSigningStatementObject()
     issuedEpochStatement["issued_at"] = "1970-01-01T00:00:00.000Z"
