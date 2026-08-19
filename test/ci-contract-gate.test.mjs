@@ -40,7 +40,7 @@ test("native qualification is serialized at the top level", () => {
   const section = job("test");
   assert.equal(
     packageManifest.scripts["test:native"],
-    "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
+    "node scripts/ci/run-native-test-shards.mjs",
   );
   assert.match(section, /runs-on: macos-latest\n    timeout-minutes: 60/u);
   for (const [name, minutes, command] of [

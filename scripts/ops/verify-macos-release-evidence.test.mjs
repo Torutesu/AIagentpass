@@ -1,32 +1,40 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import test from "node:test";
 
-const run = promisify(execFile);
+const root = new URL("../../", import.meta.url).pathname;
 const script = new URL("./verify-macos-release-evidence.mjs", import.meta.url).pathname;
-const commit = "a".repeat(40);
-const digest = `sha256:${"b".repeat(64)}`;
-function valid() {
-  return { schema_version: 1, candidate: { commit_sha: commit, artifact_digest: digest }, package: { name: "AgentPass-1.0.0.pkg", artifact_digest: digest }, signing: { status: "verified", identity: "Developer ID Application: Example (ABCDE12345)", team_id: "ABCDE12345", bundle_id: "dev.agentpass.native" }, notarization: { status: "accepted", ticket_id: "ticket-12345678" }, stapling: { status: "verified" }, gatekeeper: { status: "accepted" } };
+const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
+const write = (path, value) => fs.writeFileSync(path, canonical(value), { flag: "wx", mode: 0o600 });
+const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+function fixture() {
+  const base = fs.mkdtempSync(join(os.tmpdir(), "agentpass-macos-wrapper-"));
+  const artifactRoot = join(base, "artifact"); const evidenceRoot = join(base, "evidence");
+  fs.mkdirSync(artifactRoot); fs.mkdirSync(evidenceRoot);
+  const artifactPath = join(artifactRoot, "AgentPass-1.0.0.pkg"); fs.writeFileSync(artifactPath, "package\n");
+  const inventoryPath = join(evidenceRoot, "inventory.json");
+  execFileSync(process.execPath, [join(root, "native/macos/scripts/generate-artifact-inventory.mjs"), artifactRoot, artifactPath, inventoryPath]);
+  const inventoryBytes = fs.readFileSync(inventoryPath); const inventory = JSON.parse(inventoryBytes); const artifact = inventory.artifact;
+  const notary = { status: "Accepted", id: "01234567-89ab-cdef-0123-456789abcdef", artifact_sha256: artifact.sha256 };
+  write(join(evidenceRoot, "notary.json"), notary); write(join(evidenceRoot, "staple.json"), { status: "validated", artifact_sha256: artifact.sha256 }); write(join(evidenceRoot, "gatekeeper.json"), { assessment: "accepted", artifact_sha256: artifact.sha256 });
+  const evidenceValue = { schema_version: 1, kind: "agentpass.macos-distribution-evidence", artifact, inventory: { name: "inventory.json", bytes: inventoryBytes.length, sha256: digest(inventoryBytes) }, signature: { format: "Developer ID Installer", identity: "Developer ID Installer: Release (TEAM123456)", team_id: "TEAM123456", verified: true }, notarization: { status: "Accepted", submission_id: notary.id, artifact_sha256: artifact.sha256, evidence_file: "notary.json" }, staple: { status: "validated", artifact_sha256: artifact.sha256, evidence_file: "staple.json" }, gatekeeper: { assessment: "accepted", artifact_sha256: artifact.sha256, evidence_file: "gatekeeper.json" } };
+  const evidencePath = join(evidenceRoot, "evidence.json"); write(evidencePath, evidenceValue);
+  return { artifactRoot, evidenceRoot, inventoryPath, evidencePath };
 }
-async function evidence(value) { const dir = await mkdtemp(join(tmpdir(), "agentpass-macos-evidence-")); const path = join(dir, "evidence.json"); await writeFile(path, `${JSON.stringify(value)}\n`); return path; }
 
-test("passes only for a candidate-bound Developer ID and notarized package", async () => {
-  const path = await evidence(valid());
-  const { stdout } = await run(process.execPath, [script, path, "--candidate-commit-sha", commit, "--candidate-artifact-digest", digest]);
-  assert.equal(JSON.parse(stdout).status, "passed");
+test("delegates only an inventory-bound evidence set", () => {
+  const value = fixture();
+  const output = execFileSync(process.execPath, [script, value.evidencePath, value.inventoryPath, value.artifactRoot, value.evidenceRoot], { encoding: "utf8" });
+  assert.match(output, /"status":"verified"/u);
 });
 
-test("fails closed on digest or signing evidence substitution", async () => {
-  const value = valid(); value.package.artifact_digest = `sha256:${"c".repeat(64)}`; value.signing.identity = "Apple Development: Example";
-  const path = await evidence(value);
-  await assert.rejects(run(process.execPath, [script, path]), (error) => error.code === 1 && /evidence failed/u.test(error.stderr));
-});
-
-test("reports unknown when real Apple evidence is absent", async () => {
-  await assert.rejects(run(process.execPath, [script, "/tmp/agentpass-macos-evidence-missing.json"]), (error) => error.code === 2 && /evidence is unknown/u.test(error.stderr));
+test("reports unknown rather than accepting claim-only evidence", async () => {
+  await new Promise((resolve, reject) => {
+    execFile(process.execPath, [script], (error) => error?.code === 2 ? resolve() : reject(error ?? new Error("expected unknown")));
+  });
 });

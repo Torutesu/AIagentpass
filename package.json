@@ -41,6 +41,7 @@
     "test:cursor-runtime": "node --test scripts/cursor-runtime/materialize.test.mjs test/cursor-agent-runtime-manifest-contract.test.mjs",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
     "test:native-installer-preservation": "native/macos/scripts/test-installer-preservation.sh",
+    "test:native-distribution-evidence": "node --test native/macos/scripts/distribution-evidence.test.mjs",
     "test:native-durability-model": "node native/macos/scripts/qualification/g42-posix-kill-restart.mjs",
     "test:n3e:packaging": "node --test scripts/release/n3e/packaging.test.mjs",
     "test:postgres:g4": "node --test apps/cloud-api/test/postgres/g4-refresh-integration.test.mjs apps/cloud-api/test/postgres/g4-refresh-contention-integration.test.mjs apps/cloud-api/test/postgres/g4-1-refresh-nonce-rotation-integration.test.mjs apps/cloud-api/test/postgres/g4-1-process-kill-qualification.test.mjs apps/cloud-api/test/postgres/g4-1-propagation-postgres-qualification.test.mjs apps/cloud-api/test/postgres/p0b-signed-ack.integration.test.mjs",

@@ -50,7 +50,10 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT
   --scripts "$TEMP_DIR/package-scripts" \
   --ownership recommended \
   --sign "$IDENTITY" \
-  "$OUTPUT"
+"$OUTPUT"
 
 "$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT"
+INVENTORY_OUTPUT="${OUTPUT}.inventory.json"
+[[ ! -e "$INVENTORY_OUTPUT" && ! -L "$INVENTORY_OUTPUT" ]] || { echo "Installer inventory output already exists or is a symlink" >&2; exit 1; }
+node "$SCRIPT_DIR/generate-artifact-inventory.mjs" "$APP" "$OUTPUT" "$INVENTORY_OUTPUT" >/dev/null
 echo "$OUTPUT"
