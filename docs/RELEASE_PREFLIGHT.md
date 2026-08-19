@@ -26,7 +26,8 @@ to `scripts/ops/verify-release-preflight.mjs`:
   "checks": {
     "native_audit_delivery": {
       "status": "passed|failed|unknown",
-      "evidence_ref": "redacted immutable evidence reference",
+      "evidence_ref": "native-audit.json",
+      "evidence_sha256": "<64 lowercase hex characters>",
       "commit_sha": "<same candidate commit>",
       "artifact_digest": "<same candidate digest>"
     }
@@ -36,8 +37,10 @@ to `scripts/ops/verify-release-preflight.mjs`:
 
 The five check objects are required. The example shows the common fields; each
 check must be present and must carry its own candidate binding when `status` is
-`passed`. Evidence references must not contain tokens, passwords, private keys,
-authorization headers, or other secret material.
+`passed`. Evidence references must be regular files beneath the release evidence
+file's directory, must not be symlinks, and must match `evidence_sha256`. They
+must not contain tokens, passwords, private keys, authorization headers, or other
+secret material.
 
 判定は fail-closed です。
 

@@ -1,7 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 
 const COMMIT_SHA = /^[0-9a-f]{40}$/u;
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const FILE_SHA256 = /^[0-9a-f]{64}$/u;
 const VALID_STATUSES = new Set(["passed", "failed", "unknown"]);
 const REQUIRED_CHECKS = [
   "native_audit_delivery",
@@ -67,7 +70,18 @@ function summarizeCandidate(candidate, options) {
   return { candidateIssues, commitSha, artifactDigest };
 }
 
-function validateChecks(rawChecks, candidateSummary) {
+async function validateEvidenceFile(root, reference, expectedDigest) {
+  if (typeof reference !== "string" || reference.length === 0 || reference.startsWith("/") || reference.split(/[\\/]+/u).some((part) => part === ".." || part === "")) return "evidence_ref_invalid";
+  const path = resolve(root, reference);
+  if (path !== root && !path.startsWith(`${root}${sep}`)) return "evidence_ref_outside_root";
+  let stat;
+  try { stat = await lstat(path); } catch (error) { return error?.code === "ENOENT" ? "evidence_file_missing" : "evidence_file_unreadable"; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > 16 * 1024 * 1024) return "evidence_file_unsafe";
+  const digest = createHash("sha256").update(await readFile(path)).digest("hex");
+  return digest === expectedDigest ? undefined : "evidence_digest_mismatch";
+}
+
+async function validateChecks(rawChecks, candidateSummary, evidenceRoot) {
   const checks = {};
   for (const name of REQUIRED_CHECKS) {
     const raw = rawChecks?.[name];
@@ -83,8 +97,13 @@ function validateChecks(rawChecks, candidateSummary) {
       checks[name] = checkReport(raw.status, raw.status === "failed" ? "producer_reported_failure" : "producer_reported_unknown");
       continue;
     }
-    if (typeof raw.evidence_ref !== "string" || raw.evidence_ref.length === 0) {
+    if (typeof raw.evidence_ref !== "string" || raw.evidence_ref.length === 0 || !FILE_SHA256.test(raw.evidence_sha256 ?? "")) {
       checks[name] = checkReport("failed", "evidence_ref_missing");
+      continue;
+    }
+    const evidenceFailure = await validateEvidenceFile(evidenceRoot, raw.evidence_ref, raw.evidence_sha256);
+    if (evidenceFailure) {
+      checks[name] = checkReport("failed", evidenceFailure);
       continue;
     }
     if (raw.commit_sha !== candidateSummary.commitSha) {
@@ -129,7 +148,7 @@ async function main() {
   }
 
   const candidateSummary = summarizeCandidate(evidence.candidate, options);
-  const checks = validateChecks(evidence.checks, candidateSummary);
+  const checks = await validateChecks(evidence.checks, candidateSummary, dirname(resolve(options.evidencePath)));
   const status = overallStatus(checks, candidateSummary.candidateIssues);
   const report = {
     status,
