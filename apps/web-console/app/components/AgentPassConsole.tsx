@@ -909,6 +909,14 @@ function enrollmentProgress(device: AgentPassInitialData["devices"][number] | un
   return device.lifecycleStatus === "active" && device.lastAckAt ? "enrolled" : "enrolled";
 }
 
+function progressLabel(progress: "pending" | "enrolled" | "recovery-proven"): string {
+  return ({
+    pending: "受け入れ待ち",
+    enrolled: "登録済み",
+    "recovery-proven": "復旧確認済み",
+  } as const)[progress];
+}
+
 function EnrollmentReconciliationCard({ progress, refresh }: { progress: "pending" | "enrolled" | "recovery-proven"; refresh: () => Promise<SummaryRefreshResult> }) {
   const [state, setState] = useState<EnrollmentReconciliationState>(progress === "pending" ? "checking" : "enrolled");
   const [cycle, setCycle] = useState(0);
