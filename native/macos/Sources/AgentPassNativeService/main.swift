@@ -3564,6 +3564,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let gitCommitSigner: NativeAgentGitCommitSigner
     let capabilityVerifier: NativeCapabilityVerifier
     let cloudSigningCapabilityVerifier: NativeAgentSigningCapabilityVerifier
+    let dedicatedSigningCapabilityIssuer: NativeAgentDedicatedSigningCapabilityRuntimeIssuer
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
@@ -3588,6 +3589,20 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
             expectedKeyPurpose: NativeAgentSigningCapabilityCodec.operation,
             expectedKeyID: authority.capabilityKeyID,
             expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
+        )
+        let capabilityVerifier = self.cloudSigningCapabilityVerifier
+        self.dedicatedSigningCapabilityIssuer = NativeAgentDedicatedSigningCapabilityRuntimeIssuer(
+            makeConsumer: { sessionID in
+                try NativeAgentSigningCapabilityHTTPConsumer(
+                    baseURL: authority.deviceAPIOrigin,
+                    organizationID: authority.organizationID,
+                    deviceID: authority.deviceID,
+                    sessionID: sessionID,
+                    transport: NativeAgentURLSessionHTTPTransport(),
+                    signer: deviceSigner
+                )
+            },
+            verifier: capabilityVerifier
         )
         self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
