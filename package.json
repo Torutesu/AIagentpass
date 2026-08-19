@@ -37,7 +37,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs test/support/p0b/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs apps/cloud-api/test/hosted-bootstrap/*.test.mjs apps/cloud-api/test/hosted-identity/*.test.mjs apps/cloud-api/test/human-auth/*.test.mjs apps/cloud-api/test/postgres/*.test.mjs scripts/agent-session-signing-capability/*.test.mjs scripts/cursor-runtime/*.test.mjs scripts/kms-qualification/*.test.mjs scripts/owner-recovery/*.test.mjs scripts/p0b/*.test.mjs scripts/p0b/qualification/*.test.mjs scripts/release/p0c/drivers/*.test.mjs scripts/release/p0c/scenarios/*.test.mjs scripts/release/n3e/*.test.mjs",
-    "test:native": "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
+    "test:native": "node scripts/ci/run-native-test-shards.mjs",
     "test:cursor-runtime": "node --test scripts/cursor-runtime/materialize.test.mjs test/cursor-agent-runtime-manifest-contract.test.mjs",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
     "test:native-installer-preservation": "native/macos/scripts/test-installer-preservation.sh",
