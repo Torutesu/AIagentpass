@@ -11,6 +11,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/ops/verify-cloud-deployment.mjs"
+      - "scripts/ops/verify-cloud-promotion.mjs"
   workflow_dispatch:
 
 permissions:
@@ -37,7 +38,7 @@ jobs:
           find apps/cloud-api/test -maxdepth 1 -type f -name '*.test.mjs' \
             ! -name 'agent-session-lifecycle-repository.test.mjs' -print0 \
             | sort -z \
-            | xargs -0 node --test scripts/ops/verify-cloud-deployment.test.mjs scripts/kms-qualification/*.test.mjs scripts/release/*.test.mjs
+            | xargs -0 node --test scripts/ops/verify-cloud-deployment.test.mjs scripts/ops/verify-cloud-promotion.test.mjs scripts/kms-qualification/*.test.mjs scripts/release/*.test.mjs
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

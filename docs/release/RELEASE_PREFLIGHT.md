@@ -105,6 +105,22 @@ and cannot turn an absent or fabricated provider record into proof. Ad-hoc artif
 credentials, offline-only evidence, or a green local test suite cannot close
 these rows.
 
+The final Cloud promotion gate cross-checks that signed deployment evidence
+and the independently signed, production AWS/GCP KMS qualification report
+refer to the exact same source commit and image digest:
+
+```sh
+node scripts/ops/verify-cloud-promotion.mjs \
+  cloud-deployment-evidence.json deployment-attestation-public.pem \
+  DEPLOYMENT_PUBLIC_KEY_SHA256 \
+  signed-kms-qualification.json qualification-public.der \
+  qualification-evidence-production-1
+```
+
+This command is provider-neutral and performs no deployment itself. It fails
+closed unless both evidence chains verify and their commit/image bindings are
+identical.
+
 ## Matrix relationship
 
 This validator supports the candidate identity/signature and evidence-binding
