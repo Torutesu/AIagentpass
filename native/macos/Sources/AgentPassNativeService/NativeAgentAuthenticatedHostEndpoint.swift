@@ -319,7 +319,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         stateLock.lock()
         defer { stateLock.unlock() }
         do {
-            try revalidatePeer()
+            try revalidatePeerOrRevoke()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
             let snapshot = try snapshotAndRefreshExpiration(for: session)
             let status = status(for: snapshot)
@@ -348,7 +348,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         stateLock.lock()
         defer { stateLock.unlock() }
         do {
-            try revalidatePeer()
+            try revalidatePeerOrRevoke()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
             let snapshot = closeSessionAndRevoke(session)
             expirationWasObserved = false

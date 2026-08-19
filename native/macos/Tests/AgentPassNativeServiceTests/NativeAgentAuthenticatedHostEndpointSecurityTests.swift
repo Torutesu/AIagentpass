@@ -409,6 +409,62 @@ private func childErrorCode(
     #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
+@Test func hostEndpointStatusPeerDriftRevokesChildBeforeChildSignerInvocation() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint()
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    harness.setPeerObservation(try HostEndpointHarness.observation(
+        pid: 42,
+        pidVersion: 9,
+        codeDirectoryHash: String(repeating: "c", count: 64),
+        bundleIdentifier: "dev.agentpass.agent-host"
+    ))
+
+    var status: AgentPassHostStatusResponse?
+    var statusError: NSError?
+    endpoint.hostSessionStatus(try #require(AgentPassHostStatusRequest())) { response, responseError in
+        status = response
+        statusError = responseError
+    }
+    #expect(status == nil)
+    #expect(statusError?.code == 4)
+    #expect(harness.recorder.unregisterCount == 1)
+
+    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([8])))
+    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.recorder.signCount == 0)
+}
+
+@Test func hostEndpointClosePeerDriftRevokesChildBeforeChildSignerInvocation() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint()
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    harness.setPeerObservation(try HostEndpointHarness.observation(
+        pid: 42,
+        pidVersion: 9,
+        codeDirectoryHash: String(repeating: "c", count: 64),
+        bundleIdentifier: "dev.agentpass.agent-host"
+    ))
+
+    var close: AgentPassHostCloseResponse?
+    var closeError: NSError?
+    endpoint.closeHostSession(try #require(AgentPassHostCloseRequest(reason: .completed))) { response, responseError in
+        close = response
+        closeError = responseError
+    }
+    #expect(close == nil)
+    #expect(closeError?.code == 4)
+    #expect(harness.recorder.unregisterCount == 1)
+
+    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([9])))
+    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.recorder.signCount == 0)
+}
+
 @Test func hostEndpointRejectsPIDIdentityAndWorktreeMismatchDuringAttach() throws {
     enum Mismatch {
         case pid
