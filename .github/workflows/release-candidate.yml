@@ -94,6 +94,8 @@ jobs:
         run: |
           npm run contracts:validate
           node --test test/contract-catalog.test.mjs
+      - name: Validate Cursor Agent runtime manifest and materializer contract
+        run: npm run test:cursor-runtime
       - run: node scripts/release/validate-version.mjs --require-tag --tag="$AGENTPASS_RELEASE_TAG"
       - name: Generate immutable database migration manifest
         run: |
