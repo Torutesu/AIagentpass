@@ -269,6 +269,7 @@ private struct ServiceRefreshHintKey: Decodable {
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let agentMachServiceName: String
+    let hostMachServiceName: String
     let keyTag: String
     let keychainAccessGroup: String?
     let keyLifecycleDirectory: String?
@@ -324,6 +325,7 @@ private struct ServiceConfiguration: Decodable {
     let agentPerWorktreeSessionLimit: Int?
     let agentBootstrapAttemptLimit: Int?
     let agentWorktreeObservationPolicyVersion: Int?
+    let hostChildCodeDirectoryHash: String?
     let qualificationMode: String?
     let qualificationMachServiceName: String?
     let qualificationCandidateSHA256: String?
@@ -343,6 +345,7 @@ private struct ServiceConfiguration: Decodable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case machServiceName = "mach_service_name"
         case agentMachServiceName = "agent_mach_service_name"
+        case hostMachServiceName = "host_mach_service_name"
         case keyTag = "key_tag"
         case keychainAccessGroup = "keychain_access_group"
         case keyLifecycleDirectory = "key_lifecycle_directory"
@@ -398,6 +401,7 @@ private struct ServiceConfiguration: Decodable {
         case agentPerWorktreeSessionLimit = "agent_per_worktree_session_limit"
         case agentBootstrapAttemptLimit = "agent_bootstrap_attempt_limit"
         case agentWorktreeObservationPolicyVersion = "agent_worktree_observation_policy_version"
+        case hostChildCodeDirectoryHash = "host_child_code_directory_hash"
         case qualificationMode = "qualification_mode"
         case qualificationMachServiceName = "qualification_mach_service_name"
         case qualificationCandidateSHA256 = "qualification_candidate_sha256"
@@ -424,14 +428,23 @@ private struct ServiceConfiguration: Decodable {
         let value = try JSONDecoder().decode(Self.self, from: data)
         guard !value.machServiceName.isEmpty,
               !value.agentMachServiceName.isEmpty,
+              !value.hostMachServiceName.isEmpty,
               value.machServiceName == "dev.agentpass.native-service",
               value.agentMachServiceName == "dev.agentpass.agent-session",
+              value.hostMachServiceName == "dev.agentpass.agent-host",
               value.machServiceName != value.agentMachServiceName,
+              value.hostMachServiceName != value.machServiceName,
+              value.hostMachServiceName != value.agentMachServiceName,
               !value.keyTag.isEmpty, !value.auditKeyTag.isEmpty, value.policyPath.hasPrefix("/"), value.auditLogPath.hasPrefix("/"), value.auditCheckpointPath.hasPrefix("/"),
               !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !value.agentClientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.clientCodeSigningRequirement != value.agentClientCodeSigningRequirement else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
+        }
+        if let childHash = value.hostChildCodeDirectoryHash {
+            guard childHash.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
+                throw AgentPassNativeError.invalidConfiguration("Host child code-directory hash is invalid")
+            }
         }
         guard let serviceAccessGroup = value.keychainAccessGroup,
               value.clientCodeSigningRequirement == (try? NativeClientCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
@@ -4831,6 +4844,7 @@ do {
     }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
+    let hostListener = NSXPCListener(machServiceName: configuration.hostMachServiceName)
     let controlRefreshEvidenceStore = try configuration.controlV2RefreshStatePath.map {
         try NativeControlRefreshEvidencePOSIXStore(path: "\($0).control-ack")
     }
@@ -4920,10 +4934,54 @@ do {
         qualificationFaultConsumer: qualificationFaultConsumer,
         transportReplyFaultConsumer: transportReplyFaultConsumer
     )
+    let hostChildPolicy = try configuration.hostChildCodeDirectoryHash.map {
+        try NativeProcessIdentityPolicy(
+            expectedUID: configuration.allowedClientUID,
+            expectedCodeDirectoryHash: $0.lowercased(),
+            allowedSignatureKinds: [.developerID, .apple],
+            rejectAdHocSignature: true,
+            rejectUnknownAncestors: true
+        )
+    }
+    let hostSigner = NativeAgentAuthenticatedHostClosureSigner { payload in
+        guard let agentRuntime else {
+            throw NativeAgentAuthenticatedHostEndpointError.signerFailed
+        }
+        return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload.payload)
+    }
+    let worktreeObserver = NativeDarwinGitWorktreeObserver()
+    let hostDelegate = NativeAgentAuthenticatedHostListenerDelegate(
+        allowedClientUID: configuration.allowedClientUID,
+        codeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+        peerPolicyFactory: { observation in
+            try NativeProcessIdentityPolicy(
+                expectedUID: observation.process.uid,
+                expectedBootIdentity: observation.process.bootIdentity,
+                expectedExecutableFileIdentity: observation.process.executableFileIdentity,
+                expectedCodeDirectoryHash: observation.process.codeDirectoryHash,
+                expectedBundleIdentifier: observation.process.bundleIdentifier,
+                expectedTeamIdentifier: observation.process.teamIdentifier,
+                expectedSignatureKind: observation.process.signatureKind,
+                requiredEntitlements: observation.process.entitlements,
+                expectedAncestry: observation.ancestry,
+                rejectAdHocSignature: true,
+                rejectUnknownAncestors: true
+            )
+        },
+        childPolicy: hostChildPolicy,
+        childFactory: { pid, _ in
+            let processObservation = try NativeDarwinProcessObservationSource().observe(pid: pid, expectedUserID: configuration.allowedClientUID)
+            let worktree = try worktreeObserver.observe(pid: pid, expectedUserID: configuration.allowedClientUID)
+            return (processObservation, worktree.binding.digest)
+        },
+        signer: hostSigner
+    )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
+    hostListener.delegate = hostDelegate
     managementListener.resume()
     agentListener.resume()
+    hostListener.resume()
     qualificationRuntime?.resume()
     RunLoop.current.run()
 } catch {

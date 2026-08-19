@@ -186,6 +186,7 @@ const [configPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const managementMachService = "dev.agentpass.native-service";
 const agentMachService = "dev.agentpass.agent-session";
+const hostMachService = "dev.agentpass.agent-host";
 const expectedManagementRequirement = 'anchor apple generic and identifier "dev.agentpass.native-client" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["keychain-access-groups"] = "TEAMID.dev.agentpass.approval-keys"';
 const expectedAgentRequirement = 'anchor apple generic and identifier "dev.agentpass.agent-host" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["dev.agentpass.agent-session-client"] = true';
 const managementRequirement = config.client_code_signing_requirement;
@@ -193,6 +194,7 @@ const agentRequirement = config.agent_client_code_signing_requirement;
 
 if (config.mach_service_name !== managementMachService) throw new Error("Management Mach service example changed");
 if (config.agent_mach_service_name !== agentMachService) throw new Error("Agent Mach service example is missing or invalid");
+if (config.host_mach_service_name !== hostMachService) throw new Error("Host Mach service example is missing or invalid");
 if (managementRequirement !== expectedManagementRequirement) throw new Error("Management code-signing requirement example changed");
 if (agentRequirement !== expectedAgentRequirement) throw new Error("Agent code-signing requirement example is missing or invalid");
 NODE

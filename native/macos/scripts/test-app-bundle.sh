@@ -52,6 +52,7 @@ const expectedManagementRequirement = 'anchor apple generic and identifier "dev.
 const expectedAgentRequirement = 'anchor apple generic and identifier "dev.agentpass.agent-host" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["dev.agentpass.agent-session-client"] = true';
 if (config.mach_service_name !== "dev.agentpass.native-service") throw new Error("Management Mach service example changed");
 if (config.agent_mach_service_name !== "dev.agentpass.agent-session") throw new Error("Agent Mach service example is missing or invalid");
+if (config.host_mach_service_name !== "dev.agentpass.agent-host") throw new Error("Host Mach service example is missing or invalid");
 if (config.client_code_signing_requirement !== expectedManagementRequirement) throw new Error("Management code-signing requirement example changed");
 if (config.agent_client_code_signing_requirement !== expectedAgentRequirement) throw new Error("Agent code-signing requirement example is missing or invalid");
 NODE
