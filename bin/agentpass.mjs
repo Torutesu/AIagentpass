@@ -36,7 +36,7 @@ import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecov
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
 import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
-import { unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { launchAgentLifecycle, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 
 const [, , command, ...args] = process.argv;
@@ -1328,12 +1328,12 @@ function xmlEscape(value) {
 
 function launchAgent() {
   // Normalize the public launch vector before reaching the lifecycle boundary.
-  // Until a verified native Host is wired here, retain the existing fail-closed
-  // response and never synthesize a session or invoke an alternate launcher.
+  // The lifecycle function can only use the fixed signed Host and an already
+  // inherited FD3 handoff; it cannot synthesize authority from CLI state.
   const normalized = parseAgentLaunchArgs([command, ...args]);
-  void normalized;
-  console.log(JSON.stringify(unavailableAgentLifecycle("launch")));
-  process.exitCode = 1;
+  const result = launchAgentLifecycle(normalized, { platform: process.platform });
+  console.log(JSON.stringify(result));
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 function launchContractFailure(error) {
