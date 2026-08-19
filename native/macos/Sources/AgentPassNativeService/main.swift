@@ -743,6 +743,8 @@ private struct ServiceConfiguration: Decodable {
             agentPerWorktreeSessionLimit != nil,
             agentBootstrapAttemptLimit != nil,
             agentWorktreeObservationPolicyVersion != nil,
+            agentCapabilityPublicKey != nil,
+            agentCapabilityKeyID != nil,
         ].contains(true)
         var origin: URL?
         if configured, let apiBaseText = controlV2APIBaseURL,

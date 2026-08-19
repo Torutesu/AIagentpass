@@ -73,127 +73,29 @@ export function createPostgresAgentSessionLifecycleRepository({ client, metrics 
 
 async function expireDueInTransaction(tx, values) {
   await setTenantContext(tx, values.organizationId);
-  const grants = await tx.query(`WITH db_clock AS MATERIALIZED (
-      SELECT clock_timestamp() AS now
-    ), candidates AS (
-      SELECT grant_record.organization_id,grant_record.grant_id
-      FROM agent_session_grants AS grant_record
-      CROSS JOIN db_clock
-      WHERE grant_record.organization_id=$1
-        AND grant_record.status='issued'
-        AND grant_record.expires_at <= db_clock.now
-      ORDER BY grant_record.expires_at ASC,grant_record.grant_id ASC
-      LIMIT $2
-      FOR UPDATE OF grant_record SKIP LOCKED
-    )
-    UPDATE agent_session_grants AS grant_record
-    SET status='expired',
-        expired_at=GREATEST(
-          db_clock.now,
-          COALESCE($3::timestamptz,db_clock.now),
-          grant_record.expires_at
-        )
-    FROM candidates
-    CROSS JOIN db_clock
-    WHERE grant_record.organization_id=candidates.organization_id
-      AND grant_record.grant_id=candidates.grant_id
-      AND grant_record.status='issued'
-    RETURNING grant_record.status`, [values.organizationId, values.limit, values.expiredAt]);
-
-  const sessions = await tx.query(`WITH db_clock AS MATERIALIZED (
-      SELECT clock_timestamp() AS now
-    ), candidates AS (
-      SELECT session_record.organization_id,session_record.session_id
-      FROM agent_sessions AS session_record
-      CROSS JOIN db_clock
-      WHERE session_record.organization_id=$1
-        AND session_record.status IN (${REVOCABLE_SESSION_STATUSES.map((_, index) => `'${REVOCABLE_SESSION_STATUSES[index]}'`).join(",")})
-        AND session_record.expires_at <= db_clock.now
-      ORDER BY session_record.expires_at ASC,session_record.session_id ASC
-      LIMIT $2
-      FOR UPDATE OF session_record SKIP LOCKED
-    )
-    UPDATE agent_sessions AS session_record
-    SET status='expired',
-        last_request_id=COALESCE(session_record.last_request_id,session_record.active_request_id),
-        active_request_id=NULL,
-        expired_at=GREATEST(
-          db_clock.now,
-          COALESCE($3::timestamptz,db_clock.now),
-          session_record.expires_at
-        )
-    FROM candidates
-    CROSS JOIN db_clock
-    WHERE session_record.organization_id=candidates.organization_id
-      AND session_record.session_id=candidates.session_id
-      AND session_record.status IN (${REVOCABLE_SESSION_STATUSES.map((_, index) => `'${REVOCABLE_SESSION_STATUSES[index]}'`).join(",")})
-    RETURNING session_record.status`, [values.organizationId, values.limit, values.expiredAt]);
-
-  return lifecycleResult(grants, sessions);
+  const result = await tx.query(
+    "SELECT public.agentpass_agent_session_lifecycle_expire_due($1::uuid,$2::integer,$3::timestamptz) AS result",
+    [values.organizationId, values.limit, values.expiredAt]
+  );
+  return lifecycleJsonResult(result);
 }
 
 async function advanceRevocationInTransaction(tx, values) {
   await setTenantContext(tx, values.organizationId);
-  const selectors = selectorClauses(values, "grant_record", { sessionColumn: "consumed_session_id" });
-  const revokedAtParameter = 2 + selectors.params.length;
-  const grants = await tx.query(`WITH db_clock AS MATERIALIZED (
-      SELECT clock_timestamp() AS now
-    ), candidates AS (
-      SELECT grant_record.organization_id,grant_record.grant_id
-      FROM agent_session_grants AS grant_record
-      CROSS JOIN db_clock
-      WHERE grant_record.organization_id=$1
-        AND grant_record.status='issued'
-        AND ${selectors.text}
-      ORDER BY grant_record.expires_at ASC,grant_record.grant_id ASC
-      LIMIT ${MAX_BATCH}
-      FOR UPDATE OF grant_record
-    )
-    UPDATE agent_session_grants AS grant_record
-    SET status=CASE WHEN grant_record.expires_at <= db_clock.now THEN 'expired' ELSE 'revoked' END,
-        expired_at=CASE WHEN grant_record.expires_at <= db_clock.now
-          THEN GREATEST(db_clock.now,COALESCE($${revokedAtParameter}::timestamptz,db_clock.now),grant_record.expires_at)
-          ELSE NULL END,
-        revoked_at=CASE WHEN grant_record.expires_at <= db_clock.now THEN NULL
-          ELSE GREATEST(db_clock.now,COALESCE($${revokedAtParameter}::timestamptz,db_clock.now),grant_record.issued_at) END
-    FROM candidates
-    CROSS JOIN db_clock
-    WHERE grant_record.organization_id=candidates.organization_id
-      AND grant_record.grant_id=candidates.grant_id
-      AND grant_record.status='issued'
-    RETURNING grant_record.status`, [values.organizationId, ...selectors.params, values.revokedAt]);
+  const result = await tx.query(
+    "SELECT public.agentpass_agent_session_lifecycle_revoke($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::boolean,$7::timestamptz) AS result",
+    [values.organizationId, values.deviceId, values.agentId, values.grantId, values.sessionId, values.organizationWide, values.revokedAt]
+  );
+  return lifecycleJsonResult(result);
+}
 
-  const sessionSelectors = selectorClauses(values, "session_record", { sessionColumn: "session_id" });
-  const sessions = await tx.query(`WITH db_clock AS MATERIALIZED (
-      SELECT clock_timestamp() AS now
-    ), candidates AS (
-      SELECT session_record.organization_id,session_record.session_id
-      FROM agent_sessions AS session_record
-      CROSS JOIN db_clock
-      WHERE session_record.organization_id=$1
-        AND session_record.status IN (${REVOCABLE_SESSION_STATUSES.map((_, index) => `'${REVOCABLE_SESSION_STATUSES[index]}'`).join(",")})
-        AND ${sessionSelectors.text}
-      ORDER BY session_record.expires_at ASC,session_record.session_id ASC
-      LIMIT ${MAX_BATCH}
-      FOR UPDATE OF session_record
-    )
-    UPDATE agent_sessions AS session_record
-    SET status=CASE WHEN session_record.expires_at <= db_clock.now THEN 'expired' ELSE 'revoked' END,
-        last_request_id=COALESCE(session_record.last_request_id,session_record.active_request_id),
-        active_request_id=NULL,
-        expired_at=CASE WHEN session_record.expires_at <= db_clock.now
-          THEN GREATEST(db_clock.now,COALESCE($${revokedAtParameter}::timestamptz,db_clock.now),session_record.expires_at)
-          ELSE NULL END,
-        revoked_at=CASE WHEN session_record.expires_at <= db_clock.now THEN NULL
-          ELSE GREATEST(db_clock.now,COALESCE($${revokedAtParameter}::timestamptz,db_clock.now),session_record.created_at) END
-    FROM candidates
-    CROSS JOIN db_clock
-    WHERE session_record.organization_id=candidates.organization_id
-      AND session_record.session_id=candidates.session_id
-      AND session_record.status IN (${REVOCABLE_SESSION_STATUSES.map((_, index) => `'${REVOCABLE_SESSION_STATUSES[index]}'`).join(",")})
-    RETURNING session_record.status`, [values.organizationId, ...sessionSelectors.params, values.revokedAt]);
-
-  return lifecycleResult(grants, sessions);
+function lifecycleJsonResult(result) {
+  if (rowCount(result) !== 1 || !isObject(result.rows[0]?.result)) throw failure("ERR_DATABASE");
+  const value = result.rows[0].result;
+  if (!Array.isArray(value.counts) || value.counts.length !== 2
+    || !Number.isInteger(value.counts[0]) || !Number.isInteger(value.counts[1])
+    || !Number.isInteger(value.expired) || !Number.isInteger(value.revoked)) throw failure("ERR_DATABASE");
+  return Object.freeze({ counts: Object.freeze(value.counts), expired: value.expired, revoked: value.revoked });
 }
 
 function selectorClauses(values, alias, { sessionColumn }) {

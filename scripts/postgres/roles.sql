@@ -139,7 +139,8 @@ BEGIN
         'agent_session_signing_capability_expiry_audit_events',
         'agent_session_signing_capability_expiry_audit_heads',
         'agent_capability_sequence_heads',
-        'agent_session_launch_authority_handoffs'
+        'agent_session_launch_authority_handoffs',
+        'agent_session_grants', 'agent_sessions'
       )
       AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
       AND left(c.relname, length('platform_')) <> 'platform_'
@@ -221,7 +222,7 @@ BEGIN
         OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
           'agent_session_signing_capability_expiry_audit_events',
           'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads',
-          'agent_session_launch_authority_handoffs')
+          'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions')
       )
   LOOP
     EXECUTE format(
@@ -267,6 +268,11 @@ BEGIN
     'agentpass_capability_reservation_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,text,text,jsonb,timestamptz,bytea)',
     'agentpass_capability_reservation_list(uuid,integer)',
     'agentpass_agent_launch_authority_handoff(uuid,uuid,uuid,uuid,uuid,text,uuid,text,uuid,bytea,timestamptz,timestamptz,bigint,bigint,bytea,bytea,bytea)'
+    ,'agentpass_agent_session_grant_issue(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,timestamptz,uuid)'
+    ,'agentpass_agent_session_grant_get(uuid,uuid)'
+    ,'agentpass_agent_session_consume(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,text,text,uuid,boolean)'
+    ,'agentpass_agent_session_lifecycle_expire_due(uuid,integer,timestamptz)'
+    ,'agentpass_agent_session_lifecycle_revoke(uuid,uuid,uuid,uuid,uuid,boolean,timestamptz)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

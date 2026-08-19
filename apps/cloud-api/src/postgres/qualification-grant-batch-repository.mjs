@@ -250,15 +250,10 @@ async function insertBatch(tx, values, manifest) {
 
 async function insertGrant(tx, values, entry) {
   const statement = entry.grant.statement;
-  const result = await tx.query(`INSERT INTO agent_session_grants
-    (organization_id,grant_id,device_id,agent_id,agent_kind,adapter_id,adapter_version,
-     worktree_binding_sha256,process_binding_policy_id,scope_json,max_signatures,not_before,
-     expires_at,control_sequence,authority_generation,issuer,signer_key_id,statement_hash,
-     grant_hash,signature_base64url,status,issued_at,created_by)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::timestamptz,$13::timestamptz,
-      $14,$15,$16,$17,$18,$19,$20,'issued',$21::timestamptz,$22)
-    ON CONFLICT (organization_id,grant_id) DO NOTHING
-    RETURNING grant_id`, [
+  const result = await tx.query(`SELECT * FROM public.agentpass_agent_session_grant_issue(
+    $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text,$6::uuid,$7::text,$8::text,$9::text,
+    $10::jsonb,$11::integer,$12::timestamptz,$13::timestamptz,$14::bigint,$15::bigint,
+    $16::text,$17::text,$18::text,$19::text,$20::text,$21::timestamptz,$22::uuid)`, [
     values.organizationId, statement.grant_id, statement.device_id, statement.agent_id, statement.agent_kind,
     statement.adapter_id, statement.adapter_version, statement.worktree_binding_sha256,
     statement.process_binding_policy_id, JSON.stringify(statement.scope), statement.max_signatures,
@@ -266,13 +261,7 @@ async function insertGrant(tx, values, entry) {
     statement.issuer, statement.key_id, entry.statement_hash, entry.grant_hash, entry.grant.signature,
     statement.not_before, values.actor.memberId
   ]);
-  if (rowCount(result) === 1) return;
-  const existing = await tx.query(`SELECT grant_id,device_id,agent_id,agent_kind,adapter_id,adapter_version,
-      worktree_binding_sha256,process_binding_policy_id,scope_json,max_signatures,not_before,expires_at,
-      control_sequence,authority_generation,issuer,signer_key_id,statement_hash,grant_hash,
-      signature_base64url,status,issued_at,created_by
-    FROM agent_session_grants WHERE organization_id=$1 AND grant_id=$2 FOR SHARE`, [values.organizationId, statement.grant_id]);
-  if (rowCount(existing) !== 1 || !sameStoredGrant(existing.rows[0], entry, values)) throw failure("DATABASE");
+  if (rowCount(result) !== 1 || !sameStoredGrant(result.rows[0], entry, values)) throw failure("DATABASE");
 }
 
 async function insertStep(tx, values, entry) {

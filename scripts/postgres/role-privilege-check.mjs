@@ -22,6 +22,7 @@ const REPORT_CHECKS = [
   'sequence_privileges_ok',
   'function_privileges_ok',
   'signing_capability_boundary_ok',
+  'agent_session_authority_boundary_ok',
   'default_privileges_ok',
 ];
 
@@ -185,6 +186,11 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_capability_reservation_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,text,text,jsonb,timestamptz,bytea)'),
     ('agentpass_capability_reservation_list(uuid,integer)'),
     ('agentpass_agent_launch_authority_handoff(uuid,uuid,uuid,uuid,uuid,text,uuid,text,uuid,bytea,timestamptz,timestamptz,bigint,bigint,bytea,bytea,bytea)'),
+    ('agentpass_agent_session_grant_issue(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,timestamptz,uuid)'),
+    ('agentpass_agent_session_grant_get(uuid,uuid)'),
+    ('agentpass_agent_session_consume(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,text,text,uuid,boolean)'),
+    ('agentpass_agent_session_lifecycle_expire_due(uuid,integer,timestamptz)'),
+    ('agentpass_agent_session_lifecycle_revoke(uuid,uuid,uuid,uuid,uuid,boolean,timestamptz)'),
     ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
     ('agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)'),
     ('agentpass_platform_session_challenge_find(uuid)'),
@@ -394,6 +400,85 @@ signing_capability_boundary_ok AS (
   SELECT (SELECT value FROM signing_authority_tables_ok)
     AND (SELECT value FROM signing_capability_functions_ok) AS value
 ),
+agent_session_authority_table_allowlist(relname) AS (
+  VALUES
+    ('agent_session_grants'),
+    ('agent_sessions')
+),
+agent_session_authority_policy_contract(relname, policy_name, policy_command, using_expression, with_check_expression, policy_role) AS (
+  VALUES
+    ('agent_session_grants', 'agent_session_grants_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
+    ('agent_session_grants', 'agent_session_grants_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
+    ('agent_sessions', 'agent_sessions_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
+    ('agent_sessions', 'agent_sessions_backup_select', 'r', 'true', NULL, 'agentpass_backup')
+),
+agent_session_authority_table_observations AS (
+  SELECT t.relname, t.relkind,
+    array_remove(ARRAY[
+      CASE WHEN t.relkind IS DISTINCT FROM 'r' THEN 'relation:not_table' END,
+      CASE WHEN t.relrowsecurity IS DISTINCT FROM true THEN 'rls:not_enabled' END,
+      CASE WHEN t.relforcerowsecurity IS DISTINCT FROM true THEN 'rls:not_forced' END,
+      CASE WHEN t.relowner IS DISTINCT FROM (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')
+        THEN 'owner:not_migrator' END,
+      CASE WHEN (
+          SELECT count(*) FROM pg_policy AS p WHERE p.polrelid = t.oid
+        ) <> (
+          SELECT count(*) FROM agent_session_authority_policy_contract AS expected
+          WHERE expected.relname = t.relname
+        ) THEN 'policy:unexpected_count' END,
+      CASE WHEN EXISTS (
+          SELECT 1
+          FROM agent_session_authority_policy_contract AS expected
+          LEFT JOIN pg_policy AS p ON p.polrelid = t.oid AND p.polname = expected.policy_name
+          WHERE expected.relname = t.relname
+            AND (
+              p.oid IS NULL
+              OR p.polcmd::text IS DISTINCT FROM expected.policy_command
+              OR p.polpermissive IS DISTINCT FROM true
+              OR (expected.policy_role IS NULL AND p.polroles IS DISTINCT FROM ARRAY[0::oid])
+              OR (expected.policy_role IS NOT NULL AND p.polroles IS DISTINCT FROM ARRAY[(
+                SELECT oid FROM role_ids WHERE rolname = expected.policy_role
+              )])
+              OR regexp_replace(
+                  replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'),
+                    'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
+                  '(^[(]|[)]$)', '', 'g'
+                ) IS DISTINCT FROM expected.using_expression
+              OR regexp_replace(
+                  replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'),
+                    'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
+                  '(^[(]|[)]$)', '', 'g'
+                ) IS DISTINCT FROM expected.with_check_expression
+            )
+        ) THEN 'policy:missing_or_mismatch' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN 'app:select' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN 'app:insert' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN 'app:update' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN 'app:delete' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN 'app:truncate' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'REFERENCES') THEN 'app:references' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRIGGER') THEN 'app:trigger' END,
+      CASE WHEN has_table_privilege('agentpass_signer', t.oid, 'SELECT') THEN 'signer:select' END,
+      CASE WHEN has_table_privilege('agentpass_signer', t.oid, 'INSERT') THEN 'signer:insert' END,
+      CASE WHEN has_table_privilege('agentpass_signer', t.oid, 'UPDATE') THEN 'signer:update' END,
+      CASE WHEN has_table_privilege('agentpass_signer', t.oid, 'DELETE') THEN 'signer:delete' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'SELECT') IS DISTINCT FROM true THEN 'backup:select_missing' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'INSERT') THEN 'backup:insert' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'UPDATE') THEN 'backup:update' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'DELETE') THEN 'backup:delete' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'SELECT') THEN 'maintenance:select' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'INSERT') THEN 'maintenance:insert' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'UPDATE') THEN 'maintenance:update' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'DELETE') THEN 'maintenance:delete' END
+    ]::text[], NULL::text) AS failures
+  FROM tables AS t
+  JOIN agent_session_authority_table_allowlist AS expected ON expected.relname = t.relname
+),
+agent_session_authority_boundary_ok AS (
+  SELECT count(*) = (SELECT count(*) FROM agent_session_authority_table_allowlist)
+    AND bool_and(cardinality(failures) = 0) AS value
+  FROM agent_session_authority_table_observations
+),
 default_acl AS (
   SELECT d.defaclobjtype AS object_type, r.rolname AS grantee,
          x.privilege_type
@@ -459,34 +544,34 @@ table_privilege_observations AS (
         OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(t.relname, length('platform_')) = 'platform_'
         OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-        OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs') THEN 'authority'
+        OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions') THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
       CASE WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs')
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions')
         THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END
         ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs'))
+          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete_missing' END END,
       CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN NULL ELSE 'app:truncate' END,
@@ -591,6 +676,7 @@ checks AS (
     AND (SELECT value FROM sequence_privileges_ok)
     AND (SELECT value FROM function_privileges_ok)
     AND (SELECT value FROM signing_capability_boundary_ok)
+    AND (SELECT value FROM agent_session_authority_boundary_ok)
     AND (SELECT value FROM default_privileges_ok) AS ok
 )
 SELECT json_build_object(
@@ -616,6 +702,7 @@ SELECT json_build_object(
   'sequence_privileges_ok', (SELECT value FROM sequence_privileges_ok),
   'function_privileges_ok', (SELECT value FROM function_privileges_ok),
   'signing_capability_boundary_ok', (SELECT value FROM signing_capability_boundary_ok),
+  'agent_session_authority_boundary_ok', (SELECT value FROM agent_session_authority_boundary_ok),
       'signing_capability_table_diagnostics', COALESCE((SELECT json_agg(json_build_object(
           'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
           'failures', failures,
@@ -635,6 +722,16 @@ SELECT json_build_object(
       WHERE cardinality(failures) > 0
       ORDER BY routine_signature
       LIMIT ${MAX_TABLE_DIAGNOSTICS}) AS bounded_signing_function_failures), '[]'::json),
+  'agent_session_authority_diagnostics', COALESCE((SELECT json_agg(json_build_object(
+      'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
+      'kind', relkind,
+      'failures', failures
+    ) ORDER BY relname)
+    FROM (SELECT relname, relkind, failures
+      FROM agent_session_authority_table_observations
+      WHERE cardinality(failures) > 0
+      ORDER BY relname
+      LIMIT ${MAX_TABLE_DIAGNOSTICS}) AS bounded_agent_session_authority_failures), '[]'::json),
   'default_privileges_ok', (SELECT value FROM default_privileges_ok),
   'table_count', (SELECT count(*) FROM tables),
   'sequence_count', (SELECT count(*) FROM sequences),
@@ -691,7 +788,10 @@ SELECT json_build_object(
                   report.signing_capability_table_diagnostics,
                   report.signing_capability_function_diagnostics,
                 )}`;
-              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}`);
+              const agentSessionAuthorityDiagnostics = report.agent_session_authority_boundary_ok === true
+                ? ''
+                : ` agent_session_authority_diagnostics=${boundedTableDiagnostics(report.agent_session_authority_diagnostics)}`;
+              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
               if (evidenceOutput !== undefined) {
