@@ -35,7 +35,12 @@ extension NativeAgentDedicatedSigningCapabilityIssuer:
 /// DTO. In particular, the association and authority factory remain private
 /// to this typed value and cannot be selected by the authorized payload.
 public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
-    public let sessionID: String
+    /// Session ID owned by the authenticated Host/Child transport.
+    public let dedicatedSessionID: String
+    /// Session ID owned by the Generic Agent Coordinator and Cloud authority.
+    /// These IDs are intentionally distinct: the Dedicated transport must not
+    /// be able to select or masquerade as a Coordinator session.
+    public let coordinatorSessionID: String
     public let binding: NativeAgentSessionBinding
     public let capabilityRequest: NativeAgentSigningCapabilityRequest
     public let verificationContext: NativeAgentSigningCapabilityVerificationContext
@@ -45,7 +50,8 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
         (NativeAgentSessionBinding) throws -> NativeSigningTransactionAuthority
 
     public init(
-        sessionID: String,
+        dedicatedSessionID: String,
+        coordinatorSessionID: String,
         binding: NativeAgentSessionBinding,
         capabilityRequest: NativeAgentSigningCapabilityRequest,
         verificationContext: NativeAgentSigningCapabilityVerificationContext,
@@ -53,11 +59,13 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
         authorityProvider: @escaping @Sendable
             (NativeAgentSessionBinding) throws -> NativeSigningTransactionAuthority
     ) throws {
-        guard UUID(uuidString: sessionID)?.uuidString.lowercased() == sessionID,
-              verificationContext.sessionID == sessionID else {
+        guard UUID(uuidString: dedicatedSessionID)?.uuidString.lowercased() == dedicatedSessionID,
+              UUID(uuidString: coordinatorSessionID)?.uuidString.lowercased() == coordinatorSessionID,
+              verificationContext.sessionID == coordinatorSessionID else {
             throw NativeAgentDedicatedSigningServiceAdapterError.contextMismatch
         }
-        self.sessionID = sessionID
+        self.dedicatedSessionID = dedicatedSessionID
+        self.coordinatorSessionID = coordinatorSessionID
         self.binding = binding
         self.capabilityRequest = capabilityRequest
         self.verificationContext = verificationContext
@@ -185,10 +193,10 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
             throw NativeAgentDedicatedSigningServiceAdapterError.contextUnavailable
         }
 
-        guard context.sessionID == payload.sessionID,
+        guard context.dedicatedSessionID == payload.sessionID,
               Self.hex(context.binding.processBindingDigest)
                   == payload.peerProcessBindingHash.lowercased(),
-              context.verificationContext.sessionID == payload.sessionID else {
+              context.verificationContext.sessionID == context.coordinatorSessionID else {
             throw NativeAgentDedicatedSigningServiceAdapterError.contextMismatch
         }
 
@@ -203,7 +211,7 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
             throw NativeAgentDedicatedSigningServiceAdapterError.capabilityIssuanceFailed
         }
 
-        guard serviceRequest.sessionID == payload.sessionID,
+        guard serviceRequest.sessionID == context.coordinatorSessionID,
               serviceRequest.commitPayload == payload.payload,
               serviceRequest.capabilityID == serviceRequest.capability.statement.capabilityID else {
             throw NativeAgentDedicatedSigningServiceAdapterError.requestMaterializationFailed
