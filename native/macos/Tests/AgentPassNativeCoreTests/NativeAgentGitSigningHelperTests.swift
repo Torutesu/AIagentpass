@@ -43,7 +43,11 @@ private func withTemporaryPayload<T>(
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let path = directory.appendingPathComponent("commit-payload").path
-    try payload.write(to: URL(fileURLWithPath: path), options: .completeFileProtection)
+    // The helper contract under test is the fd3 bridge and payload binding.
+    // Complete-file-protection is an entitlement/device policy concern and
+    // is unavailable in the hosted Swift runner; retain the explicit 0600
+    // boundary without making this fixture depend on that external gate.
+    try payload.write(to: URL(fileURLWithPath: path), options: .atomic)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     return try body(path)
 }
