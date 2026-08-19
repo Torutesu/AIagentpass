@@ -294,9 +294,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   const agentSessionLifecycleRepository = createPostgresAgentSessionLifecycleRepository({ client: pool, metrics: operationalMetrics });
   const agentSessionSigningCapabilitySessionBinder = createPostgresAgentSessionSigningCapabilitySessionBinder({ client: pool });
-  // No migration-owned atomic handoff function exists yet. Keep the explicit
-  // production seam visible to composition while its default remains closed.
-  const agentLaunchAuthorityHandoffRepository = createPostgresAgentLaunchAuthorityHandoffRepository();
+  // Use the deployment-owned atomic SQL boundary when the hosted runtime is
+  // composed. The adapter itself remains fail-closed if the function is not
+  // deployed, so a partially migrated database cannot fall back to DML or an
+  // application-side check-then-insert sequence.
+  const agentLaunchAuthorityHandoffRepository = createPostgresAgentLaunchAuthorityHandoffRepository({ client: pool });
   const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
