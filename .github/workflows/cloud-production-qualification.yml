@@ -90,3 +90,23 @@ jobs:
         env:
           PROMOTION_RESULT: ${{ runner.temp }}/promotion-result.json
         run: jq -c '{status,source_commit,image_digest,provider,service,revision}' "$PROMOTION_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare immutable qualification artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/cloud-production-qualification-${EXPECTED_COMMIT}"
+          [[ ! -e "$artifact_dir" ]] || { echo "qualification artifact directory already exists" >&2; exit 1; }
+          install -d -m 0700 "$artifact_dir"
+          install -m 0600 "$RUNNER_TEMP/cloud-deployment-evidence.json" "$artifact_dir/deployment-evidence.json"
+          install -m 0600 "$RUNNER_TEMP/kms-qualification.json" "$artifact_dir/kms-qualification.json"
+          install -m 0600 "$RUNNER_TEMP/promotion-result.json" "$artifact_dir/promotion-result.json"
+          install -m 0600 "$RUNNER_TEMP/deployment-result.json" "$artifact_dir/deployment-result.json"
+          jq -n --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
+            '{schema_version:1,source_commit:$commit,image_digest:$digest,status:"verified"}' \
+            > "$artifact_dir/qualification-binding.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloud-production-qualification-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/cloud-production-qualification-${{ inputs.source_commit }}
+          if-no-files-found: error
+          retention-days: 14

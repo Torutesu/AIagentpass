@@ -7,8 +7,20 @@ on:
         description: Exact 40-character commit being qualified
         required: true
         type: string
+      source_tree:
+        description: Exact 40-character Git tree being qualified
+        required: true
+        type: string
       artifact_path:
-        description: Absolute path to the installed/signed artifact on each runner
+        description: Absolute path to the manifest-bound signed PKG on the protected runner
+        required: true
+        type: string
+      release_manifest_path:
+        description: Absolute path to the signed release manifest on the protected runner
+        required: true
+        type: string
+      release_manifest_signature_path:
+        description: Absolute path to the detached release manifest signature
         required: true
         type: string
 
@@ -16,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-hardware-qualification-${{ inputs.source_commit }}
+  group: macos-hardware-qualification-${{ inputs.source_commit }}-${{ inputs.source_tree }}
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +45,14 @@ jobs:
             runner: agentpass-hardware-intel
     runs-on: ["self-hosted", "macOS", "${{ matrix.runner }}"]
     timeout-minutes: 30
+    env:
+      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_DEVELOPER_ID_TEAM_ID }}
+      RELEASE_MANIFEST_PUBLIC_KEY: ${{ vars.AGENTPASS_RELEASE_MANIFEST_PUBLIC_KEY_PATH }}
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_FINGERPRINT }}
+      RUNNER_ATTESTATION: /opt/agentpass/macos/runner-attestation.json
+      RUNNER_ATTESTATION_SIGNATURE: /opt/agentpass/macos/runner-attestation.sig
+      RUNNER_ATTESTATION_PUBLIC_KEY: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_PUBLIC_KEY_PATH }}
+      RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_FINGERPRINT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,39 +60,84 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           clean: true
-      - name: Bind checkout to the requested source commit
+      - name: Bind checkout to the requested source commit and tree
         env:
           REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          REQUESTED_SOURCE_TREE: ${{ inputs.source_tree }}
         run: |
           set -euo pipefail
           [[ "$REQUESTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ "$REQUESTED_SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "source_tree must be a full lowercase SHA-1" >&2; exit 1; }
           [[ "$(git rev-parse HEAD)" == "$REQUESTED_SOURCE_COMMIT" ]] || { echo "checkout is not the requested source commit" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD^{tree})" == "$REQUESTED_SOURCE_TREE" ]] || { echo "checkout is not the requested source tree" >&2; exit 1; }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
+      - name: Require protected runner and trust inputs before probes
+        env:
+          ARTIFACT: ${{ inputs.artifact_path }}
+          MANIFEST: ${{ inputs.release_manifest_path }}
+          MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
+          ATTESTATION_SIGNATURE: ${{ env.RUNNER_ATTESTATION_SIGNATURE }}
+          ATTESTATION_PUBLIC_KEY: ${{ env.RUNNER_ATTESTATION_PUBLIC_KEY }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
+          EXPECTED_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "expected Developer ID Team ID is missing or invalid" >&2; exit 1; }
+          [[ "$EXPECTED_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9_-]{43}$ ]] || { echo "release manifest fingerprint is missing or invalid" >&2; exit 1; }
+          for value in "$ARTIFACT" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$ATTESTATION" "$ATTESTATION_SIGNATURE" "$ATTESTATION_PUBLIC_KEY"; do
+            [[ "$value" == /* && "$value" != *$'\0'* ]] || { echo "qualification paths must be absolute" >&2; exit 1; }
+            [[ -f "$value" && ! -L "$value" ]] || { echo "qualification input is missing or symlinked: $value" >&2; exit 1; }
+          done
+          for value in "$ATTESTATION" "$ATTESTATION_SIGNATURE" "$ATTESTATION_PUBLIC_KEY"; do
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "runner attestation inputs must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            [[ "$mode" == 400 || "$mode" == 440 || "$mode" == 444 || "$mode" == 600 || "$mode" == 640 || "$mode" == 644 ]] || { echo "runner attestation input is not protected: $value" >&2; exit 1; }
+          done
+          /usr/bin/arch >/dev/null
+          /usr/sbin/sysctl -n kern.hv_vmm_present >/dev/null
+      - name: Verify the signed manifest, package, notarization, and Developer ID Team ID
+        env:
+          MANIFEST: ${{ inputs.release_manifest_path }}
+          MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          EXPECTED_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
+        run: scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$EXPECTED_FINGERPRINT" "$EXPECTED_TEAM_ID"
       - name: Require fixed physical probes
         env:
-          AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
           AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
           AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
         run: |
           set -euo pipefail
           for value in "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "$AGENTPASS_NSXPC_PROBE" "$AGENTPASS_CRASH_RESTART_PROBE"; do
-            [[ -n "$value" && "$value" == /* && -x "$value" && ! -L "$value" ]] || { echo "all three fixed physical probes must exist as non-symlink executables" >&2; exit 1; }
+            [[ -n "$value" && "$value" == /* && -f "$value" && -x "$value" && ! -L "$value" ]] || { echo "all three fixed physical probes must exist as non-symlink executables" >&2; exit 1; }
           done
-          [[ "$AGENTPASS_QUALIFICATION_ARTIFACT" == /* && -e "$AGENTPASS_QUALIFICATION_ARTIFACT" && ! -L "$AGENTPASS_QUALIFICATION_ARTIFACT" ]] || { echo "signed artifact path is missing or symlinked" >&2; exit 1; }
       - name: Run fail-closed qualification and write canonical evidence
         env:
           AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST: ${{ inputs.release_manifest_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
           AGENTPASS_QUALIFICATION_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          AGENTPASS_QUALIFICATION_SOURCE_TREE: ${{ inputs.source_tree }}
+          AGENTPASS_QUALIFICATION_EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
           AGENTPASS_QUALIFICATION_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
           AGENTPASS_QUALIFICATION_OUTPUT: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
+          AGENTPASS_RUNNER_ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
+          AGENTPASS_RUNNER_ATTESTATION_SIGNATURE: ${{ env.RUNNER_ATTESTATION_SIGNATURE }}
+          AGENTPASS_RUNNER_ATTESTATION_PUBLIC_KEY: ${{ env.RUNNER_ATTESTATION_PUBLIC_KEY }}
+          AGENTPASS_RUNNER_ATTESTATION_FINGERPRINT: ${{ env.RUNNER_ATTESTATION_FINGERPRINT }}
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
           AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
           AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
         run: native/macos/scripts/qualification/run-hardware-qualification.sh
-      - name: Independently verify canonical evidence and artifact digest
+      - name: Independently verify canonical evidence and all bound digests
         run: node native/macos/Qualification/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

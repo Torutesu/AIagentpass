@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 
 import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
@@ -14,7 +15,7 @@ function digest(value) { return crypto.createHash("sha256").update(value).digest
 function read(file) { return fs.readFileSync(file); }
 function fail(message) { throw new Error(message); }
 
-function validateTap(tap) {
+export function validateTap(tap) {
   const text = tap.toString("utf8");
   if (/^Bail out!/mu.test(text) || /(^|[\t\r\n ])# (?:SKIP|TODO)([\t\r\n ]|$)/mu.test(text)) {
     fail("PostgreSQL qualification TAP contains a skipped or TODO test");
@@ -24,7 +25,26 @@ function validateTap(tap) {
   return { tests, tap_sha256: digest(tap) };
 }
 
-async function queryEvidence(databaseUrl) {
+async function queryIdentity(databaseUrl, expectedRole, connection) {
+  if (!databaseUrl) fail(`database URL for ${connection} role assertion is required`);
+  const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
+  try {
+    const result = await pool.query("SELECT session_user, current_user");
+    assert.equal(result.rowCount, 1);
+    const identity = result.rows[0];
+    assert.deepEqual(identity, { session_user: expectedRole, current_user: expectedRole }, `${connection} PostgreSQL identity`);
+    return {
+      connection,
+      expected_role: expectedRole,
+      session_user: identity.session_user,
+      current_user: identity.current_user,
+    };
+  } finally {
+    await pool.end();
+  }
+}
+
+async function queryEvidence(databaseUrl, appDatabaseUrl) {
   if (!databaseUrl) fail("AGENTPASS_TEST_POSTGRES_ADMIN_URL is required");
   const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
   try {
@@ -52,7 +72,12 @@ async function queryEvidence(databaseUrl) {
     assert.equal(row.forced_rls_relations, 3);
     assert.equal(row.device_audit_triggers, 2);
     assert.equal(row.ssl, true);
-    return row;
+    const adminRole = process.env.AGENTPASS_QUALIFICATION_ADMIN_ROLE ?? "postgres";
+    const roleAssertions = [
+      await queryIdentity(databaseUrl, adminRole, "admin"),
+      await queryIdentity(appDatabaseUrl, "agentpass_app", "app"),
+    ];
+    return { ...row, roleAssertions };
   } finally {
     await pool.end();
   }
@@ -65,7 +90,10 @@ async function writeEvidence(output, tapFile) {
   if (typeof candidateId !== "string" || candidateId.length < 1 || candidateId.length > 256) fail("qualification candidate id is invalid");
   const tap = read(tapFile);
   const tapEvidence = validateTap(tap);
-  const server = await queryEvidence(process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL);
+  const server = await queryEvidence(
+    process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL,
+    process.env.AGENTPASS_TEST_APP_DATABASE_URL,
+  );
   const report = {
     schema_version: 1,
     kind: "agentpass.postgres.real-service.qualification",
@@ -86,6 +114,7 @@ async function writeEvidence(output, tapFile) {
       tls_version: server.tls_version,
       cipher: server.cipher,
       roles: server.roles,
+      role_assertions: server.roleAssertions,
       forced_rls_relations: server.forced_rls_relations,
       device_audit_triggers: server.device_audit_triggers
     },
@@ -100,7 +129,7 @@ async function writeEvidence(output, tapFile) {
   return report;
 }
 
-function verifyEvidence(file, sourceCommit) {
+export function verifyEvidence(file, sourceCommit) {
   const report = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.equal(report.kind, "agentpass.postgres.real-service.qualification");
   assert.equal(report.source_commit, sourceCommit);
@@ -108,6 +137,10 @@ function verifyEvidence(file, sourceCommit) {
   assert.equal(report.schema.migration_count, 80);
   assert.equal(report.service.ssl, true);
   assert.equal(report.service.roles.length, ROLE_NAMES.length);
+  assert.deepEqual(report.service.role_assertions, [
+    { connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres" },
+    { connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app" },
+  ]);
   assert.equal(report.service.forced_rls_relations, 3);
   assert.equal(report.service.device_audit_triggers, 2);
   assert.equal(report.skipped_tests, 0);
@@ -119,6 +152,8 @@ function verifyEvidence(file, sourceCommit) {
 }
 
 const [command, output, tapFile, expectedSource] = process.argv.slice(2);
-if (command === "write" && output && tapFile) await writeEvidence(output, tapFile);
-else if (command === "verify" && output && expectedSource) verifyEvidence(output, expectedSource);
-else fail("usage: postgres-qualification-evidence.mjs write <evidence> <tap> | verify <evidence> <source-sha>");
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (command === "write" && output && tapFile) await writeEvidence(output, tapFile);
+  else if (command === "verify" && output && expectedSource) verifyEvidence(output, expectedSource);
+  else fail("usage: postgres-qualification-evidence.mjs write <evidence> <tap> | verify <evidence> <source-sha>");
+}

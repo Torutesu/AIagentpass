@@ -456,7 +456,7 @@ jobs:
             assert.equal(scenario.history.status, "clean");
           }
           NODE
-      - name: Run remaining real-service PostgreSQL qualification gate
+      - name: Run P2 real-service PostgreSQL qualification gate
         shell: bash
         run: |
           set -euo pipefail
@@ -465,12 +465,15 @@ jobs:
           export AGENTPASS_TEST_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL"
           export AGENTPASS_TEST_APP_DATABASE_URL="$N1_APP_DATABASE_URL"
           export AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT"
+          export AGENTPASS_TEST_ADMIN_ROLE="postgres"
+          export AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"
           export AGENTPASS_QUALIFICATION_SOURCE_COMMIT="$GITHUB_SHA"
           export AGENTPASS_QUALIFICATION_CANDIDATE_ID="ci-${GITHUB_SHA}"
           export AGENTPASS_QUALIFICATION_POSTGRES_IMAGE_ID="$N1_POSTGRES_IMAGE_ID"
           tap="$N1_EVIDENCE_DIR/qualification-real-service.tap"
           status=0
           node --test --test-concurrency=1 --test-reporter=tap \
+            scripts/postgres/p2-qualification-contract.test.mjs \
             scripts/postgres/device-audit-postgres-qualification.integration.test.mjs \
             apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs \
             apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs >"$tap" 2>&1 || status=$?
@@ -643,6 +646,10 @@ jobs:
             (.schema.migration_count == 80) and
             (.service.ssl == true) and
             ((.service.roles | length) == 5) and
+            (.service.role_assertions == [
+              {connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres"},
+              {connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app"}
+            ]) and
             (.service.forced_rls_relations == 3) and
             (.service.device_audit_triggers == 2) and
             (.skipped_tests == 0) and

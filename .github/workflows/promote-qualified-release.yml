@@ -1,6 +1,6 @@
 name: Promote qualified release
 
-run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }} / ${{ inputs.ci_run_id }})
+run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }} / ${{ inputs.cloud_qualification_run_id }} / ${{ inputs.macos_qualification_run_id }} / ${{ inputs.ci_run_id }})
 
 on:
   workflow_dispatch:
@@ -13,6 +13,14 @@ on:
         description: Successful P0-C hardware qualification workflow run ID
         required: true
         type: string
+      cloud_qualification_run_id:
+        description: Successful Cloud production qualification workflow run ID on the exact release source SHA, with its retained artifact
+        required: true
+        type: string
+      macos_qualification_run_id:
+        description: Successful macOS hardware qualification workflow run ID on the exact release source SHA, with both architecture artifacts
+        required: true
+        type: string
       ci_run_id:
         description: Successful CI workflow run ID with all six protected lanes green on the release source SHA
         required: true
@@ -23,7 +31,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}-${{ inputs.ci_run_id }}
+  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}-${{ inputs.cloud_qualification_run_id }}-${{ inputs.macos_qualification_run_id }}-${{ inputs.ci_run_id }}
   cancel-in-progress: false
 
 env:
@@ -46,6 +54,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+      CLOUD_QUALIFICATION_RUN_ID: ${{ inputs.cloud_qualification_run_id }}
+      MACOS_QUALIFICATION_RUN_ID: ${{ inputs.macos_qualification_run_id }}
       CI_RUN_ID: ${{ inputs.ci_run_id }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
@@ -75,9 +85,12 @@ jobs:
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "protected main ref required" >&2; exit 1; }
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$CLOUD_QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "cloud_qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$MACOS_QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "macos_qualification_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
-          [[ "$RELEASE_RUN_ID" != "$QUALIFICATION_RUN_ID" ]] || { echo "release and qualification runs must be distinct" >&2; exit 1; }
-          [[ "$RELEASE_RUN_ID" != "$CI_RUN_ID" && "$QUALIFICATION_RUN_ID" != "$CI_RUN_ID" ]] || { echo "release, qualification, and CI runs must be distinct" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" != "$QUALIFICATION_RUN_ID" && "$RELEASE_RUN_ID" != "$CLOUD_QUALIFICATION_RUN_ID" && "$RELEASE_RUN_ID" != "$MACOS_QUALIFICATION_RUN_ID" && "$RELEASE_RUN_ID" != "$CI_RUN_ID" ]] || { echo "release and dependent runs must be distinct" >&2; exit 1; }
+          [[ "$QUALIFICATION_RUN_ID" != "$CLOUD_QUALIFICATION_RUN_ID" && "$QUALIFICATION_RUN_ID" != "$MACOS_QUALIFICATION_RUN_ID" && "$QUALIFICATION_RUN_ID" != "$CI_RUN_ID" ]] || { echo "qualification and dependent runs must be distinct" >&2; exit 1; }
+          [[ "$CLOUD_QUALIFICATION_RUN_ID" != "$MACOS_QUALIFICATION_RUN_ID" && "$CLOUD_QUALIFICATION_RUN_ID" != "$CI_RUN_ID" && "$MACOS_QUALIFICATION_RUN_ID" != "$CI_RUN_ID" ]] || { echo "Cloud, macOS, and CI runs must be distinct" >&2; exit 1; }
           : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest fingerprint is required}"
           : "${EXPECTED_TEAM_ID:?release Team ID is required}"
           : "${RELEASE_ALLOWED_SIGNERS:?annotated-tag signer policy is required}"
@@ -91,6 +104,12 @@ jobs:
           release_artifacts="$PROMOTION_ROOT/api/release-artifacts.json"
           qualification_artifacts="$PROMOTION_ROOT/api/qualification-artifacts.json"
           qualification_jobs="$PROMOTION_ROOT/api/qualification-jobs.json"
+          cloud_run="$PROMOTION_ROOT/api/cloud-qualification-run.json"
+          cloud_artifacts="$PROMOTION_ROOT/api/cloud-qualification-artifacts.json"
+          cloud_jobs="$PROMOTION_ROOT/api/cloud-qualification-jobs.json"
+          macos_run="$PROMOTION_ROOT/api/macos-qualification-run.json"
+          macos_artifacts="$PROMOTION_ROOT/api/macos-qualification-artifacts.json"
+          macos_jobs="$PROMOTION_ROOT/api/macos-qualification-jobs.json"
           ci_run="$PROMOTION_ROOT/api/ci-run.json"
           ci_jobs="$PROMOTION_ROOT/api/ci-jobs.json"
           ci_commit="$PROMOTION_ROOT/api/ci-commit.json"
@@ -105,6 +124,18 @@ jobs:
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CLOUD_QUALIFICATION_RUN_ID" > "$cloud_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CLOUD_QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$cloud_artifacts"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CLOUD_QUALIFICATION_RUN_ID/jobs?per_page=100" > "$cloud_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$MACOS_QUALIFICATION_RUN_ID" > "$macos_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$MACOS_QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$macos_artifacts"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$MACOS_QUALIFICATION_RUN_ID/jobs?per_page=100" > "$macos_jobs"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID" > "$ci_run"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
@@ -177,6 +208,8 @@ jobs:
           {
             printf 'release_run_id=%s\n' "$RELEASE_RUN_ID"
             printf 'qualification_run_id=%s\n' "$QUALIFICATION_RUN_ID"
+            printf 'cloud_qualification_run_id=%s\n' "$CLOUD_QUALIFICATION_RUN_ID"
+            printf 'macos_qualification_run_id=%s\n' "$MACOS_QUALIFICATION_RUN_ID"
             printf 'ci_run_id=%s\n' "$CI_RUN_ID"
             printf 'release_head_sha=%s\n' "$release_head_sha"
             printf 'qualification_head_sha=%s\n' "$qualification_head_sha"
@@ -205,8 +238,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
+          [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/qualification" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
           mkdir -m 0700 -p "$PROMOTION_ROOT/candidate" "$PROMOTION_ROOT/apple" "$PROMOTION_ROOT/intel" "$PROMOTION_ROOT/summary" "$PROMOTION_ROOT/output"
+
+      - id: external-qualification
+        name: Verify and retain exact Cloud and macOS qualification artifacts
+        env:
+          SOURCE_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/qualification/verify-github-run-artifacts.mjs \
+            --repository "$CANONICAL_REPOSITORY" \
+            --source-sha "$SOURCE_SHA" \
+            --cloud-run-id "$CLOUD_QUALIFICATION_RUN_ID" \
+            --cloud-run-json "$PROMOTION_ROOT/api/cloud-qualification-run.json" \
+            --cloud-jobs-json "$PROMOTION_ROOT/api/cloud-qualification-jobs.json" \
+            --cloud-artifacts-json "$PROMOTION_ROOT/api/cloud-qualification-artifacts.json" \
+            --macos-run-id "$MACOS_QUALIFICATION_RUN_ID" \
+            --macos-run-json "$PROMOTION_ROOT/api/macos-qualification-run.json" \
+            --macos-jobs-json "$PROMOTION_ROOT/api/macos-qualification-jobs.json" \
+            --macos-artifacts-json "$PROMOTION_ROOT/api/macos-qualification-artifacts.json" \
+            --retain-root "$QUALIFICATION_ROOT"
 
       - name: CI promotion boundary preflight (before artifact processing)
         run: |
@@ -502,6 +556,7 @@ jobs:
           APPLE_ROOT: ${{ steps.paths.outputs.promotion_root }}/apple
           INTEL_ROOT: ${{ steps.paths.outputs.promotion_root }}/intel
           SUMMARY_ROOT: ${{ steps.paths.outputs.promotion_root }}/summary
+          EXTERNAL_QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
         run: |
           node scripts/release/ci-preflight.mjs \
             --repo-root "$GITHUB_WORKSPACE" \
@@ -518,7 +573,7 @@ jobs:
           [[ "$CI_TREE" == "$MANIFEST_SOURCE_TREE" ]] || { echo "CI workflow tree differs from manifest source tree" >&2; exit 1; }
           node --input-type=module <<'NODE'
           import { assertProtectedArtifactDirectory } from './scripts/release/ci-preflight.mjs';
-          for (const directory of [process.env.CANDIDATE_ROOT, process.env.APPLE_ROOT, process.env.INTEL_ROOT, process.env.SUMMARY_ROOT]) {
+          for (const directory of [process.env.CANDIDATE_ROOT, process.env.APPLE_ROOT, process.env.INTEL_ROOT, process.env.SUMMARY_ROOT, process.env.EXTERNAL_QUALIFICATION_ROOT]) {
             assertProtectedArtifactDirectory({ directory });
           }
           NODE
@@ -594,6 +649,7 @@ jobs:
           QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
           OPERATOR_POLICY: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
           QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
+          EXTERNAL_QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
         shell: bash
         run: |
           set -euo pipefail
@@ -608,9 +664,17 @@ jobs:
           /usr/bin/install -m 0644 "$OPERATOR_POLICY" "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json"
           /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-apple-silicon-evidence.tar.gz" -C "$APPLE_EVIDENCE" .
           /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" -C "$INTEL_EVIDENCE" .
+          for lane in cloud-production-qualification macos-hardware-qualification-arm64 macos-hardware-qualification-x86_64; do
+            /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/$lane/artifact.zip" "$QUALIFICATION_ASSETS/p1-$lane-artifact.zip"
+            /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/$lane/artifact-metadata.json" "$QUALIFICATION_ASSETS/p1-$lane-artifact-metadata.json"
+            /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/$lane/workflow-run.json" "$QUALIFICATION_ASSETS/p1-$lane-workflow-run.json"
+            /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/$lane/workflow-jobs.json" "$QUALIFICATION_ASSETS/p1-$lane-workflow-jobs.json"
+          done
+          /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/qualification-verification.json" "$QUALIFICATION_ASSETS/p1-qualification-verification.json"
           (
             cd "$QUALIFICATION_ASSETS"
             /usr/bin/shasum -a 256 p0c-* > P0C-SHA256SUMS
+            /usr/bin/shasum -a 256 p1-* > P1-QUALIFICATION-SHA256SUMS
           )
           gh release upload "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" \
             "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.json" \
@@ -623,7 +687,21 @@ jobs:
             "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" \
             "$QUALIFICATION_ASSETS/p0c-hardware-qualification-summary.json" \
             "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json" \
-            "$QUALIFICATION_ASSETS/P0C-SHA256SUMS"
+            "$QUALIFICATION_ASSETS/P0C-SHA256SUMS" \
+            "$QUALIFICATION_ASSETS/p1-cloud-production-qualification-artifact.zip" \
+            "$QUALIFICATION_ASSETS/p1-cloud-production-qualification-artifact-metadata.json" \
+            "$QUALIFICATION_ASSETS/p1-cloud-production-qualification-workflow-run.json" \
+            "$QUALIFICATION_ASSETS/p1-cloud-production-qualification-workflow-jobs.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-arm64-artifact.zip" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-arm64-artifact-metadata.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-arm64-workflow-run.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-arm64-workflow-jobs.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-artifact.zip" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-artifact-metadata.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-workflow-run.json" \
+            "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-workflow-jobs.json" \
+            "$QUALIFICATION_ASSETS/p1-qualification-verification.json" \
+            "$QUALIFICATION_ASSETS/P1-QUALIFICATION-SHA256SUMS"
 
       - name: Publish the fully uploaded public release
         env:
