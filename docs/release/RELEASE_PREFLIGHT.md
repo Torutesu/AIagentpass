@@ -43,6 +43,48 @@ unknown evidence. A successful offline validation reports
 or the protected release workflow. Therefore it cannot turn a repository-only
 record into a production claim.
 
+## Credential and identity preflight
+
+The protected signing job runs the following before importing a certificate or
+notary key:
+
+```sh
+scripts/release/require-credentials.sh
+```
+
+This gate requires all signing, profile, manifest-key, and App Store Connect
+inputs. It accepts only `Developer ID Application` and `Developer ID Installer`
+identities whose Team ID matches `AGENTPASS_TEAM_ID`; ad-hoc and development
+identities fail closed. Missing or malformed inputs exit non-zero without
+calling `codesign`, `xcrun`, `stapler`, or `spctl`.
+
+For local contract validation without credentials, use:
+
+```sh
+scripts/release/require-credentials.sh --dry-run
+```
+
+This command returns `dry_run_not_proven` and exits successfully only to report
+what was not attempted. It never proves that credentials, signing, notarization,
+stapling, Gatekeeper, or production promotion succeeded. The protected workflow
+never uses the dry-run flag.
+
+## Current audit status
+
+In this checkout, the release workflows implement the protected candidate,
+notarization, hardware-qualification, and public GitHub Release promotion
+boundaries. They do not prove those external gates locally, and no workflow in
+`.github/workflows` deploys the hosted Cloud/API production environment. The
+`promote-qualified-release.yml` workflow publishes a fully qualified public
+release; it is not a Cloud deployment mechanism.
+
+Therefore the current production status remains `not_proven` until a protected
+macOS run supplies real Developer ID signatures, an Accepted notary submission,
+a stapled ticket, Gatekeeper results, both physical hardware reports, and the
+separately operated hosted deployment evidence. Ad-hoc artifacts, missing
+credentials, offline-only evidence, or a green local test suite cannot close
+these rows.
+
 ## Matrix relationship
 
 This validator supports the candidate identity/signature and evidence-binding

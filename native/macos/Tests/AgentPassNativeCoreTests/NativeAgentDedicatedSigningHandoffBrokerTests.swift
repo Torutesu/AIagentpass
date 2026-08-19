@@ -12,6 +12,12 @@ private let brokerRequestID = "22222222-2222-4222-8222-222222222222"
 private let brokerCapabilityID = "88888888-8888-4888-8888-888888888888"
 private let brokerToken = String(repeating: "a", count: 64)
 private let brokerWall: Int64 = 1_786_615_200_000
+private let brokerCapabilityPublicKeyPEM = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=
+-----END PUBLIC KEY-----
+"""
+private let brokerCapabilityKeyID = "capability-v1"
 
 private struct BrokerRandom: NativeAgentRandomBytesGenerating {
     func randomBytes(count: Int) throws -> Data { Data(repeating: 9, count: count) }
@@ -213,7 +219,9 @@ private func brokerRuntimeAuthority() throws -> NativeAgentRuntimeAuthorityConfi
         perAgentSessionLimit: 4,
         perWorktreeSessionLimit: 2,
         bootstrapAttemptLimit: 3,
-        worktreeObservationPolicyVersion: 2)
+        worktreeObservationPolicyVersion: 2,
+        capabilityPublicKeyPEM: brokerCapabilityPublicKeyPEM,
+        capabilityKeyID: brokerCapabilityKeyID)
     return try #require(configuration.authority)
 }
 

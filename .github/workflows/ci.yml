@@ -973,6 +973,8 @@ jobs:
       - run: npm run contracts:validate:hosted-identity-bootstrap
       - run: npm run test:w16
       - run: npm test
+      - name: Run release boundary, dry-run, and signed-artifact verifier tests
+        run: node --test scripts/release/*.test.mjs
       - run: npm test --prefix apps/web-console
       - run: npm run lint --prefix apps/web-console
       - run: npm audit --prefix apps/web-console --audit-level=high
