@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import os from "node:os";
+import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,7 @@ export const TEARDOWN_SETTLE_MS = 50;
 export const TIMEOUT_EXIT_CODE = 124;
 export const ARGUMENT_EXIT_CODE = 64;
 export const SPAWN_EXIT_CODE = 127;
+export const ENVIRONMENT_EXIT_CODE = 78;
 
 export const DIAGNOSTIC_CODES = Object.freeze({
   arguments: "native_test_invalid_arguments",
@@ -23,7 +25,8 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   passed: "native_test_passed",
   nonzero: "native_test_exit_nonzero",
   unknown: "native_test_exit_unknown",
-  spawnFailed: "native_test_spawn_failed"
+  spawnFailed: "native_test_spawn_failed",
+  environment: "native_test_environment"
 });
 
 const SIGNAL_NUMBERS = Object.freeze(os.constants.signals ?? {});
@@ -118,6 +121,40 @@ function normalizeOptions(options = {}) {
     env: options.env,
     onDiagnostic: options.onDiagnostic
   };
+}
+
+/**
+ * Give a native test process a private temporary directory. macOS file
+ * protection and runner sandboxes can reject writes through a shared system
+ * TMPDIR; the runner must own the directory lifecycle instead of weakening
+ * file permissions in individual tests.
+ */
+export async function prepareNativeTestEnvironment(environment = process.env) {
+  if (environment === null || typeof environment !== "object" || Array.isArray(environment)) {
+    throw new TypeError("environment is invalid");
+  }
+  const requested = environment.NATIVE_TEST_TMPDIR;
+  const directory = requested === undefined
+    ? await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-native-suite-"))
+    : requested;
+  if (typeof directory !== "string" || directory.length === 0 || !path.isAbsolute(directory) || directory.includes("\u0000")) {
+    throw new TypeError("NATIVE_TEST_TMPDIR must be an absolute path");
+  }
+  if (requested !== undefined) {
+    try { await fs.stat(directory); }
+    catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+  }
+  const stat = await fs.stat(directory);
+  if (!stat.isDirectory() || (stat.mode & 0o077) !== 0) throw new Error("native test temporary directory is unsafe");
+  const ownsDirectory = requested === undefined;
+  return Object.freeze({
+    environment: Object.freeze({ ...environment, TMPDIR: directory }),
+    directory,
+    async cleanup() { if (ownsDirectory) await fs.rm(directory, { recursive: true, force: true }); }
+  });
 }
 
 function isRunning(child) {
@@ -314,14 +351,26 @@ export async function main(argv = process.argv.slice(2), environment = process.e
     return 0;
   }
 
-  const result = await runNativeTest(options.command, options.args, {
-    cwd: process.cwd(),
-    env: environment,
-    timeoutMs: options.timeoutMs,
-    onDiagnostic(diagnostic) {
-      process.stderr.write(formatDiagnostic(diagnostic));
-    }
-  });
+  let isolated;
+  try {
+    isolated = await prepareNativeTestEnvironment(environment);
+  } catch {
+    process.stderr.write(formatDiagnostic({ phase: "environment", code: DIAGNOSTIC_CODES.environment }));
+    return ENVIRONMENT_EXIT_CODE;
+  }
+  let result;
+  try {
+    result = await runNativeTest(options.command, options.args, {
+      cwd: process.cwd(),
+      env: isolated.environment,
+      timeoutMs: options.timeoutMs,
+      onDiagnostic(diagnostic) {
+        process.stderr.write(formatDiagnostic(diagnostic));
+      }
+    });
+  } finally {
+    await isolated.cleanup().catch(() => {});
+  }
   if (result.reason === DIAGNOSTIC_CODES.timeout) return TIMEOUT_EXIT_CODE;
   if (result.reason === DIAGNOSTIC_CODES.spawnFailed) return SPAWN_EXIT_CODE;
   if (result.interrupted) return result.exitCode ?? 1;

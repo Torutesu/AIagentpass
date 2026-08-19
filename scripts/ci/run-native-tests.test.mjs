@@ -8,11 +8,13 @@ import test from "node:test";
 import {
   DEFAULT_TIMEOUT_MS,
   DIAGNOSTIC_CODES,
+  ENVIRONMENT_EXIT_CODE,
   MAX_TIMEOUT_MS,
   TIMEOUT_EXIT_CODE,
   formatDiagnostic,
   main,
   parseArgs,
+  prepareNativeTestEnvironment,
   runNativeTest
 } from "./run-native-tests.mjs";
 
@@ -39,6 +41,29 @@ test("formats only stable, non-secret diagnostics", () => {
   assert.equal(formatDiagnostic({ phase: "timeout", code: DIAGNOSTIC_CODES.timeout, timeoutMs: 1200 }), "native-test phase=timeout code=native_test_timeout timeout_ms=1200\n");
   assert.equal(formatDiagnostic({ phase: "exit", code: DIAGNOSTIC_CODES.nonzero, exitCode: 7 }), "native-test phase=exit code=native_test_exit_nonzero exit_code=7\n");
   assert.equal(formatDiagnostic({ phase: "signal", code: DIAGNOSTIC_CODES.signal, signal: "SIGTERM" }), "native-test phase=signal code=native_test_signal signal=SIGTERM\n");
+});
+
+test("isolates native test temporary files and cleans up owned state", async () => {
+  const isolated = await prepareNativeTestEnvironment({ PATH: env.PATH });
+  try {
+    assert.match(isolated.environment.TMPDIR, /agentpass-native-suite-/u);
+    assert.equal((await fs.stat(isolated.directory)).isDirectory(), true);
+    assert.equal((await fs.stat(isolated.directory)).mode & 0o077, 0);
+  } finally {
+    await isolated.cleanup();
+  }
+  await assert.rejects(fs.stat(isolated.directory), { code: "ENOENT" });
+});
+
+test("rejects an unsafe caller-selected temporary directory", async () => {
+  await assert.rejects(prepareNativeTestEnvironment({ NATIVE_TEST_TMPDIR: "relative" }), /absolute path/u);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-native-unsafe-"));
+  try {
+    await fs.chmod(directory, 0o755);
+    await assert.rejects(prepareNativeTestEnvironment({ NATIVE_TEST_TMPDIR: directory }), /unsafe/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("preserves a successful and nonzero child exit status", async () => {
