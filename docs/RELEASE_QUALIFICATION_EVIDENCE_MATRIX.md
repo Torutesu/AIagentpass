@@ -39,7 +39,7 @@ not create Apple evidence and does not turn offline evidence into a pass.
 | Intel/T2 Secure Enclave lane | Separate signed qualified report and evidence directory bound to the same candidate digest | `node scripts/release/validate-hardware-qualification.mjs ...` | `not_proven` |
 | Aggregate hardware promotion | Both lane reports, approved operator policy, and aggregate evidence for the same candidate | `node scripts/release/verify-hardware-qualification-set.mjs ...` | `not_proven` |
 | Protected release environment | Manual protected job configuration with short-lived signing/notary credentials and no PR secret path | Review the protected workflow/environment configuration and record the run URL | `not_proven` |
-| Dedicated Host/Child XPC identity gate | Candidate-bound closed projection with live audit-token digest, Child-specific requirement digest/evaluation, authenticated-XPC activation, and four denial-before-sign cases | `node scripts/release/xpc/verify-xpc-qualification.mjs XPC-EVIDENCE.json` | `not_proven` |
+| Dedicated Host/Child XPC identity gate | Candidate-bound closed projection with live audit-token digest, candidate-bound `launch_observation` (`launchd_mach_nsxpc`, fixed Host/Child Mach services, distinct PIDs and start times), Child-specific requirement digest/evaluation, authenticated-XPC activation, and four denial-before-sign cases | `node scripts/release/xpc/verify-xpc-qualification.mjs XPC-EVIDENCE.json` | `not_proven` |
 | CI release preflight binding | Clean checkout, exact source commit/tree, product candidate SHA-256, manual protected dispatch, and no PR credential path | `node scripts/release/ci-preflight.mjs ...` in `release-candidate.yml` and `promote-qualified-release.yml` | `not_proven` |
 
 ## Promotion rule
