@@ -12,6 +12,12 @@ The service binds each accepted connection to the observed peer process and reva
 
 The child channel is registered only by a successful Host attach. A child connection with no matching process-binding hash and worktree digest is rejected. Each helper invocation uses a one-shot child connection; duplicate payload digests and attempts after the two-signature budget are rejected.
 
+`NativeAgentAuthenticatedHostXPCClient` is the connection-owned Core client for
+the Host Mach service. It exposes only `prepare`, `attach`, `sign`, `status`,
+and `close`; the service-assigned session ID is retained as connection state
+and is never accepted as a request field. The client has no FD3 or local
+signing fallback.
+
 ## Configuration
 
 `host_mach_service_name` must be `dev.agentpass.agent-host` and must be present in the launchd `MachServices` dictionary.
@@ -26,4 +32,10 @@ Before enabling the Host path in production, provision this hash from an indepen
 
 The listener, registry, and endpoint are fail-closed adapters. The Git helper has an authenticated-XPC client path, but the legacy inherited-FD3 path is still the default lifecycle path and remains a migration blocker. It must not be considered replaced until the child supervisor selects the XPC mode end-to-end and the FD3 fallback is removed.
 
-The local proof currently covers the Core state machine, endpoint adapter, Host listener build, contract validation, and runtime materializer tests. It does not prove macOS audit-token extraction, Developer ID/notarization, real launchd behavior, or production child provisioning.
+The local proof currently covers the Core state machine, endpoint adapter,
+Host client/listener builds, contract validation, and runtime materializer
+tests. The client is now available for lifecycle wiring, but production still
+defaults to the legacy path until a signed-artifact, real-launchd end-to-end
+run proves Host prepare/attach and child Git signing together. Local tests do
+not prove macOS audit-token extraction, Developer ID/notarization, real
+launchd behavior, or production child provisioning.
