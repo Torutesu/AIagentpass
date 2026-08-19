@@ -56,11 +56,11 @@ jobs:
           ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
-          node --input-type=module - "$ci_run" "$ci_jobs" "$commit" "$tree" <<'NODE'
+          node --input-type=module - "$ci_run" "$ci_jobs" "$commit" "$tree" "$tree" <<'NODE'
           import fs from 'node:fs';
           import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
-          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
-          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
+          const [runPath, jobsPath, expectedCommit, expectedTree, workflowTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree, workflowTree });
           NODE
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
@@ -105,11 +105,11 @@ jobs:
           ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
-          node --input-type=module - "$ci_run" "$ci_jobs" "$EXPECTED_COMMIT" "$EXPECTED_TREE" <<'NODE'
+          node --input-type=module - "$ci_run" "$ci_jobs" "$EXPECTED_COMMIT" "$EXPECTED_TREE" "$EXPECTED_TREE" <<'NODE'
           import fs from 'node:fs';
           import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
-          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
-          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
+          const [runPath, jobsPath, expectedCommit, expectedTree, workflowTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree, workflowTree });
           NODE
       - name: Require protected signing inputs
         env:

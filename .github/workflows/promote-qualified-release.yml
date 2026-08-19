@@ -168,11 +168,11 @@ jobs:
             "repos/$CANONICAL_REPOSITORY/commits/$release_head_sha" > "$ci_commit"
           ci_tree="$(jq -er '.commit.tree.sha' "$ci_commit")"
           [[ "$ci_tree" =~ ^[0-9a-f]{40}$ ]] || { echo "CI source tree is not a full identity" >&2; exit 1; }
-          node --input-type=module - "$ci_run" "$ci_jobs" "$release_head_sha" "$ci_tree" <<'NODE'
+          node --input-type=module - "$ci_run" "$ci_jobs" "$release_head_sha" "$ci_tree" "$ci_tree" <<'NODE'
           import fs from 'node:fs';
           import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
-          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
-          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
+          const [runPath, jobsPath, expectedCommit, expectedTree, workflowTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree, workflowTree });
           NODE
           {
             printf 'release_run_id=%s\n' "$RELEASE_RUN_ID"
