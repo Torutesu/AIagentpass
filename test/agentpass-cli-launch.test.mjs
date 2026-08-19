@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { FIXED_NATIVE_HOST_LAUNCHER, launchAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { AGENT_LIFECYCLE_HANDOFF_FD, AGENT_LIFECYCLE_DESCRIPTOR_VERSION, createAgentLifecycleLaunchDescriptor, FIXED_NATIVE_HOST_LAUNCHER, launchAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = path.join(root, "bin", "agentpass.mjs");
@@ -59,6 +59,21 @@ test("launch rejects noncanonical input before the unavailable lifecycle respons
   assert.equal(output.error.message.includes("/tmp/project/../other"), false);
 });
 
+test("launch without a project remains a stable fail-closed response", () => {
+  const result = run("launch", "--agent", "claude-code");
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), {
+    ok: false,
+    operation: "launch",
+    error: {
+      code: "AGENT_LIFECYCLE_NATIVE_HOST_REJECTED",
+      message: "The lifecycle launch descriptor is invalid"
+    }
+  });
+});
+
 test("help remains successful and unknown commands remain usage failures", () => {
   const help = run("--help");
   assert.equal(help.status, 0);
@@ -91,14 +106,54 @@ function trustedLauncherStat(file) {
   };
 }
 
+function launchDescriptor(overrides = {}) {
+  return createAgentLifecycleLaunchDescriptor({
+    agent: "claude-code",
+    project: "/tmp/project",
+    ttl_seconds: 600,
+    ...overrides
+  });
+}
+
+function inheritedHandoffStat() {
+  return {
+    isFIFO: () => false,
+    isSocket: () => true,
+    isFile: () => false
+  };
+}
+
+test("launch descriptor is frozen, exact, and names only the fixed inherited handoff", () => {
+  const descriptor = launchDescriptor();
+
+  assert.deepEqual(descriptor, {
+    version: AGENT_LIFECYCLE_DESCRIPTOR_VERSION,
+    operation: "launch",
+    agent: "claude-code",
+    project: "/tmp/project",
+    ttl_seconds: 600,
+    handoff_fd: AGENT_LIFECYCLE_HANDOFF_FD
+  });
+  assert.equal(Object.isFrozen(descriptor), true);
+  assert.throws(() => createAgentLifecycleLaunchDescriptor({
+    agent: "claude-code",
+    project: "/tmp/project",
+    ttl_seconds: 600,
+    authority: "caller-supplied-authority"
+  }), /descriptor is invalid/u);
+});
+
 test("macOS lifecycle invokes only the fixed Native Host with the canonical project and inherited FD3", () => {
   const calls = [];
   const result = launchAgentLifecycle(
-    { agent: "claude-code", project: "/tmp/project", ttl_seconds: 600 },
+    launchDescriptor(),
     {
       platform: "darwin",
       lstat: (file) => trustedLauncherStat(file),
-      handoffAvailable: true,
+      fstat: (fileDescriptor) => {
+        assert.equal(fileDescriptor, AGENT_LIFECYCLE_HANDOFF_FD);
+        return inheritedHandoffStat();
+      },
       run: (launcher, launchArgs) => {
         calls.push({ launcher, launchArgs });
         return {
@@ -115,8 +170,8 @@ test("macOS lifecycle invokes only the fixed Native Host with the canonical proj
 
 test("macOS lifecycle fails closed when the one-time FD3 handoff is absent", () => {
   const result = launchAgentLifecycle(
-    { agent: "claude-code", project: "/tmp/project", ttl_seconds: 600 },
-    { platform: "darwin", lstat: (file) => trustedLauncherStat(file), handoffAvailable: false }
+    launchDescriptor(),
+    { platform: "darwin", lstat: (file) => trustedLauncherStat(file), fstat: () => { throw new Error("missing FD3"); } }
   );
 
   assert.deepEqual(result, {
@@ -131,17 +186,17 @@ test("macOS lifecycle fails closed when the one-time FD3 handoff is absent", () 
 
 test("macOS lifecycle rejects launcher substitution and malformed Host output", () => {
   const untrusted = launchAgentLifecycle(
-    { agent: "claude-code", project: "/tmp/project", ttl_seconds: 600 },
-    { platform: "darwin", launcher: "/tmp/agentpass-native-agent-host", lstat: (file) => trustedLauncherStat(file), handoffAvailable: true }
+    launchDescriptor(),
+    { platform: "darwin", launcher: "/tmp/agentpass-native-agent-host", lstat: (file) => trustedLauncherStat(file), fstat: inheritedHandoffStat }
   );
   assert.equal(untrusted.error.code, "AGENT_LIFECYCLE_NATIVE_HOST_REJECTED");
 
   const malformed = launchAgentLifecycle(
-    { agent: "claude-code", project: "/tmp/project", ttl_seconds: 600 },
+    launchDescriptor(),
     {
       platform: "darwin",
       lstat: (file) => trustedLauncherStat(file),
-      handoffAvailable: true,
+      fstat: inheritedHandoffStat,
       run: () => ({ status: 0, stdout: '{"error":null,"ok":true,"operation":"host-launch","status":"active"}\n' })
     }
   );
@@ -158,14 +213,25 @@ test("macOS lifecycle rejects launcher substitution and malformed Host output", 
 test("macOS lifecycle rejects a replaceable Native Host ancestry", () => {
   const replacedDirectory = "/Applications/AgentPass.app/Contents/Library";
   const result = launchAgentLifecycle(
-    { agent: "claude-code", project: "/tmp/project", ttl_seconds: 600 },
+    launchDescriptor(),
     {
       platform: "darwin",
       lstat: (file) => file === replacedDirectory
         ? { isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true, nlink: 1, uid: 0, mode: 0o120777 }
         : trustedLauncherStat(file),
-      handoffAvailable: true
+      fstat: inheritedHandoffStat
     }
   );
   assert.equal(result.error.code, "AGENT_LIFECYCLE_NATIVE_HOST_REJECTED");
+});
+
+test("a caller-provided handoff boolean cannot bypass the inherited FD3 check", () => {
+  const result = launchAgentLifecycle(launchDescriptor(), {
+    platform: "darwin",
+    lstat: (file) => trustedLauncherStat(file),
+    handoffAvailable: true,
+    fstat: () => { throw new Error("missing FD3"); }
+  });
+
+  assert.equal(result.error.code, "AGENT_LIFECYCLE_HANDOFF_NOT_AVAILABLE");
 });

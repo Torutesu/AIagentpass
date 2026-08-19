@@ -36,7 +36,7 @@ import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecov
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
 import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
-import { launchAgentLifecycle, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { createAgentLifecycleLaunchDescriptor, launchAgentLifecycle, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 
 const [, , command, ...args] = process.argv;
@@ -1332,7 +1332,9 @@ function launchAgent() {
   // The lifecycle function can only use the fixed signed Host and an already
   // inherited FD3 handoff; it cannot synthesize authority from CLI state.
   const normalized = parseAgentLaunchArgs([command, ...args]);
-  const result = launchAgentLifecycle(normalized, { platform: process.platform });
+  let descriptor;
+  try { descriptor = createAgentLifecycleLaunchDescriptor(normalized); } catch { descriptor = null; }
+  const result = launchAgentLifecycle(descriptor, { platform: process.platform });
   console.log(JSON.stringify(result));
   process.exitCode = result.ok ? 0 : 1;
 }
