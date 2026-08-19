@@ -37,10 +37,21 @@ public final class NativeDeviceAuditUploadCoordinator: @unchecked Sendable {
                 let response = try await transport.uploadAuditBatch(batch)
                 try outbox.acknowledge(response)
                 uploaded += response.acceptedEventIDs.count + response.duplicateEventIDs.count
+            } catch let error as NativeDeviceSyncHTTPTransportError {
+                // Response loss and an unavailable endpoint are retryable. A
+                // malformed envelope, redirect, origin, or body is a trust
+                // failure and must not be retried as if it were connectivity.
+                switch error {
+                case .transportFailure, .unexpectedStatusCode:
+                    if maximumAttempts == 1 { throw error }
+                default:
+                    throw error
+                }
             } catch {
-                // Do not acknowledge or delete anything after a transport,
-                // response, or filesystem error. The exact batch remains.
-                if maximumAttempts == 1 { throw error }
+                // Outbox acknowledgement and filesystem failures are never
+                // silently converted into a retry loop. The exact batch stays
+                // durable and the supervisor receives the error.
+                throw error
             }
         }
         return uploaded
