@@ -290,6 +290,8 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
     private var privateGitBridgeAttempted = false
     private var privateGitBridgeCancelRequested = false
     private var privateGitBridgeAuthorityFailure: NativeAgentHostPrivateGitBridgeError?
+    private var requestedTerminationReason: NativeAgentHostLifecycleCloseReason?
+    private var requestedTerminationError: NativeAgentHostLifecycleError?
 
     public init(
         connectionBinding: NativeAgentHostConnectionBinding,
@@ -717,6 +719,40 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         )
     }
 
+    /// Requests termination of a running child while leaving the single
+    /// wait-and-close path to `waitForChild`. This is used by process-signal
+    /// and XPC-disconnect handlers, which may run concurrently with the wait.
+    public func requestTermination(
+        reason: NativeAgentHostLifecycleCloseReason = .requested
+    ) throws {
+        let child: NativeAgentHostChildSession
+        lock.lock()
+        guard case .running(let runningChild) = storageState else {
+            lock.unlock()
+            throw NativeAgentHostLifecycleError.notRunning
+        }
+        if let requestedTerminationError {
+            lock.unlock()
+            throw requestedTerminationError
+        }
+        if requestedTerminationReason != nil {
+            lock.unlock()
+            return
+        }
+        requestedTerminationReason = reason
+        child = runningChild
+        lock.unlock()
+
+        do {
+            try child.forward(.terminate)
+        } catch {
+            lock.lock()
+            requestedTerminationError = .signalFailed
+            lock.unlock()
+            throw NativeAgentHostLifecycleError.signalFailed
+        }
+    }
+
     /// Waits for the child, then always closes the qualified session. No
     /// unbounded exit information crosses the API.
     public func waitForChild() throws -> NativeAgentHostLifecycleResult {
@@ -844,32 +880,40 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         childExit: NativeAgentHostExitClassification?,
         authorityAlreadyObserved: Bool
     ) throws -> NativeAgentHostLifecycleResult {
+        lock.lock()
+        let requestedReason = requestedTerminationReason
+        let requestedError = requestedTerminationError
+        lock.unlock()
+        let requestedOutcome: NativeAgentHostLifecycleOutcome = requestedReason == nil ? .childExited : .closed
+        let result: NativeAgentHostLifecycleResult
         switch observeForClose(alreadyObserved: authorityAlreadyObserved) {
         case .lost:
-            return try closeSession(
+            result = try closeSession(
                 child: child,
                 childExit: childExit,
                 reason: .authorityLost,
                 terminateChild: false,
-                outcome: .authorityLost
+                outcome: requestedReason == nil ? .authorityLost : requestedOutcome
             )
         case .unavailable:
-            return try closeSession(
+            result = try closeSession(
                 child: child,
                 childExit: childExit,
-                reason: .authorityUnavailable,
+                reason: requestedReason ?? .authorityUnavailable,
                 terminateChild: false,
-                outcome: .childExited
+                outcome: requestedOutcome
             )
         case .authorized:
-            return try closeSession(
+            result = try closeSession(
                 child: child,
                 childExit: childExit,
-                reason: .childExited,
+                reason: requestedReason ?? .childExited,
                 terminateChild: false,
-                outcome: .childExited
+                outcome: requestedOutcome
             )
         }
+        if let requestedError { throw requestedError }
+        return result
     }
 
     private func finishReservedClose(

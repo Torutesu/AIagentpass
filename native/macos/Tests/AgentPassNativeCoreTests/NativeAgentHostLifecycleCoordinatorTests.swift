@@ -1,4 +1,4 @@
-import AgentPassNativeCore
+@testable import AgentPassNativeCore
 import Darwin
 import Foundation
 import Testing
@@ -285,10 +285,23 @@ private func makeLifecycleCoordinator(
 ) throws -> NativeAgentHostLifecycleCoordinator {
     fixture.authorityResults = authority
     fixture.activation = try lifecycleActivation()
+    let supervisor: NativeAgentHostChildSupervisor
+    if gitTransport == .authenticatedXPC {
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.supervisorHooks(),
+            executableProbe: { _ in false },
+            authenticatedHostXPCClientFactory: { xpc },
+            childObserverFactory: { xpc },
+            launchNonceFactory: { Data(repeating: 0x5a, count: 16) }
+        )
+    } else {
+        supervisor = NativeAgentHostChildSupervisor(hooks: fixture.supervisorHooks())
+    }
     return try NativeAgentHostLifecycleCoordinator(
         connectionBinding: try lifecycleConnection(),
         handoff: try lifecycleHandoff(),
-        supervisor: NativeAgentHostChildSupervisor(hooks: fixture.supervisorHooks()),
+        supervisor: supervisor,
         hooks: fixture.hooks(),
         gitTransport: gitTransport
     )
@@ -469,6 +482,42 @@ private func activationProjection(_ activation: NativeAgentHostQualifiedSessionA
     #expect(snapshot.signal == 0)
     #expect(snapshot.wait == 1)
     #expect(snapshot.reasons == [.childExited])
+    #expect(coordinator.state == .closed)
+}
+
+@Test func externalTerminationReapsChildThroughTheNormalSessionClosePath() throws {
+    let fixture = LifecycleFixture()
+    let coordinator = try makeLifecycleCoordinator(fixture: fixture)
+    _ = try coordinator.bootstrap()
+
+    _ = try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        try coordinator.requestTermination()
+        let result = try coordinator.waitForChild()
+        #expect(result.outcome == .closed)
+    }
+
+    let snapshot = fixture.snapshot()
+    #expect(snapshot.events == ["bootstrap", "observe", "spawn", "signal", "wait", "observe", "close"])
+    #expect(snapshot.reasons == [.requested])
+    #expect(coordinator.state == .closed)
+}
+
+@Test func externalTerminationStillReportsSessionCloseFailureAfterReaping() throws {
+    let fixture = LifecycleFixture()
+    fixture.closeError = true
+    let coordinator = try makeLifecycleCoordinator(fixture: fixture)
+    _ = try coordinator.bootstrap()
+
+    _ = try withLifecycleProject { project in
+        _ = try coordinator.start(projectDirectory: project)
+        try coordinator.requestTermination()
+        #expect(throws: NativeAgentHostLifecycleError.sessionCloseFailed) {
+            _ = try coordinator.waitForChild()
+        }
+    }
+
+    #expect(fixture.snapshot().reasons == [.requested])
     #expect(coordinator.state == .closed)
 }
 

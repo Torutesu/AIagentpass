@@ -38,7 +38,8 @@ private func agentHostSource() throws -> String {
     #expect(source.contains("let signalController = ActivationSignalController()"))
     #expect(source.range(of: "let signalController = ActivationSignalController()")!.lowerBound < source.range(of: "let bootstrapResult = waitForReply")!.lowerBound)
     #expect(source.contains("case .timedOut:"))
-    #expect(source.components(separatedBy: "proxy.startAgentSession(sessionRequest, withReply: reply)").count - 1 == 2)
+    let qualificationSource = String(source[source.range(of: "private func runQualificationActivation()")!.lowerBound...])
+    #expect(qualificationSource.components(separatedBy: "proxy.startAgentSession(sessionRequest, withReply: reply)").count - 1 == 2)
     #expect(source.contains("same XPC\n        // connection"))
 }
 
@@ -53,4 +54,15 @@ private func agentHostSource() throws -> String {
     #expect(source.contains("CommandLine.arguments"))
     #expect(source.contains("activationDocumentFD"))
     #expect(source.contains("path:" ) == false)
+}
+
+@Test func launchHostInstallsTerminalCleanupForSignalsAndXPCDisconnect() throws {
+    let source = try agentHostSource()
+
+    #expect(source.contains("terminalController.install()"))
+    #expect(source.contains("serviceClient.connection.invalidationHandler"))
+    #expect(source.contains("terminalController.setConnection(serviceClient.connection)"))
+    #expect(source.contains("terminalController.markBootstrapKnown()"))
+    #expect(source.contains("coordinator.requestTermination()"))
+    #expect(source.contains("agent_session_close_failed"))
 }

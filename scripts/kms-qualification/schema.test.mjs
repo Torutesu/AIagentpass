@@ -190,6 +190,24 @@ function assertCode(code, operation) {
   assert.throws(operation, (error) => error instanceof KmsQualificationEvidenceError && error.code === code);
 }
 
+function reboundReport(report, mutate) {
+  const tampered = structuredClone(report);
+  mutate(tampered);
+  const { signature: _signature, report_digest: _reportDigest, ...core } = tampered;
+  void _signature;
+  void _reportDigest;
+  tampered.report_digest = digest(canonicalJson(core));
+  return tampered;
+}
+
+function reorderJsonKeys(value) {
+  if (Array.isArray(value)) return value.map(reorderJsonKeys);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).reverse().map((key) => [key, reorderJsonKeys(value[key])]));
+  }
+  return value;
+}
+
 test("builds canonical mock evidence with exactly eight purposes and fixed matrices", () => {
   const report = buildKmsQualificationReport(baseInput());
   assert.equal(report.production, false);
@@ -335,30 +353,69 @@ test("production verification rejects a self-asserted or differently pinned sign
   }));
 });
 
-test("direct verifier revalidates the closed candidate-bound evidence envelope", async () => {
+test("direct verifier canonicalizes the candidate report before validating it", async () => {
+  const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
+  const reordered = reorderJsonKeys(report);
+  const result = verifyKmsQualificationReport(reordered, {
+    repositoryRoot: root,
+    trustedPublicKeyDer: qualificationEvidencePublicKeyDer,
+    trustedKeyId: qualificationEvidenceKeyId
+  });
+  assert.equal(result.report_digest, report.report_digest);
+  assertCode("unknown_field", () => verifyKmsQualificationReport(
+    reboundReport(report, (value) => { value.purpose_bindings[0].untrusted_projection = true; }),
+    { repositoryRoot: root, requireProduction: false }
+  ));
+});
+
+test("direct verifier binds every purpose and every source/tree identity", async () => {
+  const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
+  assert.deepEqual(
+    report.purpose_bindings.map((entry) => entry.purpose),
+    KMS_QUALIFICATION_PURPOSES.map((entry) => entry.purpose)
+  );
+  const missingPurpose = reboundReport(report, (value) => { value.purpose_bindings.pop(); });
+  assertCode("invalid_array", () => verifyKmsQualificationReport(missingPurpose, { repositoryRoot: root, requireProduction: false }));
+
+  const candidateMismatch = reboundReport(report, (value) => {
+    value.source.image_digest = digest("different-candidate-image");
+  });
+  assertCode("postgres_binding_mismatch", () => verifyKmsQualificationReport(candidateMismatch, { repositoryRoot: root, requireProduction: false }));
+
+  const treeMismatch = reboundReport(report, (value) => {
+    value.source.source_commit = "0".repeat(40);
+    for (const instance of value.postgres_binding.instances) instance.source_commit = value.source.source_commit;
+  });
+  assertCode("source_commit_mismatch", () => verifyKmsQualificationReport(treeMismatch, { repositoryRoot: root, requireProduction: false }));
+});
+
+test("direct verifier requires all IAM denials", async () => {
+  const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
+  const denial = reboundReport(report, (value) => {
+    const entry = value.iam_matrix.find((candidate) => candidate.expected === "deny");
+    entry.observed = "allow";
+  });
+  assertCode("iam_matrix_failed", () => verifyKmsQualificationReport(denial, { repositoryRoot: root, requireProduction: false }));
+});
+
+test("direct verifier enforces rotation, disable, and response-loss behavior", async () => {
   const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
   const cases = [
-    ["unknown_field", (value) => { value.purpose_bindings[0].raw_response = "provider output"; }],
-    ["iam_matrix_failed", (value) => { value.iam_matrix.find((entry) => entry.expected === "deny").observed = "allow"; }],
     ["rotation_not_proven", (value) => { value.scenario_results.find((entry) => entry.scenario === "rotation").current_key_version = "6"; }],
     ["scenario_failed", (value) => { value.scenario_results.find((entry) => entry.scenario === "disable").observed = "fail_closed"; }],
-    ["response_loss_not_proven", (value) => { value.scenario_results.find((entry) => entry.scenario === "response_loss").replay_safe = false; }],
-    ["protection_not_proven", (value) => { value.purpose_bindings[0].protection.non_exportable = false; }]
+    ["response_loss_not_proven", (value) => { value.scenario_results.find((entry) => entry.scenario === "response_loss").replay_safe = false; }]
   ];
   for (const [code, mutate] of cases) {
-    const tampered = structuredClone(report);
-    mutate(tampered);
-    const { signature: _signature, report_digest: _digest, ...core } = tampered;
-    void _signature;
-    void _digest;
-    tampered.report_digest = digest(canonicalJson(core));
-    assertCode(code, () => verifyKmsQualificationReport(tampered, {
-      repositoryRoot: root,
-      requireProduction: false,
-      trustedPublicKeyDer: qualificationEvidencePublicKeyDer,
-      trustedKeyId: qualificationEvidenceKeyId
-    }));
+    assertCode(code, () => verifyKmsQualificationReport(reboundReport(report, mutate), { repositoryRoot: root, requireProduction: false }));
   }
+});
+
+test("direct verifier rejects non-exportability tampering", async () => {
+  const report = await signedReport(baseInput({ mode: "protected_external", production: true }));
+  const tampered = reboundReport(report, (value) => {
+    value.purpose_bindings.find((entry) => entry.purpose === KMS_QUALIFICATION_PURPOSES[0].purpose).protection.non_exportable = false;
+  });
+  assertCode("protection_not_proven", () => verifyKmsQualificationReport(tampered, { repositoryRoot: root, requireProduction: false }));
 });
 
 test("verifier CLI emits only stable codes and never diagnostics", async () => {

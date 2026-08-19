@@ -77,13 +77,37 @@ export const runPreflight = (options) => {
   return { ok: true, status: 'passed', ...binding, gates };
 };
 
+const VALUE_OPTIONS = new Set(['--repo-root', '--manifest', '--expected-commit', '--expected-tree', '--source-ref', '--event-name', '--ref', '--repository', '--gate-file', '--require']);
+
+export const parseArguments = (args) => {
+  const values = {};
+  const gateFiles = [];
+  const required = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    if (!VALUE_OPTIONS.has(name)) fail(`unknown argument ${name}`);
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) fail(`argument ${name} requires a value`);
+    index += 1;
+    if (name === '--gate-file') gateFiles.push(value);
+    else if (name === '--require') {
+      const separator = value.indexOf('=');
+      if (separator <= 0) fail(`argument ${name} requires key=value`);
+      const key = value.slice(0, separator);
+      const raw = value.slice(separator + 1);
+      required[key] = raw === 'true' ? true : raw === 'false' ? false : raw;
+    } else {
+      const key = name.slice(2).replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+      values[key] = value;
+    }
+  }
+  return { ...values, gateFiles, required };
+};
+
 const main = () => {
-  const args = process.argv.slice(2);
-  const value = (name) => { const index = args.indexOf(name); return index === -1 ? undefined : args[index + 1]; };
-  const gateFiles = args.flatMap((arg, index) => arg === '--gate-file' ? [args[index + 1]] : []).filter(Boolean);
-  const required = Object.fromEntries(args.flatMap((arg, index) => arg === '--require' ? [args[index + 1]] : []).filter(Boolean).map((entry) => { const [key, raw] = entry.split('=', 2); return [key, raw === 'true' ? true : raw === 'false' ? false : raw]; }));
   try {
-    const result = runPreflight({ repoRoot: resolve(value('--repo-root') || process.cwd()), manifestPath: value('--manifest'), expectedCommit: value('--expected-commit'), expectedTree: value('--expected-tree'), sourceRef: value('--source-ref'), eventName: value('--event-name'), ref: value('--ref'), repository: value('--repository'), gateFiles, required });
+    const args = parseArguments(process.argv.slice(2));
+    const result = runPreflight({ ...args, repoRoot: resolve(args.repoRoot || process.cwd()) });
     console.log(JSON.stringify(result));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 };

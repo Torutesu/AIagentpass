@@ -221,6 +221,57 @@ function verifiedResult(device, control, refreshHint, receipt, requestDigest) {
   };
 }
 
+async function recoveryFailureFixture() {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const control = crypto.generateKeyPairSync("ed25519");
+  const refreshHint = crypto.generateKeyPairSync("ed25519");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
+  const resume = resumeStore();
+  let postCount = 0;
+  let provisionCount = 0;
+  let saveCount = 0;
+  const initial = commonOptions({
+    device,
+    receiptSigner,
+    credential,
+    fetchImpl: async (_url, init) => {
+      if (init.method === "POST") postCount += 1;
+      return init.method === "POST"
+        ? new Response("{malformed", { status: 201, headers: { "content-type": "application/json" } })
+        : new Response("", { status: 401 });
+    }
+  });
+  await assert.rejects(
+    () => createDeviceEnrollmentSetupHandler({ ...initial, resumeStore: resume.store })(context()),
+    (error) => error.code === "ERR_DEVICE_ENROLLMENT_RECOVERY_UNPROVEN"
+  );
+  const requestDigest = resume.store.read().recovery_descriptor.request_digest;
+  const recovered = verifiedResult(device, {
+    format_epoch: 2,
+    issuer: "agentpass-cloud",
+    key_id: "control-v1",
+    public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    bundle_path: `/v1/organizations/${organizationId}/bundles/${deviceId}`,
+    refresh_hint: {
+      key_id: "refresh-hint-v1",
+      algorithm: "ed25519",
+      public_key: refreshHint.publicKey.export({ type: "spki", format: "pem" }).toString()
+    }
+  }, refreshHint, receipt, requestDigest);
+  const handler = (value) => createDeviceEnrollmentSetupHandler({
+    runner: initial.runner,
+    resumeStore: resume.store,
+    recoverEnrollment: async () => value,
+    provisionControl: async () => { provisionCount += 1; return { changed: true, new_fingerprint: `SHA256:${"C".repeat(43)}` }; },
+    restartService: async () => controlRefreshEvidence(device),
+    loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } }),
+    saveConfig: () => { saveCount += 1; }
+  });
+  return { device, receipt, recovered, handler, postCount: () => postCount, provisionCount: () => provisionCount, saveCount: () => saveCount };
+}
+
 function publicSetupOptions({ device, receiptSigner, credential, resume, fetchImpl, invitationValue, provisionControl, restartService, loadConfig, saveConfig, recoverEnrollment, baseUrl = "https://api.example.test/v1" } = {}) {
   return {
     ...commonOptions({ device, receiptSigner, credential, fetchImpl, baseUrl }),
@@ -574,4 +625,41 @@ test("fails closed when a durable descriptor is incomplete or bound to another d
   };
   const common = commonOptions({ device: otherDevice, receiptSigner, credential: crypto.randomBytes(32).toString("base64url"), fetchImpl: async () => { throw new Error("unexpected network"); } });
   await assert.rejects(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: undefined, resumeStore: methods })(context()), (error) => error.code === "RESUME_BINDING_MISMATCH");
+});
+
+test("rejects adversarial recovery receipts and never POSTs or mutates trust", async () => {
+  const cases = [
+    ["receipt signature substitution", (fixture) => ({
+      ...fixture.recovered,
+      possession_receipt: { ...fixture.receipt, signature: "A".repeat(86) }
+    })],
+    ["receipt control substitution", (fixture) => ({
+      ...fixture.recovered,
+      control: { ...fixture.recovered.control, key_id: "control-substituted" }
+    })],
+    ["candidate substitution", (fixture) => ({
+      ...fixture.recovered,
+      evidence: { ...fixture.recovered.evidence, candidate_id: "release-substituted" }
+    })],
+    ["device substitution", (fixture) => ({
+      ...fixture.recovered,
+      device_id: "55555555-5555-4555-8555-555555555555"
+    })],
+    ["request hash substitution", (fixture) => ({
+      ...fixture.recovered,
+      request_hash: "e".repeat(64)
+    })]
+  ];
+
+  for (const [label, mutate] of cases) {
+    const fixture = await recoveryFailureFixture();
+    await assert.rejects(
+      () => fixture.handler(mutate(fixture))(context()),
+      (error) => error.code === "ENROLLMENT_RECOVERY_UNVERIFIED",
+      label
+    );
+    assert.equal(fixture.postCount(), 1, `${label}: recovery must not replay POST`);
+    assert.equal(fixture.provisionCount(), 0, `${label}: unverified recovery must not provision trust`);
+    assert.equal(fixture.saveCount(), 0, `${label}: unverified recovery must not save trust config`);
+  }
 });

@@ -73,6 +73,13 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
 
     do {
         let serviceClient = AgentHostServiceClient(handoff: handoff)
+        let terminalController = ActivationSignalController()
+        terminalController.install()
+        defer { terminalController.shutdown() }
+        serviceClient.connection.invalidationHandler = {
+            terminalController.requestStop()
+        }
+        terminalController.setConnection(serviceClient.connection)
         let connection = try NativeAgentHostConnectionBinding(
             connectionID: "agent-host",
             agentID: handoff.agentID
@@ -84,6 +91,10 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
             adapter: AgentHostServiceLifecycleAdapter(client: serviceClient)
         )
         let coordinator = try runtime.start()
+        terminalController.markBootstrapKnown()
+        terminalController.setStopHandler {
+            _ = try? coordinator.requestTermination()
+        }
         // Keep the Host process alive for the entire child/session lifetime.
         // The authenticated child XPC client is connection-owned by the
         // supervisor; returning from this function would invalidate it and
@@ -92,6 +103,16 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
         _ = try coordinator.waitForChild()
         writeActivation(ActivationOutput(ok: true, operation: "host-launch", status: "closed", error: nil))
         exit(0)
+    } catch let error as NativeAgentHostLifecycleError where error == .sessionCloseFailed {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "agent_session_close_failed"),
+            status: 1
+        )
+    } catch let error as NativeAgentHostLifecycleError where error == .signalFailed {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "host_child_termination_failed"),
+            status: 1
+        )
     } catch let error as NativeAgentHostLifecycleAdapterError where error == .unavailable {
         emitActivation(
             ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "service_binding_contract_unavailable"),
@@ -320,6 +341,7 @@ private final class ActivationSignalController: @unchecked Sendable {
     private var stopRequested = false
     private var bootstrapKnown = false
     private var connection: NSXPCConnection?
+    private var stopHandler: (@Sendable () -> Void)?
     private var termSource: DispatchSourceSignal?
     private var intSource: DispatchSourceSignal?
 
@@ -355,6 +377,14 @@ private final class ActivationSignalController: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setStopHandler(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        stopHandler = handler
+        let alreadyStopped = stopRequested
+        lock.unlock()
+        if alreadyStopped { handler() }
+    }
+
     var isStopRequested: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -366,8 +396,10 @@ private final class ActivationSignalController: @unchecked Sendable {
         stopRequested = true
         let shouldInvalidate = !bootstrapKnown
         let connection = self.connection
+        let stopHandler = self.stopHandler
         lock.unlock()
         if shouldInvalidate { connection?.invalidate() }
+        stopHandler?()
         wake.signal()
     }
 
