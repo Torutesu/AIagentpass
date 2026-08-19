@@ -146,9 +146,20 @@ private final class ProbeResultBox: @unchecked Sendable {
 private func readLaunchAuthorityHandoff(
     from descriptor: Int32 = AgentHostContract.activationDocumentFD
 ) throws -> NativeAgentLaunchAuthorityHandoff {
+    var descriptorInfo = stat()
+    guard Darwin.fstat(descriptor, &descriptorInfo) == 0 else {
+        throw NativeAgentLaunchAuthorityHandoffError.malformed
+    }
+    let fileType = descriptorInfo.st_mode & S_IFMT
+    guard fileType == S_IFIFO || fileType == S_IFSOCK else {
+        // Never consume authority from a seekable regular file or another
+        // replayable descriptor type.
+        throw NativeAgentLaunchAuthorityHandoffError.malformed
+    }
     var data = Data()
     var buffer = [UInt8](repeating: 0, count: 4 * 1024)
     defer {
+        _ = Darwin.close(descriptor)
         data.resetBytes(in: data.startIndex..<data.endIndex)
         _ = buffer.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
     }

@@ -184,6 +184,26 @@ test("macOS lifecycle fails closed when the one-time FD3 handoff is absent", () 
   });
 });
 
+test("macOS lifecycle rejects a replayable regular-file FD3 handoff", () => {
+  const result = launchAgentLifecycle(
+    launchDescriptor(),
+    {
+      platform: "darwin",
+      lstat: (file) => trustedLauncherStat(file),
+      fstat: () => ({ isFIFO: () => false, isSocket: () => false, isFile: () => true })
+    }
+  );
+
+  assert.deepEqual(result, {
+    ok: false,
+    operation: "launch",
+    error: {
+      code: "AGENT_LIFECYCLE_HANDOFF_NOT_AVAILABLE",
+      message: "The one-time Native Host handoff is not available"
+    }
+  });
+});
+
 test("macOS lifecycle rejects launcher substitution and malformed Host output", () => {
   const untrusted = launchAgentLifecycle(
     launchDescriptor(),

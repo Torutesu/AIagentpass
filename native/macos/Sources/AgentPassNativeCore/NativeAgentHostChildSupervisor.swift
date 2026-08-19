@@ -1017,7 +1017,13 @@ private enum NativeAgentHostSystemHooks {
               Self.addDirectoryChangeAction(&fileActions.value, descriptor: spec.workingDirectoryFD) == 0,
               // O_CLOEXEC is set at open time; this explicit action makes the
               // no-leak contract visible and robust across spawn/exec changes.
-              posix_spawn_file_actions_addclose(&fileActions.value, spec.workingDirectoryFD) == 0 else {
+              posix_spawn_file_actions_addclose(&fileActions.value, spec.workingDirectoryFD) == 0,
+              // FD3 is reserved for the one-use private Git bridge only. The
+              // Host's authority handoff must never reach a supervised Agent.
+              // The legacy bridge's dup2 action below intentionally recreates
+              // FD3 after this close; authenticated-XPC children keep it
+              // closed through exec.
+              posix_spawn_file_actions_addclose(&fileActions.value, 3) == 0 else {
             throw NativeAgentHostChildSupervisorError.launchFailed
         }
 
