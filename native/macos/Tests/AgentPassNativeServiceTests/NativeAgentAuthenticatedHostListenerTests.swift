@@ -1,4 +1,4 @@
-import AgentPassNativeService
+@testable import AgentPassNativeService
 import Foundation
 import Testing
 @testable import AgentPassNativeCore
@@ -217,4 +217,25 @@ private func prepareHostSession(_ endpoint: NativeAgentAuthenticatedHostEndpoint
     }
     #expect(error == nil)
     return response
+}
+
+@Test func injectedAgentSessionTokenMismatchTerminallyClosesBeforeProtectedOperation() throws {
+    let expected = try token().context(matching: hostObservation())
+    let changed = try token(changed(0)).context(matching: hostObservation())
+    var terminalCloseCount = 0
+    var protectedOperationRan = false
+
+    do {
+        try authorizeAgentSessionConnectionToken(
+            expected: expected,
+            current: { changed },
+            terminalClose: { terminalCloseCount += 1 }
+        )
+        protectedOperationRan = true
+    } catch let error as NativeAgentAuthenticatedHostAuditTokenError {
+        #expect(error == .invalidAuditToken)
+    }
+
+    #expect(terminalCloseCount == 1)
+    #expect(!protectedOperationRan)
 }

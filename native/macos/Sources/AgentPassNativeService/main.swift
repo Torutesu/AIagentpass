@@ -3089,6 +3089,32 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
     }
 }
 
+/// This helper is intentionally injectable so a token mismatch test can prove
+/// both terminal closure and denial-before-operation without constructing a
+/// live Mach service connection.
+internal func authorizeAgentSessionConnectionToken(
+    expected: NativeConnectionContext,
+    current: () throws -> NativeConnectionContext,
+    terminalClose: () -> Void
+) throws {
+    do {
+        guard try current() == expected else {
+            throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+        }
+    } catch {
+        terminalClose()
+        throw error
+    }
+}
+
+private final class AgentSessionConnectionBox: @unchecked Sendable {
+    let connection: NSXPCConnection
+
+    init(_ connection: NSXPCConnection) {
+        self.connection = connection
+    }
+}
+
 /// Service-wide production dependencies for the process-bound Agent runtime.
 /// Construction is all-or-none; an absent value means every Agent authority
 /// method remains fail-closed while the separate Mach service stays observable.
@@ -3553,6 +3579,8 @@ private final class AgentXPCReplyBox<Response>: @unchecked Sendable {
 private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
+    private let connection: NSXPCConnection
+    private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let runtime: AgentRuntimeDependencies?
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
@@ -3561,20 +3589,27 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
     private let coordinator: NativeAgentSessionCoordinator?
     private let signingBindingObserver: AgentConnectionSessionBindingObserver?
+    private let terminalCloseLock = NSLock()
+    private var hasTerminallyClosed = false
 
     init(
+        connection: NSXPCConnection,
         connectionGuard: NativeAgentConnectionGuard,
         observer: NativeDarwinProcessObservationSource,
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource,
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
         transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     ) {
+        self.connection = connection
         self.connectionGuard = connectionGuard
         self.observer = observer
+        self.auditTokenSource = auditTokenSource
         self.runtime = runtime
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
+        let connectionBox = AgentSessionConnectionBox(connection)
         if let runtime {
             let bindingObserver = AgentConnectionSessionBindingObserver(
                 connectionGuard: connectionGuard,
@@ -3587,11 +3622,29 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
             coordinator = try? NativeAgentSessionCoordinator(
                 connectionTokenIdentity: connectionGuard.context.tokenIdentity,
                 connectionRevalidator: {
-                    let observation = try observer.observe(
-                        pid: connectionGuard.context.pid,
-                        expectedUserID: connectionGuard.context.effectiveUserID
-                    )
-                    try connectionGuard.revalidate(observation: observation)
+                    do {
+                        let observation = try observer.observe(
+                            pid: connectionGuard.context.pid,
+                            expectedUserID: connectionGuard.context.effectiveUserID
+                        )
+                        try connectionGuard.revalidate(observation: observation)
+                        let currentToken = try auditTokenSource.completeAuditToken(for: connectionBox.connection)
+                        guard currentToken.pid == connectionGuard.context.pid,
+                              currentToken.effectiveUserID == connectionGuard.context.effectiveUserID else {
+                            throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+                        }
+                        let currentContext = try currentToken.context(matching: observation)
+                        try authorizeAgentSessionConnectionToken(
+                            expected: connectionGuard.context,
+                            current: { currentContext },
+                            terminalClose: {
+                                connectionBox.connection.invalidate()
+                            }
+                        )
+                    } catch {
+                        connectionBox.connection.invalidate()
+                        throw error
+                    }
                 },
                 bootstrapStore: bootstrapStore,
                 bindingObserver: bindingObserver,
@@ -3612,11 +3665,39 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     private func authorizeConnection() throws {
-        let observation = try observer.observe(
-            pid: connectionGuard.context.pid,
-            expectedUserID: connectionGuard.context.effectiveUserID
-        )
-        try connectionGuard.revalidate(observation: observation)
+        do {
+            let observation = try observer.observe(
+                pid: connectionGuard.context.pid,
+                expectedUserID: connectionGuard.context.effectiveUserID
+            )
+            try connectionGuard.revalidate(observation: observation)
+            let currentToken = try auditTokenSource.completeAuditToken(for: connection)
+            guard currentToken.pid == connectionGuard.context.pid,
+                  currentToken.effectiveUserID == connectionGuard.context.effectiveUserID else {
+                throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+            }
+            let currentContext = try currentToken.context(matching: observation)
+            try authorizeAgentSessionConnectionToken(
+                expected: connectionGuard.context,
+                current: { currentContext },
+                terminalClose: { [weak self] in self?.terminallyClose() }
+            )
+        } catch {
+            terminallyClose()
+            throw error
+        }
+    }
+
+    private func terminallyClose() {
+        let shouldClose = terminalCloseLock.withLock {
+            guard !hasTerminallyClosed else { return false }
+            hasTerminallyClosed = true
+            return true
+        }
+        guard shouldClose else { return }
+        coordinator?.invalidateConnection()
+        bootstrapStore.invalidate()
+        connection.invalidate()
     }
 
     private func unavailableAfterAuthorization() -> NSError {
@@ -3686,12 +3767,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         let bootstrapID = request.bootstrapID
         let proof = request.proof
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator, qualificationFaultConsumer, transportReplyFaultConsumer] in
-            guard let coordinator else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let activation = try coordinator.start(bootstrapID: bootstrapID, proof: proof)
                 guard let response = AgentPassAgentSessionResponse(
                     sessionID: activation.status.sessionID,
@@ -3711,7 +3793,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     return
                 }
                 do {
-                    try qualificationFaultConsumer.reach(.afterResultEncoded)
+                    try self.qualificationFaultConsumer.reach(.afterResultEncoded)
                 } catch {
                     // The production injected branch never returns after its
                     // atomic receipt. Any ordinary throwing implementation is
@@ -3720,7 +3802,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     throw error
                 }
-                guard !transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
+                guard !self.transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
                 replyBox.call(response, nil)
             } catch {
                 replyBox.call(nil, Self.denial(for: error).nsError)
@@ -3731,12 +3813,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     func agentSessionStatus(_ request: AgentPassAgentSessionStatusRequest, withReply reply: @escaping (AgentPassAgentSessionStatusResponse?, NSError?) -> Void) {
         let sessionID = request.sessionID
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator] in
-            guard let coordinator else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let status = try coordinator.status(sessionID: sessionID)
                 guard let response = AgentPassAgentSessionStatusResponse(
                     sessionID: status.sessionID,
@@ -3931,14 +4014,15 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         let sessionID = request.sessionID
         let reason = AgentPassAgentSessionCloseReason(rawValue: request.reason)
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator, clocks] in
-            guard let coordinator, let reason else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator, let reason else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let status = try coordinator.close(sessionID: sessionID, reason: reason)
-                let closedAt = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                let closedAt = try self.clocks.wallClock.sample().millisecondsSinceUnixEpoch
                 guard let response = AgentPassAgentCloseSessionResponse(
                     sessionID: status.sessionID,
                     closedAtMilliseconds: closedAt
@@ -3999,6 +4083,7 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let auditAppender: any NativeAgentSessionAuditAppending
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+    private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let observer = NativeDarwinProcessObservationSource()
 
     init(
@@ -4006,37 +4091,36 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
-        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming,
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource = NativeAgentAuthenticatedHostUnavailableAuditTokenSource()
     ) {
         self.configuration = configuration
         self.runtime = runtime
         self.auditAppender = auditAppender
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
+        self.auditTokenSource = auditTokenSource
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        let peerPID = connection.processIdentifier
-        let peerUID = connection.effectiveUserIdentifier
-        let auditSessionID = connection.auditSessionIdentifier
-        guard peerPID > 0,
-              peerUID == configuration.allowedClientUID,
-              auditSessionID > 0,
-              let normalizedAuditSessionID = UInt32(exactly: auditSessionID) else { return false }
+        let initialToken: NativeAgentAuthenticatedHostCompleteAuditToken
+        do {
+            initialToken = try auditTokenSource.completeAuditToken(for: connection)
+        } catch {
+            return false
+        }
+        guard initialToken.effectiveUserID == configuration.allowedClientUID else { return false }
         connection.setCodeSigningRequirement(configuration.agentClientCodeSigningRequirement)
         do {
-            let observation = try observer.observe(pid: peerPID, expectedUserID: peerUID)
-            let context = try NativeConnectionContext(
-                osProcessID: peerPID,
-                effectiveUserID: peerUID,
-                auditSessionID: normalizedAuditSessionID,
-                pidVersion: observation.process.pidVersion
-            )
+            let observation = try observer.observe(pid: initialToken.pid, expectedUserID: initialToken.effectiveUserID)
+            let context = try initialToken.context(matching: observation)
             let guardValue = try NativeAgentConnectionGuard(context: context, observation: observation)
             connection.exportedInterface = AgentPassAgentXPCInterface.make()
             let endpoint = AgentConnectionEndpoint(
+                connection: connection,
                 connectionGuard: guardValue,
                 observer: observer,
+                auditTokenSource: auditTokenSource,
                 runtime: runtime,
                 auditAppender: auditAppender,
                 qualificationFaultConsumer: qualificationFaultConsumer,
