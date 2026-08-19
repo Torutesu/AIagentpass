@@ -23,20 +23,55 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.4
+          cache: npm
+      - name: Validate source before publishing image
+        run: |
+          npm ci --ignore-scripts
+          npm run lint
+          # Lifecycle repository cases require AGENTPASS_TEST_DATABASE_URL and
+          # belong to the protected PostgreSQL qualification job. Do not turn
+          # a missing database into a false green image gate.
+          find apps/cloud-api/test -maxdepth 1 -type f -name '*.test.mjs' \
+            ! -name 'agent-session-lifecycle-repository.test.mjs' -print0 \
+            | sort -z \
+            | xargs -0 node --test scripts/ops/verify-cloud-deployment.test.mjs
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=commit-
       - uses: docker/build-push-action@v6
+        id: image
         with:
           context: .
           file: apps/cloud-api/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/agentpass-cloud-api:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: true
           sbom: true
+      - name: Record immutable image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "image digest is not immutable" >&2; exit 1; }
+          {
+            echo "### Cloud API image"
+            echo "- commit: `${GITHUB_SHA}`"
+            echo "- digest: `${IMAGE_DIGEST}`"
+            echo "- provenance: enabled"
+            echo "- sbom: enabled"
+          } >> "$GITHUB_STEP_SUMMARY"
