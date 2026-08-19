@@ -13,7 +13,8 @@ public enum AgentPassHostXPCContract {
     public static let maximumNonceBytes = 64
     public static let maximumCommitPayloadBytes = 1 * 1024 * 1024
     public static let maximumSignatureBytes = 4 * 1024
-    public static let fixedSignatureBudget = 2
+    public static let minimumSignatureBudget = NativeAgentSignatureBudget.minimumSignatures
+    public static let maximumSignatureBudget = NativeAgentSignatureBudget.maximumSignatures
     public static let maximumChildPID = Int(Int32.max)
     /// PID versions are represented as a bounded microsecond process-start
     /// identity. The upper bound is the same 2100 boundary used by native
@@ -175,19 +176,22 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
     public let status: String
     public let expiresAtMilliseconds: Int64
     public let maxSignatures: Int
+    public let usedSignatures: Int
 
     public init?(
         protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
         sessionID: String,
         status: AgentPassHostXPCContract.SessionStatus,
         expiresAtMilliseconds: Int64,
-        maxSignatures: Int
+        maxSignatures: Int,
+        usedSignatures: Int
     ) {
         guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
               let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               status == .prepared,
               AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds),
-              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
+              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
+              (0...maxSignatures).contains(usedSignatures) else {
             return nil
         }
         self.protocolVersion = protocolVersion
@@ -195,6 +199,7 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
         self.status = status.rawValue
         self.expiresAtMilliseconds = expiresAtMilliseconds
         self.maxSignatures = maxSignatures
+        self.usedSignatures = usedSignatures
         super.init()
     }
 
@@ -203,15 +208,17 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
               coder.containsValue(forKey: Keys.protocolVersion),
               coder.containsValue(forKey: Keys.expiresAtMilliseconds),
               coder.containsValue(forKey: Keys.maxSignatures),
+              coder.containsValue(forKey: Keys.usedSignatures),
               let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
               let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
               let status = coder.decodeObject(of: NSString.self, forKey: Keys.status) as String?,
               let status = AgentPassHostXPCContract.SessionStatus(rawValue: status),
               let expiresAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.expiresAtMilliseconds)?.int64Value,
-              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue else {
+              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
+              let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue else {
             return nil
         }
-        self.init(protocolVersion: protocolVersion, sessionID: sessionID, status: status, expiresAtMilliseconds: expiresAtMilliseconds, maxSignatures: maxSignatures)
+        self.init(protocolVersion: protocolVersion, sessionID: sessionID, status: status, expiresAtMilliseconds: expiresAtMilliseconds, maxSignatures: maxSignatures, usedSignatures: usedSignatures)
     }
 
     public func encode(with coder: NSCoder) {
@@ -220,6 +227,7 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
         coder.encode(status as NSString, forKey: Keys.status)
         coder.encode(NSNumber(value: expiresAtMilliseconds), forKey: Keys.expiresAtMilliseconds)
         coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
+        coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
     }
 
     private enum Keys {
@@ -228,6 +236,7 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
         static let status = "status"
         static let expiresAtMilliseconds = "expires_at_ms"
         static let maxSignatures = "max_signatures"
+        static let usedSignatures = "used_signatures"
     }
 }
 
@@ -320,17 +329,20 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
     public let status: String
     public let attachedAtMilliseconds: Int64
     public let maxSignatures: Int
+    public let usedSignatures: Int
 
     public init?(
         protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
         sessionID: String,
         attachedAtMilliseconds: Int64,
-        maxSignatures: Int
+        maxSignatures: Int,
+        usedSignatures: Int
     ) {
         guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
               let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               AgentPassHostXPCContract.isTimestamp(attachedAtMilliseconds),
-              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
+              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
+              (0...maxSignatures).contains(usedSignatures) else {
             return nil
         }
         self.protocolVersion = protocolVersion
@@ -338,6 +350,7 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
         self.status = AgentPassHostXPCContract.SessionStatus.attached.rawValue
         self.attachedAtMilliseconds = attachedAtMilliseconds
         self.maxSignatures = maxSignatures
+        self.usedSignatures = usedSignatures
         super.init()
     }
 
@@ -346,13 +359,15 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
               coder.containsValue(forKey: Keys.protocolVersion),
               coder.containsValue(forKey: Keys.attachedAtMilliseconds),
               coder.containsValue(forKey: Keys.maxSignatures),
+              coder.containsValue(forKey: Keys.usedSignatures),
               let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
               let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
               let attachedAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.attachedAtMilliseconds)?.int64Value,
-              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue else {
+              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
+              let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue else {
             return nil
         }
-        self.init(protocolVersion: protocolVersion, sessionID: sessionID, attachedAtMilliseconds: attachedAtMilliseconds, maxSignatures: maxSignatures)
+        self.init(protocolVersion: protocolVersion, sessionID: sessionID, attachedAtMilliseconds: attachedAtMilliseconds, maxSignatures: maxSignatures, usedSignatures: usedSignatures)
     }
 
     public func encode(with coder: NSCoder) {
@@ -361,6 +376,7 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
         coder.encode(status as NSString, forKey: Keys.status)
         coder.encode(NSNumber(value: attachedAtMilliseconds), forKey: Keys.attachedAtMilliseconds)
         coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
+        coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
     }
 
     private enum Keys {
@@ -369,6 +385,7 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
         static let status = "status"
         static let attachedAtMilliseconds = "attached_at_ms"
         static let maxSignatures = "max_signatures"
+        static let usedSignatures = "used_signatures"
     }
 }
 
@@ -380,7 +397,7 @@ public final class AgentPassHostSignRequest: NSObject, NSSecureCoding {
     public let commitPayload: Data
 
     public init?(requestSequence: UInt32, commitPayload: Data) {
-        guard (1...UInt32(AgentPassHostXPCContract.fixedSignatureBudget)).contains(requestSequence),
+        guard (1...UInt32(AgentPassHostXPCContract.maximumSignatureBudget)).contains(requestSequence),
               !commitPayload.isEmpty,
               commitPayload.count <= AgentPassHostXPCContract.maximumCommitPayloadBytes else {
             return nil
@@ -415,17 +432,29 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
     public let responseSequence: UInt32
     public let signature: Data
+    public let maxSignatures: Int
+    public let usedSignatures: Int
     public let remainingSignatures: Int
 
-    public init?(responseSequence: UInt32, signature: Data, remainingSignatures: Int) {
-        guard (1...UInt32(AgentPassHostXPCContract.fixedSignatureBudget)).contains(responseSequence),
+    public init?(
+        responseSequence: UInt32,
+        signature: Data,
+        maxSignatures: Int,
+        usedSignatures: Int,
+        remainingSignatures: Int
+    ) {
+        guard (1...UInt32(AgentPassHostXPCContract.maximumSignatureBudget)).contains(responseSequence),
               !signature.isEmpty,
               signature.count <= AgentPassHostXPCContract.maximumSignatureBytes,
-              remainingSignatures == AgentPassHostXPCContract.fixedSignatureBudget - Int(responseSequence) else {
+              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
+              (0...maxSignatures).contains(usedSignatures),
+              remainingSignatures == maxSignatures - usedSignatures else {
             return nil
         }
         self.responseSequence = responseSequence
         self.signature = signature
+        self.maxSignatures = maxSignatures
+        self.usedSignatures = usedSignatures
         self.remainingSignatures = remainingSignatures
         super.init()
     }
@@ -434,21 +463,27 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
         guard !AgentPassHostXPCContract.containsForbiddenAuthorityKey(coder),
               let responseSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.responseSequence)?.uint32Value,
               let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data?,
+              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
+              let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue,
               let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue else {
             return nil
         }
-        self.init(responseSequence: responseSequence, signature: signature, remainingSignatures: remainingSignatures)
+        self.init(responseSequence: responseSequence, signature: signature, maxSignatures: maxSignatures, usedSignatures: usedSignatures, remainingSignatures: remainingSignatures)
     }
 
     public func encode(with coder: NSCoder) {
         coder.encode(NSNumber(value: responseSequence), forKey: Keys.responseSequence)
         coder.encode(signature as NSData, forKey: Keys.signature)
+        coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
+        coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
         coder.encode(NSNumber(value: remainingSignatures), forKey: Keys.remainingSignatures)
     }
 
     private enum Keys {
         static let responseSequence = "response_sequence"
         static let signature = "signature"
+        static let maxSignatures = "max_signatures"
+        static let usedSignatures = "used_signatures"
         static let remainingSignatures = "remaining_signatures"
     }
 }
@@ -503,7 +538,7 @@ public final class AgentPassHostStatusResponse: NSObject, NSSecureCoding {
     ) {
         guard let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds),
-              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget,
+              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
               (0...maxSignatures).contains(usedSignatures),
               ((status == .prepared || status == .expired || status == .revoked || status == .closed) && !childAttached)
                 || ((status == .attached || status == .active) && childAttached) else {

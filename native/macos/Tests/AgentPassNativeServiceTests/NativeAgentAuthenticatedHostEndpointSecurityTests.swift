@@ -80,6 +80,7 @@ private final class HostEndpointHarness: @unchecked Sendable {
     private var liveChildWorktreeDigest: Data
     private var childObservationShouldFail = false
     private var signerBehavior: EndpointSignerBehavior = .success
+    private var signatureBudgetValue: NativeAgentSignatureBudget
 
     init() throws {
         hostObservation = try Self.observation(
@@ -103,6 +104,7 @@ private final class HostEndpointHarness: @unchecked Sendable {
         livePeerObservation = hostObservation
         liveChildObservation = childObservation
         liveChildWorktreeDigest = childWorktreeDigest
+        signatureBudgetValue = try NativeAgentSignatureBudget(maxSignatures: 2, usedSignatures: 0)
     }
 
     func setPeerObservation(_ observation: NativeProcessObservation) {
@@ -135,12 +137,31 @@ private final class HostEndpointHarness: @unchecked Sendable {
         lock.unlock()
     }
 
-    func makeEndpoint() throws -> NativeAgentAuthenticatedHostEndpoint {
+    func setSignatureBudget(maxSignatures: Int, usedSignatures: Int) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        signatureBudgetValue = try NativeAgentSignatureBudget(
+            maxSignatures: maxSignatures,
+            usedSignatures: usedSignatures
+        )
+    }
+
+    func makeEndpoint(provideSignatureBudget: Bool = true) throws -> NativeAgentAuthenticatedHostEndpoint {
         let hostIdentity = NativeProcessIdentity(observation: hostObservation)
         let childIdentity = NativeProcessIdentity(observation: childObservation)
         let peerPolicy = try NativeProcessIdentityPolicy.exact(hostIdentity)
         let childPolicy = try NativeProcessIdentityPolicy.exact(childIdentity)
         let childSigner = NativeAgentAuthenticatedChildClosureSigner { _ in Data([0x71]) }
+        let signatureBudgetProvider: NativeAgentAuthenticatedHostEndpoint.SignatureBudgetProvider?
+        if provideSignatureBudget {
+            signatureBudgetProvider = { [self] in
+                lock.lock()
+                defer { lock.unlock() }
+                return signatureBudgetValue
+            }
+        } else {
+            signatureBudgetProvider = nil
+        }
 
         return try NativeAgentAuthenticatedHostEndpoint(
             connectionContext: hostContext,
@@ -178,19 +199,21 @@ private final class HostEndpointHarness: @unchecked Sendable {
             },
             nowMilliseconds: { [self] in clock.read() },
             sessionLifetimeMilliseconds: 100,
-            childRegistrar: { [self] sessionID, observation in
+            childRegistrar: { [self] sessionID, observation, signatureBudget in
                 try registry.register(
                     sessionID: sessionID,
                     identity: observation.identity,
                     worktreeBindingDigest: observation.worktreeBindingDigest,
-                    signer: childSigner
+                    signer: childSigner,
+                    signatureBudget: signatureBudget
                 )
                 recorder.recordRegister()
             },
             childUnregistrar: { [self] bindingHash in
                 registry.unregister(identityBindingHash: bindingHash)
                 recorder.recordUnregister(bindingHash)
-            }
+            },
+            signatureBudgetProvider: signatureBudgetProvider
         )
     }
 
@@ -498,4 +521,77 @@ private func childErrorCode(
         #expect(harness.recorder.registerCount == 0)
         #expect(harness.recorder.unregisterCount == 0)
     }
+}
+
+@Test func hostEndpointFailsClosedWhenCloudBudgetProviderIsNotWired() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(provideSignatureBudget: false)
+    var response: AgentPassHostPrepareResponse?
+    var error: NSError?
+    endpoint.prepareHostSession(
+        try #require(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0x51, count: 16)))
+    ) { value, responseError in
+        response = value
+        error = responseError
+    }
+    #expect(response == nil)
+    #expect(error?.code == 2)
+    #expect(harness.recorder.signCount == 0)
+}
+
+@Test func hostAndChildConsumeOneAuthoritativeCloudBudgetWithoutTruncationOrExpansion() throws {
+    let harness = try HostEndpointHarness()
+    try harness.setSignatureBudget(maxSignatures: 5, usedSignatures: 3)
+    let endpoint = try harness.makeEndpoint()
+    let prepared = try prepare(endpoint)
+    #expect(prepared.maxSignatures == 5)
+    #expect(prepared.usedSignatures == 3)
+    let attached = try attach(endpoint, request: harness.attachRequest())
+    #expect(attached.maxSignatures == 5)
+    #expect(attached.usedSignatures == 3)
+
+    let hostRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x61])))
+    var hostResponse: AgentPassHostSignResponse?
+    var hostError: NSError?
+    endpoint.signHostPayload(hostRequest) { response, responseError in
+        hostResponse = response
+        hostError = responseError
+    }
+    #expect(hostError == nil)
+    #expect(hostResponse?.maxSignatures == 5)
+    #expect(hostResponse?.usedSignatures == 4)
+    #expect(hostResponse?.remainingSignatures == 1)
+
+    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x62])))
+    var childResponse: AgentPassChildGitSignResponse?
+    var childError: NSError?
+    harness.childEndpoint().signChildGitCommit(childRequest) { response, responseError in
+        childResponse = response
+        childError = responseError
+    }
+    #expect(childError == nil)
+    #expect(childResponse?.maxSignatures == 5)
+    #expect(childResponse?.usedSignatures == 5)
+    #expect(childResponse?.remainingSignatures == 0)
+
+    let exhaustedHostRequest = try #require(AgentPassHostSignRequest(requestSequence: 2, commitPayload: Data([0x63])))
+    #expect(errorCode(endpoint, sign: exhaustedHostRequest) == 2)
+    #expect(harness.recorder.signCount == 1)
+    #expect(childErrorCode(harness.childEndpoint(), request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x64])))) == NativeAgentAuthenticatedChildGitError.closed.rawValue)
+}
+
+@Test func hostPrepareRejectsAnAlreadyExhaustedCloudBudget() throws {
+    let harness = try HostEndpointHarness()
+    try harness.setSignatureBudget(maxSignatures: 5, usedSignatures: 5)
+    let endpoint = try harness.makeEndpoint()
+    var response: AgentPassHostPrepareResponse?
+    var error: NSError?
+    endpoint.prepareHostSession(
+        try #require(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0x52, count: 16)))
+    ) { value, responseError in
+        response = value
+        error = responseError
+    }
+    #expect(response == nil)
+    #expect(error?.code == 2)
 }

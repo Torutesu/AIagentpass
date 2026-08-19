@@ -8,7 +8,7 @@ public enum AgentPassChildGitXPCContract {
     public static let protocolVersion = 1
     public static let maximumPayloadBytes = 1 * 1024 * 1024
     public static let maximumSignatureBytes = 4 * 1024
-    public static let maximumRequests: UInt32 = 2
+    public static let maximumRequests: UInt32 = UInt32(NativeAgentSignatureBudget.maximumSignatures)
 
     public static func validSequence(_ value: UInt32) -> Bool {
         (1...maximumRequests).contains(value)
@@ -81,43 +81,64 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
     public let protocolVersion: Int
     public let responseSequence: UInt32
     public let signature: Data
+    public let maxSignatures: Int
+    public let usedSignatures: Int
+    public let remainingSignatures: Int
 
     public init?(
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
         responseSequence: UInt32,
-        signature: Data
+        signature: Data,
+        maxSignatures: Int,
+        usedSignatures: Int,
+        remainingSignatures: Int
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               AgentPassChildGitXPCContract.validSequence(responseSequence),
               !signature.isEmpty,
-              signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes else {
+              signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes,
+              (NativeAgentSignatureBudget.minimumSignatures...NativeAgentSignatureBudget.maximumSignatures).contains(maxSignatures),
+              (0...maxSignatures).contains(usedSignatures),
+              remainingSignatures == maxSignatures - usedSignatures else {
             return nil
         }
         self.protocolVersion = protocolVersion
         self.responseSequence = responseSequence
         self.signature = signature
+        self.maxSignatures = maxSignatures
+        self.usedSignatures = usedSignatures
+        self.remainingSignatures = remainingSignatures
         super.init()
     }
 
     public required convenience init?(coder: NSCoder) {
         guard let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
               let responseSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.responseSequence)?.uint32Value,
-              let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data? else {
+              let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data?,
+              let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
+              let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue,
+              let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue else {
             return nil
         }
-        self.init(protocolVersion: protocolVersion, responseSequence: responseSequence, signature: signature)
+        self.init(protocolVersion: protocolVersion, responseSequence: responseSequence, signature: signature, maxSignatures: maxSignatures, usedSignatures: usedSignatures, remainingSignatures: remainingSignatures)
     }
 
     public func encode(with coder: NSCoder) {
         coder.encode(NSNumber(value: protocolVersion), forKey: Keys.protocolVersion)
         coder.encode(NSNumber(value: responseSequence), forKey: Keys.responseSequence)
         coder.encode(signature as NSData, forKey: Keys.signature)
+        coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
+        coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
+        coder.encode(NSNumber(value: remainingSignatures), forKey: Keys.remainingSignatures)
     }
 
     private enum Keys {
         static let protocolVersion = "protocol_version"
         static let responseSequence = "response_sequence"
         static let signature = "signature"
+        static let maxSignatures = "max_signatures"
+        static let usedSignatures = "used_signatures"
+        static let remainingSignatures = "remaining_signatures"
     }
 }
 

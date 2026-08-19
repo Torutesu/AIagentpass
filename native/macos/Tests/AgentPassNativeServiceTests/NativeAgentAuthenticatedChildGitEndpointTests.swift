@@ -3,6 +3,10 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
+private func childBudget(maxSignatures: Int = 2, usedSignatures: Int = 0) -> NativeAgentSignatureBudgetLedger {
+    NativeAgentSignatureBudgetLedger(try! NativeAgentSignatureBudget(maxSignatures: maxSignatures, usedSignatures: usedSignatures))
+}
+
 private func childTestObservation() throws -> NativeProcessObservation {
     let facts = try NativeObservedProcessFacts(
         uid: 501,
@@ -30,12 +34,13 @@ private func childTestObservation() throws -> NativeProcessObservation {
         sessionID: "session-1",
         identity: identity,
         worktreeBindingDigest: worktreeDigest,
-        signer: signer
+        signer: signer,
+        signatureBudget: childBudget()
     )
     let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([1, 2, 3])))
     let result = try registry.sign(identity: identity, worktreeBindingDigest: worktreeDigest, request: request)
     #expect(result.signature == Data([3, 2, 1]))
-    #expect(result.remaining == 1)
+    #expect(result.budget.remainingSignatures == 1)
 }
 
 @Test func childRegistryClosesOnWorktreeDriftAndRejectsReplay() throws {
@@ -45,7 +50,8 @@ private func childTestObservation() throws -> NativeProcessObservation {
         sessionID: "session-2",
         identity: identity,
         worktreeBindingDigest: Data(repeating: 0x41, count: 32),
-        signer: NativeAgentAuthenticatedChildClosureSigner { $0 }
+        signer: NativeAgentAuthenticatedChildClosureSigner { $0 },
+        signatureBudget: childBudget()
     )
     let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([8])))
     #expect(throws: NativeAgentAuthenticatedChildGitError.worktreeChanged) {
@@ -63,7 +69,8 @@ private func childTestObservation() throws -> NativeProcessObservation {
         sessionID: "session-replay",
         identity: identity,
         worktreeBindingDigest: Data(repeating: 0x61, count: 32),
-        signer: NativeAgentAuthenticatedChildClosureSigner { $0 }
+        signer: NativeAgentAuthenticatedChildClosureSigner { $0 },
+        signatureBudget: childBudget()
     )
     let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([7, 7, 7])))
 
@@ -97,7 +104,8 @@ private func childTestObservation() throws -> NativeProcessObservation {
         worktreeBindingDigest: Data(repeating: 0x51, count: 32),
         signer: NativeAgentAuthenticatedChildClosureSigner { _ in
             throw NativeAgentAuthenticatedChildGitError.signerFailed
-        }
+        },
+        signatureBudget: childBudget()
     )
     let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([9])))
     #expect(throws: NativeAgentAuthenticatedChildGitError.signerFailed) {

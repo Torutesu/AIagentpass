@@ -3,6 +3,10 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
+private func adversarialChildBudget(maxSignatures: Int = 2, usedSignatures: Int = 0) -> NativeAgentSignatureBudgetLedger {
+    NativeAgentSignatureBudgetLedger(try! NativeAgentSignatureBudget(maxSignatures: maxSignatures, usedSignatures: usedSignatures))
+}
+
 private final class ChildSignerCallCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
@@ -58,7 +62,8 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         sessionID: "44444444-4444-4444-8444-444444444444",
         identity: registered,
         worktreeBindingDigest: worktree,
-        signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([1]) }
+        signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([1]) },
+        signatureBudget: adversarialChildBudget()
     )
 
     #expect(throws: NativeAgentAuthenticatedChildGitError.childNotRegistered) {
@@ -78,7 +83,8 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         sessionID: "55555555-5555-4555-8555-555555555555",
         identity: identity,
         worktreeBindingDigest: worktree,
-        signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([2]) }
+        signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([2]) },
+        signatureBudget: adversarialChildBudget()
     )
 
     #expect(throws: NativeAgentAuthenticatedChildGitError.sequenceMismatch) {
@@ -89,7 +95,7 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
     }
 }
 
-@Test func childRegistryEnforcesTheTwoRequestBudgetAcrossDistinctPayloads() throws {
+@Test func childRegistryUsesTheAuthoritativeBudgetAcrossDistinctPayloads() throws {
     let identity = NativeProcessIdentity(observation: try adversarialChildObservation())
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
     let worktree = Data(repeating: 0x23, count: AgentPassHostXPCContract.digestBytes)
@@ -97,11 +103,12 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         sessionID: "66666666-6666-4666-8666-666666666666",
         identity: identity,
         worktreeBindingDigest: worktree,
-        signer: NativeAgentAuthenticatedChildClosureSigner { payload in payload }
+        signer: NativeAgentAuthenticatedChildClosureSigner { payload in payload },
+        signatureBudget: adversarialChildBudget(maxSignatures: 5, usedSignatures: 3)
     )
 
-    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 3)).remaining == 1)
-    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 4)).remaining == 0)
+    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 3)).budget.remainingSignatures == 1)
+    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 4)).budget.remainingSignatures == 0)
     #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
         _ = try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 5))
     }
@@ -119,7 +126,8 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         signer: NativeAgentAuthenticatedChildClosureSigner { _ in
             signerCalls.increment()
             return Data([9])
-        }
+        },
+        signatureBudget: adversarialChildBudget()
     )
     let endpoint = NativeAgentAuthenticatedChildGitEndpoint(
         registry: registry,

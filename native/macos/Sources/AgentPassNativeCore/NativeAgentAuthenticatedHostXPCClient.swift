@@ -20,15 +20,18 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         public let sessionID: String
         public let expiresAtMilliseconds: Int64
         public let maxSignatures: Int
+        public let usedSignatures: Int
 
         fileprivate init(response: AgentPassHostPrepareResponse) throws {
             guard response.status == AgentPassHostXPCContract.SessionStatus.prepared.rawValue,
-                  response.maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
+                  (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(response.maxSignatures),
+                  (0...response.maxSignatures).contains(response.usedSignatures) else {
                 throw Error.invalidResponse
             }
             self.sessionID = response.sessionID
             self.expiresAtMilliseconds = response.expiresAtMilliseconds
             self.maxSignatures = response.maxSignatures
+            self.usedSignatures = response.usedSignatures
         }
     }
 
@@ -36,15 +39,18 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         public let sessionID: String
         public let attachedAtMilliseconds: Int64
         public let maxSignatures: Int
+        public let usedSignatures: Int
 
         fileprivate init(response: AgentPassHostAttachChildResponse) throws {
             guard response.status == AgentPassHostXPCContract.SessionStatus.attached.rawValue,
-                  response.maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
+                  (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(response.maxSignatures),
+                  (0...response.maxSignatures).contains(response.usedSignatures) else {
                 throw Error.invalidResponse
             }
             self.sessionID = response.sessionID
             self.attachedAtMilliseconds = response.attachedAtMilliseconds
             self.maxSignatures = response.maxSignatures
+            self.usedSignatures = response.usedSignatures
         }
     }
 
@@ -57,7 +63,7 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         public let childAttached: Bool
 
         fileprivate init(response: AgentPassHostStatusResponse) throws {
-            guard response.maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget,
+            guard (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(response.maxSignatures),
                   (0...response.maxSignatures).contains(response.usedSignatures) else {
                 throw Error.invalidResponse
             }
@@ -85,6 +91,8 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
     private let lock = NSLock()
     private var state: State = .new
     private var nextRequestSequence: UInt32 = 1
+    private var maxSignatures: Int?
+    private var usedSignatures: Int?
 
     public init(
         machServiceName: String = NativeAgentAuthenticatedHostXPCClient.defaultMachServiceName,
@@ -113,9 +121,19 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         let response: AgentPassHostPrepareResponse = try invoke { proxy, reply in
             proxy.prepareHostSession(request, withReply: reply)
         }
-        let prepared = try PreparedSession(response: response)
+        let prepared: PreparedSession
+        do {
+            prepared = try PreparedSession(response: response)
+        } catch {
+            lock.lock()
+            state = .closed
+            lock.unlock()
+            throw error
+        }
         lock.lock()
         state = .prepared
+        maxSignatures = prepared.maxSignatures
+        usedSignatures = prepared.usedSignatures
         lock.unlock()
         return prepared
     }
@@ -145,8 +163,24 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         let response: AgentPassHostAttachChildResponse = try invoke { proxy, reply in
             proxy.attachHostChild(request, withReply: reply)
         }
-        let attached = try AttachedSession(response: response)
+        let attached: AttachedSession
+        do {
+            attached = try AttachedSession(response: response)
+        } catch {
+            lock.lock()
+            state = .closed
+            lock.unlock()
+            throw error
+        }
         lock.lock()
+        guard let maxSignatures,
+              let usedSignatures,
+              attached.maxSignatures == maxSignatures,
+              attached.usedSignatures == usedSignatures else {
+            state = .closed
+            lock.unlock()
+            throw Error.invalidResponse
+        }
         state = .attached
         lock.unlock()
         return attached
@@ -159,7 +193,10 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
             throw Error.invalidState
         }
         let sequence = nextRequestSequence
-        guard sequence <= UInt32(AgentPassHostXPCContract.fixedSignatureBudget) else {
+        guard let maxSignatures,
+              let usedSignatures,
+              usedSignatures < maxSignatures,
+              sequence <= UInt32(maxSignatures) else {
             lock.unlock()
             throw Error.invalidState
         }
@@ -171,13 +208,25 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         let response: AgentPassHostSignResponse = try invoke { proxy, reply in
             proxy.signHostPayload(request, withReply: reply)
         }
+        lock.lock()
+        let priorUsedSignatures = usedSignatures
+        let expectedMaxSignatures = maxSignatures
+        lock.unlock()
         guard response.responseSequence == sequence,
-              response.remainingSignatures >= 0,
-              response.remainingSignatures <= AgentPassHostXPCContract.fixedSignatureBudget,
+              response.maxSignatures == expectedMaxSignatures,
+              response.usedSignatures > priorUsedSignatures,
+              response.usedSignatures <= response.maxSignatures,
+              response.remainingSignatures == response.maxSignatures - response.usedSignatures,
               !response.signature.isEmpty,
               response.signature.count <= AgentPassHostXPCContract.maximumSignatureBytes else {
+            lock.lock()
+            state = .closed
+            lock.unlock()
             throw Error.invalidResponse
         }
+        lock.lock()
+        self.usedSignatures = response.usedSignatures
+        lock.unlock()
         return (response.signature, response.remainingSignatures)
     }
 
@@ -192,7 +241,27 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         let response: AgentPassHostStatusResponse = try invoke { proxy, reply in
             proxy.hostSessionStatus(request, withReply: reply)
         }
-        return try Status(response: response)
+        let status: Status
+        do {
+            status = try Status(response: response)
+        } catch {
+            lock.lock()
+            state = .closed
+            lock.unlock()
+            throw error
+        }
+        lock.lock()
+        guard let maxSignatures,
+              let usedSignatures,
+              status.maxSignatures == maxSignatures,
+              status.usedSignatures >= usedSignatures else {
+            state = .closed
+            lock.unlock()
+            throw Error.invalidResponse
+        }
+        self.usedSignatures = status.usedSignatures
+        lock.unlock()
+        return status
     }
 
     public func close(reason: AgentPassHostXPCContract.CloseReason = .clientShutdown) throws {

@@ -171,7 +171,10 @@ private func changed(_ index: Int) -> [UInt32] {
             return Data([1])
         },
         nowMilliseconds: { 1_000 },
-        sessionLifetimeMilliseconds: 100
+        sessionLifetimeMilliseconds: 100,
+        signatureBudgetProvider: {
+            try NativeAgentSignatureBudget(maxSignatures: 2, usedSignatures: 0)
+        }
     )
 
     let prepared = try prepareHostSession(endpoint)

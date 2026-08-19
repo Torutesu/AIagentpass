@@ -78,7 +78,10 @@ public final class NativeAgentChildGitXPCClient: @unchecked Sendable {
         guard !wasFailed, let result else { throw Error.remoteRejected }
         guard result.responseSequence == 1,
               !result.signature.isEmpty,
-              result.signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes else {
+              result.signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes,
+              (NativeAgentSignatureBudget.minimumSignatures...NativeAgentSignatureBudget.maximumSignatures).contains(result.maxSignatures),
+              (0...result.maxSignatures).contains(result.usedSignatures),
+              result.remainingSignatures == result.maxSignatures - result.usedSignatures else {
             throw Error.invalidSignature
         }
         return result.signature

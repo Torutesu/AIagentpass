@@ -111,8 +111,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     public typealias ContextObserver = @Sendable () throws -> NativeConnectionContext
     public typealias ProcessObserver = @Sendable () throws -> NativeProcessObservation
     public typealias ChildObserver = @Sendable (_ pid: Int32, _ pidVersion: UInt64) throws -> NativeAgentAuthenticatedHostChildObservation
-    public typealias ChildRegistrar = @Sendable (_ sessionID: String, _ observation: NativeAgentAuthenticatedHostChildObservation) throws -> Void
+    public typealias ChildRegistrar = @Sendable (_ sessionID: String, _ observation: NativeAgentAuthenticatedHostChildObservation, _ signatureBudget: NativeAgentSignatureBudgetLedger) throws -> Void
     public typealias ChildUnregistrar = @Sendable (_ processBindingHash: String) -> Void
+    public typealias SignatureBudgetProvider = @Sendable () throws -> NativeAgentSignatureBudget?
     public typealias MillisecondClock = @Sendable () -> Int64
 
     private static let errorDomain = "com.agentpass.native-authenticated-host"
@@ -124,6 +125,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let childObserver: ChildObserver
     private let childRegistrar: ChildRegistrar?
     private let childUnregistrar: ChildUnregistrar?
+    private let signatureBudgetProvider: SignatureBudgetProvider?
     private let signer: any NativeAgentAuthenticatedHostSigning
     private let nowMilliseconds: MillisecondClock
     private let sessionLifetimeMilliseconds: Int64
@@ -134,6 +136,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private var expirationMilliseconds: Int64?
     private var expirationWasObserved = false
     private var registeredChildBindingHash: String?
+    private var signatureBudget: NativeAgentSignatureBudgetLedger?
 
     /// `connectionContext` and `initialPeerObservation` must be captured from
     /// the accepted NSXPC connection. The observer closures must independently
@@ -152,7 +155,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         },
         sessionLifetimeMilliseconds: Int64 = NativeAgentAuthenticatedHostEndpoint.defaultLifetimeMilliseconds,
         childRegistrar: ChildRegistrar? = nil,
-        childUnregistrar: ChildUnregistrar? = nil
+        childUnregistrar: ChildUnregistrar? = nil,
+        signatureBudgetProvider: SignatureBudgetProvider? = nil
     ) throws {
         guard sessionLifetimeMilliseconds > 0 else {
             throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
@@ -168,6 +172,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.childObserver = observeChild
         self.childRegistrar = childRegistrar
         self.childUnregistrar = childUnregistrar
+        self.signatureBudgetProvider = signatureBudgetProvider
         self.signer = signer
         self.nowMilliseconds = nowMilliseconds
         self.sessionLifetimeMilliseconds = sessionLifetimeMilliseconds
@@ -184,25 +189,33 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         do {
             try revalidatePeerOrRevoke()
             guard session == nil else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
+            guard let budgetValue = try signatureBudgetProvider?(),
+                  budgetValue.remainingSignatures > 0 else {
+                throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState
+            }
+            let budget = NativeAgentSignatureBudgetLedger(budgetValue)
 
             let sessionID = UUID().uuidString.lowercased()
             let newSession = try NativeAgentAuthenticatedGitBridgeSession(
                 sessionID: sessionID,
                 peer: peerBinding,
-                childPolicy: childPolicy
+                childPolicy: childPolicy,
+                signatureBudget: budget
             )
             let prepared = try newSession.prepare(launchNonce: request.launchNonce)
             let now = try validTimestamp(nowMilliseconds())
             let expiration = try validExpiration(now: now)
 
             session = newSession
+            signatureBudget = budget
             expirationMilliseconds = expiration
             expirationWasObserved = false
             guard let response = AgentPassHostPrepareResponse(
                 sessionID: prepared.sessionID,
                 status: .prepared,
                 expiresAtMilliseconds: expiration,
-                maxSignatures: AgentPassHostXPCContract.fixedSignatureBudget
+                maxSignatures: budgetValue.maxSignatures,
+                usedSignatures: budgetValue.usedSignatures
             ) else {
                 throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
             }
@@ -240,8 +253,12 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             }
 
             let attached = try session.attach(childIdentity: observation.identity)
+            guard let signatureBudget else {
+                closeSessionAndRevoke(session)
+                throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState
+            }
             do {
-                try childRegistrar?(attached.sessionID, observation)
+                try childRegistrar?(attached.sessionID, observation, signatureBudget)
                 registeredChildBindingHash = observation.identity.canonicalBindingHash
             } catch {
                 closeSessionAndRevoke(session)
@@ -250,7 +267,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             guard let response = AgentPassHostAttachChildResponse(
                 sessionID: attached.sessionID,
                 attachedAtMilliseconds: try validTimestamp(nowMilliseconds()),
-                maxSignatures: AgentPassHostXPCContract.fixedSignatureBudget
+                maxSignatures: attached.maxSignatures,
+                usedSignatures: attached.usedSignatures
             ) else {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
@@ -296,12 +314,15 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
             }
+            let snapshot = session.snapshot
             guard !signature.isEmpty,
                   signature.count <= AgentPassHostXPCContract.maximumSignatureBytes,
                   let response = AgentPassHostSignResponse(
                     responseSequence: request.requestSequence,
                     signature: signature,
-                    remainingSignatures: AgentPassHostXPCContract.fixedSignatureBudget - Int(request.requestSequence)
+                    maxSignatures: snapshot.maxSignatures,
+                    usedSignatures: snapshot.usedSignatures,
+                    remainingSignatures: snapshot.remainingSignatures
                   ) else {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
@@ -329,8 +350,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                     sessionID: snapshot.sessionID,
                     status: status,
                     expiresAtMilliseconds: expirationMilliseconds,
-                    maxSignatures: AgentPassHostXPCContract.fixedSignatureBudget,
-                    usedSignatures: snapshot.requestCount,
+                    maxSignatures: snapshot.maxSignatures,
+                    usedSignatures: snapshot.usedSignatures,
                     childAttached: childAttached
                   ) else {
                 throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
@@ -490,6 +511,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .codeIdentityDenied: return .codeIdentityDenied
         case .requestAuthenticationFailed, .requestReplay, .requestSequenceMismatch:
             return .invalidRequest
+        case .budgetExhausted:
+            return .invalidSessionState
         case .sessionClosed: return .endpointClosed
         }
     }

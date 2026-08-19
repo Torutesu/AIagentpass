@@ -27,7 +27,7 @@ private func childArchiveWithAuthorityKey(_ key: String) throws -> Data {
 
 @Test func childGitDTOsRoundTripWithoutSessionOrAuthority() throws {
     let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data("tree abc\n".utf8)))
-    let response = try #require(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 0x44, count: 64)))
+    let response = try #require(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 0x44, count: 64), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 1))
     let requestData = try childArchive(request)
     let responseData = try childArchive(response)
     let decodedRequest = try NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassChildGitSignRequest.self, from: requestData)
@@ -39,12 +39,13 @@ private func childArchiveWithAuthorityKey(_ key: String) throws -> Data {
 
 @Test func childGitDTOsRejectInvalidSequenceAndBounds() {
     #expect(AgentPassChildGitSignRequest(requestSequence: 0, commitPayload: Data([1])) == nil)
-    #expect(AgentPassChildGitSignRequest(requestSequence: 3, commitPayload: Data([1])) == nil)
+    #expect(AgentPassChildGitSignRequest(requestSequence: 3, commitPayload: Data([1])) != nil)
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data()) == nil)
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumPayloadBytes + 1)) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 0, signature: Data([1])) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data()) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumSignatureBytes + 1)) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 0, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumSignatureBytes + 1), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 0) == nil)
 }
 
 @Test func childGitDTOsRejectUnknownAuthorityFieldsAndUnsupportedVersions() throws {
@@ -53,7 +54,7 @@ private func childArchiveWithAuthorityKey(_ key: String) throws -> Data {
     #expect(authorityDecoded == nil)
 
     #expect(AgentPassChildGitSignRequest(protocolVersion: 2, requestSequence: 1, commitPayload: Data([1])) == nil)
-    #expect(AgentPassChildGitSignResponse(protocolVersion: 2, responseSequence: 1, signature: Data([1])) == nil)
+    #expect(AgentPassChildGitSignResponse(protocolVersion: 2, responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
 }
 
 @Test func childGitInterfaceRegistersOnlyItsDTOs() {

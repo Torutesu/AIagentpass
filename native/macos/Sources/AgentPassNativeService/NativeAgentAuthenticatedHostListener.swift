@@ -165,6 +165,8 @@ private final class NativeAgentAuthenticatedHostConnectionBox: @unchecked Sendab
 /// If either dependency is unavailable, attach fails closed instead of using
 /// request-supplied identity data.
 public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPCListenerDelegate {
+    public typealias SignatureBudgetProvider = NativeAgentAuthenticatedHostEndpoint.SignatureBudgetProvider
+
     public typealias ChildObservationFactory = @Sendable (Int32, UInt64) throws -> (NativeProcessObservation, Data)
 
     private let allowedClientUID: UInt32
@@ -176,6 +178,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
     private let signer: any NativeAgentAuthenticatedHostSigning
     private let childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar?
     private let childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar?
+    private let signatureBudgetProvider: SignatureBudgetProvider?
     private let nowMilliseconds: NativeAgentAuthenticatedHostEndpoint.MillisecondClock
     private let endpointLock = NSLock()
     private var endpoints: [ObjectIdentifier: NativeAgentAuthenticatedHostEndpoint] = [:]
@@ -190,6 +193,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         signer: any NativeAgentAuthenticatedHostSigning,
         childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar? = nil,
         childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar? = nil,
+        signatureBudgetProvider: SignatureBudgetProvider? = nil,
         nowMilliseconds: @escaping NativeAgentAuthenticatedHostEndpoint.MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         }
@@ -203,6 +207,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         self.signer = signer
         self.childRegistrar = childRegistrar
         self.childUnregistrar = childUnregistrar
+        self.signatureBudgetProvider = signatureBudgetProvider
         self.nowMilliseconds = nowMilliseconds
         super.init()
     }
@@ -279,7 +284,8 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 signer: signer,
                 nowMilliseconds: nowMilliseconds,
                 childRegistrar: childRegistrar,
-                childUnregistrar: childUnregistrar
+                childUnregistrar: childUnregistrar,
+                signatureBudgetProvider: signatureBudgetProvider
             )
             connection.exportedInterface = AgentPassHostXPCInterface.make()
             connection.exportedObject = endpoint

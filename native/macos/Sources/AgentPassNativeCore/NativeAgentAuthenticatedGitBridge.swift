@@ -13,6 +13,7 @@ public enum NativeAgentAuthenticatedGitBridgeError: String, Error, Equatable, Se
     case requestAuthenticationFailed = "request_authentication_failed"
     case requestReplay = "request_replay"
     case requestSequenceMismatch = "request_sequence_mismatch"
+    case budgetExhausted = "budget_exhausted"
     case sessionClosed = "session_closed"
 
     public var errorDescription: String? { rawValue }
@@ -258,12 +259,24 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
         public let phase: Phase
         public let requestCount: Int
         public let launchNonceDigest: Data?
+        public let maxSignatures: Int
+        public let usedSignatures: Int
+        public let remainingSignatures: Int
 
-        fileprivate init(sessionID: String, phase: Phase, requestCount: Int, launchNonceDigest: Data?) {
+        fileprivate init(
+            sessionID: String,
+            phase: Phase,
+            requestCount: Int,
+            launchNonceDigest: Data?,
+            budget: NativeAgentSignatureBudgetLedger.Snapshot
+        ) {
             self.sessionID = sessionID
             self.phase = phase
             self.requestCount = requestCount
             self.launchNonceDigest = launchNonceDigest
+            self.maxSignatures = budget.maxSignatures
+            self.usedSignatures = budget.usedSignatures
+            self.remainingSignatures = budget.remainingSignatures
         }
     }
 
@@ -297,6 +310,7 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
 
     private let authenticator: NativeAgentAuthenticatedGitBridgeRequestAuthenticator
     private let childPolicy: NativeProcessIdentityPolicy
+    private let signatureBudget: NativeAgentSignatureBudgetLedger
     private let stateLock = NSLock()
     private var phase: Phase = .new
     private var launchNonceDigest: Data?
@@ -306,6 +320,7 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
         sessionID: String,
         peer: NativeAgentAuthenticatedGitBridgePeerBinding,
         childPolicy: NativeProcessIdentityPolicy,
+        signatureBudget: NativeAgentSignatureBudgetLedger,
         authenticator: NativeAgentAuthenticatedGitBridgeRequestAuthenticator = .init()
     ) throws {
         guard let sessionID = NativeAgentAuthenticatedGitBridgeContract.canonicalUUID(sessionID) else {
@@ -314,6 +329,7 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
         self.sessionID = sessionID
         self.peer = peer
         self.childPolicy = childPolicy
+        self.signatureBudget = signatureBudget
         self.authenticator = authenticator
     }
 
@@ -328,7 +344,8 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
             sessionID: sessionID,
             phase: phase,
             requestCount: consumedSequences.count,
-            launchNonceDigest: launchNonceDigest
+            launchNonceDigest: launchNonceDigest,
+            budget: signatureBudget.snapshot()
         )
     }
 
@@ -365,7 +382,9 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
         stateLock.lock()
         defer { stateLock.unlock() }
         guard phase == .attached,
-              !consumedSequences.contains(requestSequence) else { return nil }
+              !consumedSequences.contains(requestSequence),
+              NativeAgentAuthenticatedGitBridgeContract.validSequence(requestSequence),
+              signatureBudget.snapshot().remainingSignatures > 0 else { return nil }
         return authenticator.makeRequest(
             sessionID: sessionID,
             requestSequence: requestSequence,
@@ -418,6 +437,15 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
             throw NativeAgentAuthenticatedGitBridgeError.requestAuthenticationFailed
         }
 
+        do {
+            try signatureBudget.reserve()
+        } catch NativeAgentSignatureBudgetError.exhausted {
+            phase = .closed
+            throw NativeAgentAuthenticatedGitBridgeError.budgetExhausted
+        } catch {
+            phase = .closed
+            throw NativeAgentAuthenticatedGitBridgeError.invalidSessionState
+        }
         consumedSequences.insert(request.requestSequence)
         return AuthorizedPayload(
             sessionID: sessionID,
@@ -442,8 +470,12 @@ public enum NativeAgentAuthenticatedGitBridgeContract {
     public static let minimumNonceBytes = 16
     public static let maximumNonceBytes = 64
     public static let maximumPayloadBytes = 1 * 1024 * 1024
-    public static let maximumRequests: UInt32 = 2
+    public static let maximumRequests: UInt32 = UInt32(NativeAgentSignatureBudget.maximumSignatures)
     public static let proofBytes = 32
+
+    public static func validSequence(_ value: UInt32) -> Bool {
+        (1...maximumRequests).contains(value)
+    }
 
     fileprivate static func canonicalUUID(_ value: String) -> String? {
         guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else { return nil }

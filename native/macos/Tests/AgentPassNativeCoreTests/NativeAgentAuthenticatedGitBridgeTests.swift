@@ -59,13 +59,18 @@ private func authenticatedPeer(
 
 private func authenticatedSession(
     peer: NativeAgentAuthenticatedGitBridgePeerBinding,
-    authenticator: NativeAgentAuthenticatedGitBridgeRequestAuthenticator? = nil
+    authenticator: NativeAgentAuthenticatedGitBridgeRequestAuthenticator? = nil,
+    maxSignatures: Int = 2,
+    usedSignatures: Int = 0
 ) throws -> NativeAgentAuthenticatedGitBridgeSession {
     let childPolicy = try NativeProcessIdentityPolicy.exact(peer.processIdentity)
     return try NativeAgentAuthenticatedGitBridgeSession(
         sessionID: authenticatedSessionID,
         peer: peer,
         childPolicy: childPolicy,
+        signatureBudget: NativeAgentSignatureBudgetLedger(
+            try NativeAgentSignatureBudget(maxSignatures: maxSignatures, usedSignatures: usedSignatures)
+        ),
         authenticator: authenticator ?? NativeAgentAuthenticatedGitBridgeRequestAuthenticator(keyData: Data(repeating: 0x5a, count: 32))!
     )
 }
@@ -221,6 +226,26 @@ private func authenticatedSession(
 @Test func authenticatedDTORejectsAuthorityAndSecretFieldsDuringSecureDecode() throws {
     let coder = TestForbiddenKeyCoder()
     #expect(NativeAgentAuthenticatedGitBridgeSignRequest(coder: coder) == nil)
+}
+
+@Test func authenticatedSessionUsesCloudUsedCountAndStopsAtCloudMax() throws {
+    let observation = try authenticatedObservation()
+    let peer = try authenticatedPeer(observation: observation)
+    let session = try authenticatedSession(peer: peer, maxSignatures: 5, usedSignatures: 4)
+    _ = try session.prepare(launchNonce: Data(repeating: 5, count: 16))
+    _ = try session.attach(childIdentity: peer.processIdentity)
+
+    let request = try #require(session.makeRequest(requestSequence: 1, payload: Data([5])))
+    _ = try session.authorizeAndConsume(
+        request,
+        reobservedConnectionContext: peer.connectionContext,
+        reobservedObservation: observation
+    )
+    #expect(session.snapshot.maxSignatures == 5)
+    #expect(session.snapshot.usedSignatures == 5)
+    #expect(session.snapshot.remainingSignatures == 0)
+    #expect(session.makeRequest(requestSequence: 2, payload: Data([6])) == nil)
+    #expect(session.snapshot.phase == .attached)
 }
 
 private final class TestForbiddenKeyCoder: NSCoder {

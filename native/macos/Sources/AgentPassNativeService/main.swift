@@ -5082,12 +5082,13 @@ do {
             return (processObservation, worktree.binding.digest)
         },
         signer: hostSigner,
-        childRegistrar: { sessionID, observation in
+        childRegistrar: { sessionID, observation, signatureBudget in
             try childRegistry.register(
                 sessionID: sessionID,
                 identity: observation.identity,
                 worktreeBindingDigest: observation.worktreeBindingDigest,
-                signer: childSigner
+                signer: childSigner,
+                signatureBudget: signatureBudget
             )
         },
         childUnregistrar: { bindingHash in

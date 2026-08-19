@@ -131,7 +131,8 @@ private final class HostForbiddenKeyCoder: NSCoder {
         sessionID: hostSessionID,
         status: .prepared,
         expiresAtMilliseconds: 4_000_000_000_000,
-        maxSignatures: 2
+        maxSignatures: 5,
+        usedSignatures: 3
     ))
     let attach = try #require(AgentPassHostAttachChildRequest(
         childPID: 42,
@@ -143,17 +144,18 @@ private final class HostForbiddenKeyCoder: NSCoder {
     let attachResponse = try #require(AgentPassHostAttachChildResponse(
         sessionID: hostSessionID,
         attachedAtMilliseconds: 4_000_000_000_000,
-        maxSignatures: 2
+        maxSignatures: 5,
+        usedSignatures: 3
     ))
     let sign = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data("tree deadbeef\n".utf8)))
-    let signResponse = try #require(AgentPassHostSignResponse(responseSequence: 1, signature: Data(repeating: 0x55, count: 64), remainingSignatures: 1))
+    let signResponse = try #require(AgentPassHostSignResponse(responseSequence: 1, signature: Data(repeating: 0x55, count: 64), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 1))
     let statusRequest = try #require(AgentPassHostStatusRequest())
     let statusResponse = try #require(AgentPassHostStatusResponse(
         sessionID: hostSessionID,
         status: .active,
         expiresAtMilliseconds: 4_000_000_000_000,
-        maxSignatures: 2,
-        usedSignatures: 1,
+        maxSignatures: 5,
+        usedSignatures: 4,
         childAttached: true
     ))
     let closeRequest = try #require(AgentPassHostCloseRequest(reason: .completed))
@@ -213,11 +215,12 @@ private final class HostForbiddenKeyCoder: NSCoder {
     #expect(AgentPassHostPrepareRequest(protocolVersion: 0, launchNonce: hostNonce) == nil)
     #expect(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0, count: 15)) == nil)
     #expect(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0, count: 65)) == nil)
-    #expect(AgentPassHostPrepareResponse(protocolVersion: 2, sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 1) == nil)
-    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .active, expiresAtMilliseconds: 1, maxSignatures: 1) == nil)
-    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 0, maxSignatures: 2) == nil)
-    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: -1, maxSignatures: 1) == nil)
-    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(protocolVersion: 2, sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 1, usedSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .active, expiresAtMilliseconds: 1, maxSignatures: 1, usedSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 0, maxSignatures: 2, usedSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: -1, maxSignatures: 1, usedSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 0, usedSignatures: 0) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 2, usedSignatures: 3) == nil)
     #expect(AgentPassHostStatusRequest(protocolVersion: 2) == nil)
 }
 
@@ -249,11 +252,12 @@ private final class HostForbiddenKeyCoder: NSCoder {
     }
     try AgentPassHostXPCContract.requireAllowed(.signPayload, in: .attached)
     #expect(AgentPassHostSignRequest(requestSequence: 0, commitPayload: Data([1])) == nil)
-    #expect(AgentPassHostSignRequest(requestSequence: 3, commitPayload: Data([1])) == nil)
+    #expect(AgentPassHostSignRequest(requestSequence: 3, commitPayload: Data([1])) != nil)
     #expect(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data()) == nil)
     #expect(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data(repeating: 0x01, count: AgentPassHostXPCContract.maximumCommitPayloadBytes + 1)) == nil)
-    #expect(AgentPassHostSignResponse(responseSequence: 1, signature: Data([1]), remainingSignatures: 0) == nil)
-    #expect(AgentPassHostSignResponse(responseSequence: 2, signature: Data([1]), remainingSignatures: 0) != nil)
+    #expect(AgentPassHostSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 5, remainingSignatures: 0) != nil)
+    #expect(AgentPassHostSignResponse(responseSequence: 2, signature: Data([1]), maxSignatures: 5, usedSignatures: 5, remainingSignatures: 0) != nil)
+    #expect(AgentPassHostSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 0) == nil)
 }
 
 @Test func everyHostRequestShapeExcludesAuthorityKeyMaterialAndPaths() throws {

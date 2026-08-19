@@ -43,7 +43,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         let pidVersion: UInt64
         let worktreeBindingDigest: Data
         let signer: any NativeAgentAuthenticatedChildSigning
-        var usedCount: Int
+        let signatureBudget: NativeAgentSignatureBudgetLedger
         var consumedPayloadDigests: Set<Data>
         var closed: Bool
     }
@@ -57,9 +57,11 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         sessionID: String,
         identity: NativeProcessIdentity,
         worktreeBindingDigest: Data,
-        signer: any NativeAgentAuthenticatedChildSigning
+        signer: any NativeAgentAuthenticatedChildSigning,
+        signatureBudget: NativeAgentSignatureBudgetLedger
     ) throws {
         guard AgentPassHostXPCContract.isDigest(worktreeBindingDigest),
+              signatureBudget.snapshot().remainingSignatures > 0,
               !sessionID.isEmpty else {
             throw NativeAgentAuthenticatedChildGitError.invalidRequest
         }
@@ -77,7 +79,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             pidVersion: identity.pidVersion,
             worktreeBindingDigest: worktreeBindingDigest,
             signer: signer,
-            usedCount: 0,
+            signatureBudget: signatureBudget,
             consumedPayloadDigests: [],
             closed: false
         )
@@ -93,9 +95,10 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         identity: NativeProcessIdentity,
         worktreeBindingDigest: Data,
         request: AgentPassChildGitSignRequest
-    ) throws -> (signature: Data, remaining: Int) {
+    ) throws -> (signature: Data, budget: NativeAgentSignatureBudgetLedger.Snapshot) {
         let key = identity.canonicalBindingHash
         let signer: any NativeAgentAuthenticatedChildSigning
+        let signatureBudget: NativeAgentSignatureBudgetLedger
         lock.lock()
         guard var entry = entries[key] else {
             lock.unlock()
@@ -125,12 +128,6 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.sequenceMismatch
         }
-        guard entry.usedCount < 2 else {
-            entry.closed = true
-            entries[key] = entry
-            lock.unlock()
-            throw NativeAgentAuthenticatedChildGitError.closed
-        }
         let payloadDigest = Data(SHA256.hash(data: request.commitPayload))
         guard !entry.consumedPayloadDigests.contains(payloadDigest) else {
             entry.closed = true
@@ -139,12 +136,23 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             throw NativeAgentAuthenticatedChildGitError.replay
         }
         signer = entry.signer
-        entry.usedCount += 1
-        entry.consumedPayloadDigests.insert(payloadDigest)
-        if entry.usedCount >= Int(AgentPassChildGitXPCContract.maximumRequests) {
+        signatureBudget = entry.signatureBudget
+        let budget: NativeAgentSignatureBudgetLedger.Snapshot
+        do {
+            budget = try entry.signatureBudget.reserve()
+        } catch NativeAgentSignatureBudgetError.exhausted {
             entry.closed = true
+            entries[key] = entry
+            lock.unlock()
+            throw NativeAgentAuthenticatedChildGitError.closed
+        } catch {
+            entry.closed = true
+            entries[key] = entry
+            lock.unlock()
+            throw NativeAgentAuthenticatedChildGitError.invalidRequest
         }
-        let remaining = Int(AgentPassChildGitXPCContract.maximumRequests) - entry.usedCount
+        entry.consumedPayloadDigests.insert(payloadDigest)
+        if budget.remainingSignatures == 0 { entry.closed = true }
         entries[key] = entry
         lock.unlock()
 
@@ -153,7 +161,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             guard !signature.isEmpty, signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes else {
                 throw NativeAgentAuthenticatedChildGitError.signerFailed
             }
-            return (signature, remaining)
+            return (signature, signatureBudget.snapshot())
         } catch let error as NativeAgentAuthenticatedChildGitError {
             closeEntry(for: key)
             throw error
@@ -213,7 +221,10 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
             )
             guard let response = AgentPassChildGitSignResponse(
                 responseSequence: request.requestSequence,
-                signature: result.signature
+                signature: result.signature,
+                maxSignatures: result.budget.maxSignatures,
+                usedSignatures: result.budget.usedSignatures,
+                remainingSignatures: result.budget.remainingSignatures
             ) else { throw NativeAgentAuthenticatedChildGitError.signerFailed }
             reply(response, nil)
         } catch {
