@@ -170,6 +170,37 @@ func capabilitySequenceAuthorityInvalidationIsTerminal() throws {
     }
 }
 
+@Test("Persisted sequence authority rejects rollback after a process restart")
+func capabilitySequenceAuthorityPersistsAcrossRestart() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agentpass-sequence-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = directory.appendingPathComponent("state.json").path
+    let binding = try authorityBinding()
+
+    let first = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: binding,
+        persistencePath: path
+    )
+    _ = try first.accept(
+        try first.prepare(sequence: 9, statementHash: statementHashA),
+        trustedBootstrap: NativeAgentDedicatedSigningCapabilityTrustedBootstrap()
+    )
+
+    let restarted = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: binding,
+        persistencePath: path
+    )
+    #expect(restarted.snapshot().acceptedSequence == 9)
+    #expect(throws: NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.staleSequence) {
+        _ = try restarted.prepare(sequence: 8, statementHash: statementHashB)
+    }
+    #expect(try restarted.accept(
+        try restarted.prepare(sequence: 9, statementHash: statementHashA)
+    ).disposition == .replayed)
+}
+
 private final class SequenceAuthorityResults: @unchecked Sendable {
     private let lock = NSLock()
     private var accepted: [NativeAgentDedicatedSigningCapabilitySequenceAcceptanceDisposition] = []

@@ -3600,7 +3600,9 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
             expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
         )
         let capabilityVerifier = self.cloudSigningCapabilityVerifier
-        let sequenceAuthorities = NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry()
+        let sequenceAuthorities = NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry(
+            persistenceDirectory: authority.signingIntentDirectory
+        )
         self.dedicatedCapabilitySequenceAuthorities = sequenceAuthorities
         self.dedicatedSigningCapabilityIssuer = NativeAgentDedicatedSigningCapabilityRuntimeIssuer(
             makeConsumer: { sessionID in

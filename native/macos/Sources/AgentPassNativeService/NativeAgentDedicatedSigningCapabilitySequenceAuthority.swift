@@ -27,6 +27,14 @@ public struct NativeAgentDedicatedSigningCapabilitySequenceBinding: Equatable, H
     }
 }
 
+private struct NativeAgentDedicatedSigningCapabilityPersistedState: Codable {
+    let coordinatorSessionID: String
+    let agentID: String
+    let sequence: UInt64?
+    let statementHash: String?
+    let invalidated: Bool
+}
+
 /// A marker minted by Service code only after a response has been decoded and
 /// cryptographically verified. The marker carries no response, payload, key,
 /// or secret. Its internal initializer prevents an XPC/network-facing caller
@@ -166,12 +174,14 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
     public let maximumSequence: UInt64
 
     private let lock = NSLock()
+    private let persistencePath: String?
     private var acceptedStatement: NativeAgentDedicatedSigningCapabilitySequenceStatement?
     private var invalidated = false
 
     public init(
         binding: NativeAgentDedicatedSigningCapabilitySequenceBinding,
-        maximumSequence: UInt64 = NativeAgentDedicatedSigningCapabilitySequenceAuthority.defaultMaximumSequence
+        maximumSequence: UInt64 = NativeAgentDedicatedSigningCapabilitySequenceAuthority.defaultMaximumSequence,
+        persistencePath: String? = nil
     ) throws {
         guard maximumSequence >= 1,
               maximumSequence <= Self.defaultMaximumSequence else {
@@ -179,6 +189,38 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
         }
         self.binding = binding
         self.maximumSequence = maximumSequence
+        if let persistencePath {
+            let standardized = URL(fileURLWithPath: persistencePath).standardizedFileURL.path
+            guard standardized == persistencePath, standardized.hasPrefix("/") else {
+                throw NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.invalidPreparation
+            }
+            self.persistencePath = standardized
+            if FileManager.default.fileExists(atPath: standardized) {
+                let data = try Data(contentsOf: URL(fileURLWithPath: standardized), options: .mappedIfSafe)
+                let state = try JSONDecoder().decode(NativeAgentDedicatedSigningCapabilityPersistedState.self, from: data)
+                guard state.coordinatorSessionID == binding.coordinatorSessionID,
+                      state.agentID == binding.agentID,
+                      state.invalidated == false || state.sequence != nil else {
+                    throw NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.invalidPreparation
+                }
+                if let sequence = state.sequence, let statementHash = state.statementHash {
+                    guard sequence >= 1, sequence <= maximumSequence else {
+                        throw NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.invalidPreparation
+                    }
+                    self.acceptedStatement = try NativeAgentDedicatedSigningCapabilitySequenceStatement(
+                        sequence: sequence,
+                        statementHash: statementHash
+                    )
+                } else {
+                    guard state.sequence == nil, state.statementHash == nil else {
+                        throw NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.invalidPreparation
+                    }
+                }
+                self.invalidated = state.invalidated
+            }
+        } else {
+            self.persistencePath = nil
+        }
     }
 
     public func snapshot() -> NativeAgentDedicatedSigningCapabilitySequenceAuthoritySnapshot {
@@ -237,6 +279,7 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
                 disposition = .replayed
             } else {
                 acceptedStatement = statement
+                do { try persistLocked() } catch { acceptedStatement = current; throw error }
                 disposition = .advanced
             }
             return NativeAgentDedicatedSigningCapabilitySequenceAcceptance(
@@ -250,6 +293,7 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
             throw NativeAgentDedicatedSigningCapabilitySequenceAuthorityError.bootstrapRequired
         }
         acceptedStatement = statement
+        do { try persistLocked() } catch { acceptedStatement = nil; throw error }
         return NativeAgentDedicatedSigningCapabilitySequenceAcceptance(
             binding: binding,
             statement: statement,
@@ -262,6 +306,7 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
         lock.lock()
         defer { lock.unlock() }
         invalidated = true
+        try? persistLocked()
     }
 
     private func validateCandidateLocked(
@@ -290,6 +335,19 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
             isInvalidated: invalidated
         )
     }
+
+    private func persistLocked() throws {
+        guard let persistencePath else { return }
+        let state = NativeAgentDedicatedSigningCapabilityPersistedState(
+            coordinatorSessionID: binding.coordinatorSessionID,
+            agentID: binding.agentID,
+            sequence: acceptedStatement?.sequence,
+            statementHash: acceptedStatement?.statementHash,
+            invalidated: invalidated
+        )
+        let data = try JSONEncoder().encode(state)
+        try data.write(to: URL(fileURLWithPath: persistencePath), options: [.atomic, .completeFileProtection])
+    }
 }
 
 /// Service-local authority index. It never accepts a binding from a network
@@ -298,8 +356,11 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthority: @unch
 public final class NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var authorities: [NativeAgentDedicatedSigningCapabilitySequenceBinding: NativeAgentDedicatedSigningCapabilitySequenceAuthority] = [:]
+    private let persistenceDirectory: String?
 
-    public init() {}
+    public init(persistenceDirectory: String? = nil) {
+        self.persistenceDirectory = persistenceDirectory
+    }
 
     public func authority(
         for binding: NativeAgentDedicatedSigningCapabilitySequenceBinding
@@ -307,7 +368,15 @@ public final class NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistr
         lock.lock()
         defer { lock.unlock() }
         if let existing = authorities[binding] { return existing }
-        let created = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(binding: binding)
+        let persistencePath = persistenceDirectory.map {
+            URL(fileURLWithPath: $0).appendingPathComponent(
+                "dedicated-capability-sequence-\(binding.coordinatorSessionID)-\(binding.agentID).json"
+            ).path
+        }
+        let created = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+            binding: binding,
+            persistencePath: persistencePath
+        )
         authorities[binding] = created
         return created
     }

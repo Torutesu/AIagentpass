@@ -43,6 +43,9 @@ public final class NativeAgentDedicatedSigningCapabilityRuntimeIssuer:
     ) throws -> NativeAgentPassSignRequest {
         let consumer = try makeConsumer(context.sessionID)
         let response = try consumer.issue(request)
+        guard !response.metadata.replayed else {
+            throw NativeAgentPassSignRequestError.replayedCapability
+        }
         let canonicalCapability = try NativeAgentSigningCapabilityCodec.canonicalJSON(response.capability)
         let sequence = response.capability.statement.sequence
         let verificationContext = try NativeAgentSigningCapabilityVerificationContext(
