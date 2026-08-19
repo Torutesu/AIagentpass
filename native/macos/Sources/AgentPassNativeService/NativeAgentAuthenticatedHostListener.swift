@@ -186,6 +186,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
     private let signer: any NativeAgentAuthenticatedHostSigning
     private let dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)?
     private let childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar?
+    private let dedicatedChildRegistrar: NativeAgentAuthenticatedHostEndpoint.DedicatedChildRegistrar?
     private let childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar?
     private let signatureBudgetProvider: SignatureBudgetProvider?
     private let nowMilliseconds: NativeAgentAuthenticatedHostEndpoint.MillisecondClock
@@ -202,6 +203,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         signer: any NativeAgentAuthenticatedHostSigning,
         dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)? = nil,
         childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar? = nil,
+        dedicatedChildRegistrar: NativeAgentAuthenticatedHostEndpoint.DedicatedChildRegistrar? = nil,
         childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar? = nil,
         signatureBudgetProvider: SignatureBudgetProvider? = nil,
         nowMilliseconds: @escaping NativeAgentAuthenticatedHostEndpoint.MillisecondClock = {
@@ -217,6 +219,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         self.signer = signer
         self.dedicatedSigner = dedicatedSigner
         self.childRegistrar = childRegistrar
+        self.dedicatedChildRegistrar = dedicatedChildRegistrar
         self.childUnregistrar = childUnregistrar
         self.signatureBudgetProvider = signatureBudgetProvider
         self.nowMilliseconds = nowMilliseconds
@@ -296,6 +299,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 dedicatedSigner: dedicatedSigner,
                 nowMilliseconds: nowMilliseconds,
                 childRegistrar: childRegistrar,
+                dedicatedChildRegistrar: dedicatedChildRegistrar,
                 childUnregistrar: childUnregistrar,
                 signatureBudgetProvider: signatureBudgetProvider
             )

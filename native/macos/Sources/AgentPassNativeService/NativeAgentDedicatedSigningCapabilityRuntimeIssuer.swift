@@ -67,6 +67,26 @@ public final class NativeAgentDedicatedSigningCapabilityRuntimeIssuer:
             sequence: UInt64(exactly: sequence) ?? 0,
             statementHash: try NativeAgentSigningCapabilityCodec.statementHash(response.capability.statement)
         )
+        // `prepare` is a non-mutating, authority-bound reservation. Keep it
+        // alive while all fallible request materialization runs; any throw
+        // before `accept` therefore aborts by discarding this preparation and
+        // cannot advance the persisted sequence.
+        let materializer = NativeAgentDedicatedSigningCapabilityIssuer(
+            consumer: consumer,
+            verifier: verifier,
+            random: random,
+            wallClock: wallClock
+        )
+        let serviceRequest = try materializer.issue(
+            request: request,
+            response: response,
+            context: verificationContext,
+            commitPayload: commitPayload
+        )
+
+        // Commit the Cloud sequence only after materialization has succeeded.
+        // Re-read initialization at the commit boundary so a concurrent
+        // bootstrap can be handled without manufacturing bootstrap authority.
         let bootstrap: NativeAgentDedicatedSigningCapabilityTrustedBootstrap?
         if authority.snapshot().isInitialized {
             bootstrap = nil
@@ -74,17 +94,6 @@ public final class NativeAgentDedicatedSigningCapabilityRuntimeIssuer:
             bootstrap = NativeAgentDedicatedSigningCapabilityTrustedBootstrap()
         }
         _ = try authority.accept(preparation, trustedBootstrap: bootstrap)
-        let materializer = NativeAgentDedicatedSigningCapabilityIssuer(
-            consumer: consumer,
-            verifier: verifier,
-            random: random,
-            wallClock: wallClock
-        )
-        return try materializer.issue(
-            request: request,
-            response: response,
-            context: verificationContext,
-            commitPayload: commitPayload
-        )
+        return serviceRequest
     }
 }

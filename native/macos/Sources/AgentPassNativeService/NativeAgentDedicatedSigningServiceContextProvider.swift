@@ -116,6 +116,52 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
             throw NativeAgentDedicatedSigningServiceContextProviderError.associationMissing
         }
 
+        return try makeContext(
+            dedicatedSessionID: payload.sessionID,
+            observed: observed,
+            association: association
+        )
+    }
+
+    /// Child transport counterpart. The Child DTO does not carry a Host
+    /// session or capability data. The registry supplies the fresh worktree
+    /// observation, while the coordinator binding remains the Service-owned
+    /// binding captured at Host attach time.
+    func contextForChild(
+        dedicatedSessionID: String,
+        binding: NativeAgentSessionBinding,
+        worktree: NativeAgentWorktreeBinding
+    ) throws -> NativeAgentDedicatedSigningServiceContext {
+        guard binding.worktreeBindingDigest == worktree.digest,
+              let association = registry.lookup(binding: binding),
+              association.isActive,
+              association.binding == binding,
+              association.dedicatedSigningAssociation != nil else {
+            throw NativeAgentDedicatedSigningServiceContextProviderError.associationMissing
+        }
+        let observed = try NativeAgentDedicatedSigningObservedState(
+            binding: binding,
+            worktree: worktree
+        )
+        return try makeContext(
+            dedicatedSessionID: dedicatedSessionID,
+            observed: observed,
+            association: association
+        )
+    }
+
+    private func makeContext(
+        dedicatedSessionID: String,
+        observed: NativeAgentDedicatedSigningObservedState,
+        association: NativeAgentCoordinatorSessionAssociation
+    ) throws -> NativeAgentDedicatedSigningServiceContext {
+        guard UUID(uuidString: dedicatedSessionID)?.uuidString.lowercased() == dedicatedSessionID,
+              association.isActive,
+              association.binding == observed.binding,
+              let dedicatedAssociation = association.dedicatedSigningAssociation else {
+            throw NativeAgentDedicatedSigningServiceContextProviderError.associationInvalid
+        }
+
         let sequenceValue: Int64
         do {
             sequenceValue = try sequence(association)
@@ -148,11 +194,8 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
             throw NativeAgentDedicatedSigningServiceContextProviderError.contextInvalid
         }
 
-        guard let dedicatedAssociation = association.dedicatedSigningAssociation else {
-            throw NativeAgentDedicatedSigningServiceContextProviderError.associationInvalid
-        }
         return try NativeAgentDedicatedSigningServiceContext(
-            dedicatedSessionID: payload.sessionID,
+            dedicatedSessionID: dedicatedSessionID,
             coordinatorSessionID: association.sessionID,
             binding: observed.binding,
             worktree: observed.worktree,

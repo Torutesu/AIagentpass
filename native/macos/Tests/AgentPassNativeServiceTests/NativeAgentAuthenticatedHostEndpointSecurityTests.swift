@@ -29,6 +29,7 @@ private final class EndpointTestClock: @unchecked Sendable {
 private final class EndpointTestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var signCount = 0
+    private(set) var dedicatedSignCount = 0
     private(set) var registerCount = 0
     private(set) var unregisterCount = 0
     private(set) var unregisteredBindings: [String] = []
@@ -36,6 +37,12 @@ private final class EndpointTestRecorder: @unchecked Sendable {
     func recordSign() {
         lock.lock()
         signCount += 1
+        lock.unlock()
+    }
+
+    func recordDedicatedSign() {
+        lock.lock()
+        dedicatedSignCount += 1
         lock.unlock()
     }
 
@@ -152,7 +159,11 @@ private final class HostEndpointHarness: @unchecked Sendable {
         )
     }
 
-    func makeEndpoint(provideSignatureBudget: Bool = true) throws -> NativeAgentAuthenticatedHostEndpoint {
+    func makeEndpoint(
+        provideSignatureBudget: Bool = true,
+        signerPolicy: NativeAgentAuthenticatedHostSignerPolicy = .dedicatedSignerRequired,
+        includeDedicatedSigner: Bool = false
+    ) throws -> NativeAgentAuthenticatedHostEndpoint {
         let hostIdentity = NativeProcessIdentity(observation: hostObservation)
         let childIdentity = NativeProcessIdentity(observation: childObservation)
         let peerPolicy = try NativeProcessIdentityPolicy.exact(hostIdentity)
@@ -167,6 +178,15 @@ private final class HostEndpointHarness: @unchecked Sendable {
             }
         } else {
             signatureBudgetProvider = nil
+        }
+        let dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)?
+        if includeDedicatedSigner {
+            dedicatedSigner = NativeAgentAuthenticatedHostClosureSigner { [self] _ in
+                recorder.recordDedicatedSign()
+                return Data([0xA1, 0xA2])
+            }
+        } else {
+            dedicatedSigner = nil
         }
 
         return try NativeAgentAuthenticatedHostEndpoint(
@@ -203,6 +223,8 @@ private final class HostEndpointHarness: @unchecked Sendable {
                 case .empty: return Data()
                 }
             },
+            dedicatedSigner: dedicatedSigner,
+            signerPolicy: signerPolicy,
             nowMilliseconds: { [self] in clock.read() },
             sessionLifetimeMilliseconds: 100,
             childRegistrar: { [self] sessionID, observation, signatureBudget in
@@ -374,9 +396,67 @@ private func childErrorCode(
     return error?.userInfo[NSLocalizedDescriptionKey] as? String
 }
 
+@Test func hostEndpointRequiresDedicatedSignerByDefault() throws {
+    let harness = try HostEndpointHarness()
+    var caughtError: NativeAgentAuthenticatedHostEndpointError?
+    do {
+        _ = try harness.makeEndpoint()
+    } catch let error as NativeAgentAuthenticatedHostEndpointError {
+        caughtError = error
+    } catch {
+        Issue.record("Unexpected endpoint initialization error: \(error)")
+    }
+
+    #expect(caughtError == .dedicatedSignerRequired)
+    #expect(harness.recorder.signCount == 0)
+}
+
+@Test func hostEndpointExplicitDevelopmentPolicyRetainsLegacySignerCompatibility() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0xA3])))
+    var response: AgentPassHostSignResponse?
+    var error: NSError?
+    endpoint.signHostPayload(request) { value, responseError in
+        response = value
+        error = responseError
+    }
+
+    #expect(error == nil)
+    #expect(response?.signature == Data([0x91, 0x92]))
+    #expect(harness.recorder.signCount == 1)
+    #expect(harness.recorder.dedicatedSignCount == 0)
+}
+
+@Test func hostEndpointUsesDedicatedSignerWithoutLegacyFallback() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(
+        signerPolicy: .dedicatedSignerRequired,
+        includeDedicatedSigner: true
+    )
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0xA4])))
+    var response: AgentPassHostSignResponse?
+    var error: NSError?
+    endpoint.signHostPayload(request) { value, responseError in
+        response = value
+        error = responseError
+    }
+
+    #expect(error == nil)
+    #expect(response?.signature == Data([0xA1, 0xA2]))
+    #expect(harness.recorder.signCount == 0)
+    #expect(harness.recorder.dedicatedSignCount == 1)
+}
+
 @Test func hostEndpointExpiryRevokesChildRegistrationBeforeAnyLaterSign() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
     #expect(harness.recorder.registerCount == 1)
@@ -403,7 +483,7 @@ private func childErrorCode(
 @Test func hostEndpointSignerFailureRevokesChildRegistrationAndBudget() throws {
     let harness = try HostEndpointHarness()
     harness.setSignerBehavior(.failure)
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -418,7 +498,7 @@ private func childErrorCode(
 @Test func hostEndpointEmptySignatureRevokesChildRegistrationAndBudget() throws {
     let harness = try HostEndpointHarness()
     harness.setSignerBehavior(.empty)
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -432,7 +512,7 @@ private func childErrorCode(
 
 @Test func hostEndpointResponseLossDoesNotPermitSameSequenceToSignTwice() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -459,7 +539,7 @@ private func childErrorCode(
 
 @Test func hostEndpointPeerDriftRevokesChildRegistrationBeforeReturningError() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -480,7 +560,7 @@ private func childErrorCode(
 
 @Test func hostEndpointStatusPeerDriftRevokesChildBeforeChildSignerInvocation() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -507,7 +587,7 @@ private func childErrorCode(
 
 @Test func hostEndpointClosePeerDriftRevokesChildBeforeChildSignerInvocation() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     _ = try prepare(endpoint)
     _ = try attach(endpoint, request: harness.attachRequest())
 
@@ -543,7 +623,7 @@ private func childErrorCode(
 
     for mismatch in [Mismatch.pid, .pidVersion, .executable, .ancestry, .worktree] {
         let harness = try HostEndpointHarness()
-        let endpoint = try harness.makeEndpoint()
+        let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
         _ = try prepare(endpoint)
         let request: AgentPassHostAttachChildRequest
         switch mismatch {
@@ -569,7 +649,10 @@ private func childErrorCode(
 
 @Test func hostEndpointFailsClosedWhenCloudBudgetProviderIsNotWired() throws {
     let harness = try HostEndpointHarness()
-    let endpoint = try harness.makeEndpoint(provideSignatureBudget: false)
+    let endpoint = try harness.makeEndpoint(
+        provideSignatureBudget: false,
+        signerPolicy: .developmentLegacySignerAllowed
+    )
     var response: AgentPassHostPrepareResponse?
     var error: NSError?
     endpoint.prepareHostSession(
@@ -586,7 +669,7 @@ private func childErrorCode(
 @Test func hostAndChildConsumeOneAuthoritativeCloudBudgetWithoutTruncationOrExpansion() throws {
     let harness = try HostEndpointHarness()
     try harness.setSignatureBudget(maxSignatures: 5, usedSignatures: 3)
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     let prepared = try prepare(endpoint)
     #expect(prepared.maxSignatures == 5)
     #expect(prepared.usedSignatures == 3)
@@ -630,7 +713,7 @@ private func childErrorCode(
 @Test func hostPrepareRejectsAnAlreadyExhaustedCloudBudget() throws {
     let harness = try HostEndpointHarness()
     try harness.setSignatureBudget(maxSignatures: 5, usedSignatures: 5)
-    let endpoint = try harness.makeEndpoint()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
     var response: AgentPassHostPrepareResponse?
     var error: NSError?
     endpoint.prepareHostSession(

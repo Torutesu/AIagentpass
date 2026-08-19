@@ -16,6 +16,7 @@ public enum NativeAgentAuthenticatedHostEndpointError: String, Error, Equatable,
     case expired = "expired"
     case revoked = "revoked"
     case signerFailed = "signer_failed"
+    case dedicatedSignerRequired = "dedicated_signer_required"
     case outcomeUnknown = "outcome_unknown"
     case endpointClosed = "endpoint_closed"
 
@@ -42,6 +43,14 @@ public struct NativeAgentAuthenticatedHostClosureSigner: NativeAgentAuthenticate
     public func sign(_ payload: NativeAgentAuthenticatedGitBridgeSession.AuthorizedPayload) throws -> Data {
         try operation(payload)
     }
+}
+
+/// Selects whether the endpoint may use its legacy signer when the dedicated
+/// Host signer is unavailable. Production uses the default, dedicated-only
+/// mode; the legacy mode is an explicit development/test compatibility opt-in.
+public enum NativeAgentAuthenticatedHostSignerPolicy: String, Equatable, Sendable {
+    case dedicatedSignerRequired = "dedicated_signer_required"
+    case developmentLegacySignerAllowed = "development_legacy_signer_allowed"
 }
 
 /// A child observation returned by the service-side OS adapter.
@@ -115,6 +124,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     public typealias ProcessObserver = @Sendable () throws -> NativeProcessObservation
     public typealias ChildObserver = @Sendable (_ pid: Int32, _ pidVersion: UInt64) throws -> NativeAgentAuthenticatedHostChildObservation
     public typealias ChildRegistrar = @Sendable (_ sessionID: String, _ observation: NativeAgentAuthenticatedHostChildObservation, _ signatureBudget: NativeAgentSignatureBudgetLedger) throws -> Void
+    public typealias DedicatedChildRegistrar = @Sendable (_ sessionID: String, _ hostIdentity: NativeProcessIdentity, _ observation: NativeAgentAuthenticatedHostChildObservation, _ signatureBudget: NativeAgentSignatureBudgetLedger) throws -> Void
     public typealias ChildUnregistrar = @Sendable (_ processBindingHash: String) -> Void
     public typealias SignatureBudgetProvider = @Sendable () throws -> NativeAgentSignatureBudget?
     public typealias MillisecondClock = @Sendable () -> Int64
@@ -135,13 +145,15 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let peerProcessObserver: ProcessObserver
     private let childObserver: ChildObserver
     private let childRegistrar: ChildRegistrar?
+    private let dedicatedChildRegistrar: DedicatedChildRegistrar?
     private let childUnregistrar: ChildUnregistrar?
     private let signatureBudgetProvider: SignatureBudgetProvider?
     private let signer: any NativeAgentAuthenticatedHostSigning
     /// Optional Service-owned Cloud-backed signer. When present it is the
     /// only signer used for Host payloads; the legacy closure remains solely
-    /// for explicitly unconfigured compatibility deployments.
+    /// for an explicit development/test compatibility policy.
     private let dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)?
+    private let signerPolicy: NativeAgentAuthenticatedHostSignerPolicy
     private let nowMilliseconds: MillisecondClock
     private let requestIDFactory: RequestIDFactory
     private let sessionLifetimeMilliseconds: Int64
@@ -169,6 +181,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         observeChild: @escaping ChildObserver,
         signer: any NativeAgentAuthenticatedHostSigning,
         dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)? = nil,
+        signerPolicy: NativeAgentAuthenticatedHostSignerPolicy = .dedicatedSignerRequired,
         nowMilliseconds: @escaping MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         },
@@ -177,11 +190,15 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         },
         sessionLifetimeMilliseconds: Int64 = NativeAgentAuthenticatedHostEndpoint.defaultLifetimeMilliseconds,
         childRegistrar: ChildRegistrar? = nil,
+        dedicatedChildRegistrar: DedicatedChildRegistrar? = nil,
         childUnregistrar: ChildUnregistrar? = nil,
         signatureBudgetProvider: SignatureBudgetProvider? = nil
     ) throws {
         guard sessionLifetimeMilliseconds > 0 else {
             throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
+        }
+        guard dedicatedSigner != nil || signerPolicy == .developmentLegacySignerAllowed else {
+            throw NativeAgentAuthenticatedHostEndpointError.dedicatedSignerRequired
         }
 
         self.peerBinding = try NativeAgentAuthenticatedGitBridgePeerBinding(
@@ -193,7 +210,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.peerProcessObserver = observePeerProcess
         self.childObserver = observeChild
         self.childRegistrar = childRegistrar
+        self.dedicatedChildRegistrar = dedicatedChildRegistrar
         self.dedicatedSigner = dedicatedSigner
+        self.signerPolicy = signerPolicy
         self.childUnregistrar = childUnregistrar
         self.signatureBudgetProvider = signatureBudgetProvider
         self.signer = signer
@@ -284,7 +303,16 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                 throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState
             }
             do {
-                try childRegistrar?(attached.sessionID, observation, signatureBudget)
+                if let dedicatedChildRegistrar {
+                    try dedicatedChildRegistrar(
+                        attached.sessionID,
+                        peerBinding.processIdentity,
+                        observation,
+                        signatureBudget
+                    )
+                } else {
+                    try childRegistrar?(attached.sessionID, observation, signatureBudget)
+                }
                 registeredChildBindingHash = observation.identity.canonicalBindingHash
             } catch {
                 closeSessionAndRevoke(session)
@@ -371,7 +399,19 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
 
             let signature: Data
             do {
-                signature = try (dedicatedSigner ?? signer).sign(authorized)
+                let selectedSigner: any NativeAgentAuthenticatedHostSigning
+                if let dedicatedSigner {
+                    selectedSigner = dedicatedSigner
+                } else {
+                    guard signerPolicy == .developmentLegacySignerAllowed else {
+                        throw NativeAgentAuthenticatedHostEndpointError.dedicatedSignerRequired
+                    }
+                    selectedSigner = signer
+                }
+                signature = try selectedSigner.sign(authorized)
+            } catch let error as NativeAgentAuthenticatedHostEndpointError {
+                closeSessionAndRevoke(session)
+                throw error
             } catch {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
@@ -626,6 +666,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .endpointClosed: return 10
         case .outcomeUnknown: return 11
         case .revoked: return 12
+        case .dedicatedSignerRequired: return 13
         }
     }
 }

@@ -25,6 +25,18 @@ public protocol NativeAgentAuthenticatedChildSigning: Sendable {
     func signChildPayload(_ payload: Data) throws -> Data
 }
 
+/// Optional Service-owned extension. The registry invokes it only after it
+/// has freshly re-observed the helper identity and worktree digest. It keeps
+/// those observations out of the Child XPC DTO while allowing a Cloud-backed
+/// signer to construct a complete internal context.
+public protocol NativeAgentAuthenticatedChildContextualSigning: NativeAgentAuthenticatedChildSigning {
+    func signChildPayload(
+        _ payload: Data,
+        helperIdentity: NativeProcessIdentity,
+        worktreeBindingDigest: Data
+    ) throws -> Data
+}
+
 public struct NativeAgentAuthenticatedChildClosureSigner: NativeAgentAuthenticatedChildSigning {
     private let operation: @Sendable (Data) throws -> Data
 
@@ -448,7 +460,16 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         lock.unlock()
 
         do {
-            let signature = try signer.signChildPayload(request.commitPayload)
+            let signature: Data
+            if let contextualSigner = signer as? any NativeAgentAuthenticatedChildContextualSigning {
+                signature = try contextualSigner.signChildPayload(
+                    request.commitPayload,
+                    helperIdentity: helperIdentity,
+                    worktreeBindingDigest: worktreeBindingDigest
+                )
+            } else {
+                signature = try signer.signChildPayload(request.commitPayload)
+            }
             guard !signature.isEmpty, signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes else {
                 throw NativeAgentAuthenticatedChildGitError.signerFailed
             }

@@ -208,6 +208,7 @@ private func changed(_ index: Int) -> [UInt32] {
             signer.record()
             return Data([1])
         },
+        signerPolicy: .developmentLegacySignerAllowed,
         nowMilliseconds: { 1_000 },
         sessionLifetimeMilliseconds: 100,
         signatureBudgetProvider: {

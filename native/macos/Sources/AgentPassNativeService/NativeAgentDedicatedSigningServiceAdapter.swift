@@ -216,19 +216,39 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
             throw NativeAgentDedicatedSigningServiceAdapterError.contextMismatch
         }
 
+        return try signServiceOwnedPayload(payload.payload, context: context)
+    }
+
+    /// Signs a payload after a Service-owned Child context has already been
+    /// resolved. This is the Child counterpart to `signAuthorizedPayload`:
+    /// the Child transport has no `AuthorizedPayload` DTO, so the endpoint
+    /// supplies the context created from fresh Service/OS observations.
+    ///
+    /// The same capability issuance, scope evaluation, transaction handoff,
+    /// and provider/outcome-unknown semantics are shared with the Host route.
+    public func signServiceOwnedPayload(
+        _ payload: Data,
+        context: NativeAgentDedicatedSigningServiceContext
+    ) throws -> Data {
+        guard !payload.isEmpty,
+              payload.count <= NativeAgentPassSignRequest.maximumCommitPayloadBytes,
+              context.verificationContext.sessionID == context.coordinatorSessionID else {
+            throw NativeAgentDedicatedSigningServiceAdapterError.invalidAuthorizedPayload
+        }
+
         let serviceRequest: NativeAgentPassSignRequest
         do {
             serviceRequest = try capabilityIssuer.issue(
                 context.capabilityRequest,
                 context: context.verificationContext,
-                commitPayload: payload.payload
+                commitPayload: payload
             )
         } catch {
             throw NativeAgentDedicatedSigningServiceAdapterError.capabilityIssuanceFailed
         }
 
         guard serviceRequest.sessionID == context.coordinatorSessionID,
-              serviceRequest.commitPayload == payload.payload,
+              serviceRequest.commitPayload == payload,
               serviceRequest.capabilityID == serviceRequest.capability.statement.capabilityID else {
             throw NativeAgentDedicatedSigningServiceAdapterError.requestMaterializationFailed
         }
@@ -311,6 +331,68 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
 
     private static func hex(_ value: Data) -> String {
         value.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Child-side adapter that receives only Service/OS observations from the
+/// authenticated Child registry. It never accepts a capability, session, or
+/// repository field from the Child DTO.
+public final class NativeAgentDedicatedSigningChildSigner:
+    NativeAgentAuthenticatedChildContextualSigning, @unchecked Sendable {
+    private let dedicatedSessionID: String
+    private let coordinatorBinding: NativeAgentSessionBinding
+    private let contextProvider: NativeAgentDedicatedSigningServiceContextProvider
+    private let signer: NativeAgentDedicatedSigningServiceSignerAdapter
+    private let worktreeObserver: NativeDarwinGitWorktreeObserver
+
+    public init(
+        dedicatedSessionID: String,
+        coordinatorBinding: NativeAgentSessionBinding,
+        contextProvider: NativeAgentDedicatedSigningServiceContextProvider,
+        capabilityIssuer: any NativeAgentDedicatedSigningCapabilityIssuing,
+        provider: @escaping NativeAgentDedicatedSigningServiceSignerAdapter.Provider,
+        worktreeObserver: NativeDarwinGitWorktreeObserver = .init()
+    ) {
+        self.dedicatedSessionID = dedicatedSessionID
+        self.coordinatorBinding = coordinatorBinding
+        self.contextProvider = contextProvider
+        self.signer = NativeAgentDedicatedSigningServiceSignerAdapter(
+            capabilityIssuer: capabilityIssuer,
+            contextProvider: contextProvider,
+            provider: provider
+        )
+        self.worktreeObserver = worktreeObserver
+    }
+
+    public func signChildPayload(_ payload: Data) throws -> Data {
+        throw NativeAgentAuthenticatedChildGitError.signerFailed
+    }
+
+    public func signChildPayload(
+        _ payload: Data,
+        helperIdentity: NativeProcessIdentity,
+        worktreeBindingDigest: Data
+    ) throws -> Data {
+        let worktree = try worktreeObserver.observe(
+            pid: helperIdentity.pid,
+            expectedUserID: helperIdentity.uid
+        ).binding
+        guard worktree.digest == worktreeBindingDigest else {
+            throw NativeAgentAuthenticatedChildGitError.worktreeChanged
+        }
+        let context = try contextProvider.contextForChild(
+            dedicatedSessionID: dedicatedSessionID,
+            binding: coordinatorBinding,
+            worktree: worktree
+        )
+        do {
+            return try signer.signServiceOwnedPayload(payload, context: context)
+        } catch let error as NativeAgentDedicatedSigningServiceAdapterError
+            where error == .outcomeUnknown {
+            throw NativeAgentAuthenticatedChildGitError.outcomeUnknown
+        } catch {
+            throw NativeAgentAuthenticatedChildGitError.signerFailed
+        }
     }
 }
 

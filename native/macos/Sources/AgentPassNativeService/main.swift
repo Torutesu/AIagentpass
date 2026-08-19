@@ -13,6 +13,28 @@ private struct NativeFixedProcessObservationSource: NativeProcessObservationSour
     }
 }
 
+private func nativeDigestData(_ value: String) -> Data? {
+    guard value.utf8.count == 64 else { return nil }
+    var result = Data(capacity: 32)
+    var high: UInt8?
+    for byte in value.utf8 {
+        let nibble: UInt8?
+        switch byte {
+        case 48...57: nibble = byte - 48
+        case 97...102: nibble = byte - 87
+        case 65...70: nibble = byte - 55
+        default: nibble = nil
+        }
+        guard let nibble else { return nil }
+        if let high {
+            result.append((high << 4) | nibble)
+        } else {
+            high = nibble
+        }
+    }
+    return high == nil && result.count == 32 ? result : nil
+}
+
 private func loadProtectedFile(path: String, label: String) throws -> Data {
     let original = URL(fileURLWithPath: path).standardizedFileURL
     guard original.path.hasPrefix("/"), original.resolvingSymlinksInPath().path == original.path else {
@@ -5157,12 +5179,6 @@ do {
         return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload.payload)
     }
     let childRegistry = NativeAgentAuthenticatedChildGitSessionRegistry()
-    let childSigner = NativeAgentAuthenticatedChildClosureSigner { payload in
-        guard let agentRuntime else {
-            throw NativeAgentAuthenticatedChildGitError.signerFailed
-        }
-        return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
-    }
     let worktreeObserver = NativeDarwinGitWorktreeObserver()
     let processObserver = NativeDarwinProcessObservationSource()
     let dedicatedContextProvider: NativeAgentDedicatedSigningServiceContextProvider?
@@ -5289,7 +5305,34 @@ do {
         },
         signer: hostSigner,
         dedicatedSigner: dedicatedHostSigner,
-        childRegistrar: { sessionID, observation, signatureBudget in
+        dedicatedChildRegistrar: { sessionID, hostIdentity, observation, signatureBudget in
+            guard let hostProcessDigest = nativeDigestData(hostIdentity.canonicalBindingHash),
+                  let hostAncestryDigest = nativeDigestData(hostIdentity.canonicalAncestryBindingHash),
+                  let agentRuntime, let dedicatedContextProvider,
+                  let association = sessionAssociationRegistry.lookup(
+                      processBindingDigest: hostProcessDigest,
+                      ancestryBindingDigest: hostAncestryDigest,
+                      worktreeBindingDigest: observation.worktreeBindingDigest),
+                  association.isActive else {
+                throw NativeAgentAuthenticatedChildGitError.signerFailed
+            }
+            let childSigner = NativeAgentDedicatedSigningChildSigner(
+                dedicatedSessionID: sessionID,
+                coordinatorBinding: association.binding,
+                contextProvider: dedicatedContextProvider,
+                capabilityIssuer: agentRuntime.dedicatedSigningCapabilityIssuer,
+                provider: { payload in
+                    let signature = try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
+                    guard try agentRuntime.gitCommitSigner.verifyGitCommitSignature(
+                        payload: payload,
+                        signature: signature
+                    ) else {
+                        throw NativeAgentGitCommitSignerError.invalidSignature
+                    }
+                    return signature
+                },
+                worktreeObserver: worktreeObserver
+            )
             try childRegistry.register(
                 sessionID: sessionID,
                 identity: observation.identity,

@@ -109,6 +109,56 @@ private final class ChildResponseBox: @unchecked Sendable {
     }
 }
 
+private final class ContextualChildSigner: NativeAgentAuthenticatedChildContextualSigning, @unchecked Sendable {
+    private(set) var observedHelper: NativeProcessIdentity?
+    private(set) var observedWorktree: Data?
+
+    func signChildPayload(_ payload: Data) throws -> Data {
+        Data(payload.reversed())
+    }
+
+    func signChildPayload(
+        _ payload: Data,
+        helperIdentity: NativeProcessIdentity,
+        worktreeBindingDigest: Data
+    ) throws -> Data {
+        observedHelper = helperIdentity
+        observedWorktree = worktreeBindingDigest
+        return Data(payload.reversed())
+    }
+}
+
+@Test func childRegistryPassesFreshObservationsToContextualSigner() throws {
+    let identity = NativeProcessIdentity(observation: try childTestObservation())
+    let helper = try childHelperIdentity(for: identity)
+    let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
+    let signer = ContextualChildSigner()
+    let worktree = Data(repeating: 0x38, count: 32)
+    try registry.register(
+        sessionID: "session-contextual",
+        identity: identity,
+        worktreeBindingDigest: worktree,
+        signer: signer,
+        signatureBudget: childBudget()
+    )
+    let ticket = try issueChildTicket(registry, child: identity, helper: helper, worktree: worktree)
+    let request = try #require(AgentPassChildGitSignRequest(
+        requestSequence: 1,
+        commitPayload: Data([7, 8]),
+        attachTicket: ticket
+    ))
+    let result = try registry.sign(
+        attachTicket: ticket,
+        helperIdentity: helper,
+        worktreeBindingDigest: worktree,
+        request: request,
+        nowMilliseconds: 1_000
+    )
+    #expect(result.signature == Data([8, 7]))
+    #expect(signer.observedHelper?.canonicalBindingHash == helper.canonicalBindingHash)
+    #expect(signer.observedWorktree == worktree)
+}
+
 @Test func childRegistryRequiresTheRegisteredIdentityAndConsumesInOrder() throws {
     let identity = NativeProcessIdentity(observation: try childTestObservation())
     let helper = try childHelperIdentity(for: identity)

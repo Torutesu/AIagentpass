@@ -22,6 +22,26 @@ private final class IssuerUnusedTransport: NativeAgentHTTPTransporting, @uncheck
     }
 }
 
+private final class IssuerResponseTransport: NativeAgentHTTPTransporting, @unchecked Sendable {
+    let response: Data
+
+    init(response: Data) {
+        self.response = response
+    }
+
+    func send(url: URL, method: String, headers: [String: String], body: Data, timeoutSeconds: Int) throws -> NativeAgentHTTPResponse {
+        NativeAgentHTTPResponse(statusCode: 200, body: response)
+    }
+}
+
+private struct IssuerFailingRandom: NativeAgentRandomBytesGenerating {
+    func randomBytes(count: Int) throws -> Data { throw NativeAgentPassSignRequestError.invalidRequest }
+}
+
+private struct IssuerFailingClock: NativeAgentWallClock {
+    func sample() throws -> NativeAgentWallClockValue { throw NativeAgentPassSignRequestError.invalidRequest }
+}
+
 private struct IssuerClock: NativeAgentWallClock {
     func sample() throws -> NativeAgentWallClockValue {
         NativeAgentWallClockValue(millisecondsSinceUnixEpoch: 1_786_838_410_000)
@@ -113,6 +133,64 @@ private func issuer() throws -> (NativeAgentDedicatedSigningCapabilityIssuer, Cu
         random: IssuerRandom(value: 0xa5),
         wallClock: IssuerClock()
     ), privateKey)
+}
+
+private func issuerResponseData(_ response: NativeAgentSigningCapabilityResponse) throws -> Data {
+    let capability = try #require(
+        JSONSerialization.jsonObject(
+            with: NativeAgentSigningCapabilityCodec.canonicalJSON(response.capability)
+        ) as? [String: Any]
+    )
+    let metadata: [String: Any] = [
+        "expires_at": response.metadata.expiresAt,
+        "issued_at": response.metadata.issuedAt,
+        "key_purpose": response.metadata.keyPurpose,
+        "operation": response.metadata.operation,
+        "remaining_session_signatures": response.metadata.remainingSessionSignatures,
+        "replayed": response.metadata.replayed,
+        "sequence": response.metadata.sequence,
+    ]
+    return try NativeStrictJSON.data([
+        "capability": capability,
+        "metadata": metadata,
+        "request_id": response.requestID,
+    ])
+}
+
+private func runtimeIssuer(
+    response: NativeAgentSigningCapabilityResponse,
+    authority: NativeAgentDedicatedSigningCapabilitySequenceAuthority,
+    signingKey: Curve25519.Signing.PrivateKey,
+    random: any NativeAgentRandomBytesGenerating = IssuerRandom(value: 0xa5),
+    wallClock: any NativeAgentWallClock = IssuerClock()
+) throws -> NativeAgentDedicatedSigningCapabilityRuntimeIssuer {
+    let verifier = try NativeAgentSigningCapabilityVerifier(
+        trustedPublicKey: signingKey.publicKey,
+        expectedIssuer: NativeAgentSigningCapabilityCodec.issuer,
+        expectedKeyPurpose: NativeAgentSigningCapabilityCodec.operation,
+        expectedKeyID: "git-commit-signing-v1",
+        expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
+    )
+    let responseData = try issuerResponseData(response)
+    let runtime = NativeAgentDedicatedSigningCapabilityRuntimeIssuer(
+        makeConsumer: { sessionID in
+            try NativeAgentSigningCapabilityHTTPConsumer(
+                baseURL: URL(string: "https://api.agentpass.test")!,
+                organizationID: issuerOrganization,
+                deviceID: issuerDevice,
+                sessionID: sessionID,
+                transport: IssuerResponseTransport(response: responseData),
+                signer: IssuerUnusedSigner(),
+                random: IssuerRandom(value: 0x5a),
+                wallClock: IssuerClock()
+            )
+        },
+        verifier: verifier,
+        sequenceAuthority: { _ in authority },
+        random: random,
+        wallClock: wallClock
+    )
+    return runtime
 }
 
 @Test func dedicatedIssuerVerifiesBeforeCreatingServiceOwnedRequest() throws {
@@ -213,6 +291,104 @@ private func issuer() throws -> (NativeAgentDedicatedSigningCapabilityIssuer, Cu
             commitPayload: Data([1])
         )
     }
+}
+
+@Test func runtimeIssuerCommitsSequenceOnlyAfterMaterializationSucceeds() throws {
+    let signingKey = Curve25519.Signing.PrivateKey()
+    let signedResponse = try issuerSignedResponse(privateKey: signingKey)
+    let authority = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+            coordinatorSessionID: issuerSession,
+            agentID: issuerAgent
+        )
+    )
+    let runtime = try runtimeIssuer(
+        response: signedResponse,
+        authority: authority,
+        signingKey: signingKey
+    )
+
+    let request = try runtime.issue(
+        try NativeAgentSigningCapabilityRequest(requestID: issuerRequest),
+        context: try issuerContext(),
+        commitPayload: Data([1])
+    )
+
+    #expect(request.requestID == issuerRequest)
+    #expect(authority.snapshot().acceptedSequence == 13)
+}
+
+@Test func runtimeIssuerAbortsSequenceReservationForReplayRandomClockAndMaterializationFailures() throws {
+    let signingKey = Curve25519.Signing.PrivateKey()
+    let request = try NativeAgentSigningCapabilityRequest(requestID: issuerRequest)
+
+    let replayAuthority = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+            coordinatorSessionID: issuerSession,
+            agentID: issuerAgent
+        )
+    )
+    let replayResponse = try issuerSignedResponse(privateKey: signingKey, replayed: true)
+    let replayRuntime = try runtimeIssuer(
+        response: replayResponse,
+        authority: replayAuthority,
+        signingKey: signingKey
+    )
+    #expect(throws: NativeAgentPassSignRequestError.replayedCapability) {
+        _ = try replayRuntime.issue(request, context: try issuerContext(), commitPayload: Data([1]))
+    }
+    #expect(replayAuthority.snapshot().acceptedSequence == nil)
+
+    let randomAuthority = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+            coordinatorSessionID: issuerSession,
+            agentID: issuerAgent
+        )
+    )
+    let validResponse = try issuerSignedResponse(privateKey: signingKey)
+    let randomRuntime = try runtimeIssuer(
+        response: validResponse,
+        authority: randomAuthority,
+        signingKey: signingKey,
+        random: IssuerFailingRandom()
+    )
+    #expect(throws: NativeAgentDedicatedSigningCapabilityIssuerError.randomUnavailable) {
+        _ = try randomRuntime.issue(request, context: try issuerContext(), commitPayload: Data([1]))
+    }
+    #expect(randomAuthority.snapshot().acceptedSequence == nil)
+
+    let clockAuthority = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+            coordinatorSessionID: issuerSession,
+            agentID: issuerAgent
+        )
+    )
+    let clockRuntime = try runtimeIssuer(
+        response: validResponse,
+        authority: clockAuthority,
+        signingKey: signingKey,
+        wallClock: IssuerFailingClock()
+    )
+    #expect(throws: NativeAgentDedicatedSigningCapabilityIssuerError.clockUnavailable) {
+        _ = try clockRuntime.issue(request, context: try issuerContext(), commitPayload: Data([1]))
+    }
+    #expect(clockAuthority.snapshot().acceptedSequence == nil)
+
+    let materializationAuthority = try NativeAgentDedicatedSigningCapabilitySequenceAuthority(
+        binding: try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+            coordinatorSessionID: issuerSession,
+            agentID: issuerAgent
+        )
+    )
+    let materializationRuntime = try runtimeIssuer(
+        response: validResponse,
+        authority: materializationAuthority,
+        signingKey: signingKey
+    )
+    #expect(throws: NativeAgentPassSignRequestError.invalidRequest) {
+        _ = try materializationRuntime.issue(request, context: try issuerContext(), commitPayload: Data())
+    }
+    #expect(materializationAuthority.snapshot().acceptedSequence == nil)
 }
 
 @Test func signingCapabilityResponseBindsMetadataToTheCapability() throws {
