@@ -354,6 +354,37 @@ public struct NativeAgentSigningCapabilityVerificationContext: Sendable {
     }
 }
 
+public extension NativeAgentSigningCapabilityVerificationContext {
+    /// Constructs the verifier context from the service's complete observed
+    /// session binding.  The capability sequence remains an explicit input;
+    /// it must come from service-owned state rather than the untrusted Cloud
+    /// envelope being verified.
+    init(
+        nowMilliseconds: Int64,
+        allowedClockSkewMilliseconds: Int64,
+        maximumTTLMilliseconds: Int64,
+        organizationID: String,
+        sessionID: String,
+        binding: NativeAgentSessionBinding,
+        keyID: String,
+        sequence: Int64
+    ) throws {
+        try self.init(
+            nowMilliseconds: nowMilliseconds,
+            allowedClockSkewMilliseconds: allowedClockSkewMilliseconds,
+            maximumTTLMilliseconds: maximumTTLMilliseconds,
+            organizationID: organizationID,
+            sessionID: sessionID,
+            deviceID: binding.deviceID,
+            agentID: binding.agentID,
+            keyID: keyID,
+            sequence: sequence,
+            controlSequence: binding.controlSequence,
+            authorityGeneration: binding.authorityGeneration
+        )
+    }
+}
+
 /// Cryptographic verifier for the Cloud-signed capability envelope.
 ///
 /// The trusted Ed25519 public key and all expected authority values are pinned
