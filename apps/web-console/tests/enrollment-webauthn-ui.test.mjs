@@ -19,6 +19,10 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   assert.match(source, /authenticateRecentAuth\(\{[\s\S]*?operation: RECENT_AUTH_OPERATION[\s\S]*?organizationId[\s\S]*?csrfToken/);
   assert.match(source, /"agentpass-recent-auth": authorization_id/);
   assert.match(source, /enrollmentInFlight\.current/);
+  assert.match(source, /enrollmentOutcomeUnknown/);
+  assert.match(source, /data-enrollment-state="outcome-unknown"/);
+  assert.match(source, /発行操作も再送していません/);
+  assert.match(source, /void refresh\(\)/);
   assert.match(source, /Touch ID\/パスキー確認して発行/);
   assert.match(source, /registerPasskey\(\{ organizationId, csrfToken \}\)/);
   assert.match(source, /Touch ID \/ パスキーを登録/);

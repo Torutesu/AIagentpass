@@ -17,7 +17,7 @@ import {
   type VirtualAuthenticator,
 } from "./support/browser-fixtures";
 
-type SecurityMode = "initial_registration" | "step_up_registration" | "replay" | "credential_loss";
+type SecurityMode = "initial_registration" | "step_up_registration" | "replay" | "credential_loss" | "response_loss";
 
 type BrowserSecurityState = {
   registrationOptionsCalls: number;
@@ -124,6 +124,7 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
     state.enrollmentCalls += 1;
     state.enrollmentRecentAuth.push(request.headers()["agentpass-recent-auth"]);
     state.enrollmentBodies.push(parseRequestBody(route));
+    if (mode === "response_loss") return route.abort("failed");
     if (mode === "replay" && state.enrollmentCalls > 1) return json(route, { error: { code: "replayed", message: "Recent authentication has already been consumed" } }, 403);
     return json(route, {
       enrollment: {
@@ -240,6 +241,23 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   expect(state.enrollmentBodies).toEqual([{ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }, { proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }]);
   await assertNoBrowserStorageSecret(page, ENROLLMENT_SECRET);
   await assertNoBrowserStorageSecret(page, AUTHORIZATION_ID);
+});
+
+test("converges to an outcome-unknown handoff after an enrollment response loss without resending", async ({ page }) => {
+  activeAuthenticators.set(page, await installVirtualAuthenticator(page));
+  const state = await installSecurityRoutes(page, "response_loss");
+  await openSetup(page);
+  await importPreflight(page);
+  await page.getByLabel("端末名").fill("Response Loss E2E Mac");
+  const issue = page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true });
+
+  await issue.click();
+  await expect(page.locator('[data-enrollment-state="outcome-unknown"]')).toContainText("発行結果を確認できませんでした");
+  await expect(page.locator('[data-enrollment-state="outcome-unknown"]')).toContainText("再送していません");
+  await expect(issue).toBeDisabled();
+  expect(state.enrollmentCalls).toBe(1);
+  await expect(page.locator(".secret-output")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(ENROLLMENT_SECRET);
 });
 
 test("fails closed when the virtual authenticator has lost the credential", async ({ page }) => {

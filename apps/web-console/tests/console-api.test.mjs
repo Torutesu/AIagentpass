@@ -653,6 +653,21 @@ test("v2 device enrollment rejects tenant drift, unknown receipt fields, and rep
   }
 });
 
+test("device enrollment upstream uncertainty remains no-store and never exposes credential material", async () => {
+  const secret = "a".repeat(43);
+  const api = authenticatedApi({ fetchImpl: async () => response({ error: { code: "upstream_timeout", credential: secret } }, 503) });
+  const result = await api.handle(request("/api/console?operation=device.enrollment.issue", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cookie": sessionCookie, "agentpass-csrf": "c".repeat(43), "idempotency-key": "device-enrollment-uncertain-01", "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: JSON.stringify({ proof_version: 2, candidate_id: "candidate-2026-08", device_key_fingerprint: `SHA256:${"f".repeat(43)}`, label: "Response Loss Mac", platform: "macos", ttl_ms: 600_000 }),
+  }));
+  assert.equal(result.status, 503);
+  assert.equal(result.headers.get("cache-control"), "no-store");
+  const text = await result.text();
+  assert.doesNotMatch(text, new RegExp(secret));
+  assert.match(text, /upstream_timeout/);
+});
+
 test("capability reads expose only tenant-bound lifecycle metadata, never signed authority", async () => {
   const capability = {
     version: 1,

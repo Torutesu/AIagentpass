@@ -33,6 +33,13 @@ private struct ActivationOutput: Encodable {
     let error: String?
 }
 
+private func writeActivation(_ output: ActivationOutput) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = (try? encoder.encode(output)) ?? Data("{\"error\":\"encoding_failure\",\"ok\":false}\n".utf8)
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+}
+
 private func runHostLaunchPlan(projectPath: String) -> Never {
     let handoff: NativeAgentLaunchAuthorityHandoff
     do {
@@ -76,8 +83,15 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
             supervisor: NativeAgentHostChildSupervisor(),
             adapter: AgentHostServiceLifecycleAdapter(client: serviceClient)
         )
-        _ = try runtime.start()
-        emitActivation(ActivationOutput(ok: true, operation: "host-launch", status: "active", error: nil), status: 0)
+        let coordinator = try runtime.start()
+        // Keep the Host process alive for the entire child/session lifetime.
+        // The authenticated child XPC client is connection-owned by the
+        // supervisor; returning from this function would invalidate it and
+        // silently strand the child without its signing broker.
+        writeActivation(ActivationOutput(ok: true, operation: "host-launch", status: "active", error: nil))
+        _ = try coordinator.waitForChild()
+        writeActivation(ActivationOutput(ok: true, operation: "host-launch", status: "closed", error: nil))
+        exit(0)
     } catch let error as NativeAgentHostLifecycleAdapterError where error == .unavailable {
         emitActivation(
             ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "service_binding_contract_unavailable"),

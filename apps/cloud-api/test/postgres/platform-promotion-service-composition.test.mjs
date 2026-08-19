@@ -569,7 +569,7 @@ test("composes real service, Ed25519 signer, historical resolver, and repository
 
   assert.equal(issued.replayed, false);
   assert.equal(value.signerCalls(), 1, "one durable reservation permits exactly one sign call");
-  assert.equal(value.repositoryVerification.length, 1, "repository independently verifies before commit");
+  assert.equal(value.repositoryVerification.length, 2, "repository independently verifies before and after commit");
   assert.deepEqual(value.repositoryVerification[0].context.qualification_report_digests, AUTHORITY.qualification_report_digests);
   assert.equal(value.client.row.state, "committed");
   assert.equal(value.client.state.head.current_generation, 1);
@@ -637,7 +637,7 @@ test("a lost commit response is recovered by replay with one sign and one atomic
   const issued = await value.service.issuePlatformPromotion(INPUT);
   assert.equal(issued.replayed, true, "service reconciles the accepted commit response loss");
   assert.equal(value.signerCalls(), 1);
-  assert.equal(value.repositoryVerification.length, 1);
+  assert.equal(value.repositoryVerification.length, 3, "commit result and durable replay are independently verified");
   assert.equal(value.client.row.state, "committed");
   assert.equal(value.client.state.head.current_generation, 1);
   assert.equal(value.client.events.filter((event) => event === "issuance-committed").length, 1);

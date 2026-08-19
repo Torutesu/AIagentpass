@@ -1837,6 +1837,7 @@ form.onboarding-panel .onboarding-primary { grid-column: 3; }
 .enrollment-reconciliation[data-reconciliation-state="enrolled"] { border-color: #b9d3bf; background: var(--forest-soft, #eef8f0); }
 .enrollment-reconciliation[data-reconciliation-state="response-loss"],
 .enrollment-reconciliation[data-reconciliation-state="timed-out"] { border-color: #d7a9a9; background: #fff5f3; color: #7d2525; }
+.enrollment-outcome-unknown { display: grid; gap: .35rem; margin-top: 1rem; padding: .85rem 1rem; border: 1px solid #d7a9a9; border-radius: 10px; background: #fff5f3; color: #7d2525; }
 .enrollment-steps { display: grid; gap: .65rem; margin: 1rem 0; padding: 0; list-style: none; }
 .enrollment-steps li { display: grid; gap: .15rem; grid-template-columns: 10rem 1fr; padding: .65rem .75rem; border-left: 3px solid var(--line-strong, #b8c0ba); background: #fff; color: var(--ink-soft, #59645e); }
 .enrollment-steps li[data-state="pending"] { border-left-color: #b98228; }

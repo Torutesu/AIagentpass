@@ -116,7 +116,7 @@ export function createPostgresPlatformPromotionIssuanceRepository({
         if (value?.state === "reserved" && value.claim_issued !== true) return { state: "in_progress" };
         if (value?.state === "uncertain") return { state: "uncertain" };
         const row = normalizeAuthorityResult(value, value?.claim_issued === true ? token : undefined);
-        if (row.state === "committed") return committedOutcome(row);
+        if (row.state === "committed") return verifyCommittedOutcome(row, true, verifyEvidence, evidenceTtlMs);
         if (row.state !== "reserved" || value.claim_issued !== true) throw repoError("DATABASE");
         return reservedOutcome(row, token);
       });
@@ -129,7 +129,7 @@ export function createPostgresPlatformPromotionIssuanceRepository({
       return await withTransaction(client, async (tx) => {
         const value = await callAuthority(tx, AUTHORITY_SQL.replay, identityParams(identity));
         if (["absent", "in_progress", "uncertain"].includes(value?.state)) return { state: value.state };
-        return committedOutcome(normalizeAuthorityResult(value));
+        return verifyCommittedOutcome(normalizeAuthorityResult(value), true, verifyEvidence, evidenceTtlMs);
       });
     } catch (error) { throw publicError(error); }
   }
@@ -144,10 +144,10 @@ export function createPostgresPlatformPromotionIssuanceRepository({
       return await withTransaction(client, async (tx) => {
         const current = await callAuthority(tx, AUTHORITY_SQL.get, [...identityParams(values), false]);
         if (current === null) throw repoError("NOT_FOUND");
-        const row = normalizeAuthorityResult(current, values.claim_token);
+        const row = normalizeAuthorityResult(current, current.state === "reserved" ? values.claim_token : undefined);
         if (row.state === "committed") {
           assertEvidenceMatches(evidence, row);
-          return committedOutcome(row);
+          return verifyCommittedOutcome(row, true, verifyEvidence, evidenceTtlMs);
         }
         if (row.state === "uncertain") return { state: "uncertain" };
         if (row.state !== "reserved") throw repoError("DATABASE");
@@ -159,7 +159,7 @@ export function createPostgresPlatformPromotionIssuanceRepository({
           ...identityParams(values), Buffer.from(sha256(values.claim_token), "hex"), signingBytes,
           Buffer.from(evidence.signature, "base64url"), Buffer.from(canonical, "utf8"), Buffer.from(sha256(canonical), "hex")
         ]);
-        return committedOutcome(normalizeAuthorityResult(committed));
+        return verifyCommittedOutcome(normalizeAuthorityResult(committed), true, verifyEvidence, evidenceTtlMs);
       });
     } catch (error) { throw publicError(error); }
   }
@@ -172,7 +172,7 @@ export function createPostgresPlatformPromotionIssuanceRepository({
         const value = await callAuthority(tx, AUTHORITY_SQL.uncertain, [
           ...identityParams(values), Buffer.from(sha256(values.claim_token), "hex"), values.reason
         ]);
-        if (value?.state === "committed") return committedOutcome(normalizeAuthorityResult(value));
+        if (value?.state === "committed") return verifyCommittedOutcome(normalizeAuthorityResult(value), true, verifyEvidence, evidenceTtlMs);
         if (value?.state !== "uncertain") throw repoError("DATABASE");
         return { state: "uncertain" };
       });
@@ -185,7 +185,7 @@ export function createPostgresPlatformPromotionIssuanceRepository({
       return await withTransaction(client, async (tx) => {
         const value = await callAuthority(tx, AUTHORITY_SQL.get, [...identityParams(identity), true]);
         if (value === null) throw repoError("NOT_FOUND");
-        return committedOutcome(normalizeAuthorityResult(value));
+        return verifyCommittedOutcome(normalizeAuthorityResult(value), true, verifyEvidence, evidenceTtlMs);
       });
     } catch (error) { throw publicError(error); }
   }
@@ -313,16 +313,6 @@ function deriveProviderOperationId(row) {
   }
 }
 
-function existingOutcome(row, identity) {
-  assertIdentity(row, identity);
-  if (row.state === "committed") return committedOutcome(row);
-  if (row.state === "uncertain") return { state: "uncertain" };
-  if (row.claim_expires_at && Date.parse(String(row.claim_expires_at)) > Date.now()) return { state: "in_progress" };
-  // An expired reservation is ambiguous: the signer may have started before
-  // process loss. It is never silently reclaimed or re-signed.
-  return { state: "uncertain" };
-}
-
 function reservedOutcome(row, token) {
   const result = publicRow(row);
   if (token !== undefined) result.claim_token = token;
@@ -340,6 +330,21 @@ function committedOutcome(row) {
     } catch { throw repoError("DATABASE"); }
   }
   return deepFreeze(result);
+}
+
+async function verifyCommittedOutcome(row, allowExpired, verifyEvidence, evidenceTtlMs) {
+  const result = committedOutcome(row);
+  try {
+    const verified = await verifyEvidence(
+      result.promotion_evidence,
+      verificationContext(row, evidenceTtlMs, allowExpired)
+    );
+    if (verified !== true) throw repoError("EVIDENCE");
+  } catch (error) {
+    if (error instanceof PlatformPromotionIssuanceRepositoryError) throw error;
+    throw repoError("EVIDENCE");
+  }
+  return result;
 }
 
 function publicRow(row) {
@@ -390,7 +395,7 @@ function assertEvidenceMatches(evidence, row) {
   if (evidence.version !== 3 || evidence.type !== "agentpass.promotion-evidence") throw repoError("EVIDENCE");
 }
 
-function verificationContext(row, maxTtlMs) {
+function verificationContext(row, maxTtlMs, allowExpired = false) {
   const context = {
     deployment_id: row.deployment_id,
     environment: row.environment,
@@ -412,7 +417,7 @@ function verificationContext(row, maxTtlMs) {
     key_version: numberValue(row.key_version),
     lifecycle_version: numberValue(row.lifecycle_version),
     signer_key_fingerprint: normalizeFingerprint(row.signer_key_fingerprint),
-    allowExpired: false,
+    allowExpired: allowExpired === true,
     maxTtlMs
   };
   if (!Number.isSafeInteger(maxTtlMs) || maxTtlMs < 1 || maxTtlMs > PROMOTION_EVIDENCE_V3_MAX_TTL_MS
@@ -447,9 +452,6 @@ function normalizeObject(input, keys) {
   return value;
 }
 
-function assertIdentity(row, identity) {
-  for (const key of IDENTITY_KEYS) if (String(row[key]) !== String(identity[key])) throw repoError("CONFLICT");
-}
 function makeToken(randomBytes) {
   const value = randomBytes(32);
   if (!Buffer.isBuffer(value) || value.length !== 32) throw repoError("CONFIG");

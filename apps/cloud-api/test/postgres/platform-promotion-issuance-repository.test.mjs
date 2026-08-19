@@ -393,6 +393,31 @@ test("commits exact v3 evidence with a monotonic generation and replays without 
   assert.equal(client.head.current_candidate_id, IDENTITY.candidate_id);
 });
 
+test("requires independent verification for every committed result path", async () => {
+  let accepted = true;
+  const verificationContexts = [];
+  const { repo } = repository({
+    verifyEvidence: async (_evidence, context) => {
+      verificationContexts.push(context);
+      return accepted;
+    }
+  });
+  const reserved = await repo.reservePlatformPromotion(IDENTITY);
+  const evidence = evidenceFor(reserved);
+  await repo.commitPlatformPromotion({ ...IDENTITY, claim_token: reserved.claim_token, promotion_evidence: evidence });
+  assert.deepEqual(verificationContexts.map(({ allowExpired }) => allowExpired), [false, true]);
+
+  assert.equal((await repo.replayPlatformPromotion(IDENTITY)).state, "committed");
+  assert.equal((await repo.getCommittedPlatformPromotion(IDENTITY)).promotion_evidence.signature, evidence.signature);
+  assert.equal((await repo.reservePlatformPromotion(IDENTITY)).promotion_evidence.signature, evidence.signature);
+  assert.deepEqual(verificationContexts.map(({ allowExpired }) => allowExpired), [false, true, true, true, true]);
+
+  accepted = false;
+  await assert.rejects(repo.replayPlatformPromotion(IDENTITY), { code: CODES.EVIDENCE });
+  await assert.rejects(repo.getCommittedPlatformPromotion(IDENTITY), { code: CODES.EVIDENCE });
+  await assert.rejects(repo.reservePlatformPromotion(IDENTITY), { code: CODES.EVIDENCE });
+});
+
 test("fences stale claims, rejects substitution, and makes uncertainty terminal", async () => {
   const { repo } = repository();
   const reserved = await repo.reservePlatformPromotion(IDENTITY);

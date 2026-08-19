@@ -236,6 +236,9 @@ test("v2 enrollment is candidate-bound end to end and receipt reads are exact-de
   const issuedResponse = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, { method: "POST", headers: issueHeaders, body: JSON.stringify(issueBody) });
   assert.equal(issuedResponse.status, 201, JSON.stringify(await issuedResponse.clone().json()));
   const issued = (await issuedResponse.json()).enrollment;
+  const retriedResponse = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, { method: "POST", headers: issueHeaders, body: JSON.stringify(issueBody) });
+  assert.equal(retriedResponse.status, 201, JSON.stringify(await retriedResponse.clone().json()));
+  assert.deepEqual((await retriedResponse.json()).enrollment, issued);
   assert.equal(issued.challenge_id, issueBody.enrollment_id);
   assert.equal(issued.candidate_binding.artifact_sha256, f.candidate.artifact_sha256);
   assert.equal(issued.candidate_binding.source_commit, f.candidate.source_commit);

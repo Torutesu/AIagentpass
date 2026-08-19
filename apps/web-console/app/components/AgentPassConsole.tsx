@@ -252,9 +252,9 @@ function organizationSwitcherMessage(error: unknown): string {
 }
 
 class EnrollmentFlowError extends Error {
-  readonly code: "session" | "enrollment" | "unsupported";
+  readonly code: "session" | "enrollment" | "unsupported" | "outcome-unknown";
 
-  constructor(code: "session" | "enrollment" | "unsupported", message: string) {
+  constructor(code: "session" | "enrollment" | "unsupported" | "outcome-unknown", message: string) {
     super(message);
     this.name = "EnrollmentFlowError";
     this.code = code;
@@ -661,6 +661,10 @@ function enrollmentErrorMessage(error: unknown): string {
   return "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。";
 }
 
+function isEnrollmentOutcomeUnknown(error: unknown): boolean {
+  return error instanceof EnrollmentFlowError && error.code === "outcome-unknown";
+}
+
 function passkeyErrorMessage(error: unknown): string {
   if (error instanceof ConsoleSessionError) return error.message;
   if (error instanceof EnrollmentFlowError) return error.message;
@@ -1056,6 +1060,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   const [issuedEnrollment, setIssuedEnrollment] = useState<IssuedEnrollmentSummary | null>(null);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
+  const [enrollmentOutcomeUnknown, setEnrollmentOutcomeUnknown] = useState(false);
   const enrollmentInFlight = useRef(false);
   const [passkeyPending, setPasskeyPending] = useState(false);
   const [passkeyRegistered, setPasskeyRegistered] = useState(false);
@@ -1086,12 +1091,13 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
     try { await operate("issue-capability", { agent_id: selectedAgent.agentId, device_id: selectedDevice.deviceId, scope: defaultScope, ttl_ms: 15 * 60 * 1000 }, "短期Capabilityを発行しました"); } finally { setCapabilityPending(false); }
   };
   const issueEnrollment = async () => {
-    if (enrollmentInFlight.current) return;
+    if (enrollmentInFlight.current || enrollmentOutcomeUnknown) return;
     enrollmentInFlight.current = true;
     setEnrollmentPending(true);
     clearEnrollmentStore(enrollmentStoreId);
     setEnrollmentVisible(false);
     setEnrollmentError("");
+    let mutationAttempted = false;
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
       const activePreflight = activeGuidedPreflight ?? parsePublicEnrollmentPreflight(JSON.stringify({
@@ -1107,14 +1113,18 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
         organizationId,
         csrfToken,
       });
+      mutationAttempted = true;
       const response = await fetchConsole("/api/console?operation=issue-device-enrollment", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
         body: JSON.stringify({ proof_version: 2, candidate_id: activePreflight.candidate_id, device_key_fingerprint: activePreflight.device_key_fingerprint, label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
       let payload: unknown;
-      try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
-      if (!response.ok) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      try { payload = await response.json(); } catch { throw new EnrollmentFlowError("outcome-unknown", "発行結果を確認できませんでした。"); }
+      if (!response.ok) {
+        if (response.status >= 500) throw new EnrollmentFlowError("outcome-unknown", "発行結果を確認できませんでした。");
+        throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      }
       const invitation = parseV2EnrollmentInvitation(payload, organizationId, activePreflight);
       writeEnrollmentStore(enrollmentStoreId, invitation);
       setIssuedEnrollment({
@@ -1149,7 +1159,18 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
       }
     } catch (error) {
       clearConsoleSessionOnUnauthorized(error);
-      setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
+      if (mutationAttempted && (isEnrollmentOutcomeUnknown(error) || !(error instanceof EnrollmentFlowError))) {
+        const hadLiveHandoff = liveHandoffRef.current !== null;
+        liveHandoffRef.current = null;
+        if (hadLiveHandoff) onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
+        setEnrollmentOutcomeUnknown(true);
+        setEnrollmentError("");
+        // The request may have committed before its response was lost. Read
+        // the authoritative summary once, but never issue a second invitation.
+        void refresh();
+      } else {
+        setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
+      }
     } finally {
       enrollmentInFlight.current = false;
       setEnrollmentPending(false);
@@ -1233,10 +1254,15 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           <div className="guided-enrollment-steps">
             <div className="guided-enrollment-step"><span className="setup-step-number">01</span><div><h3 className="setup-step-title">公開preflightを読み込む</h3><p className="field-help">macOS用の候補IDとP-256公開キーの指紋、バージョンだけを受け付けます。</p><textarea aria-label="公開preflight JSON" className="preflight-input" rows={5} autoComplete="off" spellCheck={false} placeholder={'{"version":1,"platform":"macos","candidate_id":"…","device_key_fingerprint":"SHA256:…"}'} value={preflightText} onChange={(event) => { setPreflightText(event.target.value); setPreflight(null); setPreflightSource("manual"); setPreflightError(""); }} /><button className="secondary-button" type="button" disabled={!preflightText.trim() || enrollmentPending} onClick={importPreflight}>公開preflightを確認</button>{preflightError ? <p className="form-error" role="alert">{preflightError}</p> : null}</div></div>
             {activeGuidedPreflight ? <div className="preflight-preview" role="status"><div className="stop-title-row"><div><p className="row-title">公開preflightを確認しました</p><p className="row-description">macOS · 候補 {activeGuidedPreflight.candidate_id} · P-256 {activeGuidedPreflight.device_key_fingerprint}</p></div><StatusTag tone="green">PUBLIC ONLY</StatusTag></div></div> : null}
-            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
+            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || enrollmentOutcomeUnknown || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
           </div>
           <details className="advanced-enrollment"><summary>上級者向け：preflight JSONを使えない場合の手入力</summary><p className="field-help">互換性のためのfallbackです。値は同じ厳格な形式で検証し、公開キー指紋以外は受け付けません。</p><div className="form-grid"><label>リリース候補ID<input maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /></label><label>端末キーのフィンガープリント<input maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">秘密鍵ではなく、P-256公開キーのSHA-256指紋。</span></label></div><button className="text-button" type="button" onClick={() => { setAdvancedEnrollment(true); setPreflight(null); setPreflightSource("manual"); setPreflightText(""); setPreflightError(""); }}>手入力を使う</button></details>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
+          {enrollmentOutcomeUnknown ? <div className="enrollment-outcome-unknown" data-enrollment-state="outcome-unknown" role="alert" aria-live="assertive">
+            <p className="row-title">発行結果を確認できませんでした</p>
+            <p className="row-description">Cloudへの依頼後に応答を受け取れませんでした。招待JSONは表示せず、発行操作も再送していません。下の登録済み端末で状態を確認し、意図しない端末があれば「停止」を選んでください。</p>
+            <button className="text-button" type="button" onClick={() => void refresh()}>状態を再確認</button>
+          </div> : null}
           {issuedEnrollment ? <div className="enrollment-progress" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel(progress)}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><EnrollmentReconciliationCard key={`${issuedEnrollment.enrollmentId}:${progress}`} progress={progress} refresh={refresh} /></div> : null}
           {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
         </article> : null}

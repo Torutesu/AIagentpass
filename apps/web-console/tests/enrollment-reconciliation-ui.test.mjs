@@ -32,3 +32,16 @@ test("enrollment reconciliation does not add a second mutation path or browser p
   assert.match(source, /<SetupSurface[\s\S]*refresh=\{refreshSummary\}/);
   assert.match(source, /<EnrollmentReconciliationCard key=\{`\$\{issuedEnrollment\.enrollmentId\}:\$\{progress\}`\}/);
 });
+
+test("enrollment response loss has an explicit fail-closed handoff state", async () => {
+  const source = await readFile(componentPath, "utf8");
+  const setup = source.slice(source.indexOf("function SetupSurface"), source.indexOf("function AgentsSurface"));
+
+  assert.match(setup, /mutationAttempted = true/);
+  assert.match(setup, /new EnrollmentFlowError\("outcome-unknown"/);
+  assert.match(setup, /enrollmentOutcomeUnknown\) return/);
+  assert.match(setup, /招待JSONは表示せず/);
+  assert.match(setup, /発行操作も再送していません/);
+  assert.match(setup, /登録済み端末.*停止/u);
+  assert.doesNotMatch(setup, /setTimeout\([^)]*issueEnrollment/);
+});
