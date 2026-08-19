@@ -330,11 +330,16 @@ public final class NativeAgentHostSigningRouteRegistry: @unchecked Sendable {
         connectionTokenIdentity: String,
         childProcessIdentity: NativeProcessIdentity,
         worktreeBindingDigest: Data,
-        requestCorrelation: NativeAgentHostSigningRequestCorrelation,
+        requestID: String,
+        createdAtMilliseconds: Int64,
         nowMilliseconds: Int64
     ) throws -> NativeAgentHostSigningRoute {
         try lock.withLock {
             let route = try route(for: routeID)
+            let requestCorrelation = try NativeAgentHostSigningRequestCorrelation(
+                requestID: requestID,
+                createdAtMilliseconds: createdAtMilliseconds
+            )
             try route.consume(
                 connectionTokenIdentity: connectionTokenIdentity,
                 childProcessIdentity: childProcessIdentity,
@@ -353,7 +358,8 @@ public final class NativeAgentHostSigningRouteRegistry: @unchecked Sendable {
         connectionTokenIdentity: String,
         childProcessIdentity: NativeProcessIdentity,
         worktreeBindingDigest: Data,
-        requestCorrelation: NativeAgentHostSigningRequestCorrelation,
+        requestID: String,
+        createdAtMilliseconds: Int64,
         nowMilliseconds: Int64,
         provider: @escaping @Sendable (Data) throws -> Data
     ) throws -> Data {
@@ -362,7 +368,8 @@ public final class NativeAgentHostSigningRouteRegistry: @unchecked Sendable {
             connectionTokenIdentity: connectionTokenIdentity,
             childProcessIdentity: childProcessIdentity,
             worktreeBindingDigest: worktreeBindingDigest,
-            requestCorrelation: requestCorrelation,
+            requestID: requestID,
+            createdAtMilliseconds: createdAtMilliseconds,
             nowMilliseconds: nowMilliseconds
         )
         return try route.execute(provider: provider)
