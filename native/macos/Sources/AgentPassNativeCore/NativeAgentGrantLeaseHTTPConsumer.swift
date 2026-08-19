@@ -116,7 +116,7 @@ public final class NativeAgentURLSessionHTTPTransport: NSObject, NativeAgentHTTP
 public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsuming,
   @unchecked Sendable
 {
-  private static let maximumGrantBytes = NativeAgentGrantConsumptionRequest.maximumProofBytes
+  static let maximumGrantBytes = NativeAgentGrantConsumptionRequest.maximumProofBytes
   private static let maximumBodyBytes = 16 * 1024
   private let baseURL: URL
   private let organizationID: String
@@ -220,11 +220,14 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
     }
   }
 
-  private struct Grant {
+  struct Grant {
     let object: [String: Any]
     let organizationID: String
     let deviceID: String
     let agentID: String
+    let agentKind: String
+    let adapterID: String
+    let adapterVersion: String
     let grantID: String
     let worktreeBindingSHA256: String
     let controlSequence: Int64
@@ -238,7 +241,7 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
     "authority_generation", "issuer", "key_id",
   ]
 
-  private static func parseGrant(_ data: Data) throws -> Grant {
+  static func parseGrant(_ data: Data) throws -> Grant {
     guard !data.isEmpty, data.count <= maximumGrantBytes else {
       throw NativeAgentGrantLeaseHTTPError.invalidGrant
     }
@@ -254,6 +257,13 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
         statement["version"] as? Int == 1,
         let organization = uuid(statement["organization_id"]),
         let device = uuid(statement["device_id"]), let agent = uuid(statement["agent_id"]),
+        let agentKind = statement["agent_kind"] as? String,
+        ["claude-code", "cursor"].contains(agentKind),
+        let adapterID = uuid(statement["adapter_id"]),
+        let adapterVersion = statement["adapter_version"] as? String,
+        adapterVersion.range(
+          of: "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+          options: .regularExpression) != nil,
         let grant = uuid(statement["grant_id"]),
         let worktreeBinding = digest(statement["worktree_binding_sha256"]),
         let controlSequence = positiveSafeInteger(statement["control_sequence"]),
@@ -265,6 +275,7 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
       else { throw NativeAgentGrantLeaseHTTPError.invalidGrant }
       return Grant(
         object: object, organizationID: organization, deviceID: device, agentID: agent,
+        agentKind: agentKind, adapterID: adapterID, adapterVersion: adapterVersion,
         grantID: grant, worktreeBindingSHA256: worktreeBinding,
         controlSequence: controlSequence, authorityGeneration: authorityGeneration)
     } catch let error as NativeAgentGrantLeaseHTTPError { throw error } catch {

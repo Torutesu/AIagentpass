@@ -51,6 +51,24 @@ public struct NativeAgentLaunchAuthorityHandoff: Equatable, Sendable {
         self.proof = proof
     }
 
+    /// The only serialized form accepted by the fixed Native Host. This is
+    /// returned as bounded memory for the caller's one-way inherited pipe;
+    /// this type never writes authority to a path, process argument, or
+    /// environment value.
+    public func canonicalJSON() throws -> Data {
+        let data = try NativeStrictJSON.data([
+            "agent_id": agentID,
+            "agent_kind": agentKind.rawValue,
+            "proof": String(decoding: proof, as: UTF8.self),
+            "requested_ttl_seconds": requestedTTLSeconds,
+            "schema_version": Self.schemaVersion,
+        ])
+        guard data.count <= Self.maximumDocumentBytes else {
+            throw NativeAgentLaunchAuthorityHandoffError.oversized
+        }
+        return data
+    }
+
     public static func decode(_ data: Data) throws -> Self {
         guard !data.isEmpty, data.count <= maximumDocumentBytes else {
             throw NativeAgentLaunchAuthorityHandoffError.oversized

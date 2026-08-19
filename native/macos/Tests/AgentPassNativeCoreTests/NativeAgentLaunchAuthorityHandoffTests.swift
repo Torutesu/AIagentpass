@@ -38,6 +38,7 @@ private func launchHandoffData(
     #expect(handoff.requestedTTLSeconds == 600)
     #expect(handoff.proof == (try launchProof()))
     #expect(try NativeAgentLaunchAuthorityHandoff.decode(data) == handoff)
+    #expect(try handoff.canonicalJSON() == data)
 }
 
 @Test func launchAuthorityHandoffRejectsAliasesUnknownFieldsAndNoncanonicalBytes() throws {
