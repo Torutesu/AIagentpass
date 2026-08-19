@@ -111,6 +111,25 @@ func successfulSigningAuditRequiresDurableEnqueue() throws {
     #expect(!NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: denied))
 }
 
+@Test("required enqueue failure is returned while best-effort failure remains retryable")
+func deviceAuditUploadAdmissionFailsClosedOnlyWhenRequired() throws {
+    let root = try uploadRecoveryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let health = try NativeDeviceAuditUploadHealthStore(path: root.appendingPathComponent("upload-health.json").path)
+
+    #expect(throws: UploadRecoveryTestError.self) {
+        try NativeDeviceAuditUploadAdmission.attempt(required: true, health: health) {
+            throw UploadRecoveryTestError.diskFull
+        }
+    }
+    #expect(health.snapshot().state == NativeDeviceAuditUploadHealth.degraded)
+
+    try NativeDeviceAuditUploadAdmission.attempt(required: false, health: health) {
+        throw UploadRecoveryTestError.diskFull
+    }
+    #expect(health.snapshot().consecutiveFailures == 2)
+}
+
 @Test("upload supervisor retries after an outage and clears persisted degraded health")
 func uploadSupervisorRecoversAfterTransportRestoration() async throws {
     let root = try uploadRecoveryRoot()
