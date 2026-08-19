@@ -613,6 +613,22 @@ async function assertCurrentGrantAuthority(tx, grant) {
 
 function mapError(error) {
   if (error instanceof AgentSessionAuthorityRepositoryError) return error;
+  const constraint = typeof error?.constraint === "string" ? error.constraint : "";
+  const constraintCodes = Object.freeze({
+    agent_session_authority_tenant: "ERR_TENANT_SCOPE",
+    agent_session_authority_grant_conflict: "ERR_GRANT_CONFLICT",
+    agent_session_authority_grant_not_found: "ERR_GRANT_NOT_FOUND",
+    agent_session_authority_grant_unavailable: "ERR_GRANT_UNAVAILABLE",
+    agent_session_authority_grant_not_yet_valid: "ERR_GRANT_NOT_YET_VALID",
+    agent_session_authority_grant_expired: "ERR_GRANT_EXPIRED",
+    agent_session_authority_binding_conflict: "ERR_BINDING_CONFLICT",
+    agent_session_authority_session_conflict: "ERR_SESSION_CONFLICT",
+    agent_session_authority_session_unavailable: "ERR_GRANT_UNAVAILABLE",
+    agent_session_authority_session_expired: "ERR_GRANT_EXPIRED",
+    agent_session_authority_session_id_required: "ERR_INPUT"
+  });
+  const code = constraintCodes[constraint];
+  if (code) return new AgentSessionAuthorityRepositoryError(code);
   return new AgentSessionAuthorityRepositoryError("ERR_DATABASE", error);
 }
 

@@ -166,6 +166,9 @@ function requiredRowCount(result) {
 
 function mapError(error) {
   if (error instanceof AgentSessionLifecycleRepositoryError) return error;
+  if (error?.constraint === "agent_session_authority_tenant") return failure("ERR_TENANT_SCOPE");
+  if (error?.constraint === "agent_session_authority_lifecycle_limit"
+    || error?.constraint === "agent_session_authority_lifecycle_selector") return failure("ERR_INPUT");
   return failure("ERR_DATABASE");
 }
 
