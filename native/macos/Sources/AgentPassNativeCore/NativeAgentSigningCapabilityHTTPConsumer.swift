@@ -66,7 +66,12 @@ public final class NativeAgentSigningCapabilityHTTPConsumer: @unchecked Sendable
               url.query == nil, url.fragment == nil else {
             throw NativeAgentSigningCapabilityHTTPError.invalidConfiguration
         }
-        let body = try NativeStrictJSON.data(["request_id": request.requestID])
+        let body: Data
+        do {
+            body = try NativeAgentSigningCapabilityCodec.encodeRequest(request)
+        } catch {
+            throw NativeAgentSigningCapabilityHTTPError.invalidRequest
+        }
         guard body.count <= Self.maximumBodyBytes else {
             throw NativeAgentSigningCapabilityHTTPError.invalidRequest
         }
@@ -126,37 +131,17 @@ public final class NativeAgentSigningCapabilityHTTPConsumer: @unchecked Sendable
         deviceID: String, sessionID: String
     ) throws -> NativeAgentSigningCapabilityResponse {
         do {
-            let object = try NativeStrictJSON.object(from: data, maxBytes: maximumResponseBytes, maxDepth: 16)
-            guard Set(object.keys) == ["capability", "metadata", "request_id"],
-                  let requestID = object["request_id"] as? String,
-                  requestID == expectedRequestID,
-                  let capability = object["capability"] as? [String: Any],
-                  let metadata = object["metadata"] as? [String: Any] else {
+            let response = try NativeAgentSigningCapabilityCodec.decodeResponse(data)
+            guard response.requestID == expectedRequestID else {
                 throw NativeAgentSigningCapabilityHTTPError.invalidResponse
             }
-            let capabilityData = try NativeStrictJSON.data(capability)
-            let envelope = try NativeAgentSigningCapabilityCodec.decode(capabilityData)
+            let envelope = response.capability
             guard envelope.statement.organizationID == organizationID,
                   envelope.statement.deviceID == deviceID,
                   envelope.statement.sessionID == sessionID else {
                 throw NativeAgentSigningCapabilityHTTPError.invalidResponse
             }
-            guard Set(metadata.keys) == ["operation", "key_purpose", "issued_at", "expires_at", "sequence", "remaining_session_signatures", "replayed"],
-                  let operation = metadata["operation"] as? String,
-                  let keyPurpose = metadata["key_purpose"] as? String,
-                  let issuedAt = metadata["issued_at"] as? String,
-                  let expiresAt = metadata["expires_at"] as? String,
-                  let sequence = metadata["sequence"] as? Int64,
-                  let remaining = metadata["remaining_session_signatures"] as? Int,
-                  let replayed = metadata["replayed"] as? Bool else {
-                throw NativeAgentSigningCapabilityHTTPError.invalidResponse
-            }
-            let responseMetadata = try NativeAgentSigningCapabilityResponseMetadata(
-                issuedAt: issuedAt, expiresAt: expiresAt, sequence: sequence,
-                remainingSessionSignatures: remaining, replayed: replayed,
-                operation: operation, keyPurpose: keyPurpose)
-            return try NativeAgentSigningCapabilityResponse(
-                capability: envelope, metadata: responseMetadata, requestID: requestID)
+            return response
         } catch let error as NativeAgentSigningCapabilityHTTPError {
             throw error
         } catch {
