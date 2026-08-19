@@ -248,6 +248,30 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         )
     }
 
+    /// Invalidating a Child connection retires only an attach ticket that has
+    /// not reached the signing admission point. An admitted operation has
+    /// already consumed its ticket and remains outcome-unknown if its reply is
+    /// lost, so it must not be reopened or reissued here.
+    public func retireAttachTicket(_ attachTicket: Data) {
+        guard attachTicket.count == AgentPassChildGitXPCContract.attachTicketBytes,
+              attachTicket.contains(where: { $0 != 0 }) else {
+            return
+        }
+        let ticketDigest = Data(SHA256.hash(data: attachTicket))
+        lock.lock()
+        defer { lock.unlock() }
+        guard let key = entries.first(where: { $0.value.activeAttachTicketDigest == ticketDigest })?.key,
+              var entry = entries[key] else {
+            return
+        }
+        entry.activeAttachTicketDigest = nil
+        entry.activeAttachTicketExpiresAtMilliseconds = nil
+        entry.activeRequestID = nil
+        entry.activeRequestCreatedAtMilliseconds = nil
+        entry.consumedAttachTicketDigests.insert(ticketDigest)
+        entries[key] = entry
+    }
+
     public func sign(
         attachTicket: Data,
         helperIdentity: NativeProcessIdentity,
@@ -466,9 +490,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         requestID: String,
         createdAtMilliseconds: Int64
     ) -> Bool {
-        let requestIDMatches = request.requestID.isEmpty
-            || request.requestID == requestID
-            || request.requestID.lowercased() == requestID.lowercased()
+        let requestIDMatches = request.requestID.isEmpty || request.requestID == requestID
         let createdAtMatches = request.createdAtMilliseconds == 0
             || request.createdAtMilliseconds == createdAtMilliseconds
         return requestIDMatches && createdAtMatches
@@ -593,7 +615,7 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                     ? NativeAgentAuthenticatedChildGitError.outcomeUnknown
                     : NativeAgentAuthenticatedChildGitError.replay
             }
-            guard request.requestID.isEmpty || request.requestID.lowercased() == attachRequestID,
+            guard request.requestID.isEmpty || request.requestID == attachRequestID,
                   request.createdAtMilliseconds == 0 || request.createdAtMilliseconds == attachRequestCreatedAtMilliseconds else {
                 stateLock.unlock()
                 throw NativeAgentAuthenticatedChildGitError.requestMismatch
@@ -621,6 +643,21 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
         } catch {
             reply(nil, Self.makeError(error))
         }
+    }
+
+    /// Called by the listener after the XPC connection is invalidated. A
+    /// ticket is retired only while no sign request has been admitted on this
+    /// connection; `used` deliberately preserves admitted/uncertain work.
+    public func connectionInvalidated() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !used, let attachTicket else {
+            return
+        }
+        registry.retireAttachTicket(attachTicket)
+        self.attachTicket = nil
+        attachRequestID = nil
+        attachRequestCreatedAtMilliseconds = nil
     }
 
     private static func stableCode(_ error: Error) -> String {
@@ -698,7 +735,9 @@ public final class NativeAgentAuthenticatedChildGitListenerDelegate: NSObject, N
             )
             connection.exportedInterface = AgentPassChildGitXPCInterface.make()
             connection.exportedObject = endpoint
-            connection.invalidationHandler = { [weak endpoint] in _ = endpoint }
+            connection.invalidationHandler = { [weak endpoint] in
+                endpoint?.connectionInvalidated()
+            }
             connection.resume()
             return true
         } catch {

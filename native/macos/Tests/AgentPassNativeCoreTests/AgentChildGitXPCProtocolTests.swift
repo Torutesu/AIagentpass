@@ -66,10 +66,10 @@ private let childCreatedAtMilliseconds: Int64 = 1_786_616_000_000
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([1]), attachTicket: Data()) == nil)
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([1]), attachTicket: childTicket, requestID: "not-a-uuid", createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([1]), attachTicket: childTicket, requestID: childRequestID, createdAtMilliseconds: 0) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 0, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumSignatureBytes + 1), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
-    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 0) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 0, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4, requestID: childRequestID, createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4, requestID: childRequestID, createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data(repeating: 1, count: AgentPassChildGitXPCContract.maximumSignatureBytes + 1), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4, requestID: childRequestID, createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
+    #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 4, remainingSignatures: 0, requestID: childRequestID, createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
 }
 
 @Test func childGitDTOsRejectUnknownAuthorityFieldsAndUnsupportedVersions() throws {
@@ -79,7 +79,7 @@ private let childCreatedAtMilliseconds: Int64 = 1_786_616_000_000
 
     #expect(AgentPassChildGitSignRequest(protocolVersion: 1, requestSequence: 1, commitPayload: Data([1]), attachTicket: childTicket) == nil)
     #expect(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([1]), attachTicket: Data(repeating: 1, count: 31)) == nil)
-    #expect(AgentPassChildGitSignResponse(protocolVersion: 2, responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4) == nil)
+    #expect(AgentPassChildGitSignResponse(protocolVersion: 2, responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4, requestID: childRequestID, createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
     #expect(AgentPassChildGitSignResponse(responseSequence: 1, signature: Data([1]), maxSignatures: 5, usedSignatures: 1, remainingSignatures: 4, requestID: "not-a-uuid", createdAtMilliseconds: childCreatedAtMilliseconds) == nil)
 }
 

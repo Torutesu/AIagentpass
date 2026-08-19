@@ -41,6 +41,9 @@ public final class NativeAgentChildGitXPCClient: @unchecked Sendable {
         }
         let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
         guard AgentPassHostXPCContract.isTimestamp(attachResponse.expiresAtMilliseconds),
+              AgentPassChildGitXPCContract.canonicalRequestID(attachResponse.requestID) == attachResponse.requestID,
+              AgentPassHostXPCContract.isTimestamp(attachResponse.createdAtMilliseconds),
+              attachResponse.createdAtMilliseconds <= attachResponse.expiresAtMilliseconds,
               attachResponse.expiresAtMilliseconds > nowMilliseconds else {
             connection.invalidate()
             throw Error.invalidTicket
@@ -49,16 +52,20 @@ public final class NativeAgentChildGitXPCClient: @unchecked Sendable {
         guard let request = AgentPassChildGitSignRequest(
             requestSequence: 1,
             commitPayload: payload,
-            attachTicket: attachResponse.attachTicket
+            attachTicket: attachResponse.attachTicket,
+            requestID: attachResponse.requestID,
+            createdAtMilliseconds: attachResponse.createdAtMilliseconds
         ) else {
             connection.invalidate()
             throw Error.invalidTicket
         }
+        defer { connection.invalidate() }
         let result: AgentPassChildGitSignResponse = try invoke(on: connection) { proxy, reply in
             proxy.signChildGitCommit(request, withReply: reply)
         }
-        connection.invalidate()
         guard result.responseSequence == 1,
+              result.requestID == request.requestID,
+              result.createdAtMilliseconds == request.createdAtMilliseconds,
               !result.signature.isEmpty,
               result.signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes,
               (NativeAgentSignatureBudget.minimumSignatures...NativeAgentSignatureBudget.maximumSignatures).contains(result.maxSignatures),

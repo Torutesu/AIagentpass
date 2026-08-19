@@ -20,9 +20,9 @@ public enum AgentPassChildGitXPCContract {
         AgentPassHostXPCContract.canonicalUUID(value)
     }
 
-    /// A request may omit correlation only for source-compatible callers that
-    /// use the ticket-bound value returned by the service implicitly. Once one
-    /// of the fields is present, both fields are mandatory and validated.
+    /// A legacy request may omit both fields for source compatibility. The
+    /// service binds that compatibility path only to the strict pair it issued
+    /// in the attach response; partial or malformed correlation is rejected.
     public static func validRequestCorrelation(requestID: String, createdAtMilliseconds: Int64) -> Bool {
         if requestID.isEmpty && createdAtMilliseconds == 0 {
             return true
@@ -103,8 +103,8 @@ public final class AgentPassChildGitAttachResponse: NSObject, NSSecureCoding {
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
         attachTicket: Data,
         expiresAtMilliseconds: Int64,
-        requestID: String = UUID().uuidString.lowercased(),
-        createdAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+        requestID: String,
+        createdAtMilliseconds: Int64
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               attachTicket.count == AgentPassChildGitXPCContract.attachTicketBytes,
@@ -187,13 +187,32 @@ public final class AgentPassChildGitSignRequest: NSObject, NSSecureCoding {
     public let requestID: String
     public let createdAtMilliseconds: Int64
 
+    /// Source-compatible initializer for legacy callers. The service accepts
+    /// this shape only by binding it to the strict service-generated attach
+    /// response pair.
+    public convenience init?(
+        protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
+        requestSequence: UInt32,
+        commitPayload: Data,
+        attachTicket: Data
+    ) {
+        self.init(
+            protocolVersion: protocolVersion,
+            requestSequence: requestSequence,
+            commitPayload: commitPayload,
+            attachTicket: attachTicket,
+            requestID: "",
+            createdAtMilliseconds: 0
+        )
+    }
+
     public init?(
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
         requestSequence: UInt32,
         commitPayload: Data,
         attachTicket: Data,
-        requestID: String = "",
-        createdAtMilliseconds: Int64 = 0
+        requestID: String,
+        createdAtMilliseconds: Int64
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               AgentPassChildGitXPCContract.validSequence(requestSequence),
@@ -286,8 +305,8 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
         maxSignatures: Int,
         usedSignatures: Int,
         remainingSignatures: Int,
-        requestID: String = UUID().uuidString.lowercased(),
-        createdAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+        requestID: String,
+        createdAtMilliseconds: Int64
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               AgentPassChildGitXPCContract.validSequence(responseSequence),
