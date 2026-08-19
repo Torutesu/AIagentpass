@@ -101,6 +101,11 @@ test('validates a complete candidate-bound offline evidence bundle without Apple
   });
 });
 
+test('binds the offline release manifest to the caller-supplied source commit when requested', () => {
+  const fixture = createFixture();
+  assert.throws(() => validateReleaseEvidence({ ...fixture, expectedSourceCommit: 'a'.repeat(40) }), /source commit/iu);
+});
+
 test('rejects candidate digest substitution even when the candidate_id is changed with it', () => {
   const fixture = createFixture();
   fixture.evidence.candidate.artifact_sha256 = 'f'.repeat(64);

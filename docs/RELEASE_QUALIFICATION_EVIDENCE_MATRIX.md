@@ -56,6 +56,13 @@ Apple or hardware rows. Without real protected Apple credentials, accepted
 notary output, stapler/Gatekeeper results, and both physical hardware lanes,
 the release remains blocked as `not_proven`.
 
+The A7/A8 aggregate boundary is checked by
+[`scripts/release/verify-production-evidence.mjs`](../scripts/release/verify-production-evidence.mjs).
+It requires an independently pinned bundle signature and candidate-bound KMS,
+PostgreSQL, offline release, and protected macOS attestation inputs. Missing
+inputs remain `not_proven`; offline evidence is never promoted to a production
+pass by this repository-side validator.
+
 ## Operator record
 
 | Field | Value |

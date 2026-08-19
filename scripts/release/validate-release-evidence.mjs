@@ -90,10 +90,11 @@ const validateTypedEvidence = (snapshot, expected, label) => {
   return value;
 };
 
-const validateManifestBinding = (manifestBytes, candidate) => {
+const validateManifestBinding = (manifestBytes, candidate, expectedSourceCommit = undefined) => {
   const manifest = parseCanonicalJSON(manifestBytes, 'release manifest');
   if (manifest?.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass' || manifest.version !== candidate.version) fail('release manifest identity does not match the candidate');
   if (manifest.candidate_id !== candidate.candidate_id) fail('release manifest candidate_id does not match the candidate');
+  if (expectedSourceCommit !== undefined && manifest.source?.commit !== expectedSourceCommit) fail('release manifest source commit does not match the candidate');
   if (!Array.isArray(manifest.artifacts)) fail('release manifest has no artifact inventory');
   const products = manifest.artifacts.filter((item) => item?.role === 'product');
   if (products.length !== 1 || products[0].name !== candidate.artifact_name || products[0].media_type !== 'application/vnd.apple.installer+xml' || products[0].bytes !== candidate.artifact_bytes || products[0].sha256 !== candidate.artifact_sha256) fail('release manifest does not bind the exact candidate PKG');
@@ -113,7 +114,7 @@ const validateEvidenceDocument = (value) => {
   exactKeys(value.gatekeeper, ['assessment'], 'gatekeeper');
 };
 
-export const validateReleaseEvidence = ({ evidence, root }) => {
+export const validateReleaseEvidence = ({ evidence, root, expectedSourceCommit = undefined }) => {
   validateEvidenceDocument(evidence);
   const rootStat = fs.lstatSync(root, { bigint: true });
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.nlink <= 0n || (rootStat.mode & 0o022n) !== 0n) fail('evidence root is not a safe non-symlink directory');
@@ -124,7 +125,7 @@ export const validateReleaseEvidence = ({ evidence, root }) => {
   const manifest = validateDescriptor(root, evidence.signature.manifest, 'release manifest', seen, MAX_MANIFEST_BYTES);
   const detachedSignature = validateDescriptor(root, evidence.signature.detached_signature, 'detached signature', seen, MAX_SIGNATURE_BYTES);
   const publicKey = validateDescriptor(root, evidence.signature.public_key, 'release public key', seen, MAX_PUBLIC_KEY_BYTES);
-  const manifestObject = validateManifestBinding(manifest.content, candidate);
+  const manifestObject = validateManifestBinding(manifest.content, candidate, expectedSourceCommit);
   let key;
   try { key = createPublicKey(publicKey.content); } catch { fail('release public key is not parseable'); }
   if (key.asymmetricKeyType !== 'ed25519') fail('release public key is not Ed25519');
