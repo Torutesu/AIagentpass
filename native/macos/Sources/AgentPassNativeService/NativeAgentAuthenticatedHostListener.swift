@@ -96,6 +96,11 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 },
                 observeChild: { pid, pidVersion in
                     let (childObservation, worktreeDigest) = try childFactory(pid, pidVersion)
+                    guard childObservation.process.pid == pid,
+                          childObservation.process.pidVersion == pidVersion,
+                          childObservation.process.uid == self.allowedClientUID else {
+                        throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
+                    }
                     struct FixedSource: NativeProcessObservationSource {
                         let observation: NativeProcessObservation
                         func observe() throws -> NativeProcessObservation { observation }

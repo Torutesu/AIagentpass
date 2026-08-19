@@ -4984,8 +4984,11 @@ do {
             )
         },
         childPolicy: hostChildPolicy,
-        childFactory: { pid, _ in
+        childFactory: { pid, expectedPIDVersion in
             let processObservation = try NativeDarwinProcessObservationSource().observe(pid: pid, expectedUserID: configuration.allowedClientUID)
+            guard processObservation.process.pidVersion == expectedPIDVersion else {
+                throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
+            }
             let worktree = try worktreeObserver.observe(pid: pid, expectedUserID: configuration.allowedClientUID)
             return (processObservation, worktree.binding.digest)
         },

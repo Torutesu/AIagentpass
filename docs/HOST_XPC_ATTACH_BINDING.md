@@ -35,7 +35,7 @@ Attach DTO は `childPIDVersion: Int64` とし、1 以上かつ 2100 年境界�
 
 Attach 時は Service が request の PID で独立観測し、その観測 identity の `pid` と `pidVersion` を request と比較する (`native/macos/Sources/AgentPassNativeService/NativeAgentAuthenticatedHostEndpoint.swift:226-239`)。worktree observer も process snapshot を前後で比較するため、PID reuse/exec/chdir drift は fail closed になる (`native/macos/Sources/AgentPassNativeCore/NativeDarwinGitWorktreeObserver.swift:64-93`)。
 
-この比較は安全側だが、`NativeAgentAuthenticatedHostListener` の `childFactory` は渡された expected PID version を `_` で捨て、PID だけで観測している (`native/macos/Sources/AgentPassNativeService/NativeAgentAuthenticatedHostListener.swift:97-106`、実配線 `native/macos/Sources/AgentPassNativeService/main.swift:4987-4991`)。最終比較は endpoint に残るため bypass ではないが、実装契約として「observer 自身が expected PID version を検証する」構造にはなっていない。
+`NativeAgentAuthenticatedHostListener` と実配線の `childFactory` は、要求された PID version と独立観測結果を listener 層でも比較する (`native/macos/Sources/AgentPassNativeService/NativeAgentAuthenticatedHostListener.swift`、`native/macos/Sources/AgentPassNativeService/main.swift`)。endpoint の最終比較も残るため、listener adapter・endpoint の二重境界で PID reuse を fail closed にする。
 
 ### Worktree binding
 
