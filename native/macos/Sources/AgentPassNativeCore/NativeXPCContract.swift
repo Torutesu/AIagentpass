@@ -110,7 +110,7 @@ public enum AgentPassNativeXPCContract {
     // This is deliberately a literal. Any intentional contract change must
     // update the version and this value together, making the change visible to
     // binaries and CI rather than deriving a new identity silently.
-    public static let frozenFingerprint = "SHA256:cb267f68b781d1453f539b436f654155cd441fff60eb4d06d4b2f5ff22c739ca"
+    public static let frozenFingerprint = "SHA256:1db231e8a27354be8b12ab77453a5c00fcfda2ec6f0df27e10f87fe61bcfffcd"
 
     public static let managementProtocol = ProtocolInventory(
         name: "AgentPassNativeServiceProtocol",
@@ -190,6 +190,13 @@ public enum AgentPassNativeXPCContract {
         purpose: .childGit,
         methods: [
             method(
+                "attachChildGit:withReply:",
+                .childGit,
+                ["AgentPassChildGitAttachRequest"],
+                ["AgentPassChildGitAttachResponse", "NSError"],
+                "v32@0:8@16@?24"
+            ),
+            method(
                 "signChildGitCommit:withReply:",
                 .childGit,
                 ["AgentPassChildGitSignRequest"],
@@ -221,6 +228,8 @@ public enum AgentPassNativeXPCContract {
         hostDTO("AgentPassHostStatusResponse", .response, "hostSessionStatus:withReply:"),
         hostDTO("AgentPassHostCloseRequest", .request, "closeHostSession:withReply:"),
         hostDTO("AgentPassHostCloseResponse", .response, "closeHostSession:withReply:"),
+        childGitDTO("AgentPassChildGitAttachRequest", .request, "attachChildGit:withReply:"),
+        childGitDTO("AgentPassChildGitAttachResponse", .response, "attachChildGit:withReply:"),
         childGitDTO("AgentPassChildGitSignRequest", .request, "signChildGitCommit:withReply:"),
         childGitDTO("AgentPassChildGitSignResponse", .response, "signChildGitCommit:withReply:"),
     ]
@@ -508,6 +517,8 @@ public enum AgentPassNativeXPCContract {
         case "AgentPassHostStatusResponse": return NSStringFromClass(AgentPassHostStatusResponse.self)
         case "AgentPassHostCloseRequest": return NSStringFromClass(AgentPassHostCloseRequest.self)
         case "AgentPassHostCloseResponse": return NSStringFromClass(AgentPassHostCloseResponse.self)
+        case "AgentPassChildGitAttachRequest": return NSStringFromClass(AgentPassChildGitAttachRequest.self)
+        case "AgentPassChildGitAttachResponse": return NSStringFromClass(AgentPassChildGitAttachResponse.self)
         case "AgentPassChildGitSignRequest": return NSStringFromClass(AgentPassChildGitSignRequest.self)
         case "AgentPassChildGitSignResponse": return NSStringFromClass(AgentPassChildGitSignResponse.self)
         default: return nil

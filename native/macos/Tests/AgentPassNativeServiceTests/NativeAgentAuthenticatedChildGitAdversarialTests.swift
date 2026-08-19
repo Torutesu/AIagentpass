@@ -49,11 +49,37 @@ private func adversarialChildObservation(
 }
 
 private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws -> AgentPassChildGitSignRequest {
-    try #require(AgentPassChildGitSignRequest(requestSequence: sequence, commitPayload: Data([byte])))
+    try #require(AgentPassChildGitSignRequest(requestSequence: sequence, commitPayload: Data([byte]), attachTicket: Data(repeating: 0x71, count: AgentPassChildGitXPCContract.attachTicketBytes)))
+}
+
+private func adversarialHelperIdentity(for child: NativeProcessIdentity, pid: Int32 = 43) throws -> NativeProcessIdentity {
+    let facts = try NativeObservedProcessFacts(
+        uid: child.uid,
+        pid: pid,
+        pidVersion: child.pidVersion + 1,
+        bootIdentity: child.bootIdentity,
+        executableFileIdentity: child.executableFileIdentity,
+        codeDirectoryHash: child.codeDirectoryHash,
+        bundleIdentifier: "dev.agentpass.git-sign-xpc",
+        teamIdentifier: child.teamIdentifier,
+        signatureKind: child.signatureKind,
+        entitlements: child.entitlements
+    )
+    return NativeProcessIdentity(observation: try NativeProcessObservation(process: facts, ancestry: [.observed(child.process)]))
+}
+
+private func issueAdversarialTicket(
+    _ registry: NativeAgentAuthenticatedChildGitSessionRegistry,
+    child: NativeProcessIdentity,
+    helper: NativeProcessIdentity,
+    worktree: Data
+) throws -> Data {
+    try registry.issueAttachTicket(helperIdentity: helper, worktreeBindingDigest: worktree, nowMilliseconds: 1_000).value
 }
 
 @Test func childRegistryDeniesPIDGenerationAndCodeIdentitySubstitution() throws {
     let registered = NativeProcessIdentity(observation: try adversarialChildObservation())
+    let helper = try adversarialHelperIdentity(for: registered)
     let pidReused = NativeProcessIdentity(observation: try adversarialChildObservation(pidVersion: 10))
     let codeReplaced = NativeProcessIdentity(observation: try adversarialChildObservation(codeDirectoryHash: String(repeating: "b", count: 64)))
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
@@ -65,18 +91,20 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([1]) },
         signatureBudget: adversarialChildBudget()
     )
+    let ticket = try issueAdversarialTicket(registry, child: registered, helper: helper, worktree: worktree)
+    let registeredRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([3]), attachTicket: ticket))
 
-    #expect(throws: NativeAgentAuthenticatedChildGitError.childNotRegistered) {
-        _ = try registry.sign(identity: pidReused, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 1))
+    #expect(throws: NativeAgentAuthenticatedChildGitError.childIdentityChanged) {
+        _ = try registry.sign(attachTicket: ticket, helperIdentity: adversarialHelperIdentity(for: pidReused), worktreeBindingDigest: worktree, request: registeredRequest, nowMilliseconds: 1_000)
     }
-    #expect(throws: NativeAgentAuthenticatedChildGitError.childNotRegistered) {
-        _ = try registry.sign(identity: codeReplaced, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 2))
+    #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
+        _ = try registry.sign(attachTicket: ticket, helperIdentity: adversarialHelperIdentity(for: codeReplaced, pid: 44), worktreeBindingDigest: worktree, request: registeredRequest, nowMilliseconds: 1_000)
     }
-    #expect(try registry.sign(identity: registered, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 3)).signature == Data([1]))
 }
 
 @Test func childRegistryClosesOnSequenceSkipAndDoesNotReopenWithAValidSequence() throws {
     let identity = NativeProcessIdentity(observation: try adversarialChildObservation())
+    let helper = try adversarialHelperIdentity(for: identity)
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
     let worktree = Data(repeating: 0x22, count: AgentPassHostXPCContract.digestBytes)
     try registry.register(
@@ -86,17 +114,19 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         signer: NativeAgentAuthenticatedChildClosureSigner { _ in Data([2]) },
         signatureBudget: adversarialChildBudget()
     )
+    let ticket = try issueAdversarialTicket(registry, child: identity, helper: helper, worktree: worktree)
 
     #expect(throws: NativeAgentAuthenticatedChildGitError.sequenceMismatch) {
-        _ = try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(2, 1))
+        _ = try registry.sign(attachTicket: ticket, helperIdentity: helper, worktreeBindingDigest: worktree, request: try #require(AgentPassChildGitSignRequest(requestSequence: 2, commitPayload: Data([1]), attachTicket: ticket)), nowMilliseconds: 1_000)
     }
     #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
-        _ = try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 2))
+        _ = try registry.sign(attachTicket: ticket, helperIdentity: helper, worktreeBindingDigest: worktree, request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([2]), attachTicket: ticket)), nowMilliseconds: 1_000)
     }
 }
 
 @Test func childRegistryUsesTheAuthoritativeBudgetAcrossDistinctPayloads() throws {
     let identity = NativeProcessIdentity(observation: try adversarialChildObservation())
+    let helper = try adversarialHelperIdentity(for: identity)
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
     let worktree = Data(repeating: 0x23, count: AgentPassHostXPCContract.digestBytes)
     try registry.register(
@@ -107,15 +137,18 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
         signatureBudget: adversarialChildBudget(maxSignatures: 5, usedSignatures: 3)
     )
 
-    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 3)).budget.remainingSignatures == 1)
-    #expect(try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 4)).budget.remainingSignatures == 0)
+    let firstTicket = try issueAdversarialTicket(registry, child: identity, helper: helper, worktree: worktree)
+    #expect(try registry.sign(attachTicket: firstTicket, helperIdentity: helper, worktreeBindingDigest: worktree, request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([3]), attachTicket: firstTicket)), nowMilliseconds: 1_000).budget.remainingSignatures == 1)
+    let secondTicket = try issueAdversarialTicket(registry, child: identity, helper: helper, worktree: worktree)
+    #expect(try registry.sign(attachTicket: secondTicket, helperIdentity: helper, worktreeBindingDigest: worktree, request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([4]), attachTicket: secondTicket)), nowMilliseconds: 1_000).budget.remainingSignatures == 0)
     #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
-        _ = try registry.sign(identity: identity, worktreeBindingDigest: worktree, request: try adversarialRequest(1, 5))
+        _ = try registry.sign(attachTicket: secondTicket, helperIdentity: helper, worktreeBindingDigest: worktree, request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([5]), attachTicket: secondTicket)), nowMilliseconds: 1_000)
     }
 }
 
 @Test func childEndpointResponseLossCannotBeRetriedOnTheSameConnection() throws {
     let identity = NativeProcessIdentity(observation: try adversarialChildObservation())
+    let helper = try adversarialHelperIdentity(for: identity)
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
     let worktree = Data(repeating: 0x24, count: AgentPassHostXPCContract.digestBytes)
     let signerCalls = ChildSignerCallCounter()
@@ -131,10 +164,16 @@ private func adversarialRequest(_ sequence: UInt32 = 1, _ byte: UInt8) throws ->
     )
     let endpoint = NativeAgentAuthenticatedChildGitEndpoint(
         registry: registry,
-        identityObserver: { identity },
-        worktreeDigestObserver: { worktree }
+        identityObserver: { helper },
+        worktreeDigestObserver: { worktree },
+        nowMilliseconds: { 1_000 }
     )
-    let request = try adversarialRequest(1, 9)
+    var attachedTicket: Data?
+    endpoint.attachChildGit(try #require(AgentPassChildGitAttachRequest())) { response, _ in
+        attachedTicket = response?.attachTicket
+    }
+    let ticket = try #require(attachedTicket)
+    let request = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([9]), attachTicket: ticket))
 
     endpoint.signChildGitCommit(request) { _, _ in
         // Deliberately drop the first reply to model XPC response loss.

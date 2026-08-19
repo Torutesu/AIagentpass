@@ -3,6 +3,8 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
+private let securityChildTicket = Data(repeating: 0x71, count: AgentPassChildGitXPCContract.attachTicketBytes)
+
 private final class EndpointTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Int64
@@ -68,6 +70,7 @@ private enum EndpointSignerBehavior: Sendable {
 private final class HostEndpointHarness: @unchecked Sendable {
     let hostObservation: NativeProcessObservation
     let childObservation: NativeProcessObservation
+    let childHelperObservation: NativeProcessObservation
     let hostContext: NativeConnectionContext
     let childWorktreeDigest = Data(repeating: 0x31, count: AgentPassHostXPCContract.digestBytes)
     let clock = EndpointTestClock(1_000)
@@ -83,21 +86,24 @@ private final class HostEndpointHarness: @unchecked Sendable {
     private var signatureBudgetValue: NativeAgentSignatureBudget
 
     init() throws {
-        hostObservation = try Self.observation(
+        let host = try Self.observation(
             pid: 42,
             pidVersion: 9,
             codeDirectoryHash: String(repeating: "a", count: 64),
             bundleIdentifier: "dev.agentpass.agent-host"
         )
-        childObservation = try Self.observation(
+        let child = try Self.observation(
             pid: 84,
             pidVersion: 12,
             codeDirectoryHash: String(repeating: "b", count: 64),
             bundleIdentifier: "dev.agentpass.git-sign-xpc"
         )
+        hostObservation = host
+        childObservation = child
+        childHelperObservation = try Self.helperObservation(for: child)
         hostContext = try NativeConnectionContext(
-            osProcessID: hostObservation.process.pid,
-            effectiveUserID: hostObservation.process.uid,
+            osProcessID: host.process.pid,
+            effectiveUserID: host.process.uid,
             auditSessionID: 7,
             pidVersion: hostObservation.process.pidVersion
         )
@@ -205,7 +211,9 @@ private final class HostEndpointHarness: @unchecked Sendable {
                     identity: observation.identity,
                     worktreeBindingDigest: observation.worktreeBindingDigest,
                     signer: childSigner,
-                    signatureBudget: signatureBudget
+                    signatureBudget: signatureBudget,
+                    expiresAtMilliseconds: 10_000,
+                    nowMilliseconds: 1_000
                 )
                 recorder.recordRegister()
             },
@@ -220,7 +228,7 @@ private final class HostEndpointHarness: @unchecked Sendable {
     func childIdentity() -> NativeProcessIdentity {
         lock.lock()
         defer { lock.unlock() }
-        return NativeProcessIdentity(observation: liveChildObservation)
+        return NativeProcessIdentity(observation: childHelperObservation)
     }
 
     func childWorktree() -> Data {
@@ -233,8 +241,29 @@ private final class HostEndpointHarness: @unchecked Sendable {
         NativeAgentAuthenticatedChildGitEndpoint(
             registry: registry,
             identityObserver: { [self] in childIdentity() },
-            worktreeDigestObserver: { [self] in childWorktree() }
+            worktreeDigestObserver: { [self] in childWorktree() },
+            nowMilliseconds: { [self] in clock.read() }
         )
+    }
+
+    func childEndpointWithTicket() throws -> (NativeAgentAuthenticatedChildGitEndpoint, Data) {
+        let endpoint = childEndpoint()
+        var ticket: Data?
+        var error: NSError?
+        endpoint.attachChildGit(try #require(AgentPassChildGitAttachRequest())) { response, responseError in
+            ticket = response?.attachTicket
+            error = responseError
+        }
+        #expect(error == nil)
+        return (endpoint, try #require(ticket))
+    }
+
+    func childAdmissionError() -> String? {
+        var error: NSError?
+        childEndpoint().attachChildGit(AgentPassChildGitAttachRequest()!) { _, responseError in
+            error = responseError
+        }
+        return error?.userInfo[NSLocalizedDescriptionKey] as? String
     }
 
     func attachRequest(
@@ -281,6 +310,22 @@ private final class HostEndpointHarness: @unchecked Sendable {
             entitlements: [:]
         )
         return try NativeProcessObservation(process: facts, ancestry: [])
+    }
+
+    static func helperObservation(for child: NativeProcessObservation) throws -> NativeProcessObservation {
+        let facts = try NativeObservedProcessFacts(
+            uid: child.process.uid,
+            pid: child.process.pid + 1,
+            pidVersion: child.process.pidVersion + 1,
+            bootIdentity: child.process.bootIdentity,
+            executableFileIdentity: child.process.executableFileIdentity,
+            codeDirectoryHash: child.process.codeDirectoryHash,
+            bundleIdentifier: "dev.agentpass.git-sign-xpc-helper",
+            teamIdentifier: child.process.teamIdentifier,
+            signatureKind: child.process.signatureKind,
+            entitlements: child.process.entitlements
+        )
+        return try NativeProcessObservation(process: facts, ancestry: [.observed(child.process)])
     }
 }
 
@@ -352,8 +397,7 @@ private func childErrorCode(
     #expect(errorCode(endpoint, sign: hostRequest) == 8)
     #expect(harness.recorder.signCount == 0)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([2])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
 @Test func hostEndpointSignerFailureRevokesChildRegistrationAndBudget() throws {
@@ -368,8 +412,7 @@ private func childErrorCode(
     #expect(harness.recorder.signCount == 1)
     #expect(harness.recorder.unregisterCount == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([4])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
 @Test func hostEndpointEmptySignatureRevokesChildRegistrationAndBudget() throws {
@@ -384,8 +427,7 @@ private func childErrorCode(
     #expect(harness.recorder.signCount == 1)
     #expect(harness.recorder.unregisterCount == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([5])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
 @Test func hostEndpointResponseLossDoesNotPermitSameSequenceToSignTwice() throws {
@@ -428,8 +470,7 @@ private func childErrorCode(
     #expect(harness.recorder.signCount == 0)
     #expect(harness.recorder.unregisterCount == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([7])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
 @Test func hostEndpointStatusPeerDriftRevokesChildBeforeChildSignerInvocation() throws {
@@ -455,8 +496,7 @@ private func childErrorCode(
     #expect(statusError?.code == 4)
     #expect(harness.recorder.unregisterCount == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([8])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
     #expect(harness.recorder.signCount == 0)
 }
 
@@ -483,8 +523,7 @@ private func childErrorCode(
     #expect(closeError?.code == 4)
     #expect(harness.recorder.unregisterCount == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([9])))
-    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
     #expect(harness.recorder.signCount == 0)
 }
 
@@ -562,10 +601,11 @@ private func childErrorCode(
     #expect(hostResponse?.usedSignatures == 4)
     #expect(hostResponse?.remainingSignatures == 1)
 
-    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x62])))
+    let (childEndpoint, childTicket) = try harness.childEndpointWithTicket()
+    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x62]), attachTicket: childTicket))
     var childResponse: AgentPassChildGitSignResponse?
     var childError: NSError?
-    harness.childEndpoint().signChildGitCommit(childRequest) { response, responseError in
+    childEndpoint.signChildGitCommit(childRequest) { response, responseError in
         childResponse = response
         childError = responseError
     }
@@ -577,7 +617,7 @@ private func childErrorCode(
     let exhaustedHostRequest = try #require(AgentPassHostSignRequest(requestSequence: 2, commitPayload: Data([0x63])))
     #expect(errorCode(endpoint, sign: exhaustedHostRequest) == 2)
     #expect(harness.recorder.signCount == 1)
-    #expect(childErrorCode(harness.childEndpoint(), request: try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x64])))) == NativeAgentAuthenticatedChildGitError.closed.rawValue)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.closed.rawValue)
 }
 
 @Test func hostPrepareRejectsAnAlreadyExhaustedCloudBudget() throws {
