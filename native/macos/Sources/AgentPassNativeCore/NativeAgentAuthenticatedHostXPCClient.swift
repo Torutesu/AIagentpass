@@ -243,3 +243,29 @@ public final class NativeAgentAuthenticatedHostXPCClient: @unchecked Sendable {
         connection.remoteObjectProxyWithErrorHandler { _ in } as! AgentPassHostXPCProtocol
     }
 }
+
+extension NativeAgentAuthenticatedHostXPCClient: NativeAgentHostAuthenticatedXPCClientProtocol {
+    func prepareForChild(launchNonce: Data) throws {
+        _ = try prepare(launchNonce: launchNonce)
+    }
+
+    func attachForChild(
+        childPID: Int,
+        childPIDVersion: Int64,
+        executableIdentityDigest: Data,
+        ancestryBindingDigest: Data,
+        worktreeBindingDigest: Data
+    ) throws {
+        _ = try attach(
+            childPID: childPID,
+            childPIDVersion: childPIDVersion,
+            executableIdentityDigest: executableIdentityDigest,
+            ancestryBindingDigest: ancestryBindingDigest,
+            worktreeBindingDigest: worktreeBindingDigest
+        )
+    }
+
+    func closeForChild(reason: AgentPassHostXPCContract.CloseReason) throws {
+        try close(reason: reason)
+    }
+}

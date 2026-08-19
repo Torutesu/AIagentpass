@@ -690,9 +690,10 @@ private func makeHookedProjectDirectory(
 @Test func authenticatedXPCUsesTheXPCGitHelperWithoutCreatingAnFD3Handoff() throws {
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
         fixture.installPrivateBridgeActions = true
         fixture.rejectPrivateBridgeActions = true
-        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let supervisor = makeAuthenticatedXPCSupervisor(process: fixture, xpc: xpc)
         let request = try makeRequest(
             projectDirectory: project,
             gitTransport: .authenticatedXPC,
@@ -715,8 +716,160 @@ private func makeHookedProjectDirectory(
         #expect(actions.closes.isEmpty)
         #expect(spec.environment["GIT_CONFIG_VALUE_1"]
             == NativeAgentHostGitConfiguration.authenticatedXPCHelperExecutablePath)
+        #expect(xpc.lastExecutableIdentityDigest == (try xpc.expectedExecutableIdentityDigest))
+        #expect(xpc.lastAncestryBindingDigest == (try xpc.expectedAncestryBindingDigest))
+        #expect(xpc.lastWorktreeBindingDigest == Data(repeating: 0x44, count: AgentPassHostXPCContract.digestBytes))
+        #expect(xpc.events == [
+            .prepare,
+            .identityObserved(pid: 700, pidVersion: 1),
+            .attach
+        ])
 
         _ = try session.wait()
+        #expect(xpc.events.last == .clientClose)
+    }
+}
+
+private func makeAuthenticatedXPCSupervisor(
+    process: HostSupervisorFixture,
+    xpc: NativeAgentHostAuthenticatedXPCSupervisorFixture
+) -> NativeAgentHostChildSupervisor {
+    NativeAgentHostChildSupervisor(
+        hooks: process.hooks(),
+        executableProbe: { _ in false },
+        authenticatedHostXPCClientFactory: { xpc },
+        childObserverFactory: { xpc },
+        launchNonceFactory: { Data(repeating: 0x5a, count: 16) }
+    )
+}
+
+@Test func authenticatedXPCPrepareFailureDoesNotSpawnAChildOrOpenLegacyFD3() throws {
+    try withTemporaryProjectDirectory { project in
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        xpc.failPrepare = true
+        let process = HostSupervisorFixture()
+        let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+            _ = try supervisor.start(try makeRequest(
+                projectDirectory: project,
+                gitTransport: .authenticatedXPC
+            ))
+        }
+
+        let snapshot = process.snapshot()
+        #expect(snapshot.spec == nil)
+        #expect(snapshot.waitCallCount == 0)
+        #expect(xpc.events == [.prepare, .clientClose])
+        #expect(process.privateBridgeActions().duplicates.isEmpty)
+        #expect(process.privateBridgeActions().closes.isEmpty)
+    }
+}
+
+@Test func authenticatedXPCIdentityObservationFailureClosesClientAndReapsChild() throws {
+    try withTemporaryProjectDirectory { project in
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        xpc.failIdentityObservation = true
+        let process = HostSupervisorFixture()
+        let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+            _ = try supervisor.start(try makeRequest(
+                projectDirectory: project,
+                gitTransport: .authenticatedXPC
+            ))
+        }
+
+        #expect(xpc.events == [
+            .prepare,
+            .identityObserved(pid: 700, pidVersion: 1),
+            .clientClose
+        ])
+        #expect(process.privateBridgeActions().duplicates.isEmpty)
+        #expect(process.privateBridgeActions().closes.isEmpty)
+        #expect(process.snapshot().waitCallCount == 1)
+        #expect(process.snapshot().signals.map { $0.1 } == [.terminate])
+    }
+}
+
+@Test func authenticatedXPCAttachFailureClosesClientAndReapsChild() throws {
+    try withTemporaryProjectDirectory { project in
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        xpc.failAttach = true
+        let process = HostSupervisorFixture()
+        let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+            _ = try supervisor.start(try makeRequest(
+                projectDirectory: project,
+                gitTransport: .authenticatedXPC
+            ))
+        }
+
+        #expect(xpc.events == [
+            .prepare,
+            .identityObserved(pid: 700, pidVersion: 1),
+            .attach,
+            .clientClose
+        ])
+        #expect(process.privateBridgeActions().duplicates.isEmpty)
+        #expect(process.privateBridgeActions().closes.isEmpty)
+        #expect(process.snapshot().waitCallCount == 1)
+        #expect(process.snapshot().signals.map { $0.1 } == [.terminate])
+    }
+}
+
+@Test func authenticatedXPCClientCloseIsTerminalAndIdempotent() throws {
+    try withTemporaryProjectDirectory { project in
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        let process = HostSupervisorFixture()
+        let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+        let session = try supervisor.start(try makeRequest(
+            projectDirectory: project,
+            gitTransport: .authenticatedXPC
+        ))
+
+        _ = try session.wait()
+        _ = try session.wait()
+
+        #expect(xpc.events == [
+            .prepare,
+            .identityObserved(pid: 700, pidVersion: 1),
+            .attach,
+            .clientClose
+        ])
+        #expect(process.privateBridgeActions().duplicates.isEmpty)
+        #expect(process.privateBridgeActions().closes.isEmpty)
+        #expect(process.snapshot().waitCallCount == 1)
+    }
+}
+
+@Test func authenticatedXPCFailurePathsNeverRegressToLegacyFD3() throws {
+    try withTemporaryProjectDirectory { project in
+        for failure in [
+            NativeAgentHostAuthenticatedXPCSupervisorFixture.Failure.identityObservationFailed,
+            .attachFailed
+        ] {
+            let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+            if failure == .identityObservationFailed {
+                xpc.failIdentityObservation = true
+            } else {
+                xpc.failAttach = true
+            }
+            let process = HostSupervisorFixture()
+            let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+
+            #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+                _ = try supervisor.start(try makeRequest(
+                    projectDirectory: project,
+                    gitTransport: .authenticatedXPC
+                ))
+            }
+            #expect(xpc.events.contains(.clientClose))
+            #expect(process.privateBridgeActions().duplicates.isEmpty)
+            #expect(process.privateBridgeActions().closes.isEmpty)
+            #expect(process.snapshot().waitCallCount == 1)
+        }
     }
 }
 

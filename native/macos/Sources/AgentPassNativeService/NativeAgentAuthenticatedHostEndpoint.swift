@@ -227,7 +227,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             do {
                 observation = try childObserver(Int32(request.childPID), UInt64(request.childPIDVersion))
             } catch {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.childObservationFailed
             }
             guard observation.identity.pid == Int32(request.childPID),
@@ -235,7 +235,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                   observation.executableIdentityDigest == request.executableIdentityDigest,
                   observation.ancestryBindingDigest == request.ancestryBindingDigest,
                   observation.worktreeBindingDigest == request.worktreeBindingDigest else {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
             }
 
@@ -244,7 +244,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                 try childRegistrar?(attached.sessionID, observation)
                 registeredChildBindingHash = observation.identity.canonicalBindingHash
             } catch {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
             }
             guard let response = AgentPassHostAttachChildResponse(
@@ -252,7 +252,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                 attachedAtMilliseconds: try validTimestamp(nowMilliseconds()),
                 maxSignatures: AgentPassHostXPCContract.fixedSignatureBudget
             ) else {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
             }
             reply(response, nil)
@@ -293,7 +293,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             do {
                 signature = try signer.sign(authorized)
             } catch {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
             }
             guard !signature.isEmpty,
@@ -303,7 +303,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                     signature: signature,
                     remainingSignatures: AgentPassHostXPCContract.fixedSignatureBudget - Int(request.requestSequence)
                   ) else {
-                _ = session.close()
+                closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
             }
             reply(response, nil)
@@ -350,8 +350,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         do {
             try revalidatePeer()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
-            let snapshot = session.close()
-            unregisterRegisteredChild()
+            let snapshot = closeSessionAndRevoke(session)
             expirationWasObserved = false
             guard let response = AgentPassHostCloseResponse(
                 sessionID: snapshot.sessionID,
@@ -369,9 +368,26 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     /// for the child registration and must not leave a signing entry alive.
     public func invalidateConnection() {
         stateLock.lock()
-        _ = session?.close()
-        unregisterRegisteredChild()
+        if let session {
+            _ = closeSessionAndRevoke(session)
+        } else {
+            unregisterRegisteredChild()
+        }
         stateLock.unlock()
+    }
+
+    /// Every terminal session transition revokes the child registry entry in
+    /// the same critical section. Otherwise a child with an unchanged process
+    /// identity could retain the remaining signing budget after Host expiry,
+    /// signer failure, or peer drift.
+    @discardableResult
+    private func closeSessionAndRevoke(
+        _ session: NativeAgentAuthenticatedGitBridgeSession
+    ) -> NativeAgentAuthenticatedGitBridgeSession.Snapshot {
+        let snapshot = session.close()
+        unregisterRegisteredChild()
+        expirationWasObserved = true
+        return snapshot
     }
 
     private func unregisterRegisteredChild() {
@@ -415,8 +431,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         let now = try validTimestamp(nowMilliseconds())
         if now >= expirationMilliseconds {
             if !expirationWasObserved {
-                _ = session.close()
-                expirationWasObserved = true
+                _ = closeSessionAndRevoke(session)
             }
         }
         return session.snapshot

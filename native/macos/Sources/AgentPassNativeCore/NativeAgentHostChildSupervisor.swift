@@ -574,17 +574,20 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
     private let process: NativeAgentHostProcessHandle
     private let hooks: NativeAgentHostChildSupervisorHooks
     private let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
+    private let authenticatedHostXPC: (any NativeAgentHostAuthenticatedXPCClientProtocol)?
     private let lock = NSLock()
     private var state: State = .running
 
     fileprivate init(
         process: NativeAgentHostProcessHandle,
         hooks: NativeAgentHostChildSupervisorHooks,
-        privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
+        privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?,
+        authenticatedHostXPC: (any NativeAgentHostAuthenticatedXPCClientProtocol)?
     ) {
         self.process = process
         self.hooks = hooks
         self.privateGitBridge = privateGitBridge
+        self.authenticatedHostXPC = authenticatedHostXPC
     }
 
     /// Host-side endpoint for the fixed child FD3 Git bridge. The caller may
@@ -626,28 +629,32 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
             lock.unlock()
         }
 
+        let outcome: NativeAgentHostWaitOutcome
         do {
-            let outcome = try hooks.wait(process)
-            let result = Self.classification(for: outcome)
-            do {
-            try privateGitBridge?.close()
-            } catch {
-                lock.lock()
-                state = .failed
-                lock.unlock()
-                throw NativeAgentHostChildSupervisorError.waitFailed
-            }
-            lock.lock()
-            state = .finished(result)
-            lock.unlock()
-            return result
+            outcome = try hooks.wait(process)
         } catch {
             try? privateGitBridge?.close()
+            try? authenticatedHostXPC?.closeForChild(reason: .cancelled)
             lock.lock()
             state = .failed
             lock.unlock()
             throw NativeAgentHostChildSupervisorError.waitFailed
         }
+
+        let result = Self.classification(for: outcome)
+        do {
+            try privateGitBridge?.close()
+            try authenticatedHostXPC?.closeForChild(reason: .completed)
+        } catch {
+            lock.lock()
+            state = .failed
+            lock.unlock()
+            throw NativeAgentHostChildSupervisorError.waitFailed
+        }
+        lock.lock()
+        state = .finished(result)
+        lock.unlock()
+        return result
     }
 
     private static func classification(for outcome: NativeAgentHostWaitOutcome) -> NativeAgentHostExitClassification {
@@ -672,6 +679,7 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
         try? hooks.signal(process, .terminate)
         _ = try? hooks.wait(process)
         try? privateGitBridge?.close()
+        try? authenticatedHostXPC?.closeForChild(reason: .clientShutdown)
     }
 }
 
@@ -680,6 +688,9 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
     private let hooks: NativeAgentHostChildSupervisorHooks
     private let cursorExecutableResolver: @Sendable () throws -> NativeCursorAgentRuntimeSelection
     private let cursorExecutableRevalidator: @Sendable (NativeCursorAgentRuntimeSelection) throws -> Void
+    private let authenticatedHostXPCClientFactory: @Sendable () -> any NativeAgentHostAuthenticatedXPCClientProtocol
+    private let childObserverFactory: @Sendable () -> any NativeAgentHostChildObserver
+    private let launchNonceFactory: @Sendable () -> Data
 
     public init(hooks: NativeAgentHostChildSupervisorHooks = .system) {
         self.hooks = hooks
@@ -689,15 +700,28 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
         self.cursorExecutableRevalidator = { selection in
             try NativeAgentHostExecutableTrust.revalidate(selection)
         }
+        self.authenticatedHostXPCClientFactory = { NativeAgentAuthenticatedHostXPCClient() }
+        self.childObserverFactory = { NativeAgentHostDarwinChildObserver() }
+        self.launchNonceFactory = { NativeAgentHostLaunchNonce.make() }
     }
 
     /// Test-only injection seam. The public production initializer above has
     /// no executable selector or filesystem trust override.
     internal init(
         hooks: NativeAgentHostChildSupervisorHooks = .system,
-        executableProbe: @escaping @Sendable (String) -> Bool
+        executableProbe: @escaping @Sendable (String) -> Bool,
+        authenticatedHostXPCClientFactory: @escaping @Sendable () -> any NativeAgentHostAuthenticatedXPCClientProtocol = {
+            NativeAgentAuthenticatedHostXPCClient()
+        },
+        childObserverFactory: @escaping @Sendable () -> any NativeAgentHostChildObserver = {
+            NativeAgentHostDarwinChildObserver()
+        },
+        launchNonceFactory: @escaping @Sendable () -> Data = { NativeAgentHostLaunchNonce.make() }
     ) {
         self.hooks = hooks
+        self.authenticatedHostXPCClientFactory = authenticatedHostXPCClientFactory
+        self.childObserverFactory = childObserverFactory
+        self.launchNonceFactory = launchNonceFactory
         self.cursorExecutableResolver = {
             guard NativeCursorAgentRuntimeSpec.requiredPaths.allSatisfy(executableProbe) else {
                 throw NativeAgentHostExecutableTrustError.noTrustedCandidate
@@ -769,10 +793,28 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
             privateGitBridgeHandoff = nil
         }
 
+        let authenticatedHostXPC: (any NativeAgentHostAuthenticatedXPCClientProtocol)?
+        if request.gitTransport == .authenticatedXPC {
+            let client = authenticatedHostXPCClientFactory()
+            do {
+                // Prepare is deliberately connection-owned and must complete
+                // before posix_spawn. There is no authenticatedXPC fallback.
+                try client.prepareForChild(launchNonce: launchNonceFactory())
+                authenticatedHostXPC = client
+            } catch {
+                try? client.closeForChild(reason: .cancelled)
+                try? privateGitBridge?.close()
+                throw NativeAgentHostChildSupervisorError.launchFailed
+            }
+        } else {
+            authenticatedHostXPC = nil
+        }
+
         let projectBinding: NativeAgentHostProjectDirectoryBinding
         do {
             projectBinding = try request.projectDirectory.openForSpawn()
         } catch {
+            try? authenticatedHostXPC?.closeForChild(reason: .cancelled)
             try? privateGitBridge?.close()
             throw error
         }
@@ -832,19 +874,42 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
                 try? privateGitBridge?.close()
                 throw NativeAgentHostChildSupervisorError.projectDirectoryCloseFailed
             }
+
+            if let authenticatedHostXPC {
+                do {
+                    let observation = try childObserverFactory().observe(pid: process.processIdentifier)
+                    guard let childPIDVersion = Int64(exactly: observation.identity.pidVersion) else {
+                        throw NativeProcessIdentityError.invalidObservation("child PID version exceeds XPC range")
+                    }
+                    try authenticatedHostXPC.attachForChild(
+                        childPID: Int(process.processIdentifier),
+                        childPIDVersion: childPIDVersion,
+                        executableIdentityDigest: try observation.identity.canonicalBindingDigestData,
+                        ancestryBindingDigest: try observation.identity.canonicalAncestryBindingDigestData,
+                        worktreeBindingDigest: observation.worktreeBindingDigest
+                    )
+                } catch {
+                    try? hooks.signal(process, .terminate)
+                    _ = try? hooks.wait(process)
+                    throw NativeAgentHostChildSupervisorError.launchFailed
+                }
+            }
             return NativeAgentHostChildSession(
                 process: process,
                 hooks: hooks,
-                privateGitBridge: privateGitBridge
+                privateGitBridge: privateGitBridge,
+                authenticatedHostXPC: authenticatedHostXPC
             )
         } catch let error as NativeAgentHostChildSupervisorError {
             try? privateGitBridgeHandoff?.abort()
             try? privateGitBridge?.close()
+            try? authenticatedHostXPC?.closeForChild(reason: .cancelled)
             try? projectBinding.close()
             throw error
         } catch {
             try? privateGitBridgeHandoff?.abort()
             try? privateGitBridge?.close()
+            try? authenticatedHostXPC?.closeForChild(reason: .cancelled)
             try? projectBinding.close()
             throw NativeAgentHostChildSupervisorError.launchFailed
         }
