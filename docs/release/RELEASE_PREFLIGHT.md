@@ -89,13 +89,17 @@ The target operator must deploy the exact `sha256:` image digest and produce a
 strict evidence JSON, then validate it with:
 
 ```sh
-node scripts/ops/verify-cloud-deployment.mjs cloud-deployment-evidence.json
+node scripts/ops/verify-cloud-deployment.mjs \
+  cloud-deployment-evidence.json \
+  deployment-attestation-public.pem
 ```
 
-The validator requires the production service revision, full source commit,
-immutable image digest, and an authenticated HTTPS `/health/ready` result. It
-does not contact the provider and cannot turn an absent or fabricated provider
-record into proof. Ad-hoc artifacts, missing
+The command also requires the path to the pinned deployment-attestation public
+key as its second argument. The evidence JSON contains an Ed25519 signature
+over the exact canonical unsigned payload. The validator requires the
+production service revision, full source commit, immutable image digest, and
+an authenticated HTTPS `/health/ready` result. It does not contact the provider
+and cannot turn an absent or fabricated provider record into proof. Ad-hoc artifacts, missing
 credentials, offline-only evidence, or a green local test suite cannot close
 these rows.
 

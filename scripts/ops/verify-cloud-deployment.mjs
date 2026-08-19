@@ -3,16 +3,24 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import process from "node:process";
 
-const [evidencePath = ""] = process.argv.slice(2);
+const [evidencePath = "", publicKeyPath = ""] = process.argv.slice(2);
 const fail = (message) => { throw new Error(`cloud deployment evidence rejected: ${message}`); };
 if (!evidencePath) fail("evidence path is required");
+if (!publicKeyPath) fail("pinned public key path is required");
 
 let evidence;
 try { evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8")); }
 catch { fail("evidence is not readable JSON"); }
 
 const keys = Object.keys(evidence ?? {}).sort().join(",");
-if (keys !== "artifact_digest,commit_sha,environment,health,revision,service,status") fail("unexpected evidence shape");
+if (keys !== "artifact_digest,commit_sha,environment,health,revision,service,signature,status") fail("unexpected evidence shape");
+if (!/^[A-Za-z0-9+/]{86,88}={0,2}$/u.test(evidence.signature)) fail("signature must be base64 Ed25519");
+let publicKey;
+try { publicKey = fs.readFileSync(publicKeyPath); } catch { fail("pinned public key is not readable"); }
+const unsigned = { ...evidence };
+delete unsigned.signature;
+const signedBytes = Buffer.from(JSON.stringify(unsigned) + "\n", "utf8");
+if (!crypto.verify(null, signedBytes, publicKey, Buffer.from(evidence.signature, "base64"))) fail("signature does not verify");
 if (evidence.status !== "verified") fail("status must be verified");
 if (evidence.environment !== "production") fail("environment must be production");
 if (!/^sha256:[0-9a-f]{64}$/u.test(evidence.artifact_digest)) fail("artifact_digest must be a sha256 digest");
