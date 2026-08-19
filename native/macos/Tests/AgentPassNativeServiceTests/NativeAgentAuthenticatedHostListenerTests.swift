@@ -3,74 +3,218 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
-@Test func hostConnectionAttributesRejectInvalidPeerFactsBeforeContextConstruction() throws {
-    #expect(throws: NativeAgentAuthenticatedHostConnectionAttributeError.invalidConnectionAttributes) {
-        _ = try NativeAgentAuthenticatedHostConnectionAttributes(
-            processIdentifier: 0,
-            effectiveUserID: 501,
-            auditSessionIdentifier: 7
-        )
+private let hostAuditTokenWords: [UInt32] = [
+    501, // auid
+    501, // euid
+    20,  // egid
+    501, // ruid
+    20,  // rgid
+    42,  // pid
+    77,  // asid
+    19   // pidversion
+]
+
+private final class MutableAuditTokenState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: NativeAgentAuthenticatedHostCompleteAuditToken
+
+    init(_ value: NativeAgentAuthenticatedHostCompleteAuditToken) {
+        self.value = value
     }
-    #expect(throws: NativeAgentAuthenticatedHostConnectionAttributeError.invalidConnectionAttributes) {
-        _ = try NativeAgentAuthenticatedHostConnectionAttributes(
-            processIdentifier: 42,
-            effectiveUserID: 501,
-            auditSessionIdentifier: 0
-        )
+
+    func read() -> NativeAgentAuthenticatedHostCompleteAuditToken {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ value: NativeAgentAuthenticatedHostCompleteAuditToken) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
     }
 }
 
-@Test func hostConnectionAttributeOSBoundaryCanBeInjectedIntoTheCoreContextFactory() throws {
-    let expected = try NativeAgentAuthenticatedHostConnectionAttributes(
-        processIdentifier: 42,
-        effectiveUserID: 501,
-        auditSessionIdentifier: 77
-    )
-    let source = NativeAgentAuthenticatedHostClosureConnectionAttributeSource { _ in expected }
-    let connection = NSXPCConnection(serviceName: "dev.agentpass.test-only")
-    let observed = try source.attributes(for: connection)
-    #expect(observed == expected)
+private final class SignRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var count = 0
 
-    let processFacts = try NativeObservedProcessFacts(
-        uid: observed.effectiveUserID,
-        pid: observed.processIdentifier,
-        pidVersion: 19,
+    func record() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+}
+
+private func hostObservation(
+    pid: Int32 = 42,
+    uid: UInt32 = 501,
+    pidVersion: UInt64 = 19,
+    codeDirectoryHash: String = String(repeating: "a", count: 64),
+    bundleIdentifier: String = "dev.agentpass.agent-host"
+) throws -> NativeProcessObservation {
+    let facts = try NativeObservedProcessFacts(
+        uid: uid,
+        pid: pid,
+        pidVersion: pidVersion,
         bootIdentity: "listener-test-boot",
         executableFileIdentity: try NativeExecutableFileIdentity(
             deviceID: 1,
-            inode: 42,
+            inode: UInt64(pid),
             fileSize: 3,
             modificationTimeNanoseconds: 4
         ),
-        codeDirectoryHash: String(repeating: "a", count: 64),
-        bundleIdentifier: "dev.agentpass.test",
+        codeDirectoryHash: codeDirectoryHash,
+        bundleIdentifier: bundleIdentifier,
         teamIdentifier: "ABCDE12345",
         signatureKind: .developerID,
         entitlements: [:]
     )
-    let observation = try NativeProcessObservation(process: processFacts, ancestry: [])
-    let contextFactory: NativeAgentAuthenticatedHostListenerDelegate.PeerContextFactory = { attributes, observation in
-        try NativeConnectionContext(
-            osProcessID: attributes.processIdentifier,
-            effectiveUserID: attributes.effectiveUserID,
-            auditSessionID: attributes.auditSessionIdentifier,
-            pidVersion: observation.process.pidVersion
-        )
-    }
-    let context = try contextFactory(observed, observation)
-
-    #expect(context.pid == expected.processIdentifier)
-    #expect(context.effectiveUserID == expected.effectiveUserID)
-    #expect(context.auditSessionID == expected.auditSessionIdentifier)
-    #expect(context.pidVersion == observation.process.pidVersion)
+    return try NativeProcessObservation(process: facts, ancestry: [])
 }
 
-@Test func hostConnectionAttributeSourceDoesNotClaimACompleteRawAuditToken() throws {
-    // An unactivated test connection has no live peer and must fail closed;
-    // this assertion also keeps the public-API limitation explicit. A raw
-    // audit-token integration would need a different transport boundary.
-    #expect(throws: NativeAgentAuthenticatedHostConnectionAttributeError.invalidConnectionAttributes) {
-        _ = try NativeAgentAuthenticatedHostNSXPCConnectionAttributeSource()
-            .attributes(for: NSXPCConnection(serviceName: "dev.agentpass.test-only"))
+private func token(_ words: [UInt32] = hostAuditTokenWords) throws -> NativeAgentAuthenticatedHostCompleteAuditToken {
+    try NativeAgentAuthenticatedHostCompleteAuditToken(words: words)
+}
+
+private func changed(_ index: Int) -> [UInt32] {
+    var words = hostAuditTokenWords
+    words[index] &+= 1
+    return words
+}
+
+@Test func hostCompleteAuditTokenRejectsAnythingOtherThanAValidEightWordToken() throws {
+    #expect(throws: NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken) {
+        _ = try token(Array(repeating: 1, count: 7))
     }
+    #expect(throws: NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken) {
+        _ = try token(Array(repeating: 1, count: 9))
+    }
+    #expect(throws: NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken) {
+        _ = try token(changed(5).enumerated().map { $0.offset == 5 ? 0 : $0.element })
+    }
+}
+
+@Test func hostCompleteAuditTokenContextBindsEveryAuditTokenField() throws {
+    let observation = try hostObservation()
+    let completeToken = try token()
+    let context = try completeToken.context(matching: observation)
+    let expected = NativeConnectionContext(capturing: try NativeAuditTokenFieldAdapter(words: hostAuditTokenWords))
+    #expect(context == expected)
+
+    for index in 0..<hostAuditTokenWords.count {
+        let changedWords = changed(index)
+        let changedToken = try token(changedWords)
+        let changedObservation = try hostObservation(
+            pid: Int32(changedWords[5]),
+            uid: changedWords[1],
+            pidVersion: UInt64(changedWords[7])
+        )
+        let changedContext = try changedToken.context(matching: changedObservation)
+        #expect(changedContext != context, "changed audit_token_t field at index \(index) was not bound")
+    }
+}
+
+@Test func hostListenerDefaultAuditTokenSourceFailsClosedWhenTheOSSourceIsUnavailable() throws {
+    let delegate = NativeAgentAuthenticatedHostListenerDelegate(
+        allowedClientUID: 501,
+        codeSigningRequirement: "anchor apple generic and identifier \"dev.agentpass.test\"",
+        peerPolicyFactory: { _ in try NativeProcessIdentityPolicy(expectedUID: 501) },
+        childPolicy: nil,
+        childFactory: nil,
+        signer: NativeAgentAuthenticatedHostClosureSigner { _ in Data([1]) }
+    )
+
+    let accepted = delegate.listener(
+        NSXPCListener.anonymous(),
+        shouldAcceptNewConnection: NSXPCConnection(serviceName: "dev.agentpass.test-only")
+    )
+    #expect(accepted == false)
+}
+
+@Test func hostEndpointRevalidatesTheCompleteTokenBeforeAProtectedOperation() throws {
+    let initialToken = try token()
+    let observation = try hostObservation()
+    let childObservation = try hostObservation(
+        pid: 84,
+        pidVersion: 12,
+        codeDirectoryHash: String(repeating: "b", count: 64),
+        bundleIdentifier: "dev.agentpass.git-sign-xpc"
+    )
+    let state = MutableAuditTokenState(initialToken)
+    let source = NativeAgentAuthenticatedHostClosureAuditTokenSource { _ in state.read() }
+    let initialContext = try source.completeAuditToken(
+        for: NSXPCConnection(serviceName: "dev.agentpass.test-only")
+    ).context(matching: observation)
+    let peerPolicy = try NativeProcessIdentityPolicy.exact(NativeProcessIdentity(observation: observation))
+    let childPolicy = try NativeProcessIdentityPolicy.exact(NativeProcessIdentity(observation: childObservation))
+    let signer = SignRecorder()
+    let endpoint = try NativeAgentAuthenticatedHostEndpoint(
+        connectionContext: initialContext,
+        initialPeerObservation: observation,
+        peerProcessPolicy: peerPolicy,
+        childProcessPolicy: childPolicy,
+        observeConnectionContext: {
+            try source.completeAuditToken(
+                for: NSXPCConnection(serviceName: "dev.agentpass.test-only")
+            ).context(matching: observation)
+        },
+        observePeerProcess: { observation },
+        observeChild: { _, _ in
+            try NativeAgentAuthenticatedHostChildObservation(
+                observationSource: FixedObservationSource(observation: childObservation),
+                worktreeBindingDigest: Data(repeating: 0x31, count: AgentPassHostXPCContract.digestBytes)
+            )
+        },
+        signer: NativeAgentAuthenticatedHostClosureSigner { _ in
+            signer.record()
+            return Data([1])
+        },
+        nowMilliseconds: { 1_000 },
+        sessionLifetimeMilliseconds: 100
+    )
+
+    let prepared = try prepareHostSession(endpoint)
+    _ = try #require(prepared)
+    let childDigest = try NativeAgentAuthenticatedHostChildObservation(
+        observationSource: FixedObservationSource(observation: childObservation),
+        worktreeBindingDigest: Data(repeating: 0x31, count: AgentPassHostXPCContract.digestBytes)
+    )
+    let attach = try #require(AgentPassHostAttachChildRequest(
+        childPID: Int(childObservation.process.pid),
+        childPIDVersion: Int64(childObservation.process.pidVersion),
+        executableIdentityDigest: childDigest.executableIdentityDigest,
+        ancestryBindingDigest: childDigest.ancestryBindingDigest,
+        worktreeBindingDigest: childDigest.worktreeBindingDigest
+    ))
+    var attachError: NSError?
+    endpoint.attachHostChild(attach) { _, error in attachError = error }
+    #expect(attachError == nil)
+
+    state.set(try token(changed(0)))
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([1])))
+    var signError: NSError?
+    endpoint.signHostPayload(request) { _, error in signError = error }
+    #expect(signError?.code == 3)
+    #expect(signError?.localizedDescription == NativeAgentAuthenticatedHostEndpointError.peerIdentityMismatch.rawValue)
+    #expect(signer.count == 0)
+}
+
+private struct FixedObservationSource: NativeProcessObservationSource {
+    let observation: NativeProcessObservation
+
+    func observe() throws -> NativeProcessObservation {
+        observation
+    }
+}
+
+private func prepareHostSession(_ endpoint: NativeAgentAuthenticatedHostEndpoint) throws -> AgentPassHostPrepareResponse? {
+    var response: AgentPassHostPrepareResponse?
+    var error: NSError?
+    endpoint.prepareHostSession(try #require(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0x41, count: 16)))) {
+        response = $0
+        error = $1
+    }
+    #expect(error == nil)
+    return response
 }
