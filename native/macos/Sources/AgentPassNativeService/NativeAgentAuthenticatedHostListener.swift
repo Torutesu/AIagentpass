@@ -29,12 +29,20 @@ public struct NativeAgentAuthenticatedHostCompleteAuditToken: Equatable, Sendabl
         guard words.count == Self.wordCount else {
             throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
         }
+        // `auid` may legitimately be AU_DEFAUDITID (`UINT32_MAX`), but the
+        // live credential fields and the process-generation fields may not be
+        // their invalid/sentinel values.  Keep this validation here as well
+        // as in the OS adapter so injected sources cannot weaken the boundary.
         guard words[1] < UInt32.max,
+              words[2] < UInt32.max,
+              words[3] < UInt32.max,
+              words[4] < UInt32.max,
               words[5] > 0,
               words[5] <= UInt32(Int32.max),
               words[6] > 0,
-              words[6] < UInt32.max,
+              words[6] <= UInt32(Int32.max),
               words[7] > 0,
+              words[7] <= UInt32(Int32.max),
               words.contains(where: { $0 != 0 }) else {
             throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
         }

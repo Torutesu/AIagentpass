@@ -5023,13 +5023,15 @@ do {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
+    let auditTokenSource = NativeMacOSAuditTokenSource()
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
     let agentDelegate = AgentListenerDelegate(
         configuration: configuration,
         runtime: agentRuntime,
         auditAppender: endpoint,
         qualificationFaultConsumer: qualificationFaultConsumer,
-        transportReplyFaultConsumer: transportReplyFaultConsumer
+        transportReplyFaultConsumer: transportReplyFaultConsumer,
+        auditTokenSource: auditTokenSource
     )
     let hostChildPolicy = try configuration.hostChildCodeDirectoryHash.map {
         try NativeProcessIdentityPolicy(
@@ -5073,6 +5075,7 @@ do {
             )
         },
         childPolicy: hostChildPolicy,
+        auditTokenSource: auditTokenSource,
         childFactory: { pid, expectedPIDVersion in
             let processObservation = try NativeDarwinProcessObservationSource().observe(pid: pid, expectedUserID: configuration.allowedClientUID)
             guard processObservation.process.pidVersion == expectedPIDVersion else {
