@@ -2,7 +2,15 @@ import CryptoKit
 import Foundation
 import AgentPassNativeCore
 
-/// Stable failures for the not-yet-wired Dedicated Host/Child signing seam.
+private struct NativeDedicatedFixedProcessObservationSource: NativeProcessObservationSource {
+    let observation: NativeProcessObservation
+
+    func observe() throws -> NativeProcessObservation {
+        observation
+    }
+}
+
+/// Stable failures for the Dedicated Host/Child signing seam.
 /// No Cloud, process, or transaction detail is reflected to an XPC peer.
 public enum NativeAgentDedicatedSigningServiceAdapterError: String, Error, Equatable, Sendable {
     case invalidAuthorizedPayload = "invalid_authorized_payload"
@@ -124,12 +132,11 @@ enum NativeAgentDedicatedSigningServiceSignatureCodec {
     }
 }
 
-/// A small Service-owned adapter for the future Dedicated Host/Child route.
+/// A Service-owned adapter for the Dedicated Host/Child route.
 ///
 /// It deliberately stops at the existing Core handoff/transaction adapter:
 /// Host/Child DTOs remain payload-only, and `main.swift` is not changed to
-/// replace the legacy signer until a production context provider and complete
-/// Coordinator wiring exist. There is no legacy signer fallback in this type.
+/// replace the legacy signer. There is no legacy signer fallback in this type.
 public protocol NativeAgentDedicatedSigning: Sendable {
     func signAuthorizedPayload(
         _ payload: NativeAgentAuthenticatedGitBridgeSession.AuthorizedPayload
@@ -344,6 +351,7 @@ public final class NativeAgentDedicatedSigningChildSigner:
     private let contextProvider: NativeAgentDedicatedSigningServiceContextProvider
     private let signer: NativeAgentDedicatedSigningServiceSignerAdapter
     private let worktreeObserver: NativeDarwinGitWorktreeObserver
+    private let processObserver: NativeDarwinProcessObservationSource
 
     public init(
         dedicatedSessionID: String,
@@ -362,6 +370,7 @@ public final class NativeAgentDedicatedSigningChildSigner:
             provider: provider
         )
         self.worktreeObserver = worktreeObserver
+        self.processObserver = .init()
     }
 
     public func signChildPayload(_ payload: Data) throws -> Data {
@@ -377,6 +386,18 @@ public final class NativeAgentDedicatedSigningChildSigner:
             pid: helperIdentity.pid,
             expectedUserID: helperIdentity.uid
         ).binding
+        let reobserved = try processObserver.observe(
+            pid: helperIdentity.pid,
+            expectedUserID: helperIdentity.uid
+        )
+        let reobservedIdentity = try NativeProcessIdentity.capture(
+            from: NativeDedicatedFixedProcessObservationSource(observation: reobserved)
+        )
+        guard reobservedIdentity.canonicalBindingHash == helperIdentity.canonicalBindingHash,
+              reobservedIdentity.canonicalAncestryBindingHash == helperIdentity.canonicalAncestryBindingHash,
+              reobservedIdentity.pidVersion == helperIdentity.pidVersion else {
+            throw NativeAgentAuthenticatedChildGitError.childIdentityChanged
+        }
         guard worktree.digest == worktreeBindingDigest else {
             throw NativeAgentAuthenticatedChildGitError.worktreeChanged
         }

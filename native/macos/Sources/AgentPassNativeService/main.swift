@@ -5205,6 +5205,18 @@ do {
                     pid: payload.peerProcessID,
                     expectedUserID: payload.peerEffectiveUserID
                 ).binding
+                let reobserved = try processObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                )
+                let reobservedIdentity = try NativeProcessIdentity.capture(
+                    from: NativeFixedProcessObservationSource(observation: reobserved)
+                )
+                guard reobservedIdentity.canonicalBindingHash == identity.canonicalBindingHash,
+                      reobservedIdentity.canonicalAncestryBindingHash == identity.canonicalAncestryBindingHash,
+                      reobservedIdentity.pidVersion == identity.pidVersion else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
                 func digest(_ value: String) -> Data? {
                     guard value.count == 64 else { return nil }
                     var result = Data(capacity: 32)

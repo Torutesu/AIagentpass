@@ -188,6 +188,23 @@ private final class HostEndpointHarness: @unchecked Sendable {
         } else {
             dedicatedSigner = nil
         }
+        let childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar?
+        if includeDedicatedSigner {
+            childRegistrar = nil
+        } else {
+            childRegistrar = { [self] sessionID, observation, signatureBudget in
+                try registry.register(
+                    sessionID: sessionID,
+                    identity: observation.identity,
+                    worktreeBindingDigest: observation.worktreeBindingDigest,
+                    signer: childSigner,
+                    signatureBudget: signatureBudget,
+                    expiresAtMilliseconds: 10_000,
+                    nowMilliseconds: 1_000
+                )
+                recorder.recordRegister()
+            }
+        }
 
         return try NativeAgentAuthenticatedHostEndpoint(
             connectionContext: hostContext,
@@ -227,18 +244,7 @@ private final class HostEndpointHarness: @unchecked Sendable {
             signerPolicy: signerPolicy,
             nowMilliseconds: { [self] in clock.read() },
             sessionLifetimeMilliseconds: 100,
-            childRegistrar: { [self] sessionID, observation, signatureBudget in
-                try registry.register(
-                    sessionID: sessionID,
-                    identity: observation.identity,
-                    worktreeBindingDigest: observation.worktreeBindingDigest,
-                    signer: childSigner,
-                    signatureBudget: signatureBudget,
-                    expiresAtMilliseconds: 10_000,
-                    nowMilliseconds: 1_000
-                )
-                recorder.recordRegister()
-            },
+            childRegistrar: childRegistrar,
             childUnregistrar: { [self] bindingHash in
                 registry.unregister(identityBindingHash: bindingHash)
                 recorder.recordUnregister(bindingHash)

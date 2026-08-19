@@ -200,6 +200,11 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         guard dedicatedSigner != nil || signerPolicy == .developmentLegacySignerAllowed else {
             throw NativeAgentAuthenticatedHostEndpointError.dedicatedSignerRequired
         }
+        guard dedicatedChildRegistrar != nil
+                || childRegistrar == nil
+                || signerPolicy == .developmentLegacySignerAllowed else {
+            throw NativeAgentAuthenticatedHostEndpointError.dedicatedSignerRequired
+        }
 
         self.peerBinding = try NativeAgentAuthenticatedGitBridgePeerBinding(
             connectionContext: connectionContext,
@@ -412,6 +417,10 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             } catch let error as NativeAgentAuthenticatedHostEndpointError {
                 closeSessionAndRevoke(session)
                 throw error
+            } catch let error as NativeAgentDedicatedSigningServiceAdapterError
+                where error == .outcomeUnknown {
+                closeSessionAndRevoke(session)
+                throw NativeAgentAuthenticatedHostEndpointError.outcomeUnknown
             } catch {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
