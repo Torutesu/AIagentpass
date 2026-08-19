@@ -5,6 +5,14 @@ import Darwin
 import Foundation
 import Security
 
+private struct NativeFixedProcessObservationSource: NativeProcessObservationSource {
+    let observation: NativeProcessObservation
+
+    func observe() throws -> NativeProcessObservation {
+        observation
+    }
+}
+
 private func loadProtectedFile(path: String, label: String) throws -> Data {
     let original = URL(fileURLWithPath: path).standardizedFileURL
     guard original.path.hasPrefix("/"), original.resolvingSymlinksInPath().path == original.path else {
@@ -3565,6 +3573,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let capabilityVerifier: NativeCapabilityVerifier
     let cloudSigningCapabilityVerifier: NativeAgentSigningCapabilityVerifier
     let dedicatedSigningCapabilityIssuer: NativeAgentDedicatedSigningCapabilityRuntimeIssuer
+    let dedicatedCapabilitySequenceAuthorities: NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
@@ -3591,6 +3600,8 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
             expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
         )
         let capabilityVerifier = self.cloudSigningCapabilityVerifier
+        let sequenceAuthorities = NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry()
+        self.dedicatedCapabilitySequenceAuthorities = sequenceAuthorities
         self.dedicatedSigningCapabilityIssuer = NativeAgentDedicatedSigningCapabilityRuntimeIssuer(
             makeConsumer: { sessionID in
                 try NativeAgentSigningCapabilityHTTPConsumer(
@@ -3602,7 +3613,14 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
                     signer: deviceSigner
                 )
             },
-            verifier: capabilityVerifier
+            verifier: capabilityVerifier,
+            sequenceAuthority: { context in
+                let binding = try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+                    coordinatorSessionID: context.sessionID,
+                    agentID: context.agentID
+                )
+                return try sequenceAuthorities.authority(for: binding)
+            }
         )
         self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
@@ -4164,7 +4182,7 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let observer = NativeDarwinProcessObservationSource()
-    private let sessionAssociationRegistry = NativeAgentCoordinatorSessionAssociationRegistry()
+    private let sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry
 
     init(
         configuration: ServiceConfiguration,
@@ -4172,7 +4190,8 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
         transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming,
-        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource = NativeAgentAuthenticatedHostUnavailableAuditTokenSource()
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource = NativeAgentAuthenticatedHostUnavailableAuditTokenSource(),
+        sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry
     ) {
         self.configuration = configuration
         self.runtime = runtime
@@ -4180,6 +4199,7 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
         self.auditTokenSource = auditTokenSource
+        self.sessionAssociationRegistry = sessionAssociationRegistry
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -5108,6 +5128,7 @@ do {
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
     let auditTokenSource = NativeMacOSAuditTokenSource()
+    let sessionAssociationRegistry = NativeAgentCoordinatorSessionAssociationRegistry()
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
     let agentDelegate = AgentListenerDelegate(
         configuration: configuration,
@@ -5115,7 +5136,8 @@ do {
         auditAppender: endpoint,
         qualificationFaultConsumer: qualificationFaultConsumer,
         transportReplyFaultConsumer: transportReplyFaultConsumer,
-        auditTokenSource: auditTokenSource
+        auditTokenSource: auditTokenSource,
+        sessionAssociationRegistry: sessionAssociationRegistry
     )
     let hostChildPolicy = try configuration.hostChildCodeDirectoryHash.map {
         try NativeProcessIdentityPolicy(
@@ -5140,6 +5162,101 @@ do {
         return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
     }
     let worktreeObserver = NativeDarwinGitWorktreeObserver()
+    let processObserver = NativeDarwinProcessObservationSource()
+    let dedicatedContextProvider: NativeAgentDedicatedSigningServiceContextProvider?
+    if let agentRuntime {
+        dedicatedContextProvider = try NativeAgentDedicatedSigningServiceContextProvider(
+            organizationID: agentRuntime.authority.organizationID,
+            capabilityKeyID: agentRuntime.authority.capabilityKeyID,
+            registry: sessionAssociationRegistry,
+            observeState: { payload in
+                guard payload.peerProcessID > 0, payload.peerProcessPIDVersion > 0 else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
+                let observation = try processObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                )
+                guard observation.process.pidVersion == payload.peerProcessPIDVersion else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
+                let identity = try NativeProcessIdentity.capture(
+                    from: NativeFixedProcessObservationSource(observation: observation)
+                )
+                let worktree = try worktreeObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                ).binding
+                func digest(_ value: String) -> Data? {
+                    guard value.count == 64 else { return nil }
+                    var result = Data(capacity: 32)
+                    var high: UInt8?
+                    for byte in value.utf8 {
+                        let nibble: UInt8?
+                        switch byte {
+                        case 48...57: nibble = byte - 48
+                        case 97...102: nibble = byte - 87
+                        case 65...70: nibble = byte - 55
+                        default: nibble = nil
+                        }
+                        guard let nibble else { return nil }
+                        if let high {
+                            result.append((high << 4) | nibble)
+                        } else {
+                            high = nibble
+                        }
+                    }
+                    return high == nil && result.count == 32 ? result : nil
+                }
+                guard let processDigest = digest(identity.canonicalBindingHash),
+                      let ancestryDigest = digest(identity.canonicalAncestryBindingHash),
+                      let payloadDigest = digest(payload.peerProcessBindingHash),
+                      processDigest == payloadDigest,
+                      let association = sessionAssociationRegistry.lookup(
+                          processBindingDigest: processDigest,
+                          ancestryBindingDigest: ancestryDigest,
+                          worktreeBindingDigest: worktree.digest) else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.associationMissing
+                }
+                return try NativeAgentDedicatedSigningObservedState(
+                    binding: association.binding,
+                    worktree: worktree
+                )
+            },
+            sequence: { association in
+                let sequenceBinding = try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+                    coordinatorSessionID: association.sessionID,
+                    agentID: association.binding.agentID
+                )
+                let authority = try agentRuntime.dedicatedCapabilitySequenceAuthorities.authority(
+                    for: sequenceBinding
+                )
+                return Int64(authority.snapshot().acceptedSequence ?? 1)
+            },
+            keyLifecycleIdentity: agentRuntime.gitCommitSigner.keyLifecycleIdentity
+        )
+    } else {
+        dedicatedContextProvider = nil
+    }
+    let dedicatedHostSigner: (any NativeAgentAuthenticatedHostSigning)? = if let agentRuntime,
+                                                                                let dedicatedContextProvider {
+        NativeAgentDedicatedSigningServiceSignerAdapter(
+            capabilityIssuer: agentRuntime.dedicatedSigningCapabilityIssuer,
+            contextProvider: dedicatedContextProvider,
+            provider: { payload in
+                let signature = try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
+                guard try agentRuntime.gitCommitSigner.verifyGitCommitSignature(
+                    payload: payload,
+                    signature: signature
+                ) else {
+                    throw NativeAgentGitCommitSignerError.invalidSignature
+                }
+                return signature
+            }
+        )
+    } else {
+        nil
+    }
     let hostDelegate = NativeAgentAuthenticatedHostListenerDelegate(
         allowedClientUID: configuration.allowedClientUID,
         codeSigningRequirement: configuration.agentClientCodeSigningRequirement,
@@ -5169,6 +5286,7 @@ do {
             return (processObservation, worktree.binding.digest)
         },
         signer: hostSigner,
+        dedicatedSigner: dedicatedHostSigner,
         childRegistrar: { sessionID, observation, signatureBudget in
             try childRegistry.register(
                 sessionID: sessionID,

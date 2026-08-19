@@ -40,8 +40,6 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
         throws -> NativeAgentDedicatedSigningObservedState
     typealias SequenceProvider = @Sendable
         (_ association: NativeAgentCoordinatorSessionAssociation) throws -> Int64
-    typealias AuthorityProvider = @Sendable
-        (_ binding: NativeAgentSessionBinding) throws -> NativeSigningTransactionAuthority
     public typealias RequestIDFactory = @Sendable () -> String
     public typealias MillisecondClock = @Sendable () throws -> Int64
 
@@ -50,7 +48,7 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
     private let registry: NativeAgentCoordinatorSessionAssociationRegistry
     private let observeState: StateObserver
     private let sequence: SequenceProvider
-    private let authority: AuthorityProvider
+    private let keyLifecycleIdentity: String
     private let requestIDFactory: RequestIDFactory
     private let clock: MillisecondClock
     private let allowedClockSkewMilliseconds: Int64
@@ -62,7 +60,7 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
         registry: NativeAgentCoordinatorSessionAssociationRegistry,
         observeState: @escaping StateObserver,
         sequence: @escaping SequenceProvider,
-        authority: @escaping AuthorityProvider,
+        keyLifecycleIdentity: String,
         requestIDFactory: @escaping RequestIDFactory = { UUID().uuidString.lowercased() },
         clock: @escaping MillisecondClock = {
             let value = Date().timeIntervalSince1970 * 1_000
@@ -76,6 +74,7 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
     ) throws {
         guard UUID(uuidString: organizationID)?.uuidString.lowercased() == organizationID,
               capabilityKeyID.range(of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", options: .regularExpression) != nil,
+              keyLifecycleIdentity.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
               allowedClockSkewMilliseconds >= 0,
               maximumTTLMilliseconds > 0 else {
             throw NativeAgentDedicatedSigningServiceContextProviderError.contextInvalid
@@ -85,7 +84,7 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
         self.registry = registry
         self.observeState = observeState
         self.sequence = sequence
-        self.authority = authority
+        self.keyLifecycleIdentity = keyLifecycleIdentity
         self.requestIDFactory = requestIDFactory
         self.clock = clock
         self.allowedClockSkewMilliseconds = allowedClockSkewMilliseconds
@@ -160,11 +159,16 @@ public final class NativeAgentDedicatedSigningServiceContextProvider:
             capabilityRequest: request,
             verificationContext: verification,
             association: dedicatedAssociation,
-            authorityProvider: { binding in
+            authorityProvider: { binding, request in
                 guard binding == observed.binding else {
                     throw NativeAgentDedicatedSigningServiceContextProviderError.associationInvalid
                 }
-                return try self.authority(binding)
+                return try NativeSigningTransactionAuthority(
+                    request: try NativeSigningTransactionRequest(request),
+                    binding: binding,
+                    worktree: observed.worktree,
+                    keyLifecycleIdentity: self.keyLifecycleIdentity
+                )
             })
     }
 

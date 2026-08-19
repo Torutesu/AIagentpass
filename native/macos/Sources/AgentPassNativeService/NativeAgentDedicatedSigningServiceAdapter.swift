@@ -48,7 +48,7 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
 
     fileprivate let association: NativeAgentDedicatedSigningAssociation
     fileprivate let authorityProvider: @Sendable
-        (NativeAgentSessionBinding) throws -> NativeSigningTransactionAuthority
+        (NativeAgentSessionBinding, AgentPassAgentSignRequest) throws -> NativeSigningTransactionAuthority
 
     public init(
         dedicatedSessionID: String,
@@ -59,7 +59,7 @@ public struct NativeAgentDedicatedSigningServiceContext: @unchecked Sendable {
         verificationContext: NativeAgentSigningCapabilityVerificationContext,
         association: NativeAgentDedicatedSigningAssociation,
         authorityProvider: @escaping @Sendable
-            (NativeAgentSessionBinding) throws -> NativeSigningTransactionAuthority
+            (NativeAgentSessionBinding, AgentPassAgentSignRequest) throws -> NativeSigningTransactionAuthority
     ) throws {
         guard UUID(uuidString: dedicatedSessionID)?.uuidString.lowercased() == dedicatedSessionID,
               UUID(uuidString: coordinatorSessionID)?.uuidString.lowercased() == coordinatorSessionID,
@@ -146,7 +146,7 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
 
     private let capabilityIssuer: any NativeAgentDedicatedSigningCapabilityIssuing
     private let contextProvider: any NativeAgentDedicatedSigningContextProviding
-    private let makeHandoffAdapter: HandoffAdapterFactory
+    private let makeHandoffAdapter: HandoffAdapterFactory?
     private let provider: Provider
 
     public init(
@@ -160,6 +160,19 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
         self.makeHandoffAdapter = { input in
             try handoffBroker.makeAdapter(for: input)
         }
+        self.provider = provider
+    }
+
+    /// Runtime initializer. The Coordinator association is selected by the
+    /// Service context for each request and must not be pinned globally.
+    public init(
+        capabilityIssuer: any NativeAgentDedicatedSigningCapabilityIssuing,
+        contextProvider: any NativeAgentDedicatedSigningContextProviding,
+        provider: @escaping Provider
+    ) {
+        self.capabilityIssuer = capabilityIssuer
+        self.contextProvider = contextProvider
+        self.makeHandoffAdapter = nil
         self.provider = provider
     }
 
@@ -257,13 +270,19 @@ public final class NativeAgentDedicatedSigningServiceSignerAdapter:
                 guard observedBinding == context.binding else {
                     throw NativeAgentDedicatedSigningServiceAdapterError.contextMismatch
                 }
-                return try context.authorityProvider(observedBinding)
+                return try context.authorityProvider(observedBinding, agentRequest)
             }
         )
 
         let adapter: NativeAgentSessionCoordinatorSigningAdapter
         do {
-            adapter = try makeHandoffAdapter(handoffInputs)
+            if let makeHandoffAdapter {
+                adapter = try makeHandoffAdapter(handoffInputs)
+            } else {
+                adapter = try NativeAgentDedicatedSigningHandoffBroker(
+                    association: context.association
+                ).makeAdapter(for: handoffInputs)
+            }
         } catch {
             throw NativeAgentDedicatedSigningServiceAdapterError.handoffUnavailable
         }

@@ -184,6 +184,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
     private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let childFactory: ChildObservationFactory?
     private let signer: any NativeAgentAuthenticatedHostSigning
+    private let dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)?
     private let childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar?
     private let childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar?
     private let signatureBudgetProvider: SignatureBudgetProvider?
@@ -199,6 +200,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource = NativeAgentAuthenticatedHostUnavailableAuditTokenSource(),
         childFactory: ChildObservationFactory?,
         signer: any NativeAgentAuthenticatedHostSigning,
+        dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)? = nil,
         childRegistrar: NativeAgentAuthenticatedHostEndpoint.ChildRegistrar? = nil,
         childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar? = nil,
         signatureBudgetProvider: SignatureBudgetProvider? = nil,
@@ -213,6 +215,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         self.auditTokenSource = auditTokenSource
         self.childFactory = childFactory
         self.signer = signer
+        self.dedicatedSigner = dedicatedSigner
         self.childRegistrar = childRegistrar
         self.childUnregistrar = childUnregistrar
         self.signatureBudgetProvider = signatureBudgetProvider
@@ -290,6 +293,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                     )
                 },
                 signer: signer,
+                dedicatedSigner: dedicatedSigner,
                 nowMilliseconds: nowMilliseconds,
                 childRegistrar: childRegistrar,
                 childUnregistrar: childUnregistrar,
