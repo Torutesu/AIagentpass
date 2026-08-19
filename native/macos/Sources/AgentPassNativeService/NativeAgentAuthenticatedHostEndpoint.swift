@@ -138,6 +138,10 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let childUnregistrar: ChildUnregistrar?
     private let signatureBudgetProvider: SignatureBudgetProvider?
     private let signer: any NativeAgentAuthenticatedHostSigning
+    /// Optional Service-owned Cloud-backed signer. When present it is the
+    /// only signer used for Host payloads; the legacy closure remains solely
+    /// for explicitly unconfigured compatibility deployments.
+    private let dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)?
     private let nowMilliseconds: MillisecondClock
     private let requestIDFactory: RequestIDFactory
     private let sessionLifetimeMilliseconds: Int64
@@ -164,6 +168,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         observePeerProcess: @escaping ProcessObserver,
         observeChild: @escaping ChildObserver,
         signer: any NativeAgentAuthenticatedHostSigning,
+        dedicatedSigner: (any NativeAgentAuthenticatedHostSigning)? = nil,
         nowMilliseconds: @escaping MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         },
@@ -188,6 +193,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.peerProcessObserver = observePeerProcess
         self.childObserver = observeChild
         self.childRegistrar = childRegistrar
+        self.dedicatedSigner = dedicatedSigner
         self.childUnregistrar = childUnregistrar
         self.signatureBudgetProvider = signatureBudgetProvider
         self.signer = signer
@@ -365,7 +371,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
 
             let signature: Data
             do {
-                signature = try signer.sign(authorized)
+                signature = try (dedicatedSigner ?? signer).sign(authorized)
             } catch {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
