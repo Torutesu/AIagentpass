@@ -34,6 +34,10 @@ const SAFE_TEXT = /^[A-Za-z0-9][A-Za-z0-9 ._:/+@-]{0,255}$/u;
 const FORBIDDEN_KEY = /^(?:access[_-]?token|api[_-]?key|authorization|bearer|client[_-]?secret|credential|diagnostic|password|private(?:[_-](?:key|material))?|raw|secret(?:[_-]?(?:access[_-]?)?(?:key|material))?|security[_-]?token|session[_-]?token|stderr|stdout|token|x[_-]?api[_-]?key)$/iu;
 const FORBIDDEN_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|(?:api|session|security)[_-]?token|(?:private|secret)[_-]?(?:access[_-]?)?(?:key|material)|client[_-]?secret)/iu;
 const DIGEST_VALUE = /^sha256:[0-9a-f]{64}$/u;
+const EXTERNAL_EVIDENCE_SOURCE = Object.freeze({
+  aws: /^aws\.(?:kms[._-]?api|workload[._-]?identity)$/u,
+  gcp: /^gcp\.(?:cloud[._-]?kms[._-]?api|workload[._-]?identity)$/u
+});
 
 export class KmsQualificationEvidenceError extends Error {
   constructor(code, message = code) {
@@ -151,11 +155,13 @@ function normalizeExecution(value, provider) {
   };
 }
 
-function normalizeProtection(value, label, mode) {
+function normalizeProtection(value, label, mode, provider) {
   exactKeys(value, ["level", "non_exportable", "key_usage", "evidence_source", "evidence_digest", "observed_at"], label);
   const source = safeString(value.evidence_source, `${label} evidence source`, { maximum: 64, pattern: /^[a-z][a-z0-9._-]{2,63}$/u });
   if (value.level !== "HSM" || value.non_exportable !== true || value.key_usage !== "sign_verify") invalid("protection_not_proven", `${label} must prove HSM non-exportability and sign/verify use`);
-  if (mode === "protected_external" && source === "test_fixture") invalid("protection_not_proven", `${label} cannot use fixture evidence`);
+  if (mode === "protected_external" && !EXTERNAL_EVIDENCE_SOURCE[provider]?.test(source)) {
+    invalid("protection_not_proven", `${label} must identify an approved external provider evidence source`);
+  }
   return {
     level: value.level,
     non_exportable: value.non_exportable,
@@ -203,7 +209,7 @@ function normalizePurposeBinding(value, provider, mode, index) {
     key_version: keyVersion,
     public_key_fingerprint: fingerprint(value.public_key_fingerprint, `${label} public key fingerprint`),
     lifecycle_epoch: positiveInteger(value.lifecycle_epoch, `${label} lifecycle epoch`),
-    protection: normalizeProtection(value.protection, `${label} protection`, mode),
+    protection: normalizeProtection(value.protection, `${label} protection`, mode, provider),
     sign_verify: normalizeSignVerify(value.sign_verify, `${label} sign/verify`)
   };
 }

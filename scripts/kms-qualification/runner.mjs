@@ -25,6 +25,10 @@ const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SAFE_TEXT = /^[a-z][a-z0-9._-]{2,63}$/u;
 const SENSITIVE_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:access[_-]?token|authorization|bearer|credential|diagnostic|password|private|secret|stderr|stdout|token)\b)/iu;
 const FIXTURE_SOURCE = /(?:^|[._-])(?:fixture|mock|test)(?:$|[._-])/iu;
+const EXTERNAL_EVIDENCE_SOURCE = Object.freeze({
+  aws: /^aws\.(?:kms[._-]?api|workload[._-]?identity)$/u,
+  gcp: /^gcp\.(?:cloud[._-]?kms[._-]?api|workload[._-]?identity)$/u
+});
 const AWS_RESOURCE = /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GCP_RESOURCE = /^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z0-9][a-z0-9-]{0,62}\/keyRings\/[A-Za-z0-9_-]{1,63}\/cryptoKeys\/[A-Za-z0-9_-]{1,63}\/cryptoKeyVersions\/([1-9][0-9]{0,19})$/u;
 const FORBIDDEN_RESULT_KEY = /^(?:credential|debug|diagnostic|error|message|output|private|raw|response|result|secret|stderr|stdout|token|trace)/iu;
@@ -348,7 +352,7 @@ function normalizePurposeDescription(value, provider, mode) {
   if (provider === "gcp" && GCP_RESOURCE.exec(value.key_resource)?.[1] !== value.key_version) fail("key_version_mismatch");
   safeString(value.public_key_fingerprint, "public key fingerprint", FINGERPRINT);
   if (!Number.isSafeInteger(value.lifecycle_epoch) || value.lifecycle_epoch < 1) fail("invalid_lifecycle_epoch");
-  const protection = normalizeProtection(value.protection, mode);
+  const protection = normalizeProtection(value.protection, mode, provider);
   return Object.freeze({
     key_id: value.key_id,
     key_resource: value.key_resource,
@@ -359,12 +363,12 @@ function normalizePurposeDescription(value, provider, mode) {
   });
 }
 
-function normalizeProtection(value, mode) {
+function normalizeProtection(value, mode, provider) {
   assertSafeCallbackValue(value, "protection");
   exactKeys(value, ["evidence_digest", "evidence_source", "key_usage", "level", "non_exportable", "observed_at"], "protection");
   if (value.level !== "HSM" || value.non_exportable !== true || value.key_usage !== "sign_verify") fail("protection_not_proven");
   safeString(value.evidence_source, "protection evidence source", SAFE_TEXT);
-  if (mode === "protected_external" && FIXTURE_SOURCE.test(value.evidence_source)) fail("fixture_protection");
+  if (mode === "protected_external" && !EXTERNAL_EVIDENCE_SOURCE[provider]?.test(value.evidence_source)) fail("external_source_not_proven");
   safeString(value.evidence_digest, "protection evidence digest", DIGEST);
   timestamp(value.observed_at, "protection observed at");
   return Object.freeze({

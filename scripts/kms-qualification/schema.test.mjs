@@ -68,7 +68,7 @@ function baseInput({ provider = "aws", mode = "mock", production = false } = {})
         level: "HSM",
         non_exportable: true,
         key_usage: "sign_verify",
-        evidence_source: mode === "mock" ? "test_fixture" : "provider_api",
+        evidence_source: mode === "mock" ? "test_fixture" : `${provider}.kms_api`,
         evidence_digest: digest(`protection:${purpose}`),
         observed_at: now
       },

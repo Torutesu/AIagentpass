@@ -23,7 +23,7 @@ import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { createDeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
 import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
-import { parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
+import { assertFixedResumeDescriptorOptions, parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
 import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
@@ -221,6 +221,7 @@ async function continueNativeSetup() {
     try { enrollmentResumeRecord = enrollmentResumeStore.read(); }
     catch (error) { if (error?.code !== "NOT_INITIALIZED") throw error; }
     if (enrollmentResumeRecord?.state === "failed") throw Object.assign(new Error("The durable device enrollment record is terminal and requires operator reconciliation"), { code: "DEVICE_ENROLLMENT_RESUME_FAILED" });
+    assertFixedResumeDescriptorOptions(flags, enrollmentResumeRecord?.recovery_descriptor);
     if (!enrollmentRequested && !enrollmentResumeRecord?.recovery_descriptor) {
       throw new Error("At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path");
     }

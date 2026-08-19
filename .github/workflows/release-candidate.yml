@@ -7,9 +7,14 @@ on:
         description: Existing annotated vX.Y.Z tag to build
         required: true
         type: string
+      ci_run_id:
+        description: Successful CI workflow run ID with all six protected lanes green on the tag commit
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify-source:
@@ -19,6 +24,7 @@ jobs:
       commit: ${{ steps.verify.outputs.commit }}
       tree: ${{ steps.verify.outputs.tree }}
       tag: ${{ steps.verify.outputs.tag }}
+      ci_run_id: ${{ steps.verify.outputs.ci_run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,11 +34,14 @@ jobs:
         name: Verify SSH-signed release tag without production secrets
         env:
           RELEASE_TAG: ${{ inputs.tag }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
           ALLOWED_SIGNERS: ${{ vars.AGENTPASS_RELEASE_ALLOWED_SIGNERS }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || { echo "Invalid release tag" >&2; exit 1; }
           [[ -n "$ALLOWED_SIGNERS" ]] || { echo "AGENTPASS_RELEASE_ALLOWED_SIGNERS is not configured" >&2; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
           allowed_signers="$RUNNER_TEMP/agentpass-release.allowed-signers"
           umask 077
           printf '%s\n' "$ALLOWED_SIGNERS" > "$allowed_signers"
@@ -43,9 +52,20 @@ jobs:
           tree="$(git rev-parse "$RELEASE_TAG^{tree}")"
           git merge-base --is-ancestor "$commit" origin/main
           [[ "$(git show "$commit:package.json" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(`v${JSON.parse(s).version}`))')" == "$RELEASE_TAG" ]] || { echo "Tag and package version disagree" >&2; exit 1; }
+          ci_run="$RUNNER_TEMP/agentpass-ci-run.json"
+          ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
+          node --input-type=module - "$ci_run" "$ci_jobs" "$commit" "$tree" <<'NODE'
+          import fs from 'node:fs';
+          import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
+          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
+          NODE
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
 
   signed-candidate:
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
@@ -69,9 +89,27 @@ jobs:
       - name: CI release boundary preflight (before protected credentials)
         run: |
           node --input-type=module <<'NODE'
-          import { assertWorkflowBoundary, assertCleanCheckout } from './scripts/release/ci-preflight.mjs';
+          import { assertGithubCiRun, assertWorkflowBoundary, assertCleanCheckout } from './scripts/release/ci-preflight.mjs';
           assertWorkflowBoundary({ eventName: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, repository: process.env.GITHUB_REPOSITORY });
           assertCleanCheckout(process.env.GITHUB_WORKSPACE);
+          NODE
+      - name: Re-validate exact-SHA CI lanes before protected credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.verify-source.outputs.ci_run_id }}
+          EXPECTED_COMMIT: ${{ needs.verify-source.outputs.commit }}
+          EXPECTED_TREE: ${{ needs.verify-source.outputs.tree }}
+        run: |
+          set -euo pipefail
+          ci_run="$RUNNER_TEMP/agentpass-ci-run.json"
+          ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
+          node --input-type=module - "$ci_run" "$ci_jobs" "$EXPECTED_COMMIT" "$EXPECTED_TREE" <<'NODE'
+          import fs from 'node:fs';
+          import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
+          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
           NODE
       - name: Require protected signing inputs
         env:
@@ -299,6 +337,7 @@ jobs:
       - name: CI candidate/source digest preflight
         env:
           MANIFEST: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}.release-manifest.json
+          CANDIDATE_ROOT: ${{ runner.temp }}/candidate
         run: |
           node scripts/release/ci-preflight.mjs \
             --repo-root "$GITHUB_WORKSPACE" \
@@ -308,6 +347,10 @@ jobs:
             --event-name "$GITHUB_EVENT_NAME" \
             --ref "$GITHUB_REF" \
             --repository "$GITHUB_REPOSITORY"
+          node --input-type=module <<'NODE'
+          import { assertProtectedArtifactDirectory } from './scripts/release/ci-preflight.mjs';
+          assertProtectedArtifactDirectory({ directory: process.env.CANDIDATE_ROOT });
+          NODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: notarized-release-candidate

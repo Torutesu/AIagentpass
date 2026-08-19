@@ -1,6 +1,6 @@
 name: Promote qualified release
 
-run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }})
+run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }} / ${{ inputs.ci_run_id }})
 
 on:
   workflow_dispatch:
@@ -13,13 +13,17 @@ on:
         description: Successful P0-C hardware qualification workflow run ID
         required: true
         type: string
+      ci_run_id:
+        description: Successful CI workflow run ID with all six protected lanes green on the release source SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}
+  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}-${{ inputs.ci_run_id }}
   cancel-in-progress: false
 
 env:
@@ -42,6 +46,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
       RELEASE_ALLOWED_SIGNERS: ${{ vars.AGENTPASS_RELEASE_ALLOWED_SIGNERS }}
@@ -70,7 +75,9 @@ jobs:
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "protected main ref required" >&2; exit 1; }
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$RELEASE_RUN_ID" != "$QUALIFICATION_RUN_ID" ]] || { echo "release and qualification runs must be distinct" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" != "$CI_RUN_ID" && "$QUALIFICATION_RUN_ID" != "$CI_RUN_ID" ]] || { echo "release, qualification, and CI runs must be distinct" >&2; exit 1; }
           : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest fingerprint is required}"
           : "${EXPECTED_TEAM_ID:?release Team ID is required}"
           : "${RELEASE_ALLOWED_SIGNERS:?annotated-tag signer policy is required}"
@@ -84,6 +91,9 @@ jobs:
           release_artifacts="$PROMOTION_ROOT/api/release-artifacts.json"
           qualification_artifacts="$PROMOTION_ROOT/api/qualification-artifacts.json"
           qualification_jobs="$PROMOTION_ROOT/api/qualification-jobs.json"
+          ci_run="$PROMOTION_ROOT/api/ci-run.json"
+          ci_jobs="$PROMOTION_ROOT/api/ci-jobs.json"
+          ci_commit="$PROMOTION_ROOT/api/ci-commit.json"
 
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > "$release_run"
@@ -95,6 +105,10 @@ jobs:
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID" > "$ci_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
 
           jq -e --arg repo "$CANONICAL_REPOSITORY" --arg run "$RELEASE_RUN_ID" '
             (.id | tostring) == $run and
@@ -120,6 +134,17 @@ jobs:
             .head_branch == "main" and
             (.head_sha | test("^[0-9a-f]{40}$"))
           ' "$qualification_run" >/dev/null
+          jq -e --arg repo "$CANONICAL_REPOSITORY" --arg run "$CI_RUN_ID" '
+            (.id | tostring) == $run and
+            .repository.full_name == $repo and
+            .head_repository.full_name == $repo and
+            .name == "CI" and
+            .path == ".github/workflows/ci.yml" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "main" and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' "$ci_run" >/dev/null
           jq -e '
             ([.jobs[] | select(.name == "validate-candidate" and .conclusion == "success" and any(.steps[]?; .name == "Validate exact same-repository release-candidate run" and .conclusion == "success"))] | length) == 1 and
             ([.jobs[] | select(.name == "aggregate-qualification" and .conclusion == "success")] | length) == 1
@@ -136,11 +161,27 @@ jobs:
 
           release_head_sha="$(jq -er '.head_sha' "$release_run")"
           qualification_head_sha="$(jq -er '.head_sha' "$qualification_run")"
+          ci_head_sha="$(jq -er '.head_sha' "$ci_run")"
+          [[ "$qualification_head_sha" == "$release_head_sha" ]] || { echo "qualification run is not on the exact release source SHA" >&2; exit 1; }
+          [[ "$ci_head_sha" == "$release_head_sha" ]] || { echo "CI run is not on the exact release source SHA" >&2; exit 1; }
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/commits/$release_head_sha" > "$ci_commit"
+          ci_tree="$(jq -er '.commit.tree.sha' "$ci_commit")"
+          [[ "$ci_tree" =~ ^[0-9a-f]{40}$ ]] || { echo "CI source tree is not a full identity" >&2; exit 1; }
+          node --input-type=module - "$ci_run" "$ci_jobs" "$release_head_sha" "$ci_tree" <<'NODE'
+          import fs from 'node:fs';
+          import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
+          const [runPath, jobsPath, expectedCommit, expectedTree] = process.argv.slice(2);
+          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree });
+          NODE
           {
             printf 'release_run_id=%s\n' "$RELEASE_RUN_ID"
             printf 'qualification_run_id=%s\n' "$QUALIFICATION_RUN_ID"
+            printf 'ci_run_id=%s\n' "$CI_RUN_ID"
             printf 'release_head_sha=%s\n' "$release_head_sha"
             printf 'qualification_head_sha=%s\n' "$qualification_head_sha"
+            printf 'ci_head_sha=%s\n' "$ci_head_sha"
+            printf 'ci_tree=%s\n' "$ci_tree"
           } >> "$GITHUB_OUTPUT"
 
           # Completed-run metadata does not expose workflow_dispatch inputs in the
@@ -151,7 +192,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ steps.preflight.outputs.release_head_sha }}
           fetch-depth: 0
           persist-credentials: false
           clean: true
@@ -456,6 +497,11 @@ jobs:
           MANIFEST_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
           MANIFEST_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
           QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
+          CI_TREE: ${{ steps.preflight.outputs.ci_tree }}
+          CANDIDATE_ROOT: ${{ steps.paths.outputs.promotion_root }}/candidate
+          APPLE_ROOT: ${{ steps.paths.outputs.promotion_root }}/apple
+          INTEL_ROOT: ${{ steps.paths.outputs.promotion_root }}/intel
+          SUMMARY_ROOT: ${{ steps.paths.outputs.promotion_root }}/summary
         run: |
           node scripts/release/ci-preflight.mjs \
             --repo-root "$GITHUB_WORKSPACE" \
@@ -469,6 +515,13 @@ jobs:
             --event-name "$GITHUB_EVENT_NAME" \
             --ref "$GITHUB_REF" \
             --repository "$GITHUB_REPOSITORY"
+          [[ "$CI_TREE" == "$MANIFEST_SOURCE_TREE" ]] || { echo "CI workflow tree differs from manifest source tree" >&2; exit 1; }
+          node --input-type=module <<'NODE'
+          import { assertProtectedArtifactDirectory } from './scripts/release/ci-preflight.mjs';
+          for (const directory of [process.env.CANDIDATE_ROOT, process.env.APPLE_ROOT, process.env.INTEL_ROOT, process.env.SUMMARY_ROOT]) {
+            assertProtectedArtifactDirectory({ directory });
+          }
+          NODE
 
       - name: Refuse an existing release before creating the public release
         env:

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { assertCandidateBinding, assertCleanCheckout, assertExternalGates, assertWorkflowBoundary, parseArguments } from './ci-preflight.mjs';
+import { assertCandidateBinding, assertCleanCheckout, assertExternalGates, assertGithubCiRun, assertProtectedArtifactDirectory, assertProtectedArtifactSecretScan, assertTerminalResults, assertWorkflowBoundary, EXACT_CI_LANES, parseArguments } from './ci-preflight.mjs';
 
 const git = (root, ...args) => {
   const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
@@ -59,6 +59,64 @@ test('candidate binding rejects a product artifact digest mismatch', () => {
   const { manifestPath, artifactName } = writeManifest(fixture);
   fs.writeFileSync(join(fixture.root, artifactName), 'tampered\n');
   assert.throws(() => assertCandidateBinding({ repoRoot: fixture.root, manifestPath, expectedCommit: fixture.commit, expectedTree: fixture.tree }), /product digest differs/);
+});
+
+const terminalResults = (commit, tree, overrides = {}) => EXACT_CI_LANES.map((lane) => ({
+  lane,
+  status: 'completed',
+  conclusion: 'success',
+  terminal: true,
+  source_commit: commit,
+  source_tree: tree,
+  workflow_path: '.github/workflows/ci.yml',
+  workflow_tree: tree,
+  ...overrides[lane],
+}));
+
+test('exact-SHA qualification requires all six terminal CI lanes and one workflow tree', () => {
+  const fixture = candidate();
+  assert.deepEqual(assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree), expectedCommit: fixture.commit, expectedTree: fixture.tree }), {
+    lanes: [...EXACT_CI_LANES], sourceCommit: fixture.commit, sourceTree: fixture.tree, workflowPath: '.github/workflows/ci.yml'
+  });
+  assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree).slice(0, 5), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /exactly 6 lanes/);
+  assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree, { test: { source_tree: 'f'.repeat(40) } }), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /exact source SHA\/tree/);
+  assert.throws(() => assertTerminalResults({ results: terminalResults(fixture.commit, fixture.tree, { test: { conclusion: 'failure' } }), expectedCommit: fixture.commit, expectedTree: fixture.tree }), /terminal success/);
+});
+
+test('GitHub CI API qualification maps the protected six jobs and rejects a different run', () => {
+  const fixture = candidate();
+  const run = {
+    name: 'CI', path: '.github/workflows/ci.yml', status: 'completed', conclusion: 'success', event: 'push',
+    head_branch: 'main', head_sha: fixture.commit, head_repository: { full_name: 'Torutesu/AIagentpass' }
+  };
+  const names = ['PostgreSQL 16 authority qualification', 'PostgreSQL 17 authority qualification', 'postgres-integration', 'browser-e2e', 'p0b-live-process', 'test'];
+  assert.deepEqual(assertGithubCiRun({ run, jobs: { jobs: names.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }, expectedCommit: fixture.commit, expectedTree: fixture.tree }).lanes, [...EXACT_CI_LANES]);
+  assert.throws(() => assertGithubCiRun({ run: { ...run, head_sha: 'f'.repeat(40) }, jobs: { jobs: names.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }, expectedCommit: fixture.commit, expectedTree: fixture.tree }), /expected source SHA/);
+  assert.throws(() => assertGithubCiRun({ run: { ...run, event: 'pull_request' }, jobs: { jobs: names.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }, expectedCommit: fixture.commit, expectedTree: fixture.tree }), /canonical main run/);
+});
+
+test('protected artifact secret scan is digest-bound and fail-closed', () => {
+  const root = fs.mkdtempSync(join(os.tmpdir(), 'agentpass-ci-preflight-'));
+  const safe = join(root, 'safe.pkg');
+  const secret = join(root, 'secret.pkg');
+  fs.writeFileSync(safe, 'notarized package bytes\n');
+  fs.writeFileSync(secret, '-----BEGIN PRIVATE KEY-----\n');
+  const safeDigest = createHash('sha256').update(fs.readFileSync(safe)).digest('hex');
+  assert.equal(assertProtectedArtifactSecretScan({ artifactPath: safe, expectedSha256: safeDigest }).status, 'passed');
+  assert.throws(() => assertProtectedArtifactSecretScan({ artifactPath: secret, expectedSha256: createHash('sha256').update(fs.readFileSync(secret)).digest('hex') }), /secret scan found/);
+  assert.throws(() => assertProtectedArtifactSecretScan({ artifactPath: safe, expectedSha256: 'f'.repeat(64) }), /digest is not manifest-bound/);
+});
+
+test('protected artifact directory scan rejects nested secrets and symlinks', () => {
+  const root = fs.mkdtempSync(join(os.tmpdir(), 'agentpass-ci-preflight-'));
+  fs.mkdirSync(join(root, 'nested'));
+  fs.writeFileSync(join(root, 'nested', 'report.json'), '{"ok":true}\n', { mode: 0o600 });
+  assert.deepEqual(assertProtectedArtifactDirectory({ directory: root }), { status: 'passed', files: 1, bytes: 12 });
+  fs.writeFileSync(join(root, 'nested', 'secret.txt'), 'ghp_123456789012345678901234567890\n', { mode: 0o600 });
+  assert.throws(() => assertProtectedArtifactDirectory({ directory: root }), /secret scan found/);
+  fs.unlinkSync(join(root, 'nested', 'secret.txt'));
+  fs.symlinkSync(join(root, 'nested', 'report.json'), join(root, 'link'));
+  assert.throws(() => assertProtectedArtifactDirectory({ directory: root }), /contains a symlink/);
 });
 
 test('external gate preflight rejects not_proven evidence and requires explicit status', () => {
