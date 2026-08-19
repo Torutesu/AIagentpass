@@ -222,7 +222,7 @@ private func routeRuntimeAuthority(directory: URL) throws -> NativeAgentRuntimeA
         organizationID: routeOrganizationID,
         deviceID: routeDeviceID,
         deviceKeyTag: NativeEnrollmentKeyMaterial.fixedApplicationTag,
-        signingIntentDirectory: directory.path,
+        signingIntentDirectory: directory.standardizedFileURL.path,
         globalSessionLimit: 8,
         perAgentSessionLimit: 4,
         perWorktreeSessionLimit: 2,
@@ -232,12 +232,12 @@ private func routeRuntimeAuthority(directory: URL) throws -> NativeAgentRuntimeA
 }
 
 private func routeValues() throws -> RouteValues {
-    let root = FileManager.default.temporaryDirectory
-        .standardizedFileURL
+    let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
         .appendingPathComponent("agentpass-route-test-\(UUID().uuidString)")
         .standardizedFileURL
     try FileManager.default.createDirectory(
         at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
 
     let binding = try routeBinding()
     let lease = try routeLease(binding: binding)
@@ -263,22 +263,25 @@ private func routeValues() throws -> RouteValues {
         connectionBinding: connection,
         nowMilliseconds: routeNow - 1_000,
         nowMonotonicNanoseconds: 1_000)
-    let recoveryPath = root.appendingPathComponent("recovery.json").path
-    let recoveryV4Path = root.appendingPathComponent("recovery-v4.json").path
+    let recoveryPath = root.appendingPathComponent("recovery.json").standardizedFileURL.path
+    let recoveryV4Path = root.appendingPathComponent("recovery-v4.json").standardizedFileURL.path
+    let recoveryStore = try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath)
+    let recoveryV4Store = try NativeAgentSessionConsumeRecoveryV4Store(path: recoveryV4Path)
+    let runtimeAuthority = try routeRuntimeAuthority(directory: root.standardizedFileURL)
     let coordinator = try NativeAgentSessionCoordinator(
         connectionTokenIdentity: routeToken,
         connectionRevalidator: {},
         bootstrapStore: challengeStore,
         bindingObserver: RouteBindingObserver(binding: binding),
         grantConsumer: RouteGrantConsumer(lease: lease),
-        recoveryStore: try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath),
-        activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(path: recoveryV4Path),
+        recoveryStore: recoveryStore,
+        activationRecoveryStore: recoveryV4Store,
         registry: NativeAgentSessionRegistry(),
         audit: RouteAudit(),
         wallClock: RouteWallClock(),
         monotonicClock: RouteMonotonicClock(),
         random: RouteRandom(),
-        authority: try routeRuntimeAuthority(directory: root))
+        authority: runtimeAuthority)
     _ = try coordinator.start(
         bootstrapID: challenge.bootstrapID, proof: challenge.challenge)
     let handoff = try coordinator.makeSigningHandoff(request: request) { _ in authority }
@@ -286,7 +289,7 @@ private func routeValues() throws -> RouteValues {
         handoff: handoff,
         coordinator: coordinator,
         transactionStore: try NativeSigningTransactionStore(
-            path: root.appendingPathComponent("transactions.json").path))
+            path: root.appendingPathComponent("transactions.json").standardizedFileURL.path))
     return RouteValues(
         binding: binding,
         identity: try routeProcessIdentity(),
