@@ -14,6 +14,7 @@ public enum NativeAgentAuthenticatedHostEndpointError: String, Error, Equatable,
     case childIdentityMismatch = "child_identity_mismatch"
     case childObservationFailed = "child_observation_failed"
     case expired = "expired"
+    case revoked = "revoked"
     case signerFailed = "signer_failed"
     case outcomeUnknown = "outcome_unknown"
     case endpointClosed = "endpoint_closed"
@@ -145,7 +146,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
 
     private var session: NativeAgentAuthenticatedGitBridgeSession?
     private var expirationMilliseconds: Int64?
-    private var expirationWasObserved = false
+    private var terminalStatus: AgentPassHostXPCContract.SessionStatus?
     private var registeredChildBindingHash: String?
     private var signatureBudget: NativeAgentSignatureBudgetLedger?
     private var consumedSignRequests: [UInt32: ConsumedSignRequest] = [:]
@@ -226,7 +227,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             session = newSession
             signatureBudget = budget
             expirationMilliseconds = expiration
-            expirationWasObserved = false
+            terminalStatus = nil
             consumedSignRequests.removeAll(keepingCapacity: true)
             issuedRequestIDs.removeAll(keepingCapacity: true)
             guard let response = AgentPassHostPrepareResponse(
@@ -428,8 +429,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         do {
             try revalidatePeerOrRevoke()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
-            let snapshot = closeSessionAndRevoke(session)
-            expirationWasObserved = false
+            let snapshot = closeSessionAndRevoke(session, status: .closed)
             guard let response = AgentPassHostCloseResponse(
                 sessionID: snapshot.sessionID,
                 closedAtMilliseconds: try validTimestamp(nowMilliseconds())
@@ -460,11 +460,12 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     /// signer failure, or peer drift.
     @discardableResult
     private func closeSessionAndRevoke(
-        _ session: NativeAgentAuthenticatedGitBridgeSession
+        _ session: NativeAgentAuthenticatedGitBridgeSession,
+        status: AgentPassHostXPCContract.SessionStatus = .revoked
     ) -> NativeAgentAuthenticatedGitBridgeSession.Snapshot {
         let snapshot = session.close()
         unregisterRegisteredChild()
-        expirationWasObserved = true
+        terminalStatus = status
         return snapshot
     }
 
@@ -508,8 +509,13 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private func requireLiveSession() throws {
         guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
         let snapshot = try snapshotAndRefreshExpiration(for: session)
-        if expirationWasObserved {
-            throw NativeAgentAuthenticatedHostEndpointError.expired
+        if let terminalStatus {
+            switch terminalStatus {
+            case .expired: throw NativeAgentAuthenticatedHostEndpointError.expired
+            case .revoked: throw NativeAgentAuthenticatedHostEndpointError.revoked
+            case .closed: throw NativeAgentAuthenticatedHostEndpointError.endpointClosed
+            default: break
+            }
         }
         if snapshot.phase == .closed {
             throw NativeAgentAuthenticatedHostEndpointError.endpointClosed
@@ -524,8 +530,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         }
         let now = try validTimestamp(nowMilliseconds())
         if now >= expirationMilliseconds {
-            if !expirationWasObserved {
-                _ = closeSessionAndRevoke(session)
+            if terminalStatus == nil {
+                _ = closeSessionAndRevoke(session, status: .expired)
             }
         }
         return session.snapshot
@@ -538,7 +544,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .new: return .prepared
         case .prepared: return .prepared
         case .attached: return snapshot.requestCount == 0 ? .attached : .active
-        case .closed: return expirationWasObserved ? .expired : .closed
+        case .closed: return terminalStatus ?? .closed
         }
     }
 
@@ -613,6 +619,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .signerFailed: return 9
         case .endpointClosed: return 10
         case .outcomeUnknown: return 11
+        case .revoked: return 12
         }
     }
 }
