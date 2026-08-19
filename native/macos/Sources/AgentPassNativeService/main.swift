@@ -266,6 +266,48 @@ private struct ServiceRefreshHintKey: Decodable {
     }
 }
 
+private let dedicatedChildHelperBundleIdentifier = "dev.agentpass.git-sign-xpc"
+
+/// Returns only the fixed Child-helper requirement provisioned by the signed
+/// product configuration. The Host and management requirements are separate
+/// principals and are never valid fallbacks for this listener.
+internal func deriveDedicatedChildCodeSigningRequirement(
+    configuredChildRequirement: String?,
+    hostCodeSigningRequirement: String,
+    managementCodeSigningRequirement: String
+) throws -> String {
+    guard let configuredChildRequirement else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration is missing the dedicated Child helper code-signing requirement"
+        )
+    }
+    let requirement = configuredChildRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    let hostRequirement = hostCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    let managementRequirement = managementCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !requirement.isEmpty,
+          requirement == configuredChildRequirement,
+          !hostRequirement.isEmpty,
+          !managementRequirement.isEmpty,
+          requirement != hostRequirement,
+          requirement != managementRequirement,
+          requirement.contains("anchor apple generic"),
+          requirement.components(separatedBy: "identifier \"").count == 2,
+          requirement.contains("identifier \"\(dedicatedChildHelperBundleIdentifier)\""),
+          requirement.range(of: #"\bor\b"#, options: .regularExpression) == nil else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    var parsedRequirement: SecRequirement?
+    guard SecRequirementCreateWithString(requirement as CFString, [], &parsedRequirement) == errSecSuccess,
+          parsedRequirement != nil else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration contains an invalid dedicated Child helper code-signing requirement"
+        )
+    }
+    return requirement
+}
+
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let agentMachServiceName: String
@@ -341,6 +383,7 @@ private struct ServiceConfiguration: Decodable {
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
     let agentClientCodeSigningRequirement: String
+    let childCodeSigningRequirement: String?
     let allowedClientUID: UInt32
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -418,6 +461,7 @@ private struct ServiceConfiguration: Decodable {
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
         case agentClientCodeSigningRequirement = "agent_client_code_signing_requirement"
+        case childCodeSigningRequirement = "child_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
     }
 
@@ -460,6 +504,11 @@ private struct ServiceConfiguration: Decodable {
         guard value.agentClientCodeSigningRequirement == (try? NativeAgentCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
             throw AgentPassNativeError.invalidConfiguration("Native Agent host code-signing requirement must bind its fixed Team ID, Developer ID identity, and dedicated entitlement")
         }
+        _ = try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: value.childCodeSigningRequirement,
+            hostCodeSigningRequirement: value.agentClientCodeSigningRequirement,
+            managementCodeSigningRequirement: value.clientCodeSigningRequirement
+        )
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
             guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
                   value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag : value.controlStatePath != nil else {
@@ -5061,7 +5110,11 @@ do {
     )
     let childDelegate = NativeAgentAuthenticatedChildGitListenerDelegate(
         allowedClientUID: configuration.allowedClientUID,
-        codeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+        codeSigningRequirement: try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: configuration.childCodeSigningRequirement,
+            hostCodeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+            managementCodeSigningRequirement: configuration.clientCodeSigningRequirement
+        ),
         registry: childRegistry,
         worktreeObserver: worktreeObserver
     )

@@ -115,6 +115,44 @@ private func changed(_ index: Int) -> [UInt32] {
     }
 }
 
+@Test func childCodeSigningRequirementFailsClosedWhenProductConfigurationOmitsIt() {
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: nil,
+            hostCodeSigningRequirement: "anchor apple generic and identifier \"dev.agentpass.agent-host\"",
+            managementCodeSigningRequirement: "anchor apple generic and identifier \"dev.agentpass.native-client\""
+        )
+    }
+}
+
+@Test func childCodeSigningRequirementRejectsHostReuseAndAmbiguousPrincipals() {
+    let hostRequirement = "anchor apple generic and identifier \"dev.agentpass.agent-host\""
+    let managementRequirement = "anchor apple generic and identifier \"dev.agentpass.native-client\""
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: hostRequirement,
+            hostCodeSigningRequirement: hostRequirement,
+            managementCodeSigningRequirement: managementRequirement
+        )
+    }
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: "anchor apple generic and identifier \"dev.agentpass.git-sign-xpc\" or identifier \"dev.agentpass.agent-host\"",
+            hostCodeSigningRequirement: hostRequirement,
+            managementCodeSigningRequirement: managementRequirement
+        )
+    }
+}
+
+@Test func childCodeSigningRequirementAcceptsOnlyTheFixedDedicatedHelperPrincipal() throws {
+    let requirement = "anchor apple generic and identifier \"dev.agentpass.git-sign-xpc\" and certificate leaf[subject.OU] = \"ABCDE12345\""
+    #expect(try deriveDedicatedChildCodeSigningRequirement(
+        configuredChildRequirement: requirement,
+        hostCodeSigningRequirement: "anchor apple generic and identifier \"dev.agentpass.agent-host\"",
+        managementCodeSigningRequirement: "anchor apple generic and identifier \"dev.agentpass.native-client\""
+    ) == requirement)
+}
+
 @Test func hostListenerDefaultAuditTokenSourceFailsClosedWhenTheOSSourceIsUnavailable() throws {
     let delegate = NativeAgentAuthenticatedHostListenerDelegate(
         allowedClientUID: 501,
