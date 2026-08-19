@@ -6,17 +6,17 @@ import Testing
 private actor FakeAuditUploader: NativeDeviceAuditBatchUploading {
     private(set) var calls = 0
     var response: NativeDeviceAuditIngestionResponse?
-    var shouldFail = false
+    var failure: NativeDeviceSyncHTTPTransportError?
 
     func uploadAuditBatch(_ batch: NativeDeviceAuditBatch) async throws -> NativeDeviceAuditIngestionResponse {
         calls += 1
-        if shouldFail { throw NativeDeviceSyncHTTPTransportError.transportFailure }
+        if let failure { throw failure }
         guard let response else { throw NativeDeviceSyncHTTPTransportError.transportFailure }
         return response
     }
 
-    func configure(response: NativeDeviceAuditIngestionResponse?, shouldFail: Bool) {
-        self.response = response; self.shouldFail = shouldFail
+    func configure(response: NativeDeviceAuditIngestionResponse?, failure: NativeDeviceSyncHTTPTransportError?) {
+        self.response = response; self.failure = failure
     }
 }
 
@@ -44,12 +44,12 @@ func uploadCoordinatorRetriesWithoutDeletingOnFailure() async throws {
     let root = try coordinatorRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
     let event = try coordinatorEvent(); _ = try outbox.enqueue(event)
-    let fake = FakeAuditUploader(); await fake.configure(response: nil, shouldFail: true)
+    let fake = FakeAuditUploader(); await fake.configure(response: nil, failure: .transportFailure)
     let coordinator = NativeDeviceAuditUploadCoordinator(outbox: outbox, transport: fake)
     do { _ = try await coordinator.flush(); Issue.record("transport failure unexpectedly succeeded") } catch is NativeDeviceSyncHTTPTransportError {}
     #expect(try outbox.pending() == [event])
 
-    await fake.configure(response: NativeDeviceAuditIngestionResponse(deviceID: "device", acceptedEventIDs: [event.eventID], duplicateEventIDs: [], gapCount: 0, headHash: event.eventHash, headEventID: event.eventID, chainStatus: "continuous"), shouldFail: false)
+    await fake.configure(response: NativeDeviceAuditIngestionResponse(deviceID: "device", acceptedEventIDs: [event.eventID], duplicateEventIDs: [], gapCount: 0, headHash: event.eventHash, headEventID: event.eventID, chainStatus: "continuous"), failure: nil)
     #expect(try await coordinator.flush() == 1)
     #expect(try outbox.pending().isEmpty)
     #expect(await fake.calls == 2)
@@ -60,10 +60,28 @@ func uploadCoordinatorBoundsAttempts() async throws {
     let root = try coordinatorRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
     _ = try outbox.enqueue(try coordinatorEvent())
-    let fake = FakeAuditUploader(); await fake.configure(response: nil, shouldFail: true)
+    let fake = FakeAuditUploader(); await fake.configure(response: nil, failure: .transportFailure)
     let coordinator = NativeDeviceAuditUploadCoordinator(outbox: outbox, transport: fake)
     #expect(try await coordinator.flush(maximumAttempts: 3) == 0)
     #expect(await fake.calls == 3)
     #expect(try outbox.pending().count == 1)
     do { _ = try await coordinator.flush(maximumAttempts: 9); Issue.record("invalid attempt bound unexpectedly succeeded") } catch is AgentPassNativeError {}
+}
+
+@Test("upload coordinator does not retry malformed or trust-boundary responses")
+func uploadCoordinatorDoesNotRetryTrustFailures() async throws {
+    let root = try coordinatorRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
+    _ = try outbox.enqueue(try coordinatorEvent())
+    let fake = FakeAuditUploader()
+    await fake.configure(response: nil, failure: .malformedResponse)
+    let coordinator = NativeDeviceAuditUploadCoordinator(outbox: outbox, transport: fake)
+    do {
+        // A malformed envelope is a non-retryable trust failure. The fake
+        // models the transport's typed projection after response validation.
+        _ = try await coordinator.flush(maximumAttempts: 3)
+        Issue.record("malformed response unexpectedly succeeded")
+    } catch {
+        #expect(await fake.calls == 1)
+    }
 }
