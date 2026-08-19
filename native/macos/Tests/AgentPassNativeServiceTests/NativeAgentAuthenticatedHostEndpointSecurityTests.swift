@@ -234,7 +234,7 @@ private final class HostEndpointHarness: @unchecked Sendable {
         ))
     }
 
-    private static func observation(
+    static func observation(
         pid: Int32,
         pidVersion: UInt64,
         codeDirectoryHash: String,
@@ -385,6 +385,28 @@ private func childErrorCode(
     endpoint.hostSessionStatus(try #require(AgentPassHostStatusRequest())) { response, _ in status = response }
     #expect(status?.status == AgentPassHostXPCContract.SessionStatus.active.rawValue)
     #expect(status?.usedSignatures == 1)
+}
+
+@Test func hostEndpointPeerDriftRevokesChildRegistrationBeforeReturningError() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint()
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    harness.setPeerObservation(try HostEndpointHarness.observation(
+        pid: 42,
+        pidVersion: 9,
+        codeDirectoryHash: String(repeating: "c", count: 64),
+        bundleIdentifier: "dev.agentpass.agent-host"
+    ))
+
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([6])))
+    #expect(errorCode(endpoint, sign: request) == 4)
+    #expect(harness.recorder.signCount == 0)
+    #expect(harness.recorder.unregisterCount == 1)
+
+    let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([7])))
+    #expect(childErrorCode(harness.childEndpoint(), request: childRequest) == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 }
 
 @Test func hostEndpointRejectsPIDIdentityAndWorktreeMismatchDuringAttach() throws {

@@ -15,14 +15,10 @@
   - attach の PID、PID generation、executable identity、ancestry、worktree digest の各 mismatch が deny されること
   - 空のsigner responseで Child registration と budget が revoke されること
 
-### Review finding kept out of the runnable suite
+### Peer process drift
 
-- peer process drift の後に Child registration が revoke されるべきだが、現行の
-  `NativeAgentAuthenticatedHostEndpoint.signHostPayload` は `revalidatePeer()` の
-  失敗を reply error に変換して return するため、`closeSessionAndRevoke` に到達しない。
-  これは現行コードでは fail する回帰期待であり、passするテストとしては誤解を招くため、
-  runnable testからは除外した。production sourceを変更しない制約のため、未修正の
-  security findingとして記録する。
+- peer process drift は connection-owned session と Child registry を terminal
+  revoke する実装とし、runnable regression test で確認する。
 
 ### Child XPC / registry
 
@@ -38,7 +34,7 @@
   - Host の全 request DTO と Child sign request に未知の keyed field を追加した archive を投入
   - authority boundary では未知フィールドを黙って無視せず deny することを要求
 
-この未知フィールド検査は、既知の `capability` 等の禁止語検査とは別のものです。現在の decoder は既知の禁止キーを拒否する一方、任意の未知キーを拒否する allow-list にはなっていないため、現状では回帰テストが fail することを想定しています。
+この未知フィールド検査は、既知の `capability` 等の禁止語検査とは別のものです。Host/Child DTO の decoder は任意の未知 keyed field を拒否し、回帰テストで確認済みです。
 
 ## 実行結果
 
@@ -50,12 +46,11 @@
 
 最初の `swift test` は `/Users/torutano/.cache/clang/ModuleCache` の権限拒否で開始できませんでした。module cacheを `/private/tmp` に移した再実行では、対象のHost/Childテストをビルド・実行できました。
 
-### まだfailする想定のnegative test
+### 残る外部ゲート
 
-現行production codeの安全性欠落を確認するため、次の検査は別レーンにあり、passすることを期待していません。
-
-1. peer revalidation failure時の `closeSessionAndRevoke` 未到達
-2. unknown keyed field の黙示的受理
+今回のテストレーンで、peer drift revoke と unknown keyed field rejection は
+local code/test boundaryまで確認済みです。実launchd/NSXPC、署名済みartifact、
+Secure Enclave、Cloud/PostgreSQLは引き続き外部 qualification が必要です。
 
 静的根拠は、`NativeAgentAuthenticatedHostEndpoint.signHostPayload` が
 `try revalidatePeer()` の失敗を `closeSessionAndRevoke` へ渡さず reply error に変換する制御フローと、`AgentPassHostXPCContract` が既知の禁止キー集合だけを `containsValue(forKey:)` で検査している点です。

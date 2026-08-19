@@ -182,7 +182,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         stateLock.lock()
         defer { stateLock.unlock() }
         do {
-            try revalidatePeer()
+            try revalidatePeerOrRevoke()
             guard session == nil else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
 
             let sessionID = UUID().uuidString.lowercased()
@@ -219,7 +219,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         stateLock.lock()
         defer { stateLock.unlock() }
         do {
-            try revalidatePeer()
+            try revalidatePeerOrRevoke()
             try requireLiveSession()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
 
@@ -268,7 +268,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         stateLock.lock()
         defer { stateLock.unlock() }
         do {
-            try revalidatePeer()
+            try revalidatePeerOrRevoke()
             try requireLiveSession()
             guard let session,
                   let bridgeRequest = session.makeRequest(
@@ -388,6 +388,22 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         unregisterRegisteredChild()
         expirationWasObserved = true
         return snapshot
+    }
+
+    /// Peer drift is terminal for the connection-owned session. Revalidation
+    /// failures must not merely become an XPC error while leaving the child
+    /// registry entry usable by a still-running child.
+    private func revalidatePeerOrRevoke() throws {
+        do {
+            try revalidatePeer()
+        } catch {
+            if let session {
+                _ = closeSessionAndRevoke(session)
+            } else {
+                unregisterRegisteredChild()
+            }
+            throw error
+        }
     }
 
     private func unregisterRegisteredChild() {
