@@ -14,12 +14,6 @@ private func planHandoff() throws -> NativeAgentLaunchAuthorityHandoff {
     )
 }
 
-private struct FailingPlanAdapter: NativeAgentHostLifecycleAdapter {
-    func hooks(for _: NativeAgentHostLaunchPlan) throws -> NativeAgentHostLifecycleCoordinatorHooks {
-        throw NativeAgentHostLifecycleAdapterError.unavailable
-    }
-}
-
 @Test func launchPlanBindsProjectPathAndForcesAuthenticatedXPC() throws {
     let plan = try NativeAgentHostLaunchPlan(projectPath: "/tmp/project", authorityHandoff: planHandoff())
     #expect(plan.projectPath == "/tmp/project")
@@ -45,7 +39,7 @@ private struct FailingPlanAdapter: NativeAgentHostLifecycleAdapter {
         plan: plan,
         connection: connection,
         supervisor: NativeAgentHostChildSupervisor(hooks: .system),
-        adapter: FailingPlanAdapter()
+        adapter: NativeAgentHostUnavailableLifecycleAdapter()
     )
     #expect(throws: NativeAgentHostLifecycleAdapterError.unavailable) {
         _ = try runtime.start()

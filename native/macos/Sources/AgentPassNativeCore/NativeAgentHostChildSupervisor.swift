@@ -688,7 +688,7 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
     private let hooks: NativeAgentHostChildSupervisorHooks
     private let cursorExecutableResolver: @Sendable () throws -> NativeCursorAgentRuntimeSelection
     private let cursorExecutableRevalidator: @Sendable (NativeCursorAgentRuntimeSelection) throws -> Void
-    private let authenticatedHostXPCClientFactory: @Sendable () -> any NativeAgentHostAuthenticatedXPCClientProtocol
+    private let authenticatedHostLaunchPreparationAdapter: any NativeAgentHostAuthenticatedLaunchPreparationAdapter
     private let childObserverFactory: @Sendable () -> any NativeAgentHostChildObserver
     private let launchNonceFactory: @Sendable () -> Data
 
@@ -700,7 +700,7 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
         self.cursorExecutableRevalidator = { selection in
             try NativeAgentHostExecutableTrust.revalidate(selection)
         }
-        self.authenticatedHostXPCClientFactory = { NativeAgentAuthenticatedHostXPCClient() }
+        self.authenticatedHostLaunchPreparationAdapter = NativeAgentAuthenticatedHostLaunchPreparationAdapter()
         self.childObserverFactory = { NativeAgentHostDarwinChildObserver() }
         self.launchNonceFactory = { NativeAgentHostLaunchNonce.make() }
     }
@@ -719,7 +719,9 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
         launchNonceFactory: @escaping @Sendable () -> Data = { NativeAgentHostLaunchNonce.make() }
     ) {
         self.hooks = hooks
-        self.authenticatedHostXPCClientFactory = authenticatedHostXPCClientFactory
+        self.authenticatedHostLaunchPreparationAdapter = NativeAgentAuthenticatedHostLaunchPreparationAdapter(
+            clientFactory: authenticatedHostXPCClientFactory
+        )
         self.childObserverFactory = childObserverFactory
         self.launchNonceFactory = launchNonceFactory
         self.cursorExecutableResolver = {
@@ -795,14 +797,13 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
 
         let authenticatedHostXPC: (any NativeAgentHostAuthenticatedXPCClientProtocol)?
         if request.gitTransport == .authenticatedXPC {
-            let client = authenticatedHostXPCClientFactory()
             do {
                 // Prepare is deliberately connection-owned and must complete
                 // before posix_spawn. There is no authenticatedXPC fallback.
-                try client.prepareForChild(launchNonce: launchNonceFactory())
-                authenticatedHostXPC = client
+                authenticatedHostXPC = try authenticatedHostLaunchPreparationAdapter.prepareForChild(
+                    launchNonce: launchNonceFactory()
+                )
             } catch {
-                try? client.closeForChild(reason: .cancelled)
                 try? privateGitBridge?.close()
                 throw NativeAgentHostChildSupervisorError.launchFailed
             }

@@ -38,6 +38,7 @@ final class NativeAgentHostAuthenticatedXPCSupervisorFixture: @unchecked Sendabl
     private var recordedEvents: [Event] = []
     private let identity: NativeProcessIdentity
     private let worktreeBindingDigest = Data(repeating: 0x44, count: AgentPassHostXPCContract.digestBytes)
+    private(set) var lastLaunchNonce: Data?
     private(set) var lastExecutableIdentityDigest: Data?
     private(set) var lastAncestryBindingDigest: Data?
     private(set) var lastWorktreeBindingDigest: Data?
@@ -98,6 +99,7 @@ final class NativeAgentHostAuthenticatedXPCSupervisorFixture: @unchecked Sendabl
     }
 
     func prepareForChild(launchNonce: Data) throws {
+        lastLaunchNonce = launchNonce
         try prepare()
     }
 

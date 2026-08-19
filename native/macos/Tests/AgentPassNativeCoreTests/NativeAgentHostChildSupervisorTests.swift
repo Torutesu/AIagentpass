@@ -768,6 +768,33 @@ private func makeAuthenticatedXPCSupervisor(
     )
 }
 
+@Test func authenticatedHostLaunchPreparationAdapterUsesTheExistingClientAndKeepsItOwned() throws {
+    let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+    let adapter = NativeAgentAuthenticatedHostLaunchPreparationAdapter(
+        clientFactory: { xpc }
+    )
+    let nonce = Data(repeating: 0x5a, count: 16)
+
+    let client = try adapter.prepareForChild(launchNonce: nonce)
+    try client.closeForChild(reason: .cancelled)
+
+    #expect(xpc.lastLaunchNonce == nonce)
+    #expect(xpc.events == [.prepare, .clientClose])
+}
+
+@Test func authenticatedHostLaunchPreparationFailureClosesTheClientAndFailsClosed() throws {
+    let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+    xpc.failPrepare = true
+    let adapter = NativeAgentAuthenticatedHostLaunchPreparationAdapter(
+        clientFactory: { xpc }
+    )
+
+    #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+        _ = try adapter.prepareForChild(launchNonce: Data(repeating: 0x5a, count: 16))
+    }
+    #expect(xpc.events == [.prepare, .clientClose])
+}
+
 @Test func authenticatedXPCPrepareFailureDoesNotSpawnAChildOrOpenLegacyFD3() throws {
     try withTemporaryProjectDirectory { project in
         let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
