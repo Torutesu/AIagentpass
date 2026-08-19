@@ -25,6 +25,7 @@ import { createProcessBindingPolicyRegistry } from "./process-binding-policy-reg
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
 import { createAgentSessionSigningCapabilityApi } from "./agent-session-signing-capability-api.mjs";
 import { createAgentSessionSigningCapabilityIssuanceService } from "./human-auth/agent-sessions/signing-capability-issuance-service.mjs";
+import { createAgentLaunchAuthorityHandoffApi } from "./agent-launch-authority-handoff-api.mjs";
 import { createQualificationGrantBatchDeviceApi } from "./qualification-grant-batch-device-api.mjs";
 import { createHostedQualificationManifestSigner, parseQualificationManifestSignerConfig } from "./qualification-manifest-signer-config.mjs";
 import { createOwnerRecoveryNotificationPublisher } from "./postgres/owner-recovery-notification-publisher.mjs";
@@ -620,6 +621,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       });
     }
     let agentSessionDeviceApi;
+    let agentLaunchAuthorityHandoffApi;
     let qualificationGrantBatchDeviceApi;
     if (profile.isHosted) {
       const deviceRequestVerifier = async (request, options) => {
@@ -636,6 +638,15 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         await agentSessionSigner.verificationKeyMetadata(grant?.statement?.key_id, { at: context.now });
         return agentSessionSigner.verifyAgentSessionGrant(grant, { at: context.now });
       };
+      agentLaunchAuthorityHandoffApi = createAgentLaunchAuthorityHandoffApi({
+        deviceRequestVerifier,
+        sessionBinder: postgresRuntime.agentSessionSigningCapabilitySessionBinder ?? (async () => {
+          const unavailable = new Error("full Agent Session Lease binding is unavailable");
+          unavailable.code = "ERR_SESSION_BINDING_UNAVAILABLE";
+          throw unavailable;
+        }),
+        rateLimiter: hostedRateLimiter
+      });
       if (agentSessionSigningCapabilitySigner !== undefined) {
         if (!postgresRuntime.agentSessionSigningCapabilitySessionBinder
           || typeof postgresRuntime.createAgentSessionSigningCapabilityReservationRepository !== "function") {
@@ -712,6 +723,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(platformPromotionHttpApi ? { platformPromotionHttpApi } : {}),
       ...(hostedBootstrapRuntime ? { hostedBootstrapHttpApi: hostedBootstrapRuntime.api } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
+      ...(agentLaunchAuthorityHandoffApi ? { agentLaunchAuthorityHandoffApi } : {}),
       ...(agentSessionSigningCapabilityApi ? { agentSessionSigningCapabilityApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),

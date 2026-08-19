@@ -32,6 +32,7 @@ import {
   platformPromotionContextHash
 } from "./platform-promotion-http-contract.mjs";
 import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
+import { AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS } from "./agent-launch-authority-handoff-api.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -54,6 +55,7 @@ const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
 const AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/(?<sessionId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/signing-capabilities$/u;
+const AGENT_LAUNCH_AUTHORITY_HANDOFF_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/(?<sessionId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/launch-authority-handoff$/u;
 const QUALIFICATION_GRANT_BATCH_DEVICE_CLAIM_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/qualification-grant-batches\/(?<batchId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/claim$/u;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const RFC3339_MILLISECONDS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -71,7 +73,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -101,6 +103,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     throw new TypeError("audit export Human API requires humanSession, recentAuthService, and expectedOrigin");
   }
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
+  if (agentLaunchAuthorityHandoffApi !== undefined && (!agentLaunchAuthorityHandoffApi || typeof agentLaunchAuthorityHandoffApi.handle !== "function" || agentLaunchAuthorityHandoffApi.paths?.prepare !== AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS.prepare)) throw new TypeError("agentLaunchAuthorityHandoffApi must expose handle() and the exact launch handoff path");
   if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
@@ -184,6 +187,22 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         // raw-request dispatch before every generic Human/Device route so the
         // injected boundary, not Cloud authentication, owns the wire format.
         return await platformPromotionHttpApi.handle(request, response);
+      }
+      const agentLaunchAuthorityRoute = request.method === "POST"
+        ? AGENT_LAUNCH_AUTHORITY_HANDOFF_PATH.exec(request.url)
+        : null;
+      if (agentLaunchAuthorityHandoffApi && agentLaunchAuthorityRoute) {
+        const admissionDecision = await acquireRateLimit(admission, {
+          tenantId: agentLaunchAuthorityRoute.groups.organizationId,
+          principalType: "device",
+          principalId: transportPrincipalId(request)
+        });
+        if (!admissionDecision.allowed) return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true));
+        const bodyBytes = await readBody(request, 16 * 1024);
+        const result = await agentLaunchAuthorityHandoffApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
+        const normalized = normalizeAgentSessionDeviceResult(result);
+        if (!normalized) throw apiError("agent_launch_authority_handoff_unavailable", 503, "Agent launch authority handoff API is unavailable");
+        return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const agentSessionRoute = request.method === "POST"
         ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) ?? AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH.exec(request.url)
