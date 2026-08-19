@@ -133,13 +133,26 @@ export function verifyOperationsReadiness(value, { expectedCandidateId, expected
 
 export function readOperationsReadinessEvidence(file, options) {
   if (typeof file !== "string" || !path.isAbsolute(file)) invalid("invalid_evidence_file", "evidence path must be absolute");
-  let stat;
+  let fd;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); }
+  catch { invalid("not_proven", "protected external evidence is unavailable"); }
+  let text;
   try {
-    const link = fs.lstatSync(file); stat = fs.statSync(file);
-    if (!link.isFile() || !stat.isFile() || link.isSymbolicLink()) invalid("invalid_evidence_file", "evidence must be a regular file");
-  } catch (error) { if (error instanceof OperationsReadinessError) throw error; invalid("not_proven", "protected external evidence is unavailable"); }
-  if (stat.size < 1 || stat.size > MAX_BYTES) invalid("invalid_evidence_file", "evidence size is invalid");
-  const text = fs.readFileSync(file, "utf8"); if (!text.endsWith("\n")) invalid("noncanonical_evidence", "evidence must end with one newline");
+    const before = fs.fstatSync(fd, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size < 1n || before.size > BigInt(MAX_BYTES)) invalid("invalid_evidence_file", "evidence must be a regular file");
+    const bytes = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) invalid("invalid_evidence_file", "evidence changed while reading");
+      offset += count;
+    }
+    const after = fs.fstatSync(fd, { bigint: true });
+    if ([before.dev, before.ino, before.mode, before.nlink, before.size, before.mtimeNs, before.ctimeNs].join(":")
+      !== [after.dev, after.ino, after.mode, after.nlink, after.size, after.mtimeNs, after.ctimeNs].join(":")) invalid("invalid_evidence_file", "evidence changed while reading");
+    text = bytes.toString("utf8");
+  } finally { fs.closeSync(fd); }
+  if (!text.endsWith("\n")) invalid("noncanonical_evidence", "evidence must end with one newline");
   const value = parseDuplicateSafeJson(text); if (`${canonicalJson(value)}\n` !== text) invalid("noncanonical_evidence", "evidence is not canonical JSON");
   return verifyOperationsReadiness(value, options);
 }

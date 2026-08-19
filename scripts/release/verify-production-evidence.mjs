@@ -157,9 +157,23 @@ export function verifyProductionEvidenceManifest({ manifest, root, repositoryRoo
 }
 
 function readRegular(file, maximum) {
-  const stat = fs.lstatSync(file, { bigint: true });
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size < 1n || stat.size > BigInt(maximum)) fail("invalid_manifest_file");
-  return fs.readFileSync(file);
+  let fd;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { fail("invalid_manifest_file"); }
+  try {
+    const before = fs.fstatSync(fd, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size < 1n || before.size > BigInt(maximum)) fail("invalid_manifest_file");
+    const bytes = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) fail("invalid_manifest_file");
+      offset += count;
+    }
+    const after = fs.fstatSync(fd, { bigint: true });
+    if ([before.dev, before.ino, before.mode, before.nlink, before.size, before.mtimeNs, before.ctimeNs].join(":")
+      !== [after.dev, after.ino, after.mode, after.nlink, after.size, after.mtimeNs, after.ctimeNs].join(":")) fail("invalid_manifest_file");
+    return bytes;
+  } finally { fs.closeSync(fd); }
 }
 
 async function main() {
