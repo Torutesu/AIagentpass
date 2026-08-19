@@ -173,6 +173,21 @@ test("creates a signed manifest from the closed source tree and materializes it"
   } finally { cleanup(value); }
 });
 
+test("manifest signer rejects a source tree without the fixed launch files", () => {
+  const value = fixture({ files: { "agent": { bytes: ORIGINAL_AGENT, executable: true } } });
+  try {
+    assert.throws(() => createCursorAgentRuntimeManifest({
+      sourceRuntimeDirectory: value.source,
+      outputFile: path.join(value.root, "generated-manifest.json"),
+      privateKeyFile: value.privateKeyFile,
+      keyId: value.keyId,
+      runtimeVersion: value.runtimeVersion,
+      releaseDigest: `sha256:${"c".repeat(64)}`,
+      materializationEpoch: 1
+    }), (error) => error instanceof CursorRuntimeMaterializerError && error.code === "invalid_manifest");
+  } finally { cleanup(value); }
+});
+
 test("requires executable node and non-executable index.js", () => {
   const missingNode = fixture({ files: { "index.js": { bytes: Buffer.from("module.exports = 1;\n"), executable: false } } });
   try { assertCode("invalid_manifest", () => materialize(missingNode)); } finally { cleanup(missingNode); }

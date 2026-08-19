@@ -110,6 +110,14 @@ function parseSignatureBytes(value) {
   return bytes;
 }
 
+function requireCursorLaunchFiles(files) {
+  const node = files.find((file) => file.relative_path === "node");
+  const index = files.find((file) => file.relative_path === "index.js");
+  if (!node || !node.executable || !index || index.executable) {
+    fail("invalid_manifest", "runtime must contain executable node and non-executable index.js");
+  }
+}
+
 function parseManifestBytes(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > CURSOR_AGENT_RUNTIME_MAX_MANIFEST_BYTES) {
     fail("invalid_manifest", "manifest size is invalid");
@@ -157,11 +165,7 @@ function parseManifestBytes(bytes) {
     total += file.size;
     if (total > CURSOR_AGENT_RUNTIME_MAX_BYTES) fail("runtime_too_large", "runtime exceeds the size bound");
   }
-  const node = value.core.files.find((file) => file.relative_path === "node");
-  const index = value.core.files.find((file) => file.relative_path === "index.js");
-  if (!node || !node.executable || !index || index.executable) {
-    fail("invalid_manifest", "runtime must contain executable node and non-executable index.js");
-  }
+  requireCursorLaunchFiles(value.core.files);
 
   if (value.signature.algorithm !== "ed25519"
     || value.signature.domain !== CURSOR_AGENT_RUNTIME_SIGNATURE_DOMAIN) fail("invalid_signature", "signature metadata is invalid");
@@ -429,6 +433,7 @@ export function createCursorAgentRuntimeManifest(options = {}) {
       executable: file.executable
     };
   });
+  requireCursorLaunchFiles(coreFiles);
   const total = coreFiles.reduce((sum, file) => sum + file.size, 0);
   if (total > CURSOR_AGENT_RUNTIME_MAX_BYTES) fail("runtime_too_large", "runtime exceeds the size bound");
 
