@@ -603,7 +603,7 @@ function normalizeNextCursor(result) {
 
 function normalizeOrganization(value, expectedOrganizationId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("organization record is invalid");
-  const organizationId = requiredUuid(value.organization_id ?? value.id, "organization_id");
+  const organizationId = requiredAliasedUuid(value, "organization_id", "id", "organization_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("organization binding is invalid");
   const output = { organization_id: organizationId, version: outputVersion(value.version), name: requiredName(value.name) };
   if (value.created_at !== undefined) output.created_at = requiredDate(value.created_at, "created_at");
@@ -614,7 +614,7 @@ function normalizeOrganization(value, expectedOrganizationId = undefined) {
 function normalizeMember(value, expectedOrganizationId = undefined, expectedMemberId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("member record is invalid");
   const organizationId = requiredUuid(value.organization_id, "organization_id");
-  const memberId = requiredUuid(value.member_id ?? value.id, "member_id");
+  const memberId = requiredAliasedUuid(value, "member_id", "id", "member_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("member binding is invalid");
   if (expectedMemberId !== undefined && memberId !== expectedMemberId) throw new Error("member binding is invalid");
   if (!ROLES.has(value.role)) throw new Error("member role is invalid");
@@ -627,14 +627,23 @@ function normalizeMember(value, expectedOrganizationId = undefined, expectedMemb
 function normalizeInvitation(value, expectedOrganizationId = undefined, expectedInvitationId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invitation record is invalid");
   const organizationId = requiredUuid(value.organization_id, "organization_id");
-  const invitationId = requiredUuid(value.invitation_id ?? value.id, "invitation_id");
+  const invitationId = requiredAliasedUuid(value, "invitation_id", "id", "invitation_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("invitation binding is invalid");
   if (expectedInvitationId !== undefined && invitationId !== expectedInvitationId) throw new Error("invitation binding is invalid");
   if (!new Set(["admin", "auditor", "viewer"]).has(value.role)) throw new Error("invitation role is invalid");
   if (typeof value.status !== "string" || !new Set(["pending", "accepted", "revoked", "expired"]).has(value.status)) throw new Error("invitation status is invalid");
   const output = { invitation_id: invitationId, organization_id: organizationId, version: outputVersion(value.version), role: value.role, status: value.status };
   for (const field of ["created_at", "expires_at"]) if (value[field] !== undefined) output[field] = requiredDate(value[field], field);
-  for (const field of ["accepted_at", "consumed_at", "revoked_at"]) if (value[field] !== undefined) output[field === "consumed_at" ? "accepted_at" : field] = nullableDate(value[field], field);
+  if (value.accepted_at !== undefined && value.consumed_at !== undefined) {
+    const acceptedAt = nullableDate(value.accepted_at, "accepted_at");
+    const consumedAt = nullableDate(value.consumed_at, "consumed_at");
+    if (acceptedAt !== consumedAt) throw new Error("invitation acceptance aliases conflict");
+    output.accepted_at = acceptedAt;
+  } else if (value.accepted_at !== undefined) {
+    output.accepted_at = nullableDate(value.accepted_at, "accepted_at");
+  } else if (value.consumed_at !== undefined) {
+    output.accepted_at = nullableDate(value.consumed_at, "consumed_at");
+  }
   if (value.accepted_member_id !== undefined) output.accepted_member_id = value.accepted_member_id === null ? null : requiredUuid(value.accepted_member_id, "accepted_member_id");
   return output;
 }
@@ -642,6 +651,17 @@ function normalizeInvitation(value, expectedOrganizationId = undefined, expected
 function outputVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error("resource version is invalid");
   return value;
+}
+
+function requiredAliasedUuid(value, primary, alias, field) {
+  const primaryValue = value[primary];
+  const aliasValue = value[alias];
+  const selected = primaryValue ?? aliasValue;
+  const normalized = requiredUuid(selected, field);
+  if (primaryValue !== undefined && aliasValue !== undefined && requiredUuid(primaryValue, field) !== requiredUuid(aliasValue, field)) {
+    throw new Error(`${field} aliases conflict`);
+  }
+  return normalized;
 }
 
 function requiredDate(value, field) {

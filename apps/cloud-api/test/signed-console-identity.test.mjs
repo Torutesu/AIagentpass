@@ -57,7 +57,7 @@ function adapterFixture(overrides = {}) {
   const events = [];
   const opaque = Object.freeze({ version: 1, issued_at: NOW, expires_at: NOW + 30_000 });
   const identityResolver = {
-    identityAdapter: { async verify() { return { member_id: ids.member, organization_id: ids.org, role: "owner", assertion_expires_at: NOW + 30_000 }; } },
+    identityAdapter: { async verify() { return { provider: config.provider, subject: "siwc-subject-42", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner", assertion_expires_at: NOW + 30_000 }; } },
     async resolveIdentity(input) { events.push(["resolve", input]); return opaque; }
   };
   const adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver, replaySecret: REPLAY_SECRET, ...overrides });
@@ -99,6 +99,39 @@ test("rejects conflicting caller identity headers and never returns signed asser
     await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact, headers)), SignedConsoleIdentityError);
   }
   assert.equal(fixture.events.length, 1);
+});
+
+test("rejects a resolver principal projected into a different tenant", async () => {
+  const fixture = adapterFixture();
+  const { compact } = makeAssertion(fixture.pair.privateKey);
+  const crossTenant = "44444444-4444-4444-8444-444444444444";
+  const adapter = createSignedConsoleIdentityAdapter({
+    ...config,
+    replaySecret: REPLAY_SECRET,
+    publicKey: fixture.pair.publicKey,
+    identityResolver: {
+      async resolveIdentity() { return fixture.opaque; },
+      identityAdapter: {
+        async verify() {
+          return {
+            provider: config.provider,
+            subject: "siwc-subject-42",
+            member_id: ids.member,
+            membership_id: "33333333-3333-4333-8333-333333333333",
+            organization_id: crossTenant,
+            role: "owner",
+            assertion_expires_at: NOW + 30_000
+          };
+        }
+      }
+    }
+  });
+  await adapter.verifyIdentityRequest(request(compact));
+  await assert.rejects(() => adapter.identityAdapter.verify(fixture.opaque, { now: NOW }), (error) => {
+    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION);
+    assert.equal(error.status, 401);
+    return true;
+  });
 });
 
 test("keys replay digests so raw assertion identifiers are not stable database identifiers", () => {

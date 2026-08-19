@@ -10,6 +10,7 @@ const MAX_JTI_BYTES = 256;
 const MAX_TTL_SECONDS = 60;
 const DEFAULT_CLOCK_SKEW_SECONDS = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
@@ -87,7 +88,8 @@ export function createSignedConsoleIdentityAdapter({
         if (!isOpaqueResolverAssertion(resolved)) throw new Error("resolver output is invalid");
         pendingReplay.set(resolved, Object.freeze({
           jti_digest: consoleIdentityJtiDigest(claims, secret),
-          expires_at: new Date(claims.exp * 1000).toISOString()
+          expires_at: new Date(claims.exp * 1000).toISOString(),
+          organization_id: claims.org.toLowerCase()
         }));
         return resolved;
       } catch (error) {
@@ -108,6 +110,7 @@ export function createSignedConsoleIdentityAdapter({
     let principal;
     try { principal = await identityResolver.identityAdapter.verify(assertion, context); }
     catch { throw new SignedConsoleIdentityError(); }
+    if (!tenantBoundPrincipal(principal, replay.organization_id)) throw new SignedConsoleIdentityError();
     return Object.freeze({ principal, identity_replay: replay });
   }
 
@@ -232,6 +235,17 @@ function decodeBase64Url(value, minBytes, maxBytes) {
 function boundedSubject(value) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBJECT_BYTES && value.trim() === value && !CONTROL_CHARACTERS.test(value); }
 function boundedJti(value) { return typeof value === "string" && value.length >= 22 && Buffer.byteLength(value, "utf8") <= MAX_JTI_BYTES && BASE64URL.test(value); }
 function exactText(value, maxBytes) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maxBytes && !CONTROL_CHARACTERS.test(value); }
+function tenantBoundPrincipal(principal, organizationId) {
+  return plain(principal)
+    && typeof principal.organization_id === "string"
+    && UUID.test(principal.organization_id)
+    && principal.organization_id.toLowerCase() === organizationId
+    && typeof principal.member_id === "string"
+    && UUID.test(principal.member_id)
+    && typeof principal.membership_id === "string"
+    && UUID.test(principal.membership_id)
+    && ROLES.has(principal.role);
+}
 function isOpaqueResolverAssertion(value) {
   return plain(value) && exactKeys(value, ["version", "issued_at", "expires_at"]) && value.version === 1 && Number.isSafeInteger(value.issued_at) && Number.isSafeInteger(value.expires_at) && value.issued_at >= 0 && value.expires_at > value.issued_at && Object.isFrozen(value);
 }

@@ -440,6 +440,29 @@ test("maps cross-tenant paths to non-disclosing not-found and never calls the se
   assert.equal(calls.renameOrganization.length + calls.listMembers.length + calls.updateMemberRole.length + calls.listInvitations.length + calls.revokeInvitation.length, 0);
 });
 
+test("fails closed on conflicting response aliases instead of projecting an ambiguous tenant record", async () => {
+  const organizationResult = fixture({ serviceOverrides: {
+    listOrganizations: async () => ({ items: [organization({ id: OTHER_ORGANIZATION_ID })], next_cursor: null })
+  } });
+  const organizationResponse = await organizationResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organizations));
+  assert.equal(organizationResponse.status, 503);
+  assert.equal(organizationResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
+
+  const memberResult = fixture({ serviceOverrides: {
+    listMembers: async () => ({ items: [member({ id: OTHER_MEMBER_ID })], next_cursor: null })
+  } });
+  const memberResponse = await memberResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.members(ORGANIZATION_ID)));
+  assert.equal(memberResponse.status, 503);
+  assert.equal(memberResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
+
+  const invitationResult = fixture({ serviceOverrides: {
+    listInvitations: async () => ({ items: [invitation({ consumed_at: "2026-08-20T00:00:00.000Z", accepted_at: CREATED_AT })], next_cursor: null })
+  } });
+  const invitationResponse = await invitationResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID)));
+  assert.equal(invitationResponse.status, 503);
+  assert.equal(invitationResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
+});
+
 test("redacts service internals and maps not-found, owner constraints, replay, conflict, and outages", async () => {
   const errors = [
     ["not_found", HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATION_NOT_FOUND, 404],
