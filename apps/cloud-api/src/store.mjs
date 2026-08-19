@@ -10,6 +10,7 @@ import {
 } from "../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "./audit-pagination.mjs";
 import { normalizeDeviceReadModel } from "./device-read-model.mjs";
+import { assertDeviceAuditChainOrdered } from "./device-audit-ingestion.mjs";
 import {
   POSSESSION_RECEIPT_PURPOSE,
   POSSESSION_RECEIPT_VERSION,
@@ -683,6 +684,8 @@ export async function createCloudStore(options = {}) {
     assertUuid(deviceId, "device_id");
     tenantRecord("devices", organizationId, deviceId, "device");
     const normalizedEvents = events.map((event) => normalizeAuditEvent(event));
+    try { assertDeviceAuditChainOrdered(normalizedEvents); }
+    catch (error) { throw new CloudStoreError(error.code, error.message, error.details); }
     for (const event of normalizedEvents) {
       const expectedHash = computeAuditEventHash(event);
       if (event.event_hash !== expectedHash) {

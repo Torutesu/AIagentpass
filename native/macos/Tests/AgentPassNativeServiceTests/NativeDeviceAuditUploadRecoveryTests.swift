@@ -1,5 +1,6 @@
 import AgentPassNativeCore
 import AgentPassNativeServiceSupport
+import Darwin
 import Foundation
 import Testing
 @testable import AgentPassNativeService
@@ -12,17 +13,22 @@ private actor UploadRecoveryFake: NativeDeviceAuditBatchUploading {
     var calls = 0
     var response: NativeDeviceAuditIngestionResponse?
     var failure: NativeDeviceSyncHTTPTransportError?
+    var blockUntilCancelled = false
 
     func uploadAuditBatch(_ batch: NativeDeviceAuditBatch) async throws -> NativeDeviceAuditIngestionResponse {
         calls += 1
+        if blockUntilCancelled {
+            try await Task.sleep(nanoseconds: UInt64.max)
+        }
         if let failure { throw failure }
         guard let response else { throw NativeDeviceSyncHTTPTransportError.transportFailure }
         return response
     }
 
-    func configure(response: NativeDeviceAuditIngestionResponse? = nil, failure: NativeDeviceSyncHTTPTransportError? = nil) {
+    func configure(response: NativeDeviceAuditIngestionResponse? = nil, failure: NativeDeviceSyncHTTPTransportError? = nil, blockUntilCancelled: Bool = false) {
         self.response = response
         self.failure = failure
+        self.blockUntilCancelled = blockUntilCancelled
     }
 }
 
@@ -88,6 +94,24 @@ func deviceAuditUploadHealthSurvivesRestart() throws {
     #expect(recovered.snapshot().lastError == nil)
 }
 
+@Test("device audit upload health is atomically replaced with private durable bytes")
+func deviceAuditUploadHealthUsesPrivateAtomicPersistence() throws {
+    let root = try uploadRecoveryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("upload-health.json").path
+    let store = try NativeDeviceAuditUploadHealthStore(path: path)
+    try store.recordFailure(UploadRecoveryTestError.diskFull)
+
+    var info = stat()
+    #expect(lstat(path, &info) == 0)
+    #expect((info.st_mode & S_IFMT) == S_IFREG)
+    #expect(info.st_uid == geteuid())
+    #expect(info.st_mode & 0o077 == 0)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.contains("tmp-") })
+    let restarted = try NativeDeviceAuditUploadHealthStore(path: path)
+    #expect(restarted.snapshot().state == NativeDeviceAuditUploadHealth.degraded)
+}
+
 @Test("successful signing audit records require durable device enqueue")
 func successfulSigningAuditRequiresDurableEnqueue() throws {
     let event = NativeAuditEvent(
@@ -130,6 +154,14 @@ func deviceAuditUploadAdmissionFailsClosedOnlyWhenRequired() throws {
     #expect(health.snapshot().consecutiveFailures == 2)
 }
 
+@Test("required signing audit admission fails closed when the durable outbox is absent")
+func requiredSigningAuditAdmissionRequiresOutbox() throws {
+    #expect(throws: AgentPassNativeError.self) {
+        try NativeDeviceAuditUploadAdmission.validate(required: true, outboxAvailable: false)
+    }
+    try NativeDeviceAuditUploadAdmission.validate(required: false, outboxAvailable: false)
+}
+
 @Test("upload supervisor retries after an outage and clears persisted degraded health")
 func uploadSupervisorRecoversAfterTransportRestoration() async throws {
     let root = try uploadRecoveryRoot()
@@ -155,4 +187,30 @@ func uploadSupervisorRecoversAfterTransportRestoration() async throws {
     #expect(try outbox.pending().isEmpty)
     #expect(health.snapshot().state == NativeDeviceAuditUploadHealth.operational)
     #expect(await fake.calls == 2)
+}
+
+@Test("cancelling the upload supervisor does not record cancellation as a failure or restart it")
+func uploadSupervisorCancellationIsTerminal() async throws {
+    let root = try uploadRecoveryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.appendingPathComponent("outbox").path)
+    _ = try outbox.enqueue(try uploadRecoveryEvent())
+    let fake = UploadRecoveryFake()
+    await fake.configure(blockUntilCancelled: true)
+    let health = try NativeDeviceAuditUploadHealthStore(path: root.appendingPathComponent("upload-health.json").path)
+    let supervisor = NativeDeviceAuditUploadRetrySupervisor(
+        coordinator: NativeDeviceAuditUploadCoordinator(outbox: outbox, transport: fake),
+        health: health,
+        intervalNanoseconds: UInt64.max
+    )
+    let task = supervisor.start()
+    for _ in 0..<200 {
+        if await fake.calls == 1 { break }
+        await Task.yield()
+    }
+    task.cancel()
+    await task.value
+    #expect(health.snapshot().consecutiveFailures == 0)
+    #expect(health.snapshot().lastError == nil)
+    #expect(await fake.calls == 1)
 }

@@ -14,6 +14,7 @@ import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } f
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { REFRESH_NONCE_KEY_ID_PATTERN } from "./refresh-nonce-codec.mjs";
 import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repository.mjs";
+import { assertDeviceAuditChainOrdered } from "../device-audit-ingestion.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -997,6 +998,8 @@ function normalizeAuditInput(input) {
     if (error instanceof ControlPlaneAuthorityRepositoryError) throw error;
     throw new ControlPlaneAuthorityRepositoryError("ERR_AUDIT_EVENT_INVALID", "audit event is invalid", undefined, error);
   }
+  try { assertDeviceAuditChainOrdered(events); }
+  catch (error) { throw new ControlPlaneAuthorityRepositoryError("ERR_AUDIT_CHAIN_ORDER", error.message); }
   const receivedAt = timestamp(input.received_at ?? input.receivedAt ?? new Date().toISOString(), "received_at");
   return { organizationId, deviceId, events, receivedAt };
 }

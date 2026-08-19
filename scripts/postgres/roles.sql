@@ -140,7 +140,9 @@ BEGIN
         'agent_session_signing_capability_expiry_audit_heads',
         'agent_capability_sequence_heads',
         'agent_session_launch_authority_handoffs',
-        'agent_session_grants', 'agent_sessions'
+        'agent_session_grants', 'agent_sessions',
+        'device_audit_events', 'device_audit_heads', 'device_audit_gaps',
+        'human_identity_assertion_replays'
       )
       AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
       AND left(c.relname, length('platform_')) <> 'platform_'

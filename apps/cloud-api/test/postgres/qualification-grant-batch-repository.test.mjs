@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { Pool } from "pg";
 
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import {
@@ -34,6 +35,10 @@ const EXPIRES = "2026-08-14T00:10:00.000Z";
 const HASH = "a".repeat(64);
 const SOURCE = "b".repeat(40);
 const TEAM = "ABCDEFGHIJ";
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
+const postgresSkipReason = databaseUrl
+  ? false
+  : "set AGENTPASS_TEST_DATABASE_URL to run the live qualification-grant-batch repository qualification";
 
 const STEP_IDENTITIES = [
   ["unarmed-control", null, null],
@@ -51,6 +56,22 @@ const scope = {
   branches: { allow: ["main"], deny: [] },
   remotes: { allow: ["origin"], deny: [] }
 };
+
+test("live PostgreSQL qualification-grant-batch repository qualification is bound to the migrated schema", { skip: postgresSkipReason }, async (t) => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  t.after(async () => pool.end());
+  const result = await pool.query(`
+    SELECT current_setting('server_version') AS server_version,
+           (SELECT max(version)::int FROM schema_migrations) AS schema_version,
+           to_regclass('public.qualification_grant_batches') AS batches,
+           to_regclass('public.qualification_grant_batch_steps') AS steps
+  `);
+  assert.equal(result.rowCount, 1);
+  assert.match(result.rows[0].server_version, /^\d+(?:\.\d+)+$/u);
+  assert.equal(result.rows[0].batches, "qualification_grant_batches");
+  assert.equal(result.rows[0].steps, "qualification_grant_batch_steps");
+  assert.ok(Number.isInteger(result.rows[0].schema_version));
+});
 
 function grantRow(index) {
   const grantId = `${String(index + 1).padStart(8, "0")}-0000-4000-8000-000000000000`;

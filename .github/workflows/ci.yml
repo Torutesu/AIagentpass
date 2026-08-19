@@ -732,6 +732,77 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-signing-capability-reservation.integration.test.mjs
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
+      - name: Run release PostgreSQL qualification suites with no skipped live tests
+        shell: bash
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_QUALIFICATION_CANDIDATE_ID: ci-${{ github.sha }}
+          AGENTPASS_QUALIFICATION_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_QUALIFICATION_EVIDENCE: ${{ github.workspace }}/qualification-evidence/native-device-and-grant-batch.json
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$(dirname "$AGENTPASS_QUALIFICATION_EVIDENCE")"
+          tap="$RUNNER_TEMP/agentpass-qualification.tap"
+          export AGENTPASS_QUALIFICATION_TAP="$tap"
+          status=0
+          node --test --test-concurrency=1 --test-reporter=tap \
+            apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs \
+            apps/cloud-api/test/postgres/qualification-grant-batch-repository.test.mjs \
+            >"$tap" 2>&1 || status=$?
+          cat "$tap"
+          (( status == 0 )) || exit "$status"
+          if grep -Eq '(^|[[:space:]])# (SKIP|TODO)([[:space:]]|$)|^Bail out!' "$tap"; then
+            echo "release PostgreSQL qualification must not contain skipped live tests" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFile, writeFile } from "node:fs/promises";
+          import { Pool } from "pg";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
+
+          const tap = await readFile(process.env.AGENTPASS_QUALIFICATION_TAP);
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          try {
+            const result = await pool.query(`
+              SELECT current_setting('server_version') AS server_version,
+                     (SELECT max(version)::int FROM schema_migrations) AS schema_version,
+                     to_regclass('public.qualification_grant_batches') AS batches,
+                     to_regclass('public.qualification_grant_batch_steps') AS steps
+            `);
+            const row = result.rows[0];
+            if (row.schema_version !== POSTGRES_SCHEMA_HEAD.version
+              || row.batches !== "qualification_grant_batches"
+              || row.steps !== "qualification_grant_batch_steps") {
+              throw new Error("qualification database schema binding failed");
+            }
+            const evidence = {
+              schema_version: 1,
+              candidate_id: process.env.AGENTPASS_QUALIFICATION_CANDIDATE_ID,
+              source_commit: process.env.AGENTPASS_QUALIFICATION_SOURCE_COMMIT,
+              database: { server_version: row.server_version, schema_head: row.schema_version },
+              suites: [
+                "apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs",
+                "apps/cloud-api/test/postgres/qualification-grant-batch-repository.test.mjs"
+              ],
+              skipped_tests: 0,
+              tap_sha256: createHash("sha256").update(tap).digest("hex"),
+              status: "passed"
+            };
+            await writeFile(process.env.AGENTPASS_QUALIFICATION_EVIDENCE, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+          } finally {
+            await pool.end();
+          }
+          NODE
+          test "$(stat -c '%a' "$AGENTPASS_QUALIFICATION_EVIDENCE")" = 600
+      - name: Retain release PostgreSQL qualification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-postgres-qualification-${{ github.sha }}
+          path: qualification-evidence/native-device-and-grant-batch.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Prepare Hosted account qualification evidence directory
         run: |
           install -d -m 0700 "$GITHUB_WORKSPACE/hosted-account-evidence"

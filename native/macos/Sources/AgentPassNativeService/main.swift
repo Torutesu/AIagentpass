@@ -990,7 +990,13 @@ internal final class NativeDeviceAuditUploadHealthStore: @unchecked Sendable {
         }
         self.path = standardized
         self.now = now
-        if FileManager.default.fileExists(atPath: standardized) {
+        var existingInfo = stat()
+        if lstat(standardized, &existingInfo) == 0 {
+            guard (existingInfo.st_mode & S_IFMT) == S_IFREG,
+                  existingInfo.st_uid == geteuid(),
+                  existingInfo.st_mode & 0o077 == 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state must be a private service-owned regular file")
+            }
             let data = try Data(contentsOf: URL(fileURLWithPath: standardized), options: [.mappedIfSafe])
             guard data.count <= Self.maximumBytes else {
                 throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
@@ -1005,9 +1011,11 @@ internal final class NativeDeviceAuditUploadHealthStore: @unchecked Sendable {
                   self.value.consecutiveFailures >= 0 else {
                 throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is invalid")
             }
-        } else {
+        } else if errno == ENOENT {
             self.value = .initial
             try persist(self.value)
+        } else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
@@ -1071,8 +1079,39 @@ internal final class NativeDeviceAuditUploadHealthStore: @unchecked Sendable {
         guard data.count <= Self.maximumBytes else {
             throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
         }
-        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        let destination = URL(fileURLWithPath: path)
+        let parent = destination.deletingLastPathComponent().path
+        let temporary = destination.appendingPathExtension("tmp-\(UUID().uuidString)").path
+        let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var openDescriptor: Int32? = descriptor
+        defer {
+            if let openDescriptor { close(openDescriptor) }
+            if FileManager.default.fileExists(atPath: temporary) { unlink(temporary) }
+        }
+        var offset = 0
+        try data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is empty") }
+            while offset < data.count {
+                let written = Darwin.write(descriptor, base.advanced(by: offset), data.count - offset)
+                guard written > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                offset += written
+            }
+        }
+        guard fchmod(descriptor, mode_t(0o600)) == 0,
+              fsync(descriptor) == 0,
+              close(descriptor) == 0 else {
+            openDescriptor = nil
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        openDescriptor = nil
+        guard rename(temporary, path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let parentDescriptor = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parentDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(parentDescriptor) }
+        guard fsync(parentDescriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 }
 
@@ -1083,6 +1122,12 @@ internal enum NativeDeviceAuditUploadPolicy {
 }
 
 internal enum NativeDeviceAuditUploadAdmission {
+    static func validate(required: Bool, outboxAvailable: Bool) throws {
+        guard !required || outboxAvailable else {
+            throw AgentPassNativeError.invalidConfiguration("Required Device audit durability is unavailable")
+        }
+    }
+
     static func attempt(
         required: Bool,
         health: NativeDeviceAuditUploadHealthStore?,
@@ -1117,12 +1162,17 @@ internal final class NativeDeviceAuditUploadRetrySupervisor: @unchecked Sendable
 
     @discardableResult
     func runOnce() async -> Bool {
+        guard !Task.isCancelled else { return false }
         try? health.recordAttempt()
         do {
             _ = try await coordinator.flush()
+            guard !Task.isCancelled else { return false }
             try? health.recordSuccess()
             return true
+        } catch is CancellationError {
+            return false
         } catch {
+            guard !Task.isCancelled else { return false }
             try? health.recordFailure(error)
             return false
         }
@@ -1133,6 +1183,7 @@ internal final class NativeDeviceAuditUploadRetrySupervisor: @unchecked Sendable
             guard let self else { return }
             while !Task.isCancelled {
                 _ = await self.runOnce()
+                guard !Task.isCancelled else { return }
                 do {
                     try await Task.sleep(nanoseconds: self.intervalNanoseconds)
                 } catch {
@@ -1242,6 +1293,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var auditPruneLastDecision: String?
     private var auditPruneLastError: String?
     private var auditPruneLastUpdatedAt: String?
+
+    deinit {
+        deviceAuditUploadTask?.cancel()
+    }
 
     private static func capabilitySequence(from requestData: Data) -> Int64? {
         guard let request = try? NativeStrictJSON.object(from: requestData, maxBytes: 12 * 1024 * 1024, maxDepth: 16),
@@ -3340,6 +3395,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         try rotateEvidenceIfReady()
         if let outbox = deviceAuditOutbox {
             let requiresDurableEnqueue = NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: event)
+            try NativeDeviceAuditUploadAdmission.validate(required: requiresDurableEnqueue, outboxAvailable: true)
             // A failed enqueue is durable health evidence, not a reason to
             // disable the queue. Signing records must be persisted before
             // hardware signing; all other projections remain best-effort.
@@ -3366,6 +3422,11 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
                 }
                 _ = try outbox.enqueue(redacted)
             }
+        } else {
+            try NativeDeviceAuditUploadAdmission.validate(
+                required: NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: event),
+                outboxAvailable: false
+            )
         }
         return status
     }

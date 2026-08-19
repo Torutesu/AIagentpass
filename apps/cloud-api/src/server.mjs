@@ -33,6 +33,7 @@ import {
 } from "./platform-promotion-http-contract.mjs";
 import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
 import { AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS } from "./agent-launch-authority-handoff-api.mjs";
+import { normalizeDeviceAuditUpload } from "./device-audit-ingestion.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -297,7 +298,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       const gapCount = result?.body?.ingestion?.gaps?.length;
       if (Number.isSafeInteger(gapCount) && gapCount > 0) recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount);
       if (result.status === 204) sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers });
-      else send(response, result.status ?? 200, { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
+      else send(response, result.status ?? 200, result.omitRequestId ? result.body : { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
     } catch (error) {
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
@@ -961,7 +962,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId }) => ({ body: { health: await store.getAuditHealth({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), null, async ({ organizationId, principal, body }) => {
         rejectUnknown(body, new Set(["batch_id", "events"]), "audit_ingestion");
-        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, deviceId: principal.device_id, events: body.events, idempotencyKey: body.batch_id ?? crypto.randomUUID() }) } };
+        const upload = normalizeDeviceAuditUpload({ organizationId, deviceId: principal.device_id, batchId: body.batch_id, events: body.events });
+        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id }) }, omitRequestId: true };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");

@@ -72,6 +72,12 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /signing_capability_function_diagnostics/u);
   assert.match(checker, /agentpass_maintenance/u);
   assert.match(checker, /maintenance_function_allowlist/u);
+  assert.match(checker, /device_audit_boundary_ok/u);
+  assert.match(checker, /device_audit_events_tenant_select/u);
+  assert.match(checker, /agentpass_record_device_audit_head\(\)/u);
+  assert.match(checker, /expected_migrations\(version, checksum\)/u);
+  assert.match(checker, /actual\.checksum IS DISTINCT FROM expected\.checksum/u);
+  assert.match(checker, /policy:tenant_predicate_mismatch/u);
   assert.match(checker, /maintenance_function_oids/u);
   assert.match(checker, /policy_mismatches/u);
   assert.match(checker, /actual_with_check/u);

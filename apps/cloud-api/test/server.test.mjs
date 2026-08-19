@@ -11,6 +11,7 @@ import { createLocalPossessionReceiptSigner } from "../src/possession-receipt-si
 import { verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, verifyCapability } from "../../../packages/capability/src/index.mjs";
 import { createRateLimiter } from "../src/rate-limit.mjs";
+import { deterministicDeviceAuditBatchId } from "../src/device-audit-ingestion.mjs";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const deviceId = "22222222-2222-4222-8222-222222222222";
@@ -405,12 +406,39 @@ test("device audit ingestion is authenticated and rejects body substitution", as
   const endpoint = `/v1/organizations/${org}/audit/events`;
   const event = { version: 1, event_id: "66666666-6666-4666-8666-666666666666", request_id: "77777777-7777-4777-8777-777777777777", agent_id: agentId, operation: "git.commit.sign", decision: "allow", reason: "allowed", policy_sequence: 1, capability_sequence: 1, repository: "/work/repo", branch: "feature/api", remote: "git@example.test:repo.git", payload_digest: "a".repeat(64), device_timestamp: new Date(now).toISOString(), previous_hash: "0".repeat(64) };
   event.event_hash = computeAuditEventHash(event);
-  const body = JSON.stringify({ batch_id: "audit-batch-1", events: [event] });
+  const batchId = deterministicDeviceAuditBatchId(org, deviceId, [event]);
+  const body = JSON.stringify({ batch_id: batchId, events: [event] });
   const headers = signDeviceRequest({ method: "POST", path: endpoint, body, device_id: deviceId, timestamp: now, nonce: "nonce-audit-abcdefghijklmnopqrstuvwxyz-12345" }, f.deviceKeys.privateKey);
   const accepted = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body });
   assert.equal(accepted.status, 202, JSON.stringify(await accepted.clone().json()));
   const tampered = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "AgentPass-Nonce": "nonce-audit-zyxwvutsrqponmlkjihgfedcba-54321", "content-type": "application/json" }, body: JSON.stringify({ batch_id: "other", events: [event] }) });
   assert.equal(tampered.status, 401);
+});
+
+test("device audit ingestion rejects nondeterministic batches and unordered chains before mutation", async (t) => {
+  const f = await fixture(t);
+  const endpoint = `/v1/organizations/${org}/audit/events`;
+  const first = auditListEvent("88888888-8888-4888-8888-888888888888", "99999999-9999-4999-8999-999999999999", "0".repeat(64), new Date(now).toISOString());
+  const second = auditListEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", first.event_hash, new Date(now + 1_000).toISOString());
+  const unordered = { batch_id: deterministicDeviceAuditBatchId(org, deviceId, [first, second]), events: [second, first] };
+  const unorderedBody = JSON.stringify(unordered);
+  const unorderedHeaders = signDeviceRequest({ method: "POST", path: endpoint, body: unorderedBody, device_id: deviceId, timestamp: now, nonce: "nonce-audit-unordered-abcdefghijklmnopqrstuvwxyz-1" }, f.deviceKeys.privateKey);
+  const rejectedOrder = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...unorderedHeaders, "content-type": "application/json" }, body: unorderedBody });
+  assert.equal(rejectedOrder.status, 400);
+  assert.equal((await rejectedOrder.json()).error.code, "err_audit_chain_order");
+  assert.deepEqual((await f.store.listDeviceAuditEvents({ organizationId: org, deviceId })).events, []);
+
+  const validBody = JSON.stringify({ batch_id: deterministicDeviceAuditBatchId(org, deviceId, [first]), events: [first] });
+  const invalidIdBody = JSON.stringify({ batch_id: "audit-" + "f".repeat(64), events: [first] });
+  const invalidIdHeaders = signDeviceRequest({ method: "POST", path: endpoint, body: invalidIdBody, device_id: deviceId, timestamp: now, nonce: "nonce-audit-invalid-id-abcdefghijklmnopqrstuvwxyz-1" }, f.deviceKeys.privateKey);
+  const rejectedId = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...invalidIdHeaders, "content-type": "application/json" }, body: invalidIdBody });
+  assert.equal(rejectedId.status, 400);
+  assert.equal((await rejectedId.json()).error.code, "err_audit_batch_id");
+
+  const validHeaders = signDeviceRequest({ method: "POST", path: endpoint, body: validBody, device_id: deviceId, timestamp: now, nonce: "nonce-audit-exact-response-abcdefghijklmnopqrstuvwxyz-1" }, f.deviceKeys.privateKey);
+  const accepted = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...validHeaders, "content-type": "application/json" }, body: validBody });
+  assert.equal(accepted.status, 202);
+  assert.deepEqual(Object.keys(await accepted.json()), ["ingestion"]);
 });
 
 test("device audit listing requires one device scope, returns exact records, and maps cursor failures", async (t) => {

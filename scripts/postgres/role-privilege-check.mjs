@@ -8,6 +8,9 @@ const DATABASE_URL_ENV = 'AGENTPASS_DATABASE_URL';
 const EVIDENCE_OUTPUT_ENV = 'AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT';
 const SCHEMA = 'public';
 const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD.version;
+const EXPECTED_MIGRATIONS_SQL = POSTGRES_SCHEMA_HEAD.migrations
+  .map(({ version, checksum }) => `(${version}, '${checksum}')`)
+  .join(',\n    ');
 const MAX_TABLE_DIAGNOSTICS = 32;
 const MAX_RELATION_DIAGNOSTIC_NAME = 128;
 const MAX_DIAGNOSTIC_OUTPUT = 4096;
@@ -18,6 +21,7 @@ const REPORT_CHECKS = [
   'schema_privileges_ok',
   'database_privileges_ok',
   'migration_head_ok',
+  'device_audit_boundary_ok',
   'table_privileges_ok',
   'sequence_privileges_ok',
   'function_privileges_ok',
@@ -532,10 +536,90 @@ database_privileges_ok AS (
     AND NOT has_database_privilege('agentpass_maintenance', current_database(), 'CREATE')
     AND NOT has_database_privilege('agentpass_maintenance', current_database(), 'TEMP') AS value
 ),
+expected_migrations(version, checksum) AS (
+  VALUES
+    ${EXPECTED_MIGRATIONS_SQL}
+),
 migration_head_ok AS (
   SELECT to_regclass('public.schema_migrations') IS NOT NULL
-    AND (SELECT count(*) = ${EXPECTED_MIGRATION_VERSION} AND min(version) = 1 AND max(version) = ${EXPECTED_MIGRATION_VERSION}
+    AND (SELECT count(*) = ${EXPECTED_MIGRATION_VERSION}
+         AND min(version) = 1
+         AND max(version) = ${EXPECTED_MIGRATION_VERSION}
+         AND NOT EXISTS (
+           SELECT 1
+           FROM public.schema_migrations AS actual
+           FULL OUTER JOIN expected_migrations AS expected USING (version)
+           WHERE actual.version IS NULL
+              OR expected.version IS NULL
+              OR actual.checksum IS DISTINCT FROM expected.checksum
+         )
          FROM public.schema_migrations) AS value
+),
+device_audit_boundary_observations AS (
+  SELECT t.relname,
+    array_remove(ARRAY[
+      CASE WHEN t.relowner IS DISTINCT FROM (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator') THEN 'owner:not_migrator' END,
+      CASE WHEN t.relrowsecurity IS DISTINCT FROM true THEN 'rls:not_enabled' END,
+      CASE WHEN t.relforcerowsecurity IS DISTINCT FROM true THEN 'rls:not_forced' END,
+      CASE WHEN (SELECT count(*) FROM pg_policy p WHERE p.polrelid = t.oid) <> 6 THEN 'policy:unexpected_count' END,
+      CASE WHEN NOT EXISTS (
+        SELECT 1 FROM (VALUES
+          ('device_audit_events_tenant_select'::name, 'r'::"char", 0::oid),
+          ('device_audit_events_tenant_insert'::name, 'a'::"char", 0::oid),
+          ('device_audit_events_tenant_update'::name, 'w'::"char", 0::oid),
+          ('device_audit_events_tenant_delete'::name, 'd'::"char", 0::oid),
+          ('device_audit_events_migrator_authority'::name, '*'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')),
+          ('device_audit_events_backup_select'::name, 'r'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_backup'))
+        ) expected(policy_name, command, role_oid)
+        LEFT JOIN pg_policy p ON p.polrelid = t.oid AND p.polname = expected.policy_name
+        WHERE p.oid IS NULL OR p.polcmd IS DISTINCT FROM expected.command
+          OR p.polpermissive IS DISTINCT FROM true
+          OR (expected.role_oid = 0 AND p.polroles IS DISTINCT FROM ARRAY[0::oid])
+          OR (expected.role_oid <> 0 AND p.polroles IS DISTINCT FROM ARRAY[expected.role_oid])
+      ) THEN 'policy:missing_or_mismatch' END,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM pg_policy p
+        WHERE p.polrelid = t.oid
+          AND p.polname LIKE 'device_audit%_tenant_%'
+          AND (
+            regexp_replace(replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
+              IS DISTINCT FROM CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN 'organization_id=agentpass_current_organization_id()' END
+            OR regexp_replace(replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
+              IS DISTINCT FROM CASE WHEN p.polcmd IN ('a', 'w') THEN 'organization_id=agentpass_current_organization_id()' END
+          )
+      ) THEN 'policy:tenant_predicate_mismatch' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') IS DISTINCT FROM true THEN 'app:select_missing' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') IS DISTINCT FROM (t.relname = 'device_audit_events') THEN 'app:insert_mismatch' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN 'app:update' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN 'app:delete' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN 'app:truncate' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'REFERENCES') THEN 'app:references' END,
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'TRIGGER') THEN 'app:trigger' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'SELECT') IS DISTINCT FROM true THEN 'backup:select_missing' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'INSERT') OR has_table_privilege('agentpass_backup', t.oid, 'UPDATE') OR has_table_privilege('agentpass_backup', t.oid, 'DELETE') THEN 'backup:dml' END,
+      CASE WHEN has_table_privilege('agentpass_signer', t.oid, 'SELECT') OR has_table_privilege('agentpass_signer', t.oid, 'INSERT') OR has_table_privilege('agentpass_signer', t.oid, 'UPDATE') OR has_table_privilege('agentpass_signer', t.oid, 'DELETE') THEN 'signer:dml' END
+    ]::text[], NULL::text) AS failures
+  FROM tables t
+  WHERE t.relname IN ('device_audit_events', 'device_audit_heads', 'device_audit_gaps')
+),
+device_audit_function_ok AS (
+  SELECT count(*) = 1
+    AND bool_and(
+      proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')
+      AND prosecdef
+      AND proconfig = ARRAY['search_path=pg_catalog, public']
+      AND NOT has_function_privilege('agentpass_app', oid, 'EXECUTE')
+      AND NOT has_function_privilege('agentpass_signer', oid, 'EXECUTE')
+      AND NOT has_function_privilege('agentpass_backup', oid, 'EXECUTE')
+    ) AS value
+  FROM functions
+  WHERE oid = to_regprocedure('public.agentpass_record_device_audit_head()')
+),
+device_audit_boundary_ok AS (
+  SELECT count(*) = 3
+    AND bool_and(cardinality(failures) = 0)
+    AND (SELECT value FROM device_audit_function_ok) AS value
+  FROM device_audit_boundary_observations
 ),
 table_privilege_observations AS (
   SELECT t.relname,
@@ -601,12 +685,13 @@ table_privilege_observations AS (
       CASE WHEN t.relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator') THEN NULL ELSE 'owner:not_migrator' END
     ]::text[], NULL::text) AS failures
   FROM tables AS t
+  WHERE t.relname NOT IN ('device_audit_events', 'device_audit_heads', 'device_audit_gaps')
 ),
 table_privileges_ok AS (
   SELECT NOT EXISTS (
     SELECT 1 FROM table_privilege_observations
     WHERE cardinality(failures) > 0
-  ) AS value
+  ) AND (SELECT value FROM device_audit_boundary_ok) AS value
 ),
 sequence_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
@@ -675,6 +760,7 @@ checks AS (
     AND (SELECT value FROM table_privileges_ok)
     AND (SELECT value FROM sequence_privileges_ok)
     AND (SELECT value FROM function_privileges_ok)
+    AND (SELECT value FROM device_audit_boundary_ok)
     AND (SELECT value FROM signing_capability_boundary_ok)
     AND (SELECT value FROM agent_session_authority_boundary_ok)
     AND (SELECT value FROM default_privileges_ok) AS ok
@@ -687,6 +773,9 @@ SELECT json_build_object(
   'schema_privileges_ok', (SELECT value FROM schema_privileges_ok),
   'database_privileges_ok', (SELECT value FROM database_privileges_ok),
   'migration_head_ok', (SELECT value FROM migration_head_ok),
+  'device_audit_boundary_ok', (SELECT value FROM device_audit_boundary_ok),
+  'device_audit_diagnostics', COALESCE((SELECT json_agg(json_build_object('relation', relname, 'failures', failures) ORDER BY relname)
+    FROM device_audit_boundary_observations WHERE cardinality(failures) > 0), '[]'::json),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
   'table_privilege_diagnostics', COALESCE((SELECT json_agg(json_build_object(
       'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
