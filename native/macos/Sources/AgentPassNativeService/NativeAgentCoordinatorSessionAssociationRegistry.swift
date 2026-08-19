@@ -60,6 +60,7 @@ internal final class NativeAgentCoordinatorSessionAssociation: @unchecked Sendab
     let sessionID: String
     let binding: NativeAgentSessionBinding
     let coordinator: any NativeAgentCoordinatorSessionReference
+    let dedicatedSigningAssociation: NativeAgentDedicatedSigningAssociation?
 
     private let stateLock = NSLock()
     private var state: NativeAgentCoordinatorSessionAssociationState = .active
@@ -67,7 +68,8 @@ internal final class NativeAgentCoordinatorSessionAssociation: @unchecked Sendab
     init(
         sessionID: String,
         binding: NativeAgentSessionBinding,
-        coordinator: any NativeAgentCoordinatorSessionReference
+        coordinator: any NativeAgentCoordinatorSessionReference,
+        dedicatedSigningAssociation: NativeAgentDedicatedSigningAssociation? = nil
     ) throws {
         guard Self.isCanonicalUUID(sessionID) else {
             throw NativeAgentCoordinatorSessionAssociationRegistryError.invalidSessionID
@@ -75,6 +77,7 @@ internal final class NativeAgentCoordinatorSessionAssociation: @unchecked Sendab
         self.sessionID = sessionID
         self.binding = binding
         self.coordinator = coordinator
+        self.dedicatedSigningAssociation = dedicatedSigningAssociation
     }
 
     var lifecycleState: NativeAgentCoordinatorSessionAssociationState {
@@ -114,12 +117,14 @@ internal final class NativeAgentCoordinatorSessionAssociationRegistry: @unchecke
     func register(
         sessionID: String,
         binding: NativeAgentSessionBinding,
-        coordinator: any NativeAgentCoordinatorSessionReference
+        coordinator: any NativeAgentCoordinatorSessionReference,
+        dedicatedSigningAssociation: NativeAgentDedicatedSigningAssociation? = nil
     ) throws -> NativeAgentCoordinatorSessionAssociation {
         let association = try NativeAgentCoordinatorSessionAssociation(
             sessionID: sessionID,
             binding: binding,
-            coordinator: coordinator
+            coordinator: coordinator,
+            dedicatedSigningAssociation: dedicatedSigningAssociation
         )
         let key = NativeAgentCoordinatorSessionAssociationKey(binding: binding)
 

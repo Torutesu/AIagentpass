@@ -3638,8 +3638,10 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
     private let coordinator: NativeAgentSessionCoordinator?
     private let signingBindingObserver: AgentConnectionSessionBindingObserver?
+    private let sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry?
     private let terminalCloseLock = NSLock()
     private var hasTerminallyClosed = false
+    private var activeSessionBinding: NativeAgentSessionBinding?
 
     init(
         connection: NSXPCConnection,
@@ -3649,7 +3651,8 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
-        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming,
+        sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry?
     ) {
         self.connection = connection
         self.connectionGuard = connectionGuard
@@ -3658,6 +3661,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         self.runtime = runtime
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
+        self.sessionAssociationRegistry = sessionAssociationRegistry
         let connectionBox = AgentSessionConnectionBox(connection)
         if let runtime {
             let bindingObserver = AgentConnectionSessionBindingObserver(
@@ -3744,6 +3748,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
             return true
         }
         guard shouldClose else { return }
+        let binding = terminalCloseLock.withLock {
+            defer { activeSessionBinding = nil }
+            return activeSessionBinding
+        }
+        if let binding {
+            sessionAssociationRegistry?.invalidate(binding: binding)
+        }
         coordinator?.invalidateConnection()
         bootstrapStore.invalidate()
         connection.invalidate()
@@ -3824,6 +3835,20 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
             do {
                 try self.authorizeConnection()
                 let activation = try coordinator.start(bootstrapID: bootstrapID, proof: proof)
+                if let runtime = self.runtime,
+                   let registry = self.sessionAssociationRegistry {
+                    let dedicatedAssociation = NativeAgentDedicatedSigningAssociation(
+                        coordinator: coordinator,
+                        transactionStore: runtime.signingTransactions)
+                    _ = try registry.register(
+                        sessionID: activation.status.sessionID,
+                        binding: activation.binding,
+                        coordinator: coordinator,
+                        dedicatedSigningAssociation: dedicatedAssociation)
+                    self.terminalCloseLock.withLock {
+                        self.activeSessionBinding = activation.binding
+                    }
+                }
                 guard let response = AgentPassAgentSessionResponse(
                     sessionID: activation.status.sessionID,
                     leaseID: activation.status.leaseID,
@@ -3837,6 +3862,10 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     expiresAtMilliseconds: activation.status.expiresAtMilliseconds,
                     maxSignatures: activation.status.maxSignatures
                 ) else {
+                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                        self.sessionAssociationRegistry?.invalidate(binding: binding)
+                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
+                    }
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
                     return
@@ -3849,6 +3878,10 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     // therefore a local fault and must not strand reply-less
                     // authority.
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
+                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                        self.sessionAssociationRegistry?.invalidate(binding: binding)
+                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
+                    }
                     throw error
                 }
                 guard !self.transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
@@ -4095,6 +4128,7 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let observer = NativeDarwinProcessObservationSource()
+    private let sessionAssociationRegistry = NativeAgentCoordinatorSessionAssociationRegistry()
 
     init(
         configuration: ServiceConfiguration,
@@ -4134,7 +4168,8 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
                 runtime: runtime,
                 auditAppender: auditAppender,
                 qualificationFaultConsumer: qualificationFaultConsumer,
-                transportReplyFaultConsumer: transportReplyFaultConsumer
+                transportReplyFaultConsumer: transportReplyFaultConsumer,
+                sessionAssociationRegistry: sessionAssociationRegistry
             )
             connection.exportedObject = endpoint
             connection.invalidationHandler = { [weak endpoint] in
