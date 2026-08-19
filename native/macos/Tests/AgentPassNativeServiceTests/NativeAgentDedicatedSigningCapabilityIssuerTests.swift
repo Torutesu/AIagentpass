@@ -127,7 +127,7 @@ private func issuer() throws -> (NativeAgentDedicatedSigningCapabilityIssuer, Cu
     #expect(request.requestID == issuerRequest)
     #expect(request.sessionID == issuerSession)
     #expect(request.capabilityID == issuerCapability)
-    #expect(request.requestNonce == Data(repeating: 0xa5, count: 16))
+    #expect(request.requestNonce == Data(repeating: 0xa5, count: NativeAgentPassSignRequest.nonceBytes))
     #expect(request.createdAtMilliseconds == 1_786_838_410_000)
     #expect(try request.canonicalCapabilityData() == NativeAgentSigningCapabilityCodec.canonicalJSON(response.capability))
 }

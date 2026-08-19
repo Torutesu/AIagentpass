@@ -12,6 +12,7 @@ public enum NativeAgentPassSignRequestError: String, Error, Equatable, Sendable 
 /// verification.  This is deliberately not an XPC DTO and has no public
 /// initializer: only the issuer in this target can create one.
 public struct NativeAgentPassSignRequest: Equatable, Sendable {
+    public static let nonceBytes = 32
     public static let minimumNonceBytes = 16
     public static let maximumNonceBytes = 64
     public static let maximumCommitPayloadBytes = 1 * 1024 * 1024

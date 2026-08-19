@@ -76,13 +76,17 @@ public final class NativeAgentDedicatedSigningCapabilityIssuer: @unchecked Senda
         guard !response.metadata.replayed else {
             throw NativeAgentPassSignRequestError.replayedCapability
         }
+        guard !commitPayload.isEmpty,
+              commitPayload.count <= NativeAgentPassSignRequest.maximumCommitPayloadBytes else {
+            throw NativeAgentPassSignRequestError.invalidRequest
+        }
         let requestNonce: Data
         do {
-            requestNonce = try random.randomBytes(count: NativeAgentPassSignRequest.minimumNonceBytes)
+            requestNonce = try random.randomBytes(count: NativeAgentPassSignRequest.nonceBytes)
         } catch {
             throw NativeAgentDedicatedSigningCapabilityIssuerError.randomUnavailable
         }
-        guard requestNonce.count == NativeAgentPassSignRequest.minimumNonceBytes else {
+        guard requestNonce.count == NativeAgentPassSignRequest.nonceBytes else {
             throw NativeAgentDedicatedSigningCapabilityIssuerError.randomUnavailable
         }
         let createdAtMilliseconds: Int64
