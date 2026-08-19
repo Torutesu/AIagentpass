@@ -286,6 +286,11 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
         public let payload: Data
         public let payloadDigest: Data
         public let peerProcessBindingHash: String
+        /// Freshly observed process coordinates used only by Service-local
+        /// observers. These fields are not part of any XPC DTO.
+        public let peerProcessID: Int32
+        public let peerProcessPIDVersion: UInt64
+        public let peerEffectiveUserID: UInt32
         public let peerAuditTokenIdentity: String
 
         fileprivate init(
@@ -294,6 +299,9 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
             payload: Data,
             payloadDigest: Data,
             peerProcessBindingHash: String,
+            peerProcessID: Int32,
+            peerProcessPIDVersion: UInt64,
+            peerEffectiveUserID: UInt32,
             peerAuditTokenIdentity: String
         ) {
             self.sessionID = sessionID
@@ -301,6 +309,9 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
             self.payload = payload
             self.payloadDigest = payloadDigest
             self.peerProcessBindingHash = peerProcessBindingHash
+            self.peerProcessID = peerProcessID
+            self.peerProcessPIDVersion = peerProcessPIDVersion
+            self.peerEffectiveUserID = peerEffectiveUserID
             self.peerAuditTokenIdentity = peerAuditTokenIdentity
         }
     }
@@ -453,6 +464,9 @@ public final class NativeAgentAuthenticatedGitBridgeSession: @unchecked Sendable
             payload: request.payload,
             payloadDigest: request.payloadDigest,
             peerProcessBindingHash: peer.processBindingHash,
+            peerProcessID: peer.connectionContext.pid,
+            peerProcessPIDVersion: peer.connectionContext.pidVersion,
+            peerEffectiveUserID: peer.connectionContext.effectiveUserID,
             peerAuditTokenIdentity: peer.auditTokenIdentity
         )
     }
