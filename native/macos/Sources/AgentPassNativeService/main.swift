@@ -1064,16 +1064,20 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         controlV2Manager?.status().sequence ?? controlManager?.status().sequence
     }
 
-    private static func deviceAuditEventID(entry: Int) -> String? {
-        guard entry > 0 else { return nil }
-        let sequence = UInt64(entry)
-        // The event ID is UUID-shaped but ordered by the local audit entry.
-        // NativeDeviceAuditOutbox uses event ID order when forming a batch.
-        // Keep the ID deterministic across a retry while retaining the exact
-        // UUID shape required by the Cloud contract. The audit entry index is
-        // bounded by the local log and the lower 32 bits are the stable ID
-        // component; the final component retains the full bounded sequence.
-        return String(format: "%08llx-0000-4000-8000-%012llx", sequence & 0xffffffff, sequence & 0xffffffffffff)
+    private static func deviceAuditEventID(recordHash: String) -> String? {
+        guard recordHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return nil }
+        // The local audit record hash survives segment rotation, unlike the
+        // active-segment entry count. Derive a deterministic UUID-shaped ID
+        // from its first 128 bits so retries cannot reuse an event ID for new
+        // evidence after a rotation.
+        let hex = Array(recordHash.prefix(32))
+        guard hex.count == 32 else { return nil }
+        let groups = [
+            String(hex[0..<8]), String(hex[8..<12]),
+            "4" + String(hex[13..<16]), "8" + String(hex[17..<20]),
+            String(hex[20..<32])
+        ]
+        return groups.joined(separator: "-")
     }
 
     init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?, controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)? = nil) {
@@ -3152,7 +3156,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         try rotateEvidenceIfReady()
         if deviceAuditUploadOperational,
            let outbox = deviceAuditOutbox,
-           let eventID = Self.deviceAuditEventID(entry: status.entries),
+           let eventID = Self.deviceAuditEventID(recordHash: status.headHash),
            let previousHash = try? outbox.nextPreviousHash(),
            let redacted = NativeServiceDeviceAuditProjection.project(
                local: event,
