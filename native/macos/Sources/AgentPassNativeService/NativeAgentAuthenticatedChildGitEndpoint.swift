@@ -259,6 +259,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         }
         guard Self.helperBelongsTo(entry: entry, helperIdentity: helperIdentity) else {
             entry.closed = true
+            entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
             entries[key] = entry
@@ -267,6 +268,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         }
         guard entry.worktreeBindingDigest == worktreeBindingDigest else {
             entry.closed = true
+            entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
             entries[key] = entry
@@ -275,6 +277,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         }
         guard request.requestSequence == 1 else {
             entry.closed = true
+            entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
             entries[key] = entry
@@ -284,6 +287,7 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         let payloadDigest = Data(SHA256.hash(data: request.commitPayload))
         guard !entry.consumedPayloadDigests.contains(payloadDigest) else {
             entry.closed = true
+            entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
             entries[key] = entry
