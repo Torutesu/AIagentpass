@@ -55,6 +55,16 @@ test("0077 locks and rechecks the existing Session/Grant authority projection", 
   assert.match(handoff, /a\.status = 'active'/u);
   assert.match(handoff, /FROM public\.revocations AS r[\s\S]*r\.status = 'active'/u);
   assert.match(handoff, /FOR SHARE OF s, d, a, gr, authority/u);
+
+  const organizationLock = handoff.indexOf(
+    "PERFORM pg_advisory_xact_lock(hashtextextended(\n    'agentpass:organization:' || p_organization_id::text, 0\n  ));",
+  );
+  const authorityQuery = handoff.indexOf("SELECT s, gr");
+  const activeRevocationQuery = handoff.indexOf("FROM public.revocations AS r");
+  assert.ok(organizationLock >= 0, "0077 must acquire the organization advisory lock with the shared key derivation");
+  assert.ok(organizationLock < authorityQuery, "0077 must acquire the organization lock before the authority query");
+  assert.ok(organizationLock < activeRevocationQuery, "0077 must acquire the organization lock before checking active revocations");
+
   assert.match(handoff, /INSERT INTO public\.agent_session_launch_authority_handoffs/u);
   assert.match(handoff, /ON CONFLICT DO NOTHING/u);
   assert.match(handoff, /'state', 'issued'/u);

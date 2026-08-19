@@ -130,6 +130,14 @@ BEGIN
       MESSAGE = 'agent session launch authority handoff binding is invalid';
   END IF;
 
+  -- Serialize this authority read with control-plane revocations. Keep the
+  -- key derivation byte-for-byte compatible with the control-plane SQL and
+  -- JavaScript repository so a revocation cannot commit between the active
+  -- revocation check and the handoff marker insert.
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'agentpass:organization:' || p_organization_id::text, 0
+  ));
+
   -- This is intentionally the same authority projection used by the Session
   -- binder. FOR SHARE locks every mutable authority row participating in the
   -- decision before the one-use marker is attempted.
