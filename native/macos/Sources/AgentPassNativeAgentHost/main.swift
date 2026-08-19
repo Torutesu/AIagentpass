@@ -33,6 +33,64 @@ private struct ActivationOutput: Encodable {
     let error: String?
 }
 
+private func runHostLaunchPlan(projectPath: String) -> Never {
+    let handoff: NativeAgentLaunchAuthorityHandoff
+    do {
+        handoff = try readLaunchAuthorityHandoff()
+    } catch let error as NativeAgentLaunchAuthorityHandoffError {
+        emitActivation(
+            ActivationOutput(
+                ok: false,
+                operation: "host-launch",
+                status: "rejected",
+                error: "launch_plan_authority_" + error.stableCode
+            ),
+            status: 2
+        )
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "launch_plan_authority_rejected"),
+            status: 2
+        )
+    }
+
+    let plan: NativeAgentHostLaunchPlan
+    do {
+        plan = try NativeAgentHostLaunchPlan(projectPath: projectPath, authorityHandoff: handoff)
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "launch_plan_project_rejected"),
+            status: 2
+        )
+    }
+
+    do {
+        let serviceClient = AgentHostServiceClient(handoff: handoff)
+        let connection = try NativeAgentHostConnectionBinding(
+            connectionID: "agent-host",
+            agentID: handoff.agentID
+        )
+        let runtime = try NativeAgentHostRuntime(
+            plan: plan,
+            connection: connection,
+            supervisor: NativeAgentHostChildSupervisor(),
+            adapter: AgentHostServiceLifecycleAdapter(client: serviceClient)
+        )
+        _ = try runtime.start()
+        emitActivation(ActivationOutput(ok: true, operation: "host-launch", status: "active", error: nil), status: 0)
+    } catch let error as NativeAgentHostLifecycleAdapterError where error == .unavailable {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "service_binding_contract_unavailable"),
+            status: 2
+        )
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "host_launch_rejected"),
+            status: 1
+        )
+    }
+}
+
 private final class ProbeResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ProbeOutput?
@@ -98,6 +156,113 @@ private func randomNonce() -> Data? {
         SecRandomCopyBytes(kSecRandomDefault, bytes.count, bytes.baseAddress!)
     }
     return result == errSecSuccess ? nonce : nil
+}
+
+/// The launch command owns one authenticated Service connection. All
+/// lifecycle hooks below use that same connection; no session identifier or
+/// binding material is accepted from argv, environment, or the child.
+private final class AgentHostServiceClient: @unchecked Sendable {
+    let connection: NSXPCConnection
+    let proxy: AgentPassAgentXPCProtocol
+    let handoff: NativeAgentLaunchAuthorityHandoff
+
+    init(handoff: NativeAgentLaunchAuthorityHandoff) {
+        self.handoff = handoff
+        let connection = NSXPCConnection(machServiceName: AgentHostContract.machServiceName, options: .privileged)
+        connection.remoteObjectInterface = AgentPassAgentXPCInterface.make()
+        connection.resume()
+        self.connection = connection
+        self.proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as! AgentPassAgentXPCProtocol
+    }
+
+    deinit { connection.invalidate() }
+
+    func close(sessionID: String, reason: AgentPassAgentSessionCloseReason = .clientShutdown) -> Bool {
+        guard let request = AgentPassAgentCloseSessionRequest(
+            sessionID: sessionID,
+            reason: reason.rawValue
+        ) else { return false }
+        guard case .response = waitForReply({ reply in
+            proxy.closeAgentSession(request, withReply: reply)
+        }) else { return false }
+        return true
+    }
+}
+
+private struct AgentHostServiceLifecycleAdapter: NativeAgentHostLifecycleAdapter {
+    let client: AgentHostServiceClient
+
+    func hooks(for plan: NativeAgentHostLaunchPlan) throws -> NativeAgentHostLifecycleCoordinatorHooks {
+        guard plan.authorityHandoff == client.handoff else {
+            throw NativeAgentHostLifecycleAdapterError.unavailable
+        }
+
+        return NativeAgentHostLifecycleCoordinatorHooks(
+            bootstrap: { connection, context in
+                guard connection.agentID == plan.authorityHandoff.agentID else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard let nonce = randomNonce(),
+                      let request = AgentPassAgentBootstrapRequest(
+                        agentID: connection.agentID,
+                        adapterKind: context.adapter.rawValue,
+                        requestedTTLSeconds: context.requestedTTLSeconds,
+                        bootstrapNonce: nonce
+                      ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let bootstrap) = waitForReply({ reply in
+                    client.proxy.bootstrapAgent(request, withReply: reply)
+                }),
+                let sessionRequest = AgentPassAgentSessionRequest(
+                    bootstrapID: bootstrap.bootstrapID,
+                    proof: plan.authorityHandoff.proof
+                ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let session) = waitForReply({ reply in
+                    client.proxy.startAgentSession(sessionRequest, withReply: reply)
+                }),
+                let binding = try? NativeAgentSessionBinding(
+                    agentID: connection.agentID,
+                    deviceID: session.deviceID,
+                    processBindingDigest: session.processBindingDigest,
+                    ancestryBindingDigest: session.ancestryBindingDigest,
+                    worktreeBindingDigest: session.worktreeBindingDigest,
+                    controlSequence: session.controlSequence,
+                    authorityGeneration: session.authorityGeneration,
+                    keyGeneration: session.keyGeneration
+                ),
+                let activation = try? NativeAgentHostQualifiedSessionActivation(
+                    sessionID: session.sessionID,
+                    binding: binding
+                ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                let sessionID = session.sessionID
+                return NativeAgentHostLifecycleBootstrapReceipt(
+                    activation: activation,
+                    rollback: { _ = client.close(sessionID: sessionID) }
+                )
+            },
+            reobserveAuthority: { identity in
+                guard let request = AgentPassAgentSessionStatusRequest(sessionID: identity.sessionID) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let status) = waitForReply({ reply in
+                    client.proxy.agentSessionStatus(request, withReply: reply)
+                }) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                return status.status == "active" ? .authorized : .lost
+            },
+            close: { identity, _ in
+                guard client.close(sessionID: identity.sessionID) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+            }
+        )
+    }
 }
 
 private enum XPCReplyResult<T> {
@@ -423,13 +588,16 @@ private func runStatusProbe() -> Never {
 
 #if !AGENTPASS_HOST_TESTING
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.isEmpty || arguments == ["status"] || arguments == ["probe"] || arguments == ["qualification-activate"] else {
-    FileHandle.standardError.write(Data("Usage: agentpass-native-agent-host [status|probe|qualification-activate]\n".utf8))
+guard arguments.isEmpty || arguments == ["status"] || arguments == ["probe"] || arguments == ["qualification-activate"]
+    || (arguments.count == 2 && arguments[0] == "launch") else {
+    FileHandle.standardError.write(Data("Usage: agentpass-native-agent-host [status|probe|qualification-activate|launch PROJECT_PATH]\n".utf8))
     exit(2)
 }
 
 if arguments == ["qualification-activate"] {
     runQualificationActivation()
+} else if arguments.count == 2, arguments[0] == "launch" {
+    runHostLaunchPlan(projectPath: arguments[1])
 } else {
     runStatusProbe()
 }

@@ -3696,8 +3696,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 guard let response = AgentPassAgentSessionResponse(
                     sessionID: activation.status.sessionID,
                     leaseID: activation.status.leaseID,
+                    deviceID: activation.binding.deviceID,
                     processBindingDigest: activation.binding.processBindingDigest,
+                    ancestryBindingDigest: activation.binding.ancestryBindingDigest,
                     worktreeBindingDigest: activation.binding.worktreeBindingDigest,
+                    controlSequence: activation.binding.controlSequence,
+                    authorityGeneration: activation.binding.authorityGeneration,
+                    keyGeneration: activation.binding.keyGeneration,
                     expiresAtMilliseconds: activation.status.expiresAtMilliseconds,
                     maxSignatures: activation.status.maxSignatures
                 ) else {

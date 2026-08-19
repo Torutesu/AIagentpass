@@ -32,6 +32,7 @@ through every row:
 | Intel/T2 Secure Enclave lane | Separate signed qualified report and evidence directory bound to the same candidate digest | `node scripts/release/validate-hardware-qualification.mjs ...` | `not_proven` |
 | Aggregate hardware promotion | Both lane reports, approved operator policy, and aggregate evidence for the same candidate | `node scripts/release/verify-hardware-qualification-set.mjs ...` | `not_proven` |
 | Protected release environment | Manual protected job configuration with short-lived signing/notary credentials and no PR secret path | Review the protected workflow/environment configuration and record the run URL | `not_proven` |
+| Dedicated Host/Child XPC identity gate | Candidate-bound closed projection with live audit-token digest, Child-specific requirement digest/evaluation, authenticated-XPC activation, and four denial-before-sign cases | `node scripts/release/xpc/verify-xpc-qualification.mjs XPC-EVIDENCE.json` | `not_proven` |
 
 ## Promotion rule
 

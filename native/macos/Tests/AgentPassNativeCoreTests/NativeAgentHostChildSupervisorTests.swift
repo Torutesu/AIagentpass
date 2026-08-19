@@ -730,6 +730,31 @@ private func makeHookedProjectDirectory(
     }
 }
 
+@Test func authenticatedXPCLifecycleIsPrepareSpawnIndependentObserveAttach() throws {
+    try withTemporaryProjectDirectory { project in
+        let xpc = NativeAgentHostAuthenticatedXPCSupervisorFixture()
+        let process = HostSupervisorFixture()
+        let supervisor = makeAuthenticatedXPCSupervisor(process: process, xpc: xpc)
+
+        let session = try supervisor.start(try makeRequest(
+            projectDirectory: project,
+            gitTransport: .authenticatedXPC
+        ))
+
+        #expect(xpc.events == [
+            .prepare,
+            .identityObserved(pid: 700, pidVersion: 1),
+            .attach
+        ])
+        #expect(process.snapshot().spec?.gitTransport == .authenticatedXPC)
+        #expect(xpc.lastExecutableIdentityDigest == (try xpc.expectedExecutableIdentityDigest))
+        #expect(xpc.lastAncestryBindingDigest == (try xpc.expectedAncestryBindingDigest))
+        #expect(xpc.lastWorktreeBindingDigest == Data(repeating: 0x44, count: AgentPassHostXPCContract.digestBytes))
+
+        _ = try session.wait()
+    }
+}
+
 private func makeAuthenticatedXPCSupervisor(
     process: HostSupervisorFixture,
     xpc: NativeAgentHostAuthenticatedXPCSupervisorFixture

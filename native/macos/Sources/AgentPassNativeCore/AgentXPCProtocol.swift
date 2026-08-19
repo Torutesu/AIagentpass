@@ -201,12 +201,61 @@ public final class AgentPassAgentSessionResponse: NSObject, NSSecureCoding {
 
     public let sessionID: String
     public let leaseID: String
+    public let deviceID: String
     public let processBindingDigest: Data
+    public let ancestryBindingDigest: Data
     public let worktreeBindingDigest: Data
+    public let controlSequence: Int64
+    public let authorityGeneration: Int64
+    public let keyGeneration: Int64
     public let expiresAtMilliseconds: Int64
     public let maxSignatures: Int
 
     public init?(
+        sessionID: String,
+        leaseID: String,
+        deviceID: String,
+        processBindingDigest: Data,
+        ancestryBindingDigest: Data,
+        worktreeBindingDigest: Data,
+        controlSequence: Int64,
+        authorityGeneration: Int64,
+        keyGeneration: Int64,
+        expiresAtMilliseconds: Int64,
+        maxSignatures: Int
+    ) {
+        guard let sessionID = AgentXPCValidation.uuid(sessionID),
+              let leaseID = AgentXPCValidation.uuid(leaseID),
+              let deviceID = AgentXPCValidation.uuid(deviceID),
+              AgentXPCValidation.digest(processBindingDigest),
+              AgentXPCValidation.digest(ancestryBindingDigest),
+              AgentXPCValidation.digest(worktreeBindingDigest),
+              controlSequence >= 1,
+              authorityGeneration >= 1,
+              keyGeneration >= 1,
+              AgentXPCValidation.timestamp(expiresAtMilliseconds),
+              (Self.minimumSignatureBudget...Self.maximumSignatureBudget).contains(maxSignatures) else {
+            return nil
+        }
+        self.sessionID = sessionID
+        self.leaseID = leaseID
+        self.deviceID = deviceID
+        self.processBindingDigest = processBindingDigest
+        self.ancestryBindingDigest = ancestryBindingDigest
+        self.worktreeBindingDigest = worktreeBindingDigest
+        self.controlSequence = controlSequence
+        self.authorityGeneration = authorityGeneration
+        self.keyGeneration = keyGeneration
+        self.expiresAtMilliseconds = expiresAtMilliseconds
+        self.maxSignatures = maxSignatures
+        super.init()
+    }
+
+    /// Compatibility initializer for older Core-only callers. New callers
+    /// must provide the complete binding projection above. The fallback is
+    /// retained only while the out-of-process entrypoints migrate together.
+    @available(*, deprecated, message: "Provide the complete session binding projection")
+    public convenience init?(
         sessionID: String,
         leaseID: String,
         processBindingDigest: Data,
@@ -214,30 +263,34 @@ public final class AgentPassAgentSessionResponse: NSObject, NSSecureCoding {
         expiresAtMilliseconds: Int64,
         maxSignatures: Int
     ) {
-        guard let sessionID = AgentXPCValidation.uuid(sessionID),
-              let leaseID = AgentXPCValidation.uuid(leaseID),
-              AgentXPCValidation.digest(processBindingDigest),
-              AgentXPCValidation.digest(worktreeBindingDigest),
-              AgentXPCValidation.timestamp(expiresAtMilliseconds),
-              (Self.minimumSignatureBudget...Self.maximumSignatureBudget).contains(maxSignatures) else {
-            return nil
-        }
-        self.sessionID = sessionID
-        self.leaseID = leaseID
-        self.processBindingDigest = processBindingDigest
-        self.worktreeBindingDigest = worktreeBindingDigest
-        self.expiresAtMilliseconds = expiresAtMilliseconds
-        self.maxSignatures = maxSignatures
-        super.init()
+        self.init(
+            sessionID: sessionID,
+            leaseID: leaseID,
+            deviceID: leaseID,
+            processBindingDigest: processBindingDigest,
+            ancestryBindingDigest: processBindingDigest,
+            worktreeBindingDigest: worktreeBindingDigest,
+            controlSequence: 1,
+            authorityGeneration: 1,
+            keyGeneration: 1,
+            expiresAtMilliseconds: expiresAtMilliseconds,
+            maxSignatures: maxSignatures
+        )
     }
 
     public required convenience init?(coder: NSCoder) {
-        guard coder.containsValue(forKey: Keys.expiresAtMilliseconds),
+        guard !AgentXPCValidation.containsForbiddenField(coder),
+              coder.containsValue(forKey: Keys.expiresAtMilliseconds),
               coder.containsValue(forKey: Keys.maxSignatures),
               let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
               let leaseID = coder.decodeObject(of: NSString.self, forKey: Keys.leaseID) as String?,
+              let deviceID = coder.decodeObject(of: NSString.self, forKey: Keys.deviceID) as String?,
               let processBindingDigest = coder.decodeObject(of: NSData.self, forKey: Keys.processBindingDigest) as Data?,
+              let ancestryBindingDigest = coder.decodeObject(of: NSData.self, forKey: Keys.ancestryBindingDigest) as Data?,
               let worktreeBindingDigest = coder.decodeObject(of: NSData.self, forKey: Keys.worktreeBindingDigest) as Data?,
+              let controlSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.controlSequence)?.int64Value,
+              let authorityGeneration = coder.decodeObject(of: NSNumber.self, forKey: Keys.authorityGeneration)?.int64Value,
+              let keyGeneration = coder.decodeObject(of: NSNumber.self, forKey: Keys.keyGeneration)?.int64Value,
               let expiresAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.expiresAtMilliseconds)?.int64Value,
               let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue else {
             return nil
@@ -245,8 +298,13 @@ public final class AgentPassAgentSessionResponse: NSObject, NSSecureCoding {
         self.init(
             sessionID: sessionID,
             leaseID: leaseID,
+            deviceID: deviceID,
             processBindingDigest: processBindingDigest,
+            ancestryBindingDigest: ancestryBindingDigest,
             worktreeBindingDigest: worktreeBindingDigest,
+            controlSequence: controlSequence,
+            authorityGeneration: authorityGeneration,
+            keyGeneration: keyGeneration,
             expiresAtMilliseconds: expiresAtMilliseconds,
             maxSignatures: maxSignatures
         )
@@ -255,8 +313,13 @@ public final class AgentPassAgentSessionResponse: NSObject, NSSecureCoding {
     public func encode(with coder: NSCoder) {
         coder.encode(sessionID as NSString, forKey: Keys.sessionID)
         coder.encode(leaseID as NSString, forKey: Keys.leaseID)
+        coder.encode(deviceID as NSString, forKey: Keys.deviceID)
         coder.encode(processBindingDigest as NSData, forKey: Keys.processBindingDigest)
+        coder.encode(ancestryBindingDigest as NSData, forKey: Keys.ancestryBindingDigest)
         coder.encode(worktreeBindingDigest as NSData, forKey: Keys.worktreeBindingDigest)
+        coder.encode(NSNumber(value: controlSequence), forKey: Keys.controlSequence)
+        coder.encode(NSNumber(value: authorityGeneration), forKey: Keys.authorityGeneration)
+        coder.encode(NSNumber(value: keyGeneration), forKey: Keys.keyGeneration)
         coder.encode(NSNumber(value: expiresAtMilliseconds), forKey: Keys.expiresAtMilliseconds)
         coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
     }
@@ -264,8 +327,13 @@ public final class AgentPassAgentSessionResponse: NSObject, NSSecureCoding {
     private enum Keys {
         static let sessionID = "session_id"
         static let leaseID = "lease_id"
+        static let deviceID = "device_id"
         static let processBindingDigest = "process_binding_digest"
+        static let ancestryBindingDigest = "ancestry_binding_digest"
         static let worktreeBindingDigest = "worktree_binding_digest"
+        static let controlSequence = "control_sequence"
+        static let authorityGeneration = "authority_generation"
+        static let keyGeneration = "key_generation"
         static let expiresAtMilliseconds = "expires_at_ms"
         static let maxSignatures = "max_signatures"
     }
@@ -643,6 +711,11 @@ public enum AgentPassAgentXPCInterface {
 
 private enum AgentXPCValidation {
     static let maximumTimestampMilliseconds: Int64 = 4_102_444_800_000 // 2100-01-01T00:00:00Z
+    private static let forbiddenFields = [
+        "future_authority", "unknown_field", "unexpected", "token", "session_token",
+        "capability", "capability_id", "private_key", "private_key_data", "signer",
+        "signer_arguments", "operation", "scope", "authority", "agent_id", "adapter_kind",
+    ]
 
     static func uuid(_ value: String) -> String? {
         guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else { return nil }
@@ -650,6 +723,10 @@ private enum AgentXPCValidation {
     }
 
     static func digest(_ value: Data) -> Bool { value.count == 32 }
+
+    static func containsForbiddenField(_ coder: NSCoder) -> Bool {
+        forbiddenFields.contains { coder.containsValue(forKey: $0) }
+    }
 
     static func timestamp(_ value: Int64) -> Bool {
         (0...maximumTimestampMilliseconds).contains(value)
