@@ -16,6 +16,7 @@ import {
   parseKmsQualificationReport,
   resolveKmsQualificationSourceCommit,
   serializeKmsQualificationReport,
+  scanForForbiddenEvidence,
   signatureInputBytes,
   verifyKmsQualificationReport,
   writeKmsQualificationReport
@@ -239,6 +240,12 @@ test("rejects unknown fields, incomplete purposes, and shared key identity", () 
   const shared = baseInput();
   shared.purpose_bindings[1].key_resource = shared.purpose_bindings[0].key_resource;
   assertCode("shared_key_resource", () => buildKmsQualificationReport(shared));
+});
+
+test("rejects common API/session credential fields and JWT-shaped values", () => {
+  assertCode("sensitive_field", () => scanForForbiddenEvidence({ api_key: "redacted-but-never-accepted" }));
+  assertCode("sensitive_field", () => scanForForbiddenEvidence({ session_token: "redacted-but-never-accepted" }));
+  assertCode("sensitive_value", () => scanForForbiddenEvidence("eyJaaaaaaaa.eyJbbbbbbbb.eyJcccccccc"));
 });
 
 test("rejects provider/resource/version substitutions and non-HSM evidence", () => {

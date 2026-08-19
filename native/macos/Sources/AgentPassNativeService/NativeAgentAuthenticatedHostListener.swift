@@ -77,6 +77,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 // worktree binding are configured. Never expose a weak mode.
                 return false
             }
+            let expectedChildUID = allowedClientUID
             let endpoint = try NativeAgentAuthenticatedHostEndpoint(
                 connectionContext: context,
                 initialPeerObservation: initialObservation,
@@ -98,7 +99,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                     let (childObservation, worktreeDigest) = try childFactory(pid, pidVersion)
                     guard childObservation.process.pid == pid,
                           childObservation.process.pidVersion == pidVersion,
-                          childObservation.process.uid == self.allowedClientUID else {
+                          childObservation.process.uid == expectedChildUID else {
                         throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
                     }
                     struct FixedSource: NativeProcessObservationSource {

@@ -31,8 +31,8 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/u;
 const AWS_RESOURCE = /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GCP_RESOURCE = /^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z0-9][a-z0-9-]{0,62}\/keyRings\/[A-Za-z0-9_-]{1,63}\/cryptoKeys\/[A-Za-z0-9_-]{1,63}\/cryptoKeyVersions\/([1-9][0-9]{0,19})$/u;
 const SAFE_TEXT = /^[A-Za-z0-9][A-Za-z0-9 ._:/+@-]{0,255}$/u;
-const FORBIDDEN_KEY = /^(?:access[_-]?token|authorization|bearer|client[_-]?secret|credential|diagnostic|password|private(?:[_-](?:key|material))?|raw|secret(?:[_-](?:key|material))?|stderr|stdout|token)$/iu;
-const FORBIDDEN_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}|(?:private|secret)[_-]?(?:key|material)|client[_-]?secret)/iu;
+const FORBIDDEN_KEY = /^(?:access[_-]?token|api[_-]?key|authorization|bearer|client[_-]?secret|credential|diagnostic|password|private(?:[_-](?:key|material))?|raw|secret(?:[_-]?(?:access[_-]?)?(?:key|material))?|security[_-]?token|session[_-]?token|stderr|stdout|token|x[_-]?api[_-]?key)$/iu;
+const FORBIDDEN_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|(?:api|session|security)[_-]?token|(?:private|secret)[_-]?(?:access[_-]?)?(?:key|material)|client[_-]?secret)/iu;
 const DIGEST_VALUE = /^sha256:[0-9a-f]{64}$/u;
 
 export class KmsQualificationEvidenceError extends Error {

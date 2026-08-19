@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { ConsoleSummaryParseError, parseConsoleSummary } from "../app/console-summary.ts";
+import { ConsoleSummaryParseError, parseConsoleActivityPage, parseConsoleSummary } from "../app/console-summary.ts";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -96,6 +96,14 @@ function parse(input, options) {
   return parseConsoleSummary(input, options);
 }
 
+function activityPage(overrides = {}) {
+  return {
+    activity: [summary().audit.activity[0]],
+    next_cursor: "Y3Vyc29y.cG9zaXRpb24.c2lnbmF0dXJl",
+    ...overrides,
+  };
+}
+
 function assertParseError(fn, path) {
   assert.throws(fn, (error) => {
     assert.ok(error instanceof ConsoleSummaryParseError);
@@ -134,6 +142,29 @@ test("accepts an explicitly empty tenant summary without inventing data", () => 
   assert.deepEqual(result.agents, []);
   assert.deepEqual(result.policies, []);
   assert.deepEqual(result.audit, { health: [], activity: [], nextCursor: null });
+});
+
+test("parses the standalone cursor-paginated activity response", () => {
+  const result = parseConsoleActivityPage(activityPage(), { organizationId: ORGANIZATION_ID });
+  assert.deepEqual(result.activity[0], {
+    eventId: EVENT_ID, deviceId: DEVICE_ID, agentId: AGENT_ID, operation: "git.commit.sign", decision: "allow",
+    tone: "green", reason: "allowed", deviceTimestamp: DATE, receivedAt: DATE,
+  });
+  assert.equal(result.nextCursor, "Y3Vyc29y.cG9zaXRpb24.c2lnbmF0dXJl");
+  assert.ok(Object.isFrozen(result));
+  assert.ok(Object.isFrozen(result.activity));
+  assert.ok(Object.isFrozen(result.activity[0]));
+});
+
+test("rejects standalone activity tenant mismatches, duplicate events, and invalid cursors", () => {
+  const otherTenant = "77777777-7777-4777-8777-777777777777";
+  assertParseError(() => parseConsoleActivityPage(activityPage({
+    activity: [{ ...summary().audit.activity[0], organization_id: otherTenant }],
+  }), { organizationId: ORGANIZATION_ID }), "$.activity[0].organization_id");
+  assertParseError(() => parseConsoleActivityPage(activityPage({
+    activity: [summary().audit.activity[0], summary().audit.activity[0]],
+  }), { organizationId: ORGANIZATION_ID }), "$.activity");
+  assertParseError(() => parseConsoleActivityPage(activityPage({ next_cursor: "not-a-cursor" }), { organizationId: ORGANIZATION_ID }), "$.next_cursor");
 });
 
 test("rejects unknown keys at every closed boundary", () => {

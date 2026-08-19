@@ -20,7 +20,7 @@ verifierでproduction gate判定するための手順です。ここにあるコ
 - 2 instanceそれぞれのsource commit、image digest、config digestと、
   PostgreSQLのmigration head・managed signer operation bindingを含む
 - すべての観測時刻はmillisecond RFC 3339 UTCで、skip countはproductionで0
-- providerのraw response、stdout/stderr、diagnostic、credential、token、
+- providerのraw response、stdout/stderr、diagnostic、credential、API key、session/security token、JWT、
   private key、自由記述のエラーメッセージはレポートに含めない
 
 レポートの`report_digest`は署名欄を除いたcanonical JSONのSHA-256です。
@@ -74,7 +74,7 @@ const reportInput = {
 ```
 
 `validateKmsQualificationRunnerResult()`は、runnerから保管・転送するhandoffを再検証します。
-unknown field、accessor、raw/response/result/output、credential、token、private key、
+unknown field、accessor、raw/response/result/output、API key、session/security token、JWT、private key、
 diagnostic、stdout/stderr、自由記述エラーを含む値は拒否します。runnerの成功は、実AWS/GCPで
 実行されたことやproduction report全体の完成を意味しません。
 
