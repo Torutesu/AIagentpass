@@ -3,7 +3,9 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { AGENT_LIFECYCLE_HANDOFF_FD, AGENT_LIFECYCLE_DESCRIPTOR_VERSION, createAgentLifecycleLaunchDescriptor, FIXED_NATIVE_HOST_LAUNCHER, launchAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { EventEmitter } from "node:events";
+import { AGENT_LIFECYCLE_HANDOFF_FD, AGENT_LIFECYCLE_DESCRIPTOR_VERSION, createAgentLifecycleLaunchDescriptor, FIXED_NATIVE_HOST_LAUNCHER, launchAgentLifecycle, launchAgentLifecycleWithHandoff } from "../lib/agent-lifecycle-cli.mjs";
+import { AGENT_LAUNCH_HANDOFF_ERRORS, readAgentLaunchAuthority } from "../lib/agent-launch-handoff.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = path.join(root, "bin", "agentpass.mjs");
@@ -120,6 +122,29 @@ function inheritedHandoffStat() {
     isFIFO: () => false,
     isSocket: () => true,
     isFile: () => false
+  };
+}
+
+function authority(overrides = {}) {
+  const issuedAt = overrides.issued_at ?? "2026-08-19T03:00:00.000Z";
+  const expiresAt = overrides.expires_at ?? "2026-08-19T03:10:00.000Z";
+  const { issued_at: _issuedAt, expires_at: _expiresAt, authority: innerOverrides = {}, ...envelopeOverrides } = overrides;
+  return {
+    version: 1,
+    type: "agentpass.launch-authority",
+    project: "/tmp/project",
+    agent: "claude-code",
+    issued_at: issuedAt,
+    expires_at: expiresAt,
+    authority: {
+      schema_version: 1,
+      agent_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agent_kind: "claude_code",
+      requested_ttl_seconds: 600,
+      proof: '{"nonce":"AAAAAAAAAAAAAAAAAAAAAA","version":1}',
+      ...innerOverrides
+    },
+    ...envelopeOverrides
   };
 }
 
@@ -254,4 +279,87 @@ test("a caller-provided handoff boolean cannot bypass the inherited FD3 check", 
   });
 
   assert.equal(result.error.code, "AGENT_LIFECYCLE_HANDOFF_NOT_AVAILABLE");
+});
+
+test("the JS seam consumes canonical authority and relays it only through a fresh FD3 pipe", async () => {
+  const calls = [];
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stdio = [null, child.stdout, null, new EventEmitter()];
+  child.stdio[3].end = (bytes, callback) => {
+    calls.push({ bytes: Buffer.from(bytes), descriptor: 3 });
+    callback();
+    child.stdout.emit("data", '{"error":null,"ok":true,"operation":"host-launch","status":"active"}\n');
+    child.stdout.emit("data", '{"error":null,"ok":true,"operation":"host-launch","status":"closed"}\n');
+    child.emit("close", 0, null);
+  };
+
+  const result = await launchAgentLifecycleWithHandoff(launchDescriptor(), {
+    platform: "darwin",
+    lstat: (file) => trustedLauncherStat(file),
+    nowMs: Date.parse("2026-08-19T03:05:00.000Z"),
+    readAuthority: () => authority(),
+    spawn: (launcher, args, options) => {
+      calls.push({ launcher, args, options });
+      return child;
+    }
+  });
+
+  assert.deepEqual(result, { ok: true, operation: "launch", status: "closed" });
+  assert.equal(calls[0].args[0], "launch");
+  assert.equal(calls[0].args[1], "/tmp/project");
+  assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "ignore", "pipe"]);
+  assert.deepEqual(calls[0].options.env, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+  assert.equal(JSON.stringify(calls[0].args).includes("AAAAAAAA"), false);
+  assert.deepEqual(JSON.parse(calls[1].bytes.toString("utf8")), authority().authority);
+  assert.equal(calls[1].descriptor, AGENT_LIFECYCLE_HANDOFF_FD);
+});
+
+test("the JS seam fails closed when no upstream API handoff is inherited", async () => {
+  const result = await launchAgentLifecycleWithHandoff(launchDescriptor(), {
+    platform: "darwin",
+    lstat: (file) => trustedLauncherStat(file),
+    fstat: () => { throw new Error("upstream handoff unavailable"); },
+    spawn: () => { throw new Error("must not spawn"); }
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    operation: "launch",
+    error: {
+      code: AGENT_LAUNCH_HANDOFF_ERRORS.UNAVAILABLE,
+      message: "The one-time launch handoff is not available"
+    }
+  });
+});
+
+test("the JS seam rejects agent, TTL, proof, and project-binding substitutions before spawn", async () => {
+  for (const value of [
+    authority({ authority: { agent_kind: "cursor" } }),
+    authority({ authority: { requested_ttl_seconds: 601 } }),
+    authority({ authority: { proof: '{ "version": 1, "nonce": "AAAAAAAAAAAAAAAAAAAAAA" }' } }),
+    authority({ project: "/tmp/other" }),
+    authority({ expires_at: "2026-08-19T03:11:00.000Z" }),
+    authority({ extra: "forbidden" })
+  ]) {
+    let spawned = false;
+    const result = await launchAgentLifecycleWithHandoff(launchDescriptor(), {
+      platform: "darwin",
+      lstat: (file) => trustedLauncherStat(file),
+      nowMs: Date.parse("2026-08-19T03:05:00.000Z"),
+      readAuthority: () => value,
+      spawn: () => { spawned = true; throw new Error("must not spawn"); }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(spawned, false);
+    assert.ok([AGENT_LAUNCH_HANDOFF_ERRORS.INVALID, AGENT_LAUNCH_HANDOFF_ERRORS.MISMATCH].includes(result.error.code));
+  }
+});
+
+test("FD3 authority reader rejects regular files and closes the upstream descriptor", () => {
+  let closed = 0;
+  assert.throws(() => readAgentLaunchAuthority({
+    fstat: () => ({ isFIFO: () => false, isSocket: () => false, isFile: () => true }),
+    close: () => { closed += 1; }
+  }), (error) => error.code === AGENT_LAUNCH_HANDOFF_ERRORS.UNAVAILABLE);
+  assert.equal(closed, 1);
 });
