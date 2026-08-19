@@ -177,6 +177,16 @@ public struct NativeDeviceAuditIngestionResponse: Equatable, Sendable {
     public let headEventID: String?
     public let chainStatus: String
 
+    public init(deviceID: String, acceptedEventIDs: [String], duplicateEventIDs: [String], gapCount: Int, headHash: String, headEventID: String?, chainStatus: String) {
+        self.deviceID = deviceID
+        self.acceptedEventIDs = acceptedEventIDs
+        self.duplicateEventIDs = duplicateEventIDs
+        self.gapCount = gapCount
+        self.headHash = headHash
+        self.headEventID = headEventID
+        self.chainStatus = chainStatus
+    }
+
     public static func decode(_ data: Data, expectedDeviceID: String) throws -> NativeDeviceAuditIngestionResponse {
         let root = try NativeStrictJSON.object(from: data, maxBytes: 64 * 1024, maxDepth: 10)
         guard Set(root.keys) == Set(["ingestion"]), let ingestion = root["ingestion"] as? [String: Any],
