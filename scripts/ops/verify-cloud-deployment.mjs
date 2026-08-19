@@ -3,10 +3,11 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import process from "node:process";
 
-const [evidencePath = "", publicKeyPath = ""] = process.argv.slice(2);
+const [evidencePath = "", publicKeyPath = "", expectedFingerprint = ""] = process.argv.slice(2);
 const fail = (message) => { throw new Error(`cloud deployment evidence rejected: ${message}`); };
 if (!evidencePath) fail("evidence path is required");
 if (!publicKeyPath) fail("pinned public key path is required");
+if (!/^[0-9a-f]{64}$/u.test(expectedFingerprint)) fail("pinned public key fingerprint is required");
 
 let evidence;
 try { evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8")); }
@@ -17,6 +18,7 @@ if (keys !== "artifact_digest,commit_sha,environment,health,revision,service,sig
 if (!/^[A-Za-z0-9+/]{86,88}={0,2}$/u.test(evidence.signature)) fail("signature must be base64 Ed25519");
 let publicKey;
 try { publicKey = fs.readFileSync(publicKeyPath); } catch { fail("pinned public key is not readable"); }
+if (crypto.createHash("sha256").update(publicKey).digest("hex") !== expectedFingerprint) fail("pinned public key fingerprint mismatch");
 const unsigned = { ...evidence };
 delete unsigned.signature;
 const signedBytes = Buffer.from(JSON.stringify(unsigned) + "\n", "utf8");

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -21,9 +21,11 @@ test("accepts exact production deployment evidence", async () => {
   const file = join(dir, "evidence.json");
   const keyFile = join(dir, "deployment-public.pem");
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  await writeFile(keyFile, publicKey.export({ type: "spki", format: "pem" }));
+  const publicKeyBytes = publicKey.export({ type: "spki", format: "pem" });
+  await writeFile(keyFile, publicKeyBytes);
   await writeFile(file, `${JSON.stringify(signedEvidence(privateKey))}\n`);
-  const { stdout } = await run(process.execPath, [script, file, keyFile]);
+  const fingerprint = createHash("sha256").update(publicKeyBytes).digest("hex");
+  const { stdout } = await run(process.execPath, [script, file, keyFile, fingerprint]);
   assert.match(stdout, /"status":"verified"/u);
 });
 
@@ -35,7 +37,23 @@ test("rejects a healthy non-production or floating artifact", async () => {
   evidence.environment = "staging";
   evidence.artifact_digest = "latest";
   const keyFile = join(dir, "deployment-public.pem");
-  await writeFile(keyFile, publicKey.export({ type: "spki", format: "pem" }));
+  const publicKeyBytes = publicKey.export({ type: "spki", format: "pem" });
+  await writeFile(keyFile, publicKeyBytes);
   await writeFile(file, `${JSON.stringify(evidence)}\n`);
-  await assert.rejects(run(process.execPath, [script, file, keyFile]), /evidence rejected/u);
+  const fingerprint = createHash("sha256").update(publicKeyBytes).digest("hex");
+  await assert.rejects(run(process.execPath, [script, file, keyFile, fingerprint]), /evidence rejected/u);
+});
+
+test("rejects a substituted public key even when its signature is valid", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agentpass-cloud-evidence-"));
+  const file = join(dir, "evidence.json");
+  const keyFile = join(dir, "deployment-public.pem");
+  const trusted = generateKeyPairSync("ed25519");
+  const substituted = generateKeyPairSync("ed25519");
+  const substitutedBytes = substituted.publicKey.export({ type: "spki", format: "pem" });
+  await writeFile(keyFile, substitutedBytes);
+  await writeFile(file, `${JSON.stringify(signedEvidence(trusted.privateKey))}\n`);
+  const trustedBytes = trusted.publicKey.export({ type: "spki", format: "pem" });
+  const trustedFingerprint = createHash("sha256").update(trustedBytes).digest("hex");
+  await assert.rejects(run(process.execPath, [script, file, keyFile, trustedFingerprint]), /evidence rejected/u);
 });
