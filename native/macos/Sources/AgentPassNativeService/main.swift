@@ -3923,87 +3923,48 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     return
                 }
 
-                let (reservation, reservedBinding) = try coordinator.reserveSigningRequest(request)
-                do {
-                    let now = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
-                    let (requestAge, ageOverflow) = now.subtractingReportingOverflow(
-                        request.createdAtMilliseconds)
-                    guard !ageOverflow, (-60_000...60_000).contains(requestAge) else {
-                        throw NativeAgentSessionCoordinatorError.sessionDenied
-                    }
-                    try bindingObserver.consumeSigningCapability(
-                        request: request,
-                        agentID: reservedBinding.agentID,
-                        verifier: runtime.capabilityVerifier,
-                        nowMilliseconds: now
-                    )
-                    let authority = try bindingObserver.observeSigningAuthority(
-                        request: transactionRequest,
-                        agentID: reservedBinding.agentID,
-                        keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
-                    guard authority.sessionID == request.sessionID.lowercased() else {
-                        throw NativeAgentSessionCoordinatorError.bindingDenied
-                    }
-                    _ = try runtime.signingTransactions.admit(
-                        request: transactionRequest,
-                        authority: authority,
-                        budgetSequence: reservation.budgetSequence)
+                let now = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                let (requestAge, ageOverflow) = now.subtractingReportingOverflow(
+                    request.createdAtMilliseconds)
+                guard !ageOverflow, (-60_000...60_000).contains(requestAge) else {
+                    throw NativeAgentSessionCoordinatorError.sessionDenied
+                }
 
-                    let finalBinding = try coordinator.beginSigningIntent(reservation)
-                    let finalAuthority = try bindingObserver.observeSigningAuthority(
-                        request: transactionRequest,
-                        agentID: finalBinding.agentID,
-                        keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
-                    guard finalBinding == reservedBinding, finalAuthority == authority else {
-                        throw NativeAgentSessionCoordinatorError.bindingDenied
-                    }
-                    _ = try runtime.signingTransactions.markIntent(
-                        requestID: transactionRequest.requestID,
-                        authority: finalAuthority)
-
-                    // This fsynced marker is the last durable action before
-                    // the fixed Secure Enclave-backed provider is invoked.
-                    _ = try runtime.signingTransactions.markProviderStarted(
-                        requestID: transactionRequest.requestID)
-                    let signature = try runtime.gitCommitSigner.signGitCommitPayload(request.commitPayload)
+                let handoff = try coordinator.makeSigningHandoff(
+                    request: request,
+                    authorityProvider: { binding in
+                        try bindingObserver.consumeSigningCapability(
+                            request: request,
+                            agentID: binding.agentID,
+                            verifier: runtime.capabilityVerifier,
+                            nowMilliseconds: now
+                        )
+                        return try bindingObserver.observeSigningAuthority(
+                            request: transactionRequest,
+                            agentID: binding.agentID,
+                            keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                    })
+                let adapter = try NativeAgentSessionCoordinatorSigningAdapter(
+                    handoff: handoff,
+                    coordinator: coordinator,
+                    transactionStore: runtime.signingTransactions)
+                let completed = try adapter.execute { payload in
+                    let signature = try runtime.gitCommitSigner.signGitCommitPayload(payload)
                     guard try runtime.gitCommitSigner.verifyGitCommitSignature(
-                        payload: request.commitPayload,
+                        payload: payload,
                         signature: signature) else {
                         throw NativeAgentGitCommitSignerError.invalidSignature
                     }
-                    _ = try runtime.signingTransactions.recordVerified(
-                        requestID: transactionRequest.requestID,
-                        signature: String(decoding: signature, as: UTF8.self))
-                    let status = try coordinator.finalizeSigning(reservation)
-                    let completed = try runtime.signingTransactions.complete(
-                        requestID: transactionRequest.requestID,
-                        remainingSignatures: status.remainingSignatures)
-                    guard let responseSignature = completed.signature?.data(using: .utf8),
-                          let response = AgentPassAgentSignResponse(
-                            requestID: request.requestID,
-                            signature: responseSignature,
-                            remainingSignatures: completed.remainingSignatures ?? 0) else {
-                        throw NativeSigningTransactionError.invalidState
-                    }
-                    replyBox.call(response, nil)
-                } catch {
-                    let phase = try runtime.signingTransactions.lookup(request: transactionRequest)?.phase
-                    if phase == .signedVerified {
-                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) }
-                        catch { replyBox.call(nil, Self.denial(for: NativeSigningTransactionError.invalidState).nsError); return }
-                    }
-                    if phase == .providerStarted {
-                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
-                        do { try coordinator.markSigningOutcomeUnknown(reservation) } catch {}
-                    } else if phase == .intent {
-                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
-                        do { try coordinator.markSigningOutcomeUnknown(reservation) } catch {}
-                    } else if phase == .admitted || phase == nil {
-                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
-                        do { try coordinator.releaseSigningBeforeKey(reservation) } catch {}
-                    }
-                    replyBox.call(nil, Self.denial(for: error).nsError)
+                    return signature
                 }
+                guard let responseSignature = completed.signature?.data(using: .utf8),
+                      let response = AgentPassAgentSignResponse(
+                        requestID: request.requestID,
+                        signature: responseSignature,
+                        remainingSignatures: completed.remainingSignatures ?? 0) else {
+                    throw NativeSigningTransactionError.invalidState
+                }
+                replyBox.call(response, nil)
             } catch {
                 replyBox.call(nil, Self.denial(for: error).nsError)
             }

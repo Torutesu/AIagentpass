@@ -51,7 +51,7 @@ public final class NativeAgentSessionCoordinatorSigningHandoff: @unchecked Senda
     /// live-session reservation. It is not trusted for authority: every
     /// session, capability, lease, and process/worktree binding is compared
     /// against the supplied service-owned projections below.
-    public static func issue(
+    internal static func issue(
         request: AgentPassAgentSignRequest,
         binding: NativeAgentSessionBinding,
         lease: NativeAgentVerifiedCloudLease,

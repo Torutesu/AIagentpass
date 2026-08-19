@@ -303,3 +303,35 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     unknownArchiver.finishEncoding()
     #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassAgentSessionResponse.self, from: unknownArchiver.encodedData)) == nil)
 }
+
+@Test("generic Agent XPC routes new signing through the coordinator adapter")
+func genericAgentSigningCutoverKeepsReplayAndAuthorityBoundaries() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let sourceURL = testDirectory
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Sources/AgentPassNativeService/main.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let signStart = try #require(source.range(of: "func signGitCommit("))
+    let closeStart = try #require(source.range(of: "func closeAgentSession(", range: signStart.upperBound..<source.endIndex))
+    let signBody = String(source[signStart.lowerBound..<closeStart.lowerBound])
+
+    #expect(signBody.contains("coordinator.makeSigningHandoff"))
+    #expect(signBody.contains("NativeAgentSessionCoordinatorSigningAdapter"))
+    #expect(signBody.contains("adapter.execute"))
+    #expect(signBody.contains("consumeSigningCapability"))
+    #expect(signBody.contains("verifyGitCommitSignature"))
+    for phase in [".completed", ".signedVerified", ".providerStarted", ".uncertain"] {
+        #expect(signBody.contains(phase))
+    }
+    #expect(signBody.contains("recoverSigningReservation"))
+    #expect(signBody.contains("markUncertain"))
+    #expect(signBody.contains("case .completed"))
+    #expect(signBody.contains("case .signedVerified"))
+    #expect(signBody.contains("case .providerStarted"))
+    #expect(signBody.contains("case .uncertain"))
+    #expect(signBody.contains("runtime.signingTransactions.admit") == false)
+    #expect(signBody.contains("runtime.signingTransactions.markIntent") == false)
+    #expect(signBody.contains("runtime.signingTransactions.markProviderStarted") == false)
+    #expect(signBody.contains("runtime.signingTransactions.recordVerified") == false)
+}

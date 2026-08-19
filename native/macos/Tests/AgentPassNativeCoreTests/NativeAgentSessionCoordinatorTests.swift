@@ -436,14 +436,42 @@ private final class InvalidatingCoordinatorAudit: NativeAgentSessionAuditAppendi
   }
 }
 
+private func coordinatorHex(_ data: Data) -> String {
+  data.map { String(format: "%02x", $0) }.joined()
+}
+
+private func coordinatorWorktree() throws -> NativeAgentWorktreeBinding {
+  let repository = try NativeAgentWorktreeDirectoryIdentity(
+    device: 1, inode: 20, generation: 1, ownerUserID: 501, permissions: 0o755)
+  let git = try NativeAgentWorktreeDirectoryIdentity(
+    device: 1, inode: 21, generation: 1, ownerUserID: 501, permissions: 0o755)
+  let remote = try NativeAgentGitRemote(name: "origin", url: "git@example.test:repo.git")
+  return try NativeAgentWorktreeBinding(
+    layout: .embedded,
+    repositoryPath: "/work/repo",
+    gitDirectoryPath: "/work/repo/.git",
+    commonDirectoryPath: "/work/repo/.git",
+    repositoryIdentity: repository,
+    gitDirectoryIdentity: git,
+    commonDirectoryIdentity: git,
+    objectFormat: .sha1,
+    head: .branch("feature/native"),
+    headObjectID: String(repeating: "a", count: 40),
+    headTreeID: String(repeating: "b", count: 40),
+    remotes: [remote])
+}
+
 private func coordinatorBinding(worktree: UInt8 = 0xaa) throws
   -> NativeAgentSessionBinding
 {
-  try NativeAgentSessionBinding(
+  let worktreeDigest = worktree == 0xaa
+    ? try coordinatorWorktree().digest
+    : Data(repeating: worktree, count: 32)
+  return try NativeAgentSessionBinding(
     agentID: coordinatorAgentID, deviceID: coordinatorDeviceID,
     processBindingDigest: Data(repeating: 0xbb, count: 32),
     ancestryBindingDigest: Data(repeating: 0xcc, count: 32),
-    worktreeBindingDigest: Data(repeating: worktree, count: 32),
+    worktreeBindingDigest: worktreeDigest,
     controlSequence: 12, authorityGeneration: 7, keyGeneration: 99)
 }
 
@@ -460,15 +488,59 @@ private func coordinatorLease(
     "agent_id": coordinatorAgentID, "agent_kind": "claude-code",
     "adapter_id": "77777777-7777-4777-8777-777777777777",
     "adapter_version": "1.0.0",
-    "process_binding_sha256": String(repeating: "b", count: 64),
-    "ancestry_binding_sha256": String(repeating: "c", count: 64),
-    "worktree_binding_sha256": String(repeating: "a", count: 64),
+    "process_binding_sha256": coordinatorHex(binding.processBindingDigest),
+    "ancestry_binding_sha256": coordinatorHex(binding.ancestryBindingDigest),
+    "worktree_binding_sha256": coordinatorHex(binding.worktreeBindingDigest),
     "max_signatures": 2, "used_signatures": 0,
     "not_before": "2026-08-13T10:00:00.000Z", "expires_at": expiresAt,
     "control_sequence": 12, "authority_generation": 7,
   ]
   return try NativeAgentLeaseCodec.decode(
     NativeStrictJSON.data(object), expectedBinding: binding)
+}
+
+private func coordinatorSigningRequest(
+  requestID: String = "22222222-2222-4222-8222-222222222222",
+  capabilityID: String = "88888888-8888-4888-8888-888888888888",
+  nonce: UInt8 = 0x2a
+) throws -> AgentPassAgentSignRequest {
+  let capability = try NativeStrictJSON.data([
+    "version": 1,
+    "capability_id": capabilityID,
+    "nonce": String(repeating: "N", count: 32),
+    "issuer": "agentpass-cloud",
+    "key_id": "capability-v1",
+    "audience": ["agent_id": coordinatorAgentID, "device_id": coordinatorDeviceID],
+    "scope": [
+      "operations": ["git.commit.sign"],
+      "repositories": ["/work/repo"],
+      "branches": ["allow": ["feature/native"], "deny": []],
+      "remotes": ["allow": ["git@example.test:repo.git"], "deny": []],
+    ],
+    "not_before": "2026-08-13T10:00:00.000Z",
+    "expires_at": "2026-08-13T10:15:00.000Z",
+    "sequence": 1,
+    "signature": String(repeating: "A", count: 88),
+  ])
+  return try #require(AgentPassAgentSignRequest(
+    sessionID: coordinatorSessionID,
+    requestID: requestID,
+    capabilityID: capabilityID,
+    capability: capability,
+    commitPayload: Data("commit payload".utf8),
+    requestNonce: Data(repeating: nonce, count: 16),
+    createdAtMilliseconds: coordinatorWall + 1_000))
+}
+
+private func coordinatorSigningAuthority(
+  request: AgentPassAgentSignRequest,
+  binding: NativeAgentSessionBinding
+) throws -> NativeSigningTransactionAuthority {
+  try NativeSigningTransactionAuthority(
+    request: try NativeSigningTransactionRequest(request),
+    binding: binding,
+    worktree: try coordinatorWorktree(),
+    keyLifecycleIdentity: String(repeating: "f", count: 64))
 }
 
 private func coordinatorAuthority() throws -> NativeAgentRuntimeAuthorityConfiguration {
@@ -552,6 +624,71 @@ private func coordinatorFixture(
     try fixture.coordinator.close(sessionID: coordinatorSessionID, reason: .completed).state
       == .closed)
   #expect(fixture.audit.events.map(\.action) == [.sessionActivated, .sessionClosed])
+}
+
+@Test func coordinatorSigningHandoffUsesOnlyActiveLeaseAndTracksBudget() throws {
+  let fixture = try coordinatorFixture()
+  _ = try fixture.coordinator.start(bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+  let request = try coordinatorSigningRequest()
+  let binding = try coordinatorBinding()
+  let authority = try coordinatorSigningAuthority(
+    request: request, binding: binding)
+  var observedBinding: NativeAgentSessionBinding?
+  let handoff = try fixture.coordinator.makeSigningHandoff(request: request) { binding in
+    observedBinding = binding
+    return authority
+  }
+  #expect(observedBinding == binding)
+
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("agentpass-coordinator-signing-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(
+    at: directory, withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700])
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let transactions = try NativeSigningTransactionStore(
+    path: directory.appendingPathComponent("transactions.json").path)
+  let adapter = try NativeAgentSessionCoordinatorSigningAdapter(
+    handoff: handoff, coordinator: fixture.coordinator, transactionStore: transactions)
+  let completed = try adapter.execute { payload in
+    #expect(payload == request.commitPayload)
+    return Data("verified-signature".utf8)
+  }
+  #expect(completed.phase == .completed)
+  #expect(completed.remainingSignatures == 1)
+  #expect(try fixture.coordinator.status(sessionID: coordinatorSessionID).usedSignatures == 1)
+
+  let secondRequest = try coordinatorSigningRequest(
+    requestID: "99999999-9999-4999-8999-999999999999",
+    capabilityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nonce: 0x2b)
+  let secondAuthority = try coordinatorSigningAuthority(
+    request: secondRequest, binding: binding)
+  let secondHandoff = try fixture.coordinator.makeSigningHandoff(
+    request: secondRequest) { _ in secondAuthority }
+  let secondAdapter = try NativeAgentSessionCoordinatorSigningAdapter(
+    handoff: secondHandoff, coordinator: fixture.coordinator, transactionStore: transactions)
+  _ = try secondAdapter.execute { _ in Data("second-signature".utf8) }
+  #expect(try fixture.coordinator.status(sessionID: coordinatorSessionID).state == .closed)
+
+  #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+    _ = try fixture.coordinator.makeSigningHandoff(request: secondRequest) { _ in nil }
+  }
+}
+
+@Test func coordinatorSigningHandoffFailsClosedWithoutAuthority() throws {
+  let fixture = try coordinatorFixture()
+  _ = try fixture.coordinator.start(bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+  let request = try coordinatorSigningRequest()
+  #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+    _ = try fixture.coordinator.makeSigningHandoff(request: request) { _ in nil }
+  }
+  _ = try fixture.coordinator.close(sessionID: coordinatorSessionID, reason: .completed)
+  #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+    _ = try fixture.coordinator.makeSigningHandoff(request: request) { _ in
+      try coordinatorSigningAuthority(request: request, binding: try coordinatorBinding())
+    }
+  }
 }
 
 @Test func coordinatorRejectsConflictingRetryWithoutSecondCloudCall() throws {
