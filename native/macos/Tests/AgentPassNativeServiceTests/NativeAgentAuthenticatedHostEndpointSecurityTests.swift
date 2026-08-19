@@ -443,8 +443,13 @@ private func childErrorCode(
     #expect(harness.recorder.signCount == 1)
 
     let retry = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([5])))
-    #expect(errorCode(endpoint, sign: retry) == 2)
+    var retryError: NSError?
+    endpoint.signHostPayload(retry) { _, responseError in retryError = responseError }
+    #expect(retryError?.code == 11)
+    #expect(retryError?.localizedDescription == NativeAgentAuthenticatedHostEndpointError.outcomeUnknown.rawValue)
     #expect(harness.recorder.signCount == 1)
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
 
     var status: AgentPassHostStatusResponse?
     endpoint.hostSessionStatus(try #require(AgentPassHostStatusRequest())) { response, _ in status = response }
@@ -600,6 +605,8 @@ private func childErrorCode(
     #expect(hostResponse?.maxSignatures == 5)
     #expect(hostResponse?.usedSignatures == 4)
     #expect(hostResponse?.remainingSignatures == 1)
+    #expect(hostResponse?.requestID.isEmpty == false)
+    #expect(hostResponse?.createdAtMilliseconds == 1_000)
 
     let (childEndpoint, childTicket) = try harness.childEndpointWithTicket()
     let childRequest = try #require(AgentPassChildGitSignRequest(requestSequence: 1, commitPayload: Data([0x62]), attachTicket: childTicket))

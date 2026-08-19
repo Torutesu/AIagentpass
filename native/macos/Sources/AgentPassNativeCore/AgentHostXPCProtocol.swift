@@ -94,6 +94,19 @@ public enum AgentPassHostXPCContract {
         return uuid.uuidString.lowercased()
     }
 
+    /// Host sign correlation is an opaque service-issued value. A request may
+    /// omit both fields on its first attempt, but a caller may not supply only
+    /// one field or an invalid value.
+    public static func validRequestCorrelation(
+        requestID: String,
+        createdAtMilliseconds: Int64
+    ) -> Bool {
+        if requestID.isEmpty && createdAtMilliseconds == 0 {
+            return true
+        }
+        return canonicalUUID(requestID) != nil && isTimestamp(createdAtMilliseconds)
+    }
+
     public static func isTimestamp(_ value: Int64) -> Bool {
         (1...4_102_444_800_000).contains(value)
     }
@@ -114,7 +127,8 @@ public enum AgentPassHostXPCContract {
         "key", "key_id", "algorithm", "signer", "signer_arguments",
         "operation", "repository", "repository_path", "worktree_path",
         "branch", "remote", "session_token", "token", "ttl_seconds",
-        "scope", "authority", "lease", "agent_id", "adapter_kind",
+        "scope", "authority", "authority_id", "authority_token", "lease", "lease_id",
+        "grant", "grant_id", "grant_token", "agent_id", "adapter_kind",
     ]
 
     private static let requestOnlyForbiddenKeys = [
@@ -389,41 +403,84 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
     }
 }
 
-/// The only sign request shape: a bounded opaque commit payload.
+/// The only sign request shape: a bounded opaque commit payload plus optional
+/// echo data for a service-issued correlation pair.
 @objc(AgentPassHostSignRequest)
 public final class AgentPassHostSignRequest: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
     public let requestSequence: UInt32
     public let commitPayload: Data
+    /// Empty/zero means that the service must issue correlation for this
+    /// first attempt. A retry may echo the pair returned by the service.
+    public let requestID: String
+    public let createdAtMilliseconds: Int64
 
-    public init?(requestSequence: UInt32, commitPayload: Data) {
+    public convenience init?(requestSequence: UInt32, commitPayload: Data) {
+        self.init(
+            requestSequence: requestSequence,
+            commitPayload: commitPayload,
+            requestID: "",
+            createdAtMilliseconds: 0
+        )
+    }
+
+    public init?(
+        requestSequence: UInt32,
+        commitPayload: Data,
+        requestID: String,
+        createdAtMilliseconds: Int64
+    ) {
         guard (1...UInt32(AgentPassHostXPCContract.maximumSignatureBudget)).contains(requestSequence),
               !commitPayload.isEmpty,
-              commitPayload.count <= AgentPassHostXPCContract.maximumCommitPayloadBytes else {
+              commitPayload.count <= AgentPassHostXPCContract.maximumCommitPayloadBytes,
+              AgentPassHostXPCContract.validRequestCorrelation(
+                  requestID: requestID,
+                  createdAtMilliseconds: createdAtMilliseconds
+              ),
+              let canonicalRequestID = requestID.isEmpty
+                  ? ""
+                  : AgentPassHostXPCContract.canonicalUUID(requestID) else {
             return nil
         }
         self.requestSequence = requestSequence
         self.commitPayload = commitPayload
+        self.requestID = canonicalRequestID
+        self.createdAtMilliseconds = createdAtMilliseconds
         super.init()
     }
 
     public required convenience init?(coder: NSCoder) {
         guard !AgentPassHostXPCContract.containsForbiddenRequestAuthorityKey(coder),
               let requestSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.requestSequence)?.uint32Value,
-              let commitPayload = coder.decodeObject(of: NSData.self, forKey: Keys.commitPayload) as Data? else {
+              let commitPayload = coder.decodeObject(of: NSData.self, forKey: Keys.commitPayload) as Data?,
+              let requestID = coder.containsValue(forKey: Keys.requestID)
+                  ? (coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?)
+                  : "",
+              let createdAtMilliseconds = coder.containsValue(forKey: Keys.createdAtMilliseconds)
+                  ? coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value
+                  : 0 else {
             return nil
         }
-        self.init(requestSequence: requestSequence, commitPayload: commitPayload)
+        self.init(
+            requestSequence: requestSequence,
+            commitPayload: commitPayload,
+            requestID: requestID,
+            createdAtMilliseconds: createdAtMilliseconds
+        )
     }
 
     public func encode(with coder: NSCoder) {
         coder.encode(NSNumber(value: requestSequence), forKey: Keys.requestSequence)
         coder.encode(commitPayload as NSData, forKey: Keys.commitPayload)
+        coder.encode(requestID as NSString, forKey: Keys.requestID)
+        coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
     }
 
     private enum Keys {
         static let requestSequence = "request_sequence"
         static let commitPayload = "commit_payload"
+        static let requestID = "request_id"
+        static let createdAtMilliseconds = "created_at_ms"
     }
 }
 
@@ -435,20 +492,47 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
     public let maxSignatures: Int
     public let usedSignatures: Int
     public let remainingSignatures: Int
+    public let requestID: String
+    public let createdAtMilliseconds: Int64
 
-    public init?(
+    /// Source-compatible convenience initializer for callers that construct a
+    /// response locally. Service responses must use the strict initializer
+    /// below with the correlation it generated for the request.
+    public convenience init?(
         responseSequence: UInt32,
         signature: Data,
         maxSignatures: Int,
         usedSignatures: Int,
         remainingSignatures: Int
     ) {
+        self.init(
+            responseSequence: responseSequence,
+            signature: signature,
+            maxSignatures: maxSignatures,
+            usedSignatures: usedSignatures,
+            remainingSignatures: remainingSignatures,
+            requestID: UUID().uuidString.lowercased(),
+            createdAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+    }
+
+    public init?(
+        responseSequence: UInt32,
+        signature: Data,
+        maxSignatures: Int,
+        usedSignatures: Int,
+        remainingSignatures: Int,
+        requestID: String,
+        createdAtMilliseconds: Int64
+    ) {
         guard (1...UInt32(AgentPassHostXPCContract.maximumSignatureBudget)).contains(responseSequence),
               !signature.isEmpty,
               signature.count <= AgentPassHostXPCContract.maximumSignatureBytes,
               (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
               (0...maxSignatures).contains(usedSignatures),
-              remainingSignatures == maxSignatures - usedSignatures else {
+              remainingSignatures == maxSignatures - usedSignatures,
+              let canonicalRequestID = AgentPassHostXPCContract.canonicalUUID(requestID),
+              AgentPassHostXPCContract.isTimestamp(createdAtMilliseconds) else {
             return nil
         }
         self.responseSequence = responseSequence
@@ -456,6 +540,8 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
         self.maxSignatures = maxSignatures
         self.usedSignatures = usedSignatures
         self.remainingSignatures = remainingSignatures
+        self.requestID = canonicalRequestID
+        self.createdAtMilliseconds = createdAtMilliseconds
         super.init()
     }
 
@@ -465,10 +551,22 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
               let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data?,
               let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
               let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue,
-              let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue else {
+              let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue,
+              coder.containsValue(forKey: Keys.requestID),
+              coder.containsValue(forKey: Keys.createdAtMilliseconds),
+              let requestID = coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?,
+              let createdAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value else {
             return nil
         }
-        self.init(responseSequence: responseSequence, signature: signature, maxSignatures: maxSignatures, usedSignatures: usedSignatures, remainingSignatures: remainingSignatures)
+        self.init(
+            responseSequence: responseSequence,
+            signature: signature,
+            maxSignatures: maxSignatures,
+            usedSignatures: usedSignatures,
+            remainingSignatures: remainingSignatures,
+            requestID: requestID,
+            createdAtMilliseconds: createdAtMilliseconds
+        )
     }
 
     public func encode(with coder: NSCoder) {
@@ -477,6 +575,8 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
         coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
         coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
         coder.encode(NSNumber(value: remainingSignatures), forKey: Keys.remainingSignatures)
+        coder.encode(requestID as NSString, forKey: Keys.requestID)
+        coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
     }
 
     private enum Keys {
@@ -485,6 +585,8 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
         static let maxSignatures = "max_signatures"
         static let usedSignatures = "used_signatures"
         static let remainingSignatures = "remaining_signatures"
+        static let requestID = "request_id"
+        static let createdAtMilliseconds = "created_at_ms"
     }
 }
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import AgentPassNativeCore
 
@@ -14,6 +15,7 @@ public enum NativeAgentAuthenticatedHostEndpointError: String, Error, Equatable,
     case childObservationFailed = "child_observation_failed"
     case expired = "expired"
     case signerFailed = "signer_failed"
+    case outcomeUnknown = "outcome_unknown"
     case endpointClosed = "endpoint_closed"
 
     public var errorDescription: String? { rawValue }
@@ -115,6 +117,14 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     public typealias ChildUnregistrar = @Sendable (_ processBindingHash: String) -> Void
     public typealias SignatureBudgetProvider = @Sendable () throws -> NativeAgentSignatureBudget?
     public typealias MillisecondClock = @Sendable () -> Int64
+    public typealias RequestIDFactory = @Sendable () -> String
+
+    private struct ConsumedSignRequest: Equatable {
+        let requestID: String
+        let createdAtMilliseconds: Int64
+        let requestSequence: UInt32
+        let payloadDigest: Data
+    }
 
     private static let errorDomain = "com.agentpass.native-authenticated-host"
     public static let defaultLifetimeMilliseconds: Int64 = 32 * 60 * 1_000
@@ -128,6 +138,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let signatureBudgetProvider: SignatureBudgetProvider?
     private let signer: any NativeAgentAuthenticatedHostSigning
     private let nowMilliseconds: MillisecondClock
+    private let requestIDFactory: RequestIDFactory
     private let sessionLifetimeMilliseconds: Int64
     private let childPolicy: NativeProcessIdentityPolicy
     private let stateLock = NSLock()
@@ -137,6 +148,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private var expirationWasObserved = false
     private var registeredChildBindingHash: String?
     private var signatureBudget: NativeAgentSignatureBudgetLedger?
+    private var consumedSignRequests: [UInt32: ConsumedSignRequest] = [:]
+    private var issuedRequestIDs: Set<String> = []
 
     /// `connectionContext` and `initialPeerObservation` must be captured from
     /// the accepted NSXPC connection. The observer closures must independently
@@ -152,6 +165,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         signer: any NativeAgentAuthenticatedHostSigning,
         nowMilliseconds: @escaping MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
+        },
+        requestIDFactory: @escaping RequestIDFactory = {
+            UUID().uuidString.lowercased()
         },
         sessionLifetimeMilliseconds: Int64 = NativeAgentAuthenticatedHostEndpoint.defaultLifetimeMilliseconds,
         childRegistrar: ChildRegistrar? = nil,
@@ -175,6 +191,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.signatureBudgetProvider = signatureBudgetProvider
         self.signer = signer
         self.nowMilliseconds = nowMilliseconds
+        self.requestIDFactory = requestIDFactory
         self.sessionLifetimeMilliseconds = sessionLifetimeMilliseconds
         self.childPolicy = childProcessPolicy
         super.init()
@@ -210,6 +227,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             signatureBudget = budget
             expirationMilliseconds = expiration
             expirationWasObserved = false
+            consumedSignRequests.removeAll(keepingCapacity: true)
+            issuedRequestIDs.removeAll(keepingCapacity: true)
             guard let response = AgentPassHostPrepareResponse(
                 sessionID: prepared.sessionID,
                 status: .prepared,
@@ -288,11 +307,39 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         do {
             try revalidatePeerOrRevoke()
             try requireLiveSession()
-            guard let session,
-                  let bridgeRequest = session.makeRequest(
-                    requestSequence: request.requestSequence,
-                    payload: request.commitPayload
-                  ) else {
+            guard let session else {
+                throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState
+            }
+
+            let payloadDigest = Data(SHA256.hash(data: request.commitPayload))
+            if let consumed = consumedSignRequests[request.requestSequence] {
+                guard consumed.payloadDigest == payloadDigest,
+                      requestCorrelationMatches(request, consumed: consumed) else {
+                    closeSessionAndRevoke(session)
+                    throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
+                }
+                closeSessionAndRevoke(session)
+                throw NativeAgentAuthenticatedHostEndpointError.outcomeUnknown
+            }
+
+            guard request.requestID.isEmpty,
+                  request.createdAtMilliseconds == 0,
+                  request.requestSequence == UInt32(consumedSignRequests.count + 1) else {
+                closeSessionAndRevoke(session)
+                throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
+            }
+
+            let createdAtMilliseconds = try validTimestamp(nowMilliseconds())
+            guard let requestID = AgentPassHostXPCContract.canonicalUUID(requestIDFactory()),
+                  !issuedRequestIDs.contains(requestID) else {
+                closeSessionAndRevoke(session)
+                throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
+            }
+
+            guard let bridgeRequest = session.makeRequest(
+                requestSequence: request.requestSequence,
+                payload: request.commitPayload
+            ) else {
                 throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState
             }
 
@@ -306,6 +353,14 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             } catch let error as NativeAgentAuthenticatedGitBridgeError {
                 throw mapCoreError(error)
             }
+
+            issuedRequestIDs.insert(requestID)
+            consumedSignRequests[request.requestSequence] = ConsumedSignRequest(
+                requestID: requestID,
+                createdAtMilliseconds: createdAtMilliseconds,
+                requestSequence: request.requestSequence,
+                payloadDigest: payloadDigest
+            )
 
             let signature: Data
             do {
@@ -322,7 +377,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
                     signature: signature,
                     maxSignatures: snapshot.maxSignatures,
                     usedSignatures: snapshot.usedSignatures,
-                    remainingSignatures: snapshot.remainingSignatures
+                    remainingSignatures: snapshot.remainingSignatures,
+                    requestID: requestID,
+                    createdAtMilliseconds: createdAtMilliseconds
                   ) else {
                 closeSessionAndRevoke(session)
                 throw NativeAgentAuthenticatedHostEndpointError.signerFailed
@@ -500,6 +557,16 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         return expiration
     }
 
+    private func requestCorrelationMatches(
+        _ request: AgentPassHostSignRequest,
+        consumed: ConsumedSignRequest
+    ) -> Bool {
+        let requestIDMatches = request.requestID.isEmpty || request.requestID == consumed.requestID
+        let createdAtMatches = request.createdAtMilliseconds == 0
+            || request.createdAtMilliseconds == consumed.createdAtMilliseconds
+        return requestIDMatches && createdAtMatches
+    }
+
     private func mapCoreError(
         _ error: NativeAgentAuthenticatedGitBridgeError
     ) -> NativeAgentAuthenticatedHostEndpointError {
@@ -545,6 +612,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .expired: return 8
         case .signerFailed: return 9
         case .endpointClosed: return 10
+        case .outcomeUnknown: return 11
         }
     }
 }
