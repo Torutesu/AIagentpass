@@ -5,6 +5,8 @@ public enum NativeAgentRuntimeConfigurationError: String, Error, Equatable, Send
   case invalidOrigin = "invalid_origin"
   case invalidIdentity = "invalid_identity"
   case invalidDeviceKey = "invalid_device_key"
+  case invalidCapabilityKey = "invalid_capability_key"
+  case invalidCapabilityKeyID = "invalid_capability_key_id"
   case invalidPath = "invalid_path"
   case invalidLimit = "invalid_limit"
   case unsupportedObservationPolicy = "unsupported_observation_policy"
@@ -22,6 +24,8 @@ public struct NativeAgentRuntimeAuthorityConfiguration: Equatable, Sendable {
   public let organizationID: String
   public let deviceID: String
   public let deviceKeyTag: String
+  public let capabilityPublicKeyPEM: String
+  public let capabilityKeyID: String
   public let signingIntentDirectory: String
   public let globalSessionLimit: Int
   public let perAgentSessionLimit: Int
@@ -34,6 +38,8 @@ public struct NativeAgentRuntimeAuthorityConfiguration: Equatable, Sendable {
     organizationID: String,
     deviceID: String,
     deviceKeyTag: String,
+    capabilityPublicKeyPEM: String,
+    capabilityKeyID: String,
     signingIntentDirectory: String,
     globalSessionLimit: Int,
     perAgentSessionLimit: Int,
@@ -45,6 +51,8 @@ public struct NativeAgentRuntimeAuthorityConfiguration: Equatable, Sendable {
     self.organizationID = organizationID
     self.deviceID = deviceID
     self.deviceKeyTag = deviceKeyTag
+    self.capabilityPublicKeyPEM = capabilityPublicKeyPEM
+    self.capabilityKeyID = capabilityKeyID
     self.signingIntentDirectory = signingIntentDirectory
     self.globalSessionLimit = globalSessionLimit
     self.perAgentSessionLimit = perAgentSessionLimit
@@ -71,13 +79,17 @@ public enum NativeAgentRuntimeConfiguration: Equatable, Sendable {
     perAgentSessionLimit: Int?,
     perWorktreeSessionLimit: Int?,
     bootstrapAttemptLimit: Int?,
-    worktreeObservationPolicyVersion: Int?
+    worktreeObservationPolicyVersion: Int?,
+    capabilityPublicKeyPEM: String? = nil,
+    capabilityKeyID: String? = nil
   ) throws {
     let presence = [
       deviceAPIOrigin != nil,
       organizationID != nil,
       deviceID != nil,
       deviceKeyTag != nil,
+      capabilityPublicKeyPEM != nil,
+      capabilityKeyID != nil,
       signingIntentDirectory != nil,
       globalSessionLimit != nil,
       perAgentSessionLimit != nil,
@@ -94,6 +106,8 @@ public enum NativeAgentRuntimeConfiguration: Equatable, Sendable {
       let rawOrganizationID = organizationID,
       let rawDeviceID = deviceID,
       let rawDeviceKeyTag = deviceKeyTag,
+      let rawCapabilityPublicKeyPEM = capabilityPublicKeyPEM,
+      let rawCapabilityKeyID = capabilityKeyID,
       let rawIntentDirectory = signingIntentDirectory,
       let rawGlobalLimit = globalSessionLimit,
       let rawPerAgentLimit = perAgentSessionLimit,
@@ -109,6 +123,20 @@ public enum NativeAgentRuntimeConfiguration: Equatable, Sendable {
     let normalizedDeviceID = try Self.uuid(rawDeviceID)
     guard rawDeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag else {
       throw NativeAgentRuntimeConfigurationError.invalidDeviceKey
+    }
+    guard rawCapabilityPublicKeyPEM.hasPrefix("-----BEGIN PUBLIC KEY-----\n"),
+      (rawCapabilityPublicKeyPEM.hasSuffix("\n-----END PUBLIC KEY-----") ||
+        rawCapabilityPublicKeyPEM.hasSuffix("\n-----END PUBLIC KEY-----\n")),
+      (try? NativeCapabilityTrust(publicKeyPEM: rawCapabilityPublicKeyPEM)) != nil else {
+      throw NativeAgentRuntimeConfigurationError.invalidCapabilityKey
+    }
+    guard rawCapabilityKeyID.utf8.count <= 64,
+      rawCapabilityKeyID.range(
+        of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+        options: .regularExpression
+      ) != nil
+    else {
+      throw NativeAgentRuntimeConfigurationError.invalidCapabilityKeyID
     }
     let intentDirectory = try Self.directory(rawIntentDirectory)
     guard (1...NativeAgentSessionRegistry.maximumActiveSessions).contains(rawGlobalLimit),
@@ -131,6 +159,8 @@ public enum NativeAgentRuntimeConfiguration: Equatable, Sendable {
         organizationID: normalizedOrganizationID,
         deviceID: normalizedDeviceID,
         deviceKeyTag: rawDeviceKeyTag,
+        capabilityPublicKeyPEM: rawCapabilityPublicKeyPEM,
+        capabilityKeyID: rawCapabilityKeyID,
         signingIntentDirectory: intentDirectory,
         globalSessionLimit: rawGlobalLimit,
         perAgentSessionLimit: rawPerAgentLimit,

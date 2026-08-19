@@ -368,6 +368,8 @@ private struct ServiceConfiguration: Decodable {
     let agentPerWorktreeSessionLimit: Int?
     let agentBootstrapAttemptLimit: Int?
     let agentWorktreeObservationPolicyVersion: Int?
+    let agentCapabilityPublicKey: String?
+    let agentCapabilityKeyID: String?
     let hostChildCodeDirectoryHash: String?
     let qualificationMode: String?
     let qualificationMachServiceName: String?
@@ -446,6 +448,8 @@ private struct ServiceConfiguration: Decodable {
         case agentPerWorktreeSessionLimit = "agent_per_worktree_session_limit"
         case agentBootstrapAttemptLimit = "agent_bootstrap_attempt_limit"
         case agentWorktreeObservationPolicyVersion = "agent_worktree_observation_policy_version"
+        case agentCapabilityPublicKey = "agent_capability_public_key"
+        case agentCapabilityKeyID = "agent_capability_key_id"
         case hostChildCodeDirectoryHash = "host_child_code_directory_hash"
         case qualificationMode = "qualification_mode"
         case qualificationMachServiceName = "qualification_mach_service_name"
@@ -569,7 +573,9 @@ private struct ServiceConfiguration: Decodable {
             value.agentPerAgentSessionLimit,
             value.agentPerWorktreeSessionLimit,
             value.agentBootstrapAttemptLimit,
-            value.agentWorktreeObservationPolicyVersion
+            value.agentWorktreeObservationPolicyVersion,
+            value.agentCapabilityPublicKey,
+            value.agentCapabilityKeyID
         ]
         let agentRuntimeCount = agentRuntimeValues.compactMap { $0 }.count
         if agentRuntimeCount != 0 {
@@ -757,7 +763,9 @@ private struct ServiceConfiguration: Decodable {
             perAgentSessionLimit: configured ? agentPerAgentSessionLimit : nil,
             perWorktreeSessionLimit: configured ? agentPerWorktreeSessionLimit : nil,
             bootstrapAttemptLimit: configured ? agentBootstrapAttemptLimit : nil,
-            worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil
+            worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil,
+            capabilityPublicKeyPEM: configured ? agentCapabilityPublicKey : nil,
+            capabilityKeyID: configured ? agentCapabilityKeyID : nil
         )
     }
 
@@ -3553,6 +3561,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let signingTransactions: NativeSigningTransactionStore
     let gitCommitSigner: NativeAgentGitCommitSigner
     let capabilityVerifier: NativeCapabilityVerifier
+    let cloudSigningCapabilityVerifier: NativeAgentSigningCapabilityVerifier
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
@@ -3568,6 +3577,16 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         self.authority = authority
         self.authorityState = authorityState
         self.capabilityVerifier = capabilityVerifier
+        let trustedPublicKey = try NativeCapabilityTrust(
+            publicKeyPEM: authority.capabilityPublicKeyPEM
+        ).publicKey
+        self.cloudSigningCapabilityVerifier = try NativeAgentSigningCapabilityVerifier(
+            trustedPublicKey: trustedPublicKey,
+            expectedIssuer: NativeAgentSigningCapabilityCodec.issuer,
+            expectedKeyPurpose: NativeAgentSigningCapabilityCodec.operation,
+            expectedKeyID: authority.capabilityKeyID,
+            expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
+        )
         self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
             baseURL: authority.deviceAPIOrigin,
@@ -4641,7 +4660,10 @@ do {
         let audience = NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID)
         let trust = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: audience)
         controlV2Manager = try NativeControlBundleV2Manager(trust: trust, statePath: statePath)
-        capabilityVerifier = try NativeCapabilityVerifier(trust: NativeCapabilityTrust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID), statePath: capabilityStatePath)
+        capabilityVerifier = try NativeCapabilityVerifier(
+            trust: NativeCapabilityTrust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID),
+            statePath: capabilityStatePath
+        )
         requestEvidenceStore = try NativeRequestEvidenceStore(path: requestEvidencePath)
     } else {
         controlV2Manager = nil
