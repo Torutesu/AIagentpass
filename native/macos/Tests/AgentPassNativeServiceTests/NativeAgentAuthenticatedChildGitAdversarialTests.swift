@@ -182,6 +182,6 @@ private func issueAdversarialTicket(
 
     var error: NSError?
     endpoint.signChildGitCommit(request) { _, responseError in error = responseError }
-    #expect(error?.userInfo[NSLocalizedDescriptionKey] as? String == NativeAgentAuthenticatedChildGitError.replay.rawValue)
+    #expect(error?.userInfo[NSLocalizedDescriptionKey] as? String == NativeAgentAuthenticatedChildGitError.outcomeUnknown.rawValue)
     #expect(signerCalls.read() == 1)
 }

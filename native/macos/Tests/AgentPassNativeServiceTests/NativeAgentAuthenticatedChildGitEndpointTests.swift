@@ -171,7 +171,7 @@ private func issueChildTicket(
     }
 }
 
-@Test func childRegistryRejectsARepeatedPayloadAsReplay() throws {
+@Test func childRegistryClassifiesARepeatedRequestAsOutcomeUnknown() throws {
     let identity = NativeProcessIdentity(observation: try childTestObservation())
     let helper = try childHelperIdentity(for: identity)
     let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
@@ -193,7 +193,7 @@ private func issueChildTicket(
         request: request,
         nowMilliseconds: 1_000
     )
-    #expect(throws: NativeAgentAuthenticatedChildGitError.attachTicketReplay) {
+    #expect(throws: NativeAgentAuthenticatedChildGitError.outcomeUnknown) {
         _ = try registry.sign(
             attachTicket: ticket,
             helperIdentity: helper,
@@ -202,7 +202,7 @@ private func issueChildTicket(
             nowMilliseconds: 1_000
         )
     }
-    #expect(throws: NativeAgentAuthenticatedChildGitError.attachTicketReplay) {
+    #expect(throws: NativeAgentAuthenticatedChildGitError.outcomeUnknown) {
         _ = try registry.sign(
             attachTicket: ticket,
             helperIdentity: helper,
@@ -232,7 +232,7 @@ private func issueChildTicket(
     #expect(throws: NativeAgentAuthenticatedChildGitError.signerFailed) {
         _ = try registry.sign(attachTicket: ticket, helperIdentity: helper, worktreeBindingDigest: worktree, request: request, nowMilliseconds: 1_000)
     }
-    #expect(throws: NativeAgentAuthenticatedChildGitError.closed) {
+    #expect(throws: NativeAgentAuthenticatedChildGitError.outcomeUnknown) {
         _ = try registry.sign(attachTicket: ticket, helperIdentity: helper, worktreeBindingDigest: worktree, request: request, nowMilliseconds: 1_000)
     }
 }

@@ -5,7 +5,7 @@ import Foundation
 /// the authority boundary; no session ID, capability, key selector, path, or
 /// inherited descriptor is carried by these DTOs.
 public enum AgentPassChildGitXPCContract {
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
     public static let maximumPayloadBytes = 1 * 1024 * 1024
     public static let maximumSignatureBytes = 4 * 1024
     public static let attachTicketBytes = 32
@@ -14,6 +14,21 @@ public enum AgentPassChildGitXPCContract {
 
     public static func validSequence(_ value: UInt32) -> Bool {
         (1...maximumRequests).contains(value)
+    }
+
+    public static func canonicalRequestID(_ value: String) -> String? {
+        AgentPassHostXPCContract.canonicalUUID(value)
+    }
+
+    /// A request may omit correlation only for source-compatible callers that
+    /// use the ticket-bound value returned by the service implicitly. Once one
+    /// of the fields is present, both fields are mandatory and validated.
+    public static func validRequestCorrelation(requestID: String, createdAtMilliseconds: Int64) -> Bool {
+        if requestID.isEmpty && createdAtMilliseconds == 0 {
+            return true
+        }
+        return canonicalRequestID(requestID) != nil
+            && AgentPassHostXPCContract.isTimestamp(createdAtMilliseconds)
     }
 }
 
@@ -80,21 +95,31 @@ public final class AgentPassChildGitAttachResponse: NSObject, NSSecureCoding {
     public let protocolVersion: Int
     public let attachTicket: Data
     public let expiresAtMilliseconds: Int64
+    /// Issued by the service for the one sign operation bound to this ticket.
+    public let requestID: String
+    public let createdAtMilliseconds: Int64
 
     public init?(
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
         attachTicket: Data,
-        expiresAtMilliseconds: Int64
+        expiresAtMilliseconds: Int64,
+        requestID: String = UUID().uuidString.lowercased(),
+        createdAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               attachTicket.count == AgentPassChildGitXPCContract.attachTicketBytes,
               attachTicket.contains(where: { $0 != 0 }),
-              AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds) else {
+              AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds),
+              let canonicalRequestID = AgentPassChildGitXPCContract.canonicalRequestID(requestID),
+              AgentPassHostXPCContract.isTimestamp(createdAtMilliseconds),
+              createdAtMilliseconds <= expiresAtMilliseconds else {
             return nil
         }
         self.protocolVersion = protocolVersion
         self.attachTicket = attachTicket
         self.expiresAtMilliseconds = expiresAtMilliseconds
+        self.requestID = canonicalRequestID
+        self.createdAtMilliseconds = createdAtMilliseconds
         super.init()
     }
 
@@ -103,15 +128,21 @@ public final class AgentPassChildGitAttachResponse: NSObject, NSSecureCoding {
               coder.containsValue(forKey: Keys.protocolVersion),
               coder.containsValue(forKey: Keys.attachTicket),
               coder.containsValue(forKey: Keys.expiresAtMilliseconds),
+              coder.containsValue(forKey: Keys.requestID),
+              coder.containsValue(forKey: Keys.createdAtMilliseconds),
               let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
               let attachTicket = coder.decodeObject(of: NSData.self, forKey: Keys.attachTicket) as Data?,
-              let expiresAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.expiresAtMilliseconds)?.int64Value else {
+              let expiresAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.expiresAtMilliseconds)?.int64Value,
+              let requestID = coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?,
+              let createdAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value else {
             return nil
         }
         self.init(
             protocolVersion: protocolVersion,
             attachTicket: attachTicket,
-            expiresAtMilliseconds: expiresAtMilliseconds
+            expiresAtMilliseconds: expiresAtMilliseconds,
+            requestID: requestID,
+            createdAtMilliseconds: createdAtMilliseconds
         )
     }
 
@@ -119,12 +150,16 @@ public final class AgentPassChildGitAttachResponse: NSObject, NSSecureCoding {
         coder.encode(NSNumber(value: protocolVersion), forKey: Keys.protocolVersion)
         coder.encode(attachTicket as NSData, forKey: Keys.attachTicket)
         coder.encode(NSNumber(value: expiresAtMilliseconds), forKey: Keys.expiresAtMilliseconds)
+        coder.encode(requestID as NSString, forKey: Keys.requestID)
+        coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
     }
 
     private enum Keys {
         static let protocolVersion = "protocol_version"
         static let attachTicket = "attach_ticket"
         static let expiresAtMilliseconds = "expires_at_ms"
+        static let requestID = "request_id"
+        static let createdAtMilliseconds = "created_at_ms"
     }
 
     private static func containsForbiddenKey(_ coder: NSCoder) -> Bool {
@@ -147,25 +182,37 @@ public final class AgentPassChildGitSignRequest: NSObject, NSSecureCoding {
     public let requestSequence: UInt32
     public let commitPayload: Data
     public let attachTicket: Data
+    /// Optional on the source-compatible client path; the service binds an
+    /// omitted value to the ID and timestamp issued with the attach ticket.
+    public let requestID: String
+    public let createdAtMilliseconds: Int64
 
     public init?(
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
         requestSequence: UInt32,
         commitPayload: Data,
-        attachTicket: Data
+        attachTicket: Data,
+        requestID: String = "",
+        createdAtMilliseconds: Int64 = 0
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               AgentPassChildGitXPCContract.validSequence(requestSequence),
               !commitPayload.isEmpty,
               commitPayload.count <= AgentPassChildGitXPCContract.maximumPayloadBytes,
               attachTicket.count == AgentPassChildGitXPCContract.attachTicketBytes,
-              attachTicket.contains(where: { $0 != 0 }) else {
+              attachTicket.contains(where: { $0 != 0 }),
+              AgentPassChildGitXPCContract.validRequestCorrelation(
+                  requestID: requestID,
+                  createdAtMilliseconds: createdAtMilliseconds
+              ) else {
             return nil
         }
         self.protocolVersion = protocolVersion
         self.requestSequence = requestSequence
         self.commitPayload = commitPayload
         self.attachTicket = attachTicket
+        self.requestID = requestID.isEmpty ? "" : requestID.lowercased()
+        self.createdAtMilliseconds = createdAtMilliseconds
         super.init()
     }
 
@@ -174,14 +221,18 @@ public final class AgentPassChildGitSignRequest: NSObject, NSSecureCoding {
               let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
               let requestSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.requestSequence)?.uint32Value,
               let commitPayload = coder.decodeObject(of: NSData.self, forKey: Keys.commitPayload) as Data?,
-              let attachTicket = coder.decodeObject(of: NSData.self, forKey: Keys.attachTicket) as Data? else {
+              let attachTicket = coder.decodeObject(of: NSData.self, forKey: Keys.attachTicket) as Data?,
+              let requestID = coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?,
+              let createdAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value else {
             return nil
         }
         self.init(
             protocolVersion: protocolVersion,
             requestSequence: requestSequence,
             commitPayload: commitPayload,
-            attachTicket: attachTicket
+            attachTicket: attachTicket,
+            requestID: requestID,
+            createdAtMilliseconds: createdAtMilliseconds
         )
     }
 
@@ -190,6 +241,8 @@ public final class AgentPassChildGitSignRequest: NSObject, NSSecureCoding {
         coder.encode(NSNumber(value: requestSequence), forKey: Keys.requestSequence)
         coder.encode(commitPayload as NSData, forKey: Keys.commitPayload)
         coder.encode(attachTicket as NSData, forKey: Keys.attachTicket)
+        coder.encode(requestID as NSString, forKey: Keys.requestID)
+        coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
     }
 
     private enum Keys {
@@ -197,6 +250,8 @@ public final class AgentPassChildGitSignRequest: NSObject, NSSecureCoding {
         static let requestSequence = "request_sequence"
         static let commitPayload = "commit_payload"
         static let attachTicket = "attach_ticket"
+        static let requestID = "request_id"
+        static let createdAtMilliseconds = "created_at_ms"
     }
 
     private static let forbiddenKeys = [
@@ -221,6 +276,8 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
     public let maxSignatures: Int
     public let usedSignatures: Int
     public let remainingSignatures: Int
+    public let requestID: String
+    public let createdAtMilliseconds: Int64
 
     public init?(
         protocolVersion: Int = AgentPassChildGitXPCContract.protocolVersion,
@@ -228,7 +285,9 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
         signature: Data,
         maxSignatures: Int,
         usedSignatures: Int,
-        remainingSignatures: Int
+        remainingSignatures: Int,
+        requestID: String = UUID().uuidString.lowercased(),
+        createdAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
     ) {
         guard protocolVersion == AgentPassChildGitXPCContract.protocolVersion,
               AgentPassChildGitXPCContract.validSequence(responseSequence),
@@ -236,7 +295,9 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
               signature.count <= AgentPassChildGitXPCContract.maximumSignatureBytes,
               (NativeAgentSignatureBudget.minimumSignatures...NativeAgentSignatureBudget.maximumSignatures).contains(maxSignatures),
               (0...maxSignatures).contains(usedSignatures),
-              remainingSignatures == maxSignatures - usedSignatures else {
+              remainingSignatures == maxSignatures - usedSignatures,
+              let canonicalRequestID = AgentPassChildGitXPCContract.canonicalRequestID(requestID),
+              AgentPassHostXPCContract.isTimestamp(createdAtMilliseconds) else {
             return nil
         }
         self.protocolVersion = protocolVersion
@@ -245,6 +306,8 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
         self.maxSignatures = maxSignatures
         self.usedSignatures = usedSignatures
         self.remainingSignatures = remainingSignatures
+        self.requestID = canonicalRequestID
+        self.createdAtMilliseconds = createdAtMilliseconds
         super.init()
     }
 
@@ -254,10 +317,12 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
               let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data?,
               let maxSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.maxSignatures)?.intValue,
               let usedSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.usedSignatures)?.intValue,
-              let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue else {
+              let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue,
+              let requestID = coder.decodeObject(of: NSString.self, forKey: Keys.requestID) as String?,
+              let createdAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.createdAtMilliseconds)?.int64Value else {
             return nil
         }
-        self.init(protocolVersion: protocolVersion, responseSequence: responseSequence, signature: signature, maxSignatures: maxSignatures, usedSignatures: usedSignatures, remainingSignatures: remainingSignatures)
+        self.init(protocolVersion: protocolVersion, responseSequence: responseSequence, signature: signature, maxSignatures: maxSignatures, usedSignatures: usedSignatures, remainingSignatures: remainingSignatures, requestID: requestID, createdAtMilliseconds: createdAtMilliseconds)
     }
 
     public func encode(with coder: NSCoder) {
@@ -267,6 +332,8 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
         coder.encode(NSNumber(value: maxSignatures), forKey: Keys.maxSignatures)
         coder.encode(NSNumber(value: usedSignatures), forKey: Keys.usedSignatures)
         coder.encode(NSNumber(value: remainingSignatures), forKey: Keys.remainingSignatures)
+        coder.encode(requestID as NSString, forKey: Keys.requestID)
+        coder.encode(NSNumber(value: createdAtMilliseconds), forKey: Keys.createdAtMilliseconds)
     }
 
     private enum Keys {
@@ -276,6 +343,8 @@ public final class AgentPassChildGitSignResponse: NSObject, NSSecureCoding {
         static let maxSignatures = "max_signatures"
         static let usedSignatures = "used_signatures"
         static let remainingSignatures = "remaining_signatures"
+        static let requestID = "request_id"
+        static let createdAtMilliseconds = "created_at_ms"
     }
 }
 

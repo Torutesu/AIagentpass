@@ -13,6 +13,8 @@ public enum NativeAgentAuthenticatedChildGitError: String, Error, Equatable, Sen
     case worktreeChanged = "worktree_changed"
     case replay = "replay"
     case sequenceMismatch = "sequence_mismatch"
+    case requestMismatch = "request_mismatch"
+    case outcomeUnknown = "outcome_unknown"
     case signerFailed = "signer_failed"
     case closed = "closed"
 
@@ -42,11 +44,29 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
     public struct AttachTicket: Equatable, Sendable {
         public let value: Data
         public let expiresAtMilliseconds: Int64
+        public let requestID: String
+        public let createdAtMilliseconds: Int64
 
-        fileprivate init(value: Data, expiresAtMilliseconds: Int64) {
+        fileprivate init(
+            value: Data,
+            expiresAtMilliseconds: Int64,
+            requestID: String,
+            createdAtMilliseconds: Int64
+        ) {
             self.value = value
             self.expiresAtMilliseconds = expiresAtMilliseconds
+            self.requestID = requestID
+            self.createdAtMilliseconds = createdAtMilliseconds
         }
+    }
+
+    private struct RequestIdentity: Hashable {
+        let ticketDigest: Data
+        let sessionID: String
+        let requestID: String
+        let createdAtMilliseconds: Int64
+        let requestSequence: UInt32
+        let payloadDigest: Data
     }
 
     private struct Entry {
@@ -65,7 +85,10 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         var consumedPayloadDigests: Set<Data>
         var activeAttachTicketDigest: Data?
         var activeAttachTicketExpiresAtMilliseconds: Int64?
+        var activeRequestID: String?
+        var activeRequestCreatedAtMilliseconds: Int64?
         var consumedAttachTicketDigests: Set<Data>
+        var consumedRequestIdentities: Set<RequestIdentity>
         var closed: Bool
     }
 
@@ -73,12 +96,19 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
 
     private let lock = NSLock()
     private let ticketFactory: @Sendable () -> Data
+    private let requestIDFactory: @Sendable () -> String
     private var entries: [String: Entry] = [:]
 
-    public init(ticketFactory: @escaping @Sendable () -> Data = {
-        Data(SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
-    }) {
+    public init(
+        ticketFactory: @escaping @Sendable () -> Data = {
+            Data(SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
+        },
+        requestIDFactory: @escaping @Sendable () -> String = {
+            UUID().uuidString.lowercased()
+        }
+    ) {
         self.ticketFactory = ticketFactory
+        self.requestIDFactory = requestIDFactory
     }
 
     public func register(
@@ -126,7 +156,10 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             consumedPayloadDigests: [],
             activeAttachTicketDigest: nil,
             activeAttachTicketExpiresAtMilliseconds: nil,
+            activeRequestID: nil,
+            activeRequestCreatedAtMilliseconds: nil,
             consumedAttachTicketDigests: [],
+            consumedRequestIdentities: [],
             closed: false
         )
     }
@@ -193,10 +226,26 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             entry.sessionExpiresAtMilliseconds ?? nowMilliseconds + Self.defaultAttachTicketLifetimeMilliseconds,
             nowMilliseconds + Self.defaultAttachTicketLifetimeMilliseconds
         )
+        guard let requestID = AgentPassChildGitXPCContract.canonicalRequestID(requestIDFactory()),
+              !entries.values.contains(where: { entry in
+                  entry.activeRequestID == requestID
+                      || entry.consumedRequestIdentities.contains(where: { $0.requestID == requestID })
+              }) else {
+            entry.closed = true
+            entries[key] = entry
+            throw NativeAgentAuthenticatedChildGitError.invalidRequest
+        }
         entry.activeAttachTicketDigest = digest
         entry.activeAttachTicketExpiresAtMilliseconds = ticketExpiry
+        entry.activeRequestID = requestID
+        entry.activeRequestCreatedAtMilliseconds = nowMilliseconds
         entries[key] = entry
-        return AttachTicket(value: ticket, expiresAtMilliseconds: ticketExpiry)
+        return AttachTicket(
+            value: ticket,
+            expiresAtMilliseconds: ticketExpiry,
+            requestID: requestID,
+            createdAtMilliseconds: nowMilliseconds
+        )
     }
 
     public func sign(
@@ -232,6 +281,26 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         }
         let key = matching[0].0
         var entry = matching[0].1
+
+        let payloadDigest = Data(SHA256.hash(data: request.commitPayload))
+        if let consumedIdentity = entry.consumedRequestIdentities.first(where: {
+            $0.ticketDigest == ticketDigest
+                && $0.sessionID == entry.sessionID
+                && $0.requestSequence == request.requestSequence
+                && $0.payloadDigest == payloadDigest
+                && Self.requestCorrelationMatches(
+                    request,
+                    requestID: $0.requestID,
+                    createdAtMilliseconds: $0.createdAtMilliseconds
+                )
+        }) {
+            // The ticket and exact request identity were already admitted to
+            // the signer. A missing reply cannot make this a new provider
+            // operation, even if the original response was lost.
+            _ = consumedIdentity
+            lock.unlock()
+            throw NativeAgentAuthenticatedChildGitError.outcomeUnknown
+        }
         guard !entry.closed else {
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.closed
@@ -248,11 +317,30 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.attachTicketReplay
         }
+        guard let activeRequestID = entry.activeRequestID,
+              let activeRequestCreatedAtMilliseconds = entry.activeRequestCreatedAtMilliseconds,
+              Self.requestCorrelationMatches(
+                  request,
+                  requestID: activeRequestID,
+                  createdAtMilliseconds: activeRequestCreatedAtMilliseconds
+              ) else {
+            entry.closed = true
+            entry.consumedAttachTicketDigests.insert(ticketDigest)
+            entry.activeAttachTicketDigest = nil
+            entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
+            entries[key] = entry
+            lock.unlock()
+            throw NativeAgentAuthenticatedChildGitError.requestMismatch
+        }
         guard let ticketExpiry = entry.activeAttachTicketExpiresAtMilliseconds,
               nowMilliseconds < ticketExpiry else {
             entry.closed = true
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
             entries[key] = entry
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.attachTicketExpired
@@ -262,6 +350,8 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
             entries[key] = entry
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.childIdentityChanged
@@ -271,6 +361,8 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
             entries[key] = entry
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.worktreeChanged
@@ -280,23 +372,36 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
             entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
             entries[key] = entry
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.sequenceMismatch
         }
-        let payloadDigest = Data(SHA256.hash(data: request.commitPayload))
         guard !entry.consumedPayloadDigests.contains(payloadDigest) else {
             entry.closed = true
             entry.consumedAttachTicketDigests.insert(ticketDigest)
             entry.activeAttachTicketDigest = nil
             entry.activeAttachTicketExpiresAtMilliseconds = nil
+            entry.activeRequestID = nil
+            entry.activeRequestCreatedAtMilliseconds = nil
             entries[key] = entry
             lock.unlock()
             throw NativeAgentAuthenticatedChildGitError.replay
         }
         entry.activeAttachTicketDigest = nil
         entry.activeAttachTicketExpiresAtMilliseconds = nil
+        entry.activeRequestID = nil
+        entry.activeRequestCreatedAtMilliseconds = nil
         entry.consumedAttachTicketDigests.insert(ticketDigest)
+        entry.consumedRequestIdentities.insert(RequestIdentity(
+            ticketDigest: ticketDigest,
+            sessionID: entry.sessionID,
+            requestID: activeRequestID,
+            createdAtMilliseconds: activeRequestCreatedAtMilliseconds,
+            requestSequence: request.requestSequence,
+            payloadDigest: payloadDigest
+        ))
         signer = entry.signer
         signatureBudget = entry.signatureBudget
         let budget: NativeAgentSignatureBudgetLedger.Snapshot
@@ -356,6 +461,19 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         return found
     }
 
+    private static func requestCorrelationMatches(
+        _ request: AgentPassChildGitSignRequest,
+        requestID: String,
+        createdAtMilliseconds: Int64
+    ) -> Bool {
+        let requestIDMatches = request.requestID.isEmpty
+            || request.requestID == requestID
+            || request.requestID.lowercased() == requestID.lowercased()
+        let createdAtMatches = request.createdAtMilliseconds == 0
+            || request.createdAtMilliseconds == createdAtMilliseconds
+        return requestIDMatches && createdAtMatches
+    }
+
     private static func currentMilliseconds() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -381,7 +499,18 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
     private let nowMilliseconds: MillisecondClock
     private let stateLock = NSLock()
     private var attachTicket: Data?
+    private var attachRequestID: String?
+    private var attachRequestCreatedAtMilliseconds: Int64?
     private var used = false
+    private var usedRequestIdentity: RequestIdentity?
+
+    private struct RequestIdentity: Equatable {
+        let ticketDigest: Data
+        let requestID: String
+        let createdAtMilliseconds: Int64
+        let requestSequence: UInt32
+        let payloadDigest: Data
+    }
 
     public init(
         registry: NativeAgentAuthenticatedChildGitSessionRegistry,
@@ -415,9 +544,13 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 nowMilliseconds: nowMilliseconds()
             )
             attachTicket = ticket.value
+            attachRequestID = ticket.requestID
+            attachRequestCreatedAtMilliseconds = ticket.createdAtMilliseconds
             guard let response = AgentPassChildGitAttachResponse(
                 attachTicket: ticket.value,
-                expiresAtMilliseconds: ticket.expiresAtMilliseconds
+                expiresAtMilliseconds: ticket.expiresAtMilliseconds,
+                requestID: ticket.requestID,
+                createdAtMilliseconds: ticket.createdAtMilliseconds
             ) else {
                 throw NativeAgentAuthenticatedChildGitError.invalidRequest
             }
@@ -433,11 +566,6 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
     ) {
         do {
             stateLock.lock()
-            guard !used else {
-                stateLock.unlock()
-                throw NativeAgentAuthenticatedChildGitError.replay
-            }
-            used = true
             guard let attachTicket else {
                 stateLock.unlock()
                 throw NativeAgentAuthenticatedChildGitError.attachTicketMissing
@@ -446,6 +574,32 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 stateLock.unlock()
                 throw NativeAgentAuthenticatedChildGitError.attachTicketMismatch
             }
+            guard let attachRequestID,
+                  let attachRequestCreatedAtMilliseconds else {
+                stateLock.unlock()
+                throw NativeAgentAuthenticatedChildGitError.attachTicketMissing
+            }
+            let requestIdentity = RequestIdentity(
+                ticketDigest: Data(SHA256.hash(data: attachTicket)),
+                requestID: attachRequestID,
+                createdAtMilliseconds: attachRequestCreatedAtMilliseconds,
+                requestSequence: request.requestSequence,
+                payloadDigest: Data(SHA256.hash(data: request.commitPayload))
+            )
+            if used {
+                let sameRequest = usedRequestIdentity == requestIdentity
+                stateLock.unlock()
+                throw sameRequest
+                    ? NativeAgentAuthenticatedChildGitError.outcomeUnknown
+                    : NativeAgentAuthenticatedChildGitError.replay
+            }
+            guard request.requestID.isEmpty || request.requestID.lowercased() == attachRequestID,
+                  request.createdAtMilliseconds == 0 || request.createdAtMilliseconds == attachRequestCreatedAtMilliseconds else {
+                stateLock.unlock()
+                throw NativeAgentAuthenticatedChildGitError.requestMismatch
+            }
+            used = true
+            usedRequestIdentity = requestIdentity
             stateLock.unlock()
             let result = try registry.sign(
                 attachTicket: attachTicket,
@@ -459,7 +613,9 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 signature: result.signature,
                 maxSignatures: result.budget.maxSignatures,
                 usedSignatures: result.budget.usedSignatures,
-                remainingSignatures: result.budget.remainingSignatures
+                remainingSignatures: result.budget.remainingSignatures,
+                requestID: attachRequestID,
+                createdAtMilliseconds: attachRequestCreatedAtMilliseconds
             ) else { throw NativeAgentAuthenticatedChildGitError.signerFailed }
             reply(response, nil)
         } catch {
@@ -490,6 +646,8 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
         case .worktreeChanged: return 8
         case .replay: return 9
         case .sequenceMismatch: return 10
+        case .requestMismatch: return 13
+        case .outcomeUnknown: return 14
         case .signerFailed: return 11
         case .closed: return 12
         default: return 1
