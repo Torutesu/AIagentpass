@@ -870,6 +870,86 @@ private final class ServiceDataReply: @unchecked Sendable {
     func call(_ data: NSData?, _ error: NSError?) { body(data, error) }
 }
 
+/// Projects the local audit record into the closed, redacted Device audit
+/// contract.  A local audit record is deliberately allowed to be richer than
+/// its Cloud projection; missing trusted fields therefore mean local-only
+/// evidence, never guessed Cloud data.
+internal enum NativeServiceDeviceAuditProjection {
+    private static let stableReasons: Set<String> = [
+        "allowed", "branch_denied", "branch_not_allowed", "capability_expired",
+        "capability_missing", "operation_not_allowed", "policy_changed",
+        "remote_control_stale", "remote_denied", "remote_not_allowed",
+        "repository_not_allowed", "revoked", "session_required", "signer_failed",
+        "tag_denied", "tag_not_allowed"
+    ]
+
+    static func stableReason(decision: String, rawReason: String?) -> String {
+        guard decision != "allow" else { return "allowed" }
+        let raw = rawReason?.lowercased() ?? ""
+        if stableReasons.contains(raw) { return raw }
+        let matches: [(String, String)] = [
+            ("branch_denied", "branch_denied"),
+            ("branch denied", "branch_denied"),
+            ("branch_not_allowed", "branch_not_allowed"),
+            ("branch not allowed", "branch_not_allowed"),
+            ("capability_expired", "capability_expired"),
+            ("capability_missing", "capability_missing"),
+            ("short-lived cloud capability", "capability_missing"),
+            ("operation_not_allowed", "operation_not_allowed"),
+            ("unsupported native broker operation", "operation_not_allowed"),
+            ("policy_changed", "policy_changed"),
+            ("trusted git context changed", "policy_changed"),
+            ("control_refresh_pending", "remote_control_stale"),
+            ("remote_control_stale", "remote_control_stale"),
+            ("remote_denied", "remote_denied"),
+            ("remote_not_allowed", "remote_not_allowed"),
+            ("repository_not_allowed", "repository_not_allowed"),
+            ("repository path", "repository_not_allowed"),
+            ("revoked", "revoked"),
+            ("session_required", "session_required"),
+            ("session is required", "session_required"),
+            ("tag_denied", "tag_denied"),
+            ("tag_not_allowed", "tag_not_allowed")
+        ]
+        if let match = matches.first(where: { raw.contains($0.0) }) { return match.1 }
+        return decision == "error" ? "signer_failed" : "policy_changed"
+    }
+
+    static func project(
+        local: NativeAuditEvent,
+        eventID: String,
+        policySequence: Int64?,
+        capabilitySequence: Int64?,
+        deviceTimestamp: String,
+        previousHash: String
+    ) -> NativeDeviceAuditEvent? {
+        guard local.operation == "git.commit.sign",
+              let requestID = local.requestID,
+              let agentID = local.agentID,
+              let repository = local.repository,
+              let branch = local.branch,
+              let remote = local.remote,
+              let payloadDigest = local.payloadSHA256,
+              let policySequence,
+              let capabilitySequence else { return nil }
+        return try? NativeDeviceAuditEvent(
+            eventID: eventID,
+            requestID: requestID,
+            agentID: agentID,
+            decision: local.decision,
+            reason: stableReason(decision: local.decision, rawReason: local.reason),
+            policySequence: policySequence,
+            capabilitySequence: capabilitySequence,
+            repository: repository,
+            branch: branch,
+            remote: remote,
+            payloadDigest: payloadDigest,
+            deviceTimestamp: deviceTimestamp,
+            previousHash: previousHash
+        )
+    }
+}
+
 private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, NativeAgentSessionAuditAppending, @unchecked Sendable {
     private struct PendingKeyActivation {
         let statement: NativeKeyTransitionStatement
@@ -950,6 +1030,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var controlFetcher: NativeControlFetcher?
     private var deviceSyncRunner: NativeDeviceSyncRunner?
     private var deviceSyncPublicKeyPEM: String?
+    private var deviceAuditOutbox: NativeDeviceAuditOutbox?
+    private var deviceAuditUploadCoordinator: NativeDeviceAuditUploadCoordinator?
+    private var deviceAuditUploadTask: Task<Void, Never>?
+    private var deviceAuditUploadOperational = true
     private var deviceSyncRequiresInitialConvergence = false
     private var lastControlFetchAuditReason: String?
     private var lastControlFetchAuditAt: Date?
@@ -965,6 +1049,32 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var auditPruneLastDecision: String?
     private var auditPruneLastError: String?
     private var auditPruneLastUpdatedAt: String?
+
+    private static func capabilitySequence(from requestData: Data) -> Int64? {
+        guard let request = try? NativeStrictJSON.object(from: requestData, maxBytes: 12 * 1024 * 1024, maxDepth: 16),
+              let capability = request["capability"] as? [String: Any],
+              let capabilityData = try? NativeStrictJSON.data(capability),
+              let parsed = try? NativeCapabilityCodec.parse(capabilityData) else {
+            return nil
+        }
+        return parsed.sequence
+    }
+
+    private func currentPolicySequence() -> Int64? {
+        controlV2Manager?.status().sequence ?? controlManager?.status().sequence
+    }
+
+    private static func deviceAuditEventID(entry: Int) -> String? {
+        guard entry > 0 else { return nil }
+        let sequence = UInt64(entry)
+        // The event ID is UUID-shaped but ordered by the local audit entry.
+        // NativeDeviceAuditOutbox uses event ID order when forming a batch.
+        // Keep the ID deterministic across a retry while retaining the exact
+        // UUID shape required by the Cloud contract. The audit entry index is
+        // bounded by the local log and the lower 32 bits are the stable ID
+        // component; the final component retains the full bounded sequence.
+        return String(format: "%08llx-0000-4000-8000-%012llx", sequence & 0xffffffff, sequence & 0xffffffffffff)
+    }
 
     init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?, controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)? = nil) {
         self.keyStore = keyStore
@@ -1026,6 +1136,34 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         runner.start()
     }
 
+    func installDeviceAuditUploadCoordinator(
+        _ coordinator: NativeDeviceAuditUploadCoordinator,
+        outbox: NativeDeviceAuditOutbox
+    ) throws {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard deviceAuditUploadCoordinator == nil,
+              deviceAuditOutbox == nil else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload is already configured")
+        }
+        _ = try outbox.nextPreviousHash()
+        deviceAuditOutbox = outbox
+        deviceAuditUploadCoordinator = coordinator
+        deviceAuditUploadOperational = true
+        let task = Task { [weak self, coordinator] in
+            while !Task.isCancelled {
+                _ = try? await coordinator.flush()
+                do {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                } catch {
+                    return
+                }
+                guard self != nil else { return }
+            }
+        }
+        deviceAuditUploadTask = task
+    }
+
     func deviceSyncActivation() -> NativeDeviceSyncBundleActivation {
         NativeDeviceSyncBundleActivation { [weak self] bundle, nowMilliseconds in
             guard let self else { throw AgentPassNativeError.invalidConfiguration("Native control service is unavailable") }
@@ -1080,13 +1218,14 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         catch { reply(nil, error as NSError); return }
         do { try rotateAuditIfReady(); _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
+        let capabilitySequence = Self.capabilitySequence(from: request as Data)
         do {
             if let prior = try signingTransactions.lookup(requestData: request as Data) {
                 switch prior.phase {
                 case .completed:
                     reply(prior.signature! as NSString, nil)
                 case .signedVerified:
-                    try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash))
+                    try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash), deviceAuditCapabilitySequence: capabilitySequence)
                     let completed = try signingTransactions.complete(requestID: prior.requestID)
                     reply(completed.signature! as NSString, nil)
                 case .intent:
@@ -1105,7 +1244,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         do {
             authorized = try authorizer.authorize(requestData: request as Data)
         } catch let authorizationError {
-            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription), deviceAuditCapabilitySequence: capabilitySequence) }
             catch let auditError {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
@@ -1115,18 +1254,20 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             reply(nil, authorizationError as NSError)
             return
         }
+        var payloadHash: String?
         do {
-            let payloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
-            _ = try signingTransactions.begin(requestData: request as Data, authorized: authorized, payloadHash: payloadHash)
+            let computedPayloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
+            payloadHash = computedPayloadHash
+            _ = try signingTransactions.begin(requestData: request as Data, authorized: authorized, payloadHash: computedPayloadHash)
             // Durable authorization intent is appended before the hardware key
             // is touched. A missing terminal result is therefore observable as
             // an unresolved outcome rather than silent key use.
-            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: computedPayloadHash), deviceAuditCapabilitySequence: capabilitySequence)
             try authorizer.revalidate(authorized)
             _ = try signingTransactions.markProviderStarted(requestID: authorized.requestID)
             let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
             _ = try signingTransactions.recordSigned(requestID: authorized.requestID, signature: signature)
-            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: computedPayloadHash), deviceAuditCapabilitySequence: capabilitySequence)
             let completed = try signingTransactions.complete(requestID: authorized.requestID)
             reply(completed.signature! as NSString, nil)
         } catch let signingError {
@@ -1145,7 +1286,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent || transaction.phase == .providerStarted {
                 _ = try? signingTransactions.markOutcomeUnknown(requestID: authorized.requestID)
             }
-            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash), deviceAuditCapabilitySequence: capabilitySequence) }
             catch let auditError {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
@@ -2975,16 +3116,28 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     }
 
     @discardableResult
-    private func appendAudit(_ event: NativeAuditEvent, timestamp: Date = Date()) throws -> NativeAuditStatus {
+    private func appendAudit(
+        _ event: NativeAuditEvent,
+        timestamp: Date = Date(),
+        deviceAuditCapabilitySequence: Int64? = nil
+    ) throws -> NativeAuditStatus {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
-        return try appendAuditLocked(event, timestamp: timestamp)
+        return try appendAuditLocked(
+            event,
+            timestamp: timestamp,
+            deviceAuditCapabilitySequence: deviceAuditCapabilitySequence
+        )
     }
 
     /// Caller must hold `authorizationLock`. Keeping reconciliation lookup and
     /// append under this same service-wide mutation gate makes verified absence
     /// and the subsequent durable append one serialized decision.
-    private func appendAuditLocked(_ event: NativeAuditEvent, timestamp: Date) throws -> NativeAuditStatus {
+    private func appendAuditLocked(
+        _ event: NativeAuditEvent,
+        timestamp: Date,
+        deviceAuditCapabilitySequence: Int64? = nil
+    ) throws -> NativeAuditStatus {
         if let pendingRecovery, pendingRecovery.expiresAt <= timestamp { self.pendingRecovery = nil }
         guard pendingRecovery?.freezesMutations != true else {
             throw AgentPassNativeError.invalidConfiguration("Audit evidence is frozen while offline recovery is pending")
@@ -2997,6 +3150,26 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         // An automatic audit rotation creates a checkpoint. Keep checkpoint and receipt segments
         // bounded as part of the same service-level append path.
         try rotateEvidenceIfReady()
+        if deviceAuditUploadOperational,
+           let outbox = deviceAuditOutbox,
+           let eventID = Self.deviceAuditEventID(entry: status.entries),
+           let previousHash = try? outbox.nextPreviousHash(),
+           let redacted = NativeServiceDeviceAuditProjection.project(
+               local: event,
+               eventID: eventID,
+               policySequence: currentPolicySequence(),
+               capabilitySequence: deviceAuditCapabilitySequence,
+               deviceTimestamp: serviceTimestamp(timestamp),
+               previousHash: previousHash
+           ) {
+            do {
+                _ = try outbox.enqueue(redacted)
+            } catch {
+                // Local audit durability is the existing signing/XPC boundary.
+                // Cloud upload setup is secondary and never changes that result.
+                deviceAuditUploadOperational = false
+            }
+        }
         return status
     }
 
@@ -5108,6 +5281,13 @@ do {
             organizationID: organizationID,
             deviceID: deviceID,
             signer: deviceSigner
+        )
+        let deviceAuditOutboxPath = configuration.auditLogPath + ".device-audit-outbox"
+        try validateProtectedOutputPath(path: deviceAuditOutboxPath, label: "Native device audit outbox")
+        let deviceAuditOutbox = try NativeDeviceAuditOutbox(rootPath: deviceAuditOutboxPath)
+        try endpoint.installDeviceAuditUploadCoordinator(
+            NativeDeviceAuditUploadCoordinator(outbox: deviceAuditOutbox, transport: transport),
+            outbox: deviceAuditOutbox
         )
         let snapshotStore = try NativeDeviceRefreshPOSIXSnapshotStore(path: refreshStatePath)
         guard let evidenceStore = controlRefreshEvidenceStore else {
