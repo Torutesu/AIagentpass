@@ -950,6 +950,199 @@ internal enum NativeServiceDeviceAuditProjection {
     }
 }
 
+internal struct NativeDeviceAuditUploadHealth: Codable, Equatable, Sendable {
+    let version: Int
+    let state: String
+    let consecutiveFailures: Int
+    let lastError: String?
+    let lastAttemptAt: Date?
+    let lastSuccessAt: Date?
+
+    static let operational = "operational"
+    static let degraded = "degraded"
+
+    static var initial: NativeDeviceAuditUploadHealth {
+        NativeDeviceAuditUploadHealth(
+            version: 1,
+            state: operational,
+            consecutiveFailures: 0,
+            lastError: nil,
+            lastAttemptAt: nil,
+            lastSuccessAt: nil
+        )
+    }
+}
+
+/// Small, local-only state file for the upload supervisor.  A degraded state
+/// is informational and never gates retries: it survives restart so operators
+/// can see the outage, while the supervisor continues attempting recovery.
+internal final class NativeDeviceAuditUploadHealthStore: @unchecked Sendable {
+    private static let maximumBytes = 64 * 1024
+    private let path: String
+    private let now: @Sendable () -> Date
+    private let lock = NSLock()
+    private var value: NativeDeviceAuditUploadHealth
+
+    init(path: String, now: @escaping @Sendable () -> Date = { Date() }) throws {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard standardized.hasPrefix("/") else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload health path must be absolute")
+        }
+        self.path = standardized
+        self.now = now
+        if FileManager.default.fileExists(atPath: standardized) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: standardized), options: [.mappedIfSafe])
+            guard data.count <= Self.maximumBytes else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
+            }
+            do {
+                self.value = try JSONDecoder().decode(NativeDeviceAuditUploadHealth.self, from: data)
+            } catch {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is invalid")
+            }
+            guard self.value.version == 1,
+                  [NativeDeviceAuditUploadHealth.operational, NativeDeviceAuditUploadHealth.degraded].contains(self.value.state),
+                  self.value.consecutiveFailures >= 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is invalid")
+            }
+        } else {
+            self.value = .initial
+            try persist(self.value)
+        }
+    }
+
+    func snapshot() -> NativeDeviceAuditUploadHealth {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func recordAttempt() throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: current.state,
+                consecutiveFailures: current.consecutiveFailures,
+                lastError: current.lastError,
+                lastAttemptAt: now(),
+                lastSuccessAt: current.lastSuccessAt
+            )
+        }
+    }
+
+    func recordFailure(_ error: Error) throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: NativeDeviceAuditUploadHealth.degraded,
+                consecutiveFailures: current.consecutiveFailures + 1,
+                lastError: error.localizedDescription,
+                lastAttemptAt: now(),
+                lastSuccessAt: current.lastSuccessAt
+            )
+        }
+    }
+
+    func recordSuccess() throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: NativeDeviceAuditUploadHealth.operational,
+                consecutiveFailures: 0,
+                lastError: nil,
+                lastAttemptAt: now(),
+                lastSuccessAt: now()
+            )
+        }
+    }
+
+    private func update(_ makeValue: (NativeDeviceAuditUploadHealth) -> NativeDeviceAuditUploadHealth) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let next = makeValue(value)
+        try persist(next)
+        value = next
+    }
+
+    private func persist(_ value: NativeDeviceAuditUploadHealth) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(value)
+        guard data.count <= Self.maximumBytes else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
+        }
+        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    }
+}
+
+internal enum NativeDeviceAuditUploadPolicy {
+    static func requiresDurableEnqueue(for event: NativeAuditEvent) -> Bool {
+        event.operation == "git.commit.sign" && event.decision == "allow" && event.requestID != nil
+    }
+}
+
+internal enum NativeDeviceAuditUploadAdmission {
+    static func attempt(
+        required: Bool,
+        health: NativeDeviceAuditUploadHealthStore?,
+        operation: () throws -> Void
+    ) throws {
+        do {
+            try operation()
+        } catch {
+            try? health?.recordFailure(error)
+            if required { throw error }
+        }
+    }
+}
+
+/// The supervisor deliberately treats both transport and local filesystem
+/// failures as retryable.  It never stops because health persistence or one
+/// upload attempt failed; the next iteration is the recovery mechanism.
+internal final class NativeDeviceAuditUploadRetrySupervisor: @unchecked Sendable {
+    private let coordinator: NativeDeviceAuditUploadCoordinator
+    private let health: NativeDeviceAuditUploadHealthStore
+    private let intervalNanoseconds: UInt64
+
+    init(
+        coordinator: NativeDeviceAuditUploadCoordinator,
+        health: NativeDeviceAuditUploadHealthStore,
+        intervalNanoseconds: UInt64 = 30_000_000_000
+    ) {
+        self.coordinator = coordinator
+        self.health = health
+        self.intervalNanoseconds = intervalNanoseconds
+    }
+
+    @discardableResult
+    func runOnce() async -> Bool {
+        try? health.recordAttempt()
+        do {
+            _ = try await coordinator.flush()
+            try? health.recordSuccess()
+            return true
+        } catch {
+            try? health.recordFailure(error)
+            return false
+        }
+    }
+
+    func start() -> Task<Void, Never> {
+        Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                _ = await self.runOnce()
+                do {
+                    try await Task.sleep(nanoseconds: self.intervalNanoseconds)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+}
+
 private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, NativeAgentSessionAuditAppending, @unchecked Sendable {
     private struct PendingKeyActivation {
         let statement: NativeKeyTransitionStatement
@@ -1031,9 +1224,9 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var deviceSyncRunner: NativeDeviceSyncRunner?
     private var deviceSyncPublicKeyPEM: String?
     private var deviceAuditOutbox: NativeDeviceAuditOutbox?
-    private var deviceAuditUploadCoordinator: NativeDeviceAuditUploadCoordinator?
+    private var deviceAuditUploadHealthStore: NativeDeviceAuditUploadHealthStore?
+    private var deviceAuditUploadSupervisor: NativeDeviceAuditUploadRetrySupervisor?
     private var deviceAuditUploadTask: Task<Void, Never>?
-    private var deviceAuditUploadOperational = true
     private var deviceSyncRequiresInitialConvergence = false
     private var lastControlFetchAuditReason: String?
     private var lastControlFetchAuditAt: Date?
@@ -1142,30 +1335,21 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
 
     func installDeviceAuditUploadCoordinator(
         _ coordinator: NativeDeviceAuditUploadCoordinator,
-        outbox: NativeDeviceAuditOutbox
+        outbox: NativeDeviceAuditOutbox,
+        health: NativeDeviceAuditUploadHealthStore
     ) throws {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
-        guard deviceAuditUploadCoordinator == nil,
+        guard deviceAuditUploadSupervisor == nil,
               deviceAuditOutbox == nil else {
             throw AgentPassNativeError.invalidConfiguration("Device audit upload is already configured")
         }
         _ = try outbox.nextPreviousHash()
+        let supervisor = NativeDeviceAuditUploadRetrySupervisor(coordinator: coordinator, health: health)
         deviceAuditOutbox = outbox
-        deviceAuditUploadCoordinator = coordinator
-        deviceAuditUploadOperational = true
-        let task = Task { [weak self, coordinator] in
-            while !Task.isCancelled {
-                _ = try? await coordinator.flush()
-                do {
-                    try await Task.sleep(nanoseconds: 30_000_000_000)
-                } catch {
-                    return
-                }
-                guard self != nil else { return }
-            }
-        }
-        deviceAuditUploadTask = task
+        deviceAuditUploadHealthStore = health
+        deviceAuditUploadSupervisor = supervisor
+        deviceAuditUploadTask = supervisor.start()
     }
 
     func deviceSyncActivation() -> NativeDeviceSyncBundleActivation {
@@ -3154,24 +3338,33 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         // An automatic audit rotation creates a checkpoint. Keep checkpoint and receipt segments
         // bounded as part of the same service-level append path.
         try rotateEvidenceIfReady()
-        if deviceAuditUploadOperational,
-           let outbox = deviceAuditOutbox,
-           let eventID = Self.deviceAuditEventID(recordHash: status.headHash),
-           let previousHash = try? outbox.nextPreviousHash(),
-           let redacted = NativeServiceDeviceAuditProjection.project(
-               local: event,
-               eventID: eventID,
-               policySequence: currentPolicySequence(),
-               capabilitySequence: deviceAuditCapabilitySequence,
-               deviceTimestamp: serviceTimestamp(timestamp),
-               previousHash: previousHash
-           ) {
-            do {
+        if let outbox = deviceAuditOutbox {
+            let requiresDurableEnqueue = NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: event)
+            // A failed enqueue is durable health evidence, not a reason to
+            // disable the queue. Signing records must be persisted before
+            // hardware signing; all other projections remain best-effort.
+            try NativeDeviceAuditUploadAdmission.attempt(
+                required: requiresDurableEnqueue,
+                health: deviceAuditUploadHealthStore
+            ) {
+                guard let eventID = Self.deviceAuditEventID(recordHash: status.headHash) else {
+                    throw AgentPassNativeError.invalidSignature("Native device audit record hash cannot derive an event ID")
+                }
+                let previousHash = try outbox.nextPreviousHash()
+                guard let redacted = NativeServiceDeviceAuditProjection.project(
+                    local: event,
+                    eventID: eventID,
+                    policySequence: currentPolicySequence(),
+                    capabilitySequence: deviceAuditCapabilitySequence,
+                    deviceTimestamp: serviceTimestamp(timestamp),
+                    previousHash: previousHash
+                ) else {
+                    if requiresDurableEnqueue {
+                        throw AgentPassNativeError.invalidConfiguration("Required Device audit projection is unavailable")
+                    }
+                    return
+                }
                 _ = try outbox.enqueue(redacted)
-            } catch {
-                // Local audit durability is the existing signing/XPC boundary.
-                // Cloud upload setup is secondary and never changes that result.
-                deviceAuditUploadOperational = false
             }
         }
         return status
@@ -5289,9 +5482,13 @@ do {
         let deviceAuditOutboxPath = configuration.auditLogPath + ".device-audit-outbox"
         try validateProtectedOutputPath(path: deviceAuditOutboxPath, label: "Native device audit outbox")
         let deviceAuditOutbox = try NativeDeviceAuditOutbox(rootPath: deviceAuditOutboxPath)
+        let deviceAuditUploadHealthPath = deviceAuditOutboxPath + ".upload-health.json"
+        try validateProtectedOutputPath(path: deviceAuditUploadHealthPath, label: "Native device audit upload health")
+        let deviceAuditUploadHealth = try NativeDeviceAuditUploadHealthStore(path: deviceAuditUploadHealthPath)
         try endpoint.installDeviceAuditUploadCoordinator(
             NativeDeviceAuditUploadCoordinator(outbox: deviceAuditOutbox, transport: transport),
-            outbox: deviceAuditOutbox
+            outbox: deviceAuditOutbox,
+            health: deviceAuditUploadHealth
         )
         let snapshotStore = try NativeDeviceRefreshPOSIXSnapshotStore(path: refreshStatePath)
         guard let evidenceStore = controlRefreshEvidenceStore else {

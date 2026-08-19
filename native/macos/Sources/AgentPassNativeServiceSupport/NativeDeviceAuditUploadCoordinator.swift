@@ -32,7 +32,7 @@ public final class NativeDeviceAuditUploadCoordinator: @unchecked Sendable {
         for _ in 0..<maximumAttempts {
             let events = try outbox.pending()
             guard !events.isEmpty else { return uploaded }
-            let batch = try NativeDeviceAuditBatch(batchID: UUID().uuidString.lowercased(), events: events)
+            let batch = try NativeDeviceAuditBatch(events: events)
             do {
                 let response = try await transport.uploadAuditBatch(batch)
                 try outbox.acknowledge(response)

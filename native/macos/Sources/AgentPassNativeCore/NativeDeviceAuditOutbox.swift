@@ -144,8 +144,8 @@ public final class NativeDeviceAuditOutbox: @unchecked Sendable {
             try validateRoot()
             let head = try loadOrCreateHead()
             let entries = try pendingEntries()
-            _ = try chainTail(head: head, entries: entries)
-            return entries.prefix(limit).map(\.event)
+            let ordered = try orderedEntries(head: head, entries: entries, includingHeadEvent: true)
+            return ordered.prefix(limit).map(\.event)
         }
     }
 
@@ -206,26 +206,27 @@ public final class NativeDeviceAuditOutbox: @unchecked Sendable {
                     throw AgentPassNativeError.invalidSignature("Device audit ingestion response head is not an acknowledged event")
                 }
                 let chain = try orderedExtensions(head: current, entries: entries)
-                var reachedHead = false
-                for event in chain {
-                    guard acknowledged.contains(event.eventID) else {
-                        throw AgentPassNativeError.invalidSignature("Device audit acknowledgement skips a chain event")
-                    }
-                    if event.eventID == headEventID {
-                        reachedHead = true
-                        break
-                    }
-                }
-                guard reachedHead else {
+                guard let headIndex = chain.firstIndex(where: { $0.eventID == headEventID }) else {
                     throw AgentPassNativeError.invalidSignature("Device audit ingestion response head is not contiguous")
                 }
-            } else if let headEventID = incoming.lastEventID,
-                      let headEntry = byID[headEventID] {
-                guard headEntry.event.eventHash == incoming.lastHash else {
-                    throw AgentPassNativeError.invalidSignature("Device audit ingestion response head equivocates")
+                let expectedIDs = chain.prefix(headIndex + 1).map(\.eventID)
+                guard acknowledged.count == expectedIDs.count,
+                      Set(acknowledged) == Set(expectedIDs) else {
+                    throw AgentPassNativeError.invalidSignature("Device audit acknowledgement skips or exceeds the contiguous chain")
                 }
-            } else if incoming.lastEventID == nil && incoming.lastHash != Self.genesisHash {
-                throw AgentPassNativeError.invalidSignature("Device audit ingestion response head is missing its event ID")
+            } else {
+                // An unchanged genesis head cannot acknowledge a pending
+                // event, and an unchanged non-genesis head may only replay
+                // that exact head event after a response-loss crash.
+                guard let headEventID = incoming.lastEventID,
+                      Set(acknowledged) == Set([headEventID]) else {
+                    throw AgentPassNativeError.invalidSignature("Device audit ingestion response acknowledges pending events without advancing the head")
+                }
+                if let headEntry = byID[headEventID] {
+                    guard headEntry.event.eventHash == incoming.lastHash else {
+                        throw AgentPassNativeError.invalidSignature("Device audit ingestion response head equivocates")
+                    }
+                }
             }
 
             if incoming != current {
@@ -303,29 +304,51 @@ public final class NativeDeviceAuditOutbox: @unchecked Sendable {
     }
 
     private func orderedExtensions(head: NativeDeviceAuditHead, entries: [FileEntry]) throws -> [NativeDeviceAuditEvent] {
+        try orderedEntries(head: head, entries: entries, includingHeadEvent: false).map(\.event)
+    }
+
+    private func orderedEntries(head: NativeDeviceAuditHead, entries: [FileEntry], includingHeadEvent: Bool) throws -> [FileEntry] {
         try Self.validateHead(head)
-        var remaining = entries
+        let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.event.eventID, $0) })
+        let byHash = Dictionary(uniqueKeysWithValues: entries.map { ($0.event.eventHash, $0) })
+        var consumed = Set<String>()
+        var result: [FileEntry] = []
+
+        // Acknowledgement commits the Cloud head before deleting files. On a
+        // restart, files for the head and its already-acknowledged ancestors
+        // can therefore still be present and must remain replayable.
         if let headEventID = head.lastEventID {
-            if let index = remaining.firstIndex(where: { $0.event.eventID == headEventID }) {
-                guard remaining[index].event.eventHash == head.lastHash else {
+            if let headEntry = byID[headEventID] {
+                guard headEntry.event.eventHash == head.lastHash else {
                     throw AgentPassNativeError.invalidSignature("Device audit outbox head equivocates with a pending event")
                 }
-                remaining.remove(at: index)
+                var reverse = [headEntry]
+                consumed.insert(headEventID)
+                var previousHash = headEntry.event.previousHash
+                while let predecessor = byHash[previousHash] {
+                    guard consumed.insert(predecessor.event.eventID).inserted else {
+                        throw AgentPassNativeError.invalidSignature("Device audit outbox contains a cycle before its durable head")
+                    }
+                    reverse.append(predecessor)
+                    previousHash = predecessor.event.previousHash
+                }
+                if includingHeadEvent {
+                    result.append(contentsOf: reverse.reversed())
+                }
             }
         }
         var currentHash = head.lastHash
-        var result: [NativeDeviceAuditEvent] = []
         while true {
-            let candidates = remaining.filter { $0.event.previousHash == currentHash }
+            let candidates = entries.filter { !consumed.contains($0.event.eventID) && $0.event.previousHash == currentHash }
             guard candidates.count <= 1 else {
                 throw AgentPassNativeError.invalidSignature("Device audit outbox contains an equivocal chain fork")
             }
             guard let candidate = candidates.first else { break }
-            result.append(candidate.event)
+            result.append(candidate)
+            consumed.insert(candidate.event.eventID)
             currentHash = candidate.event.eventHash
-            remaining.removeAll { $0.event.eventID == candidate.event.eventID }
         }
-        guard remaining.isEmpty else {
+        guard consumed.count == entries.count else {
             throw AgentPassNativeError.invalidSignature("Device audit outbox contains a disconnected chain")
         }
         return result

@@ -146,10 +146,38 @@ public struct NativeDeviceAuditBatch: Equatable, Sendable {
     public static let maxEvents = 64
     public let batchID: String
     public let events: [NativeDeviceAuditEvent]
-    public init(batchID: String, events: [NativeDeviceAuditEvent]) throws {
-        guard let uuid = UUID(uuidString: batchID), uuid.uuidString.lowercased() == batchID.lowercased(), !events.isEmpty, events.count <= Self.maxEvents, Set(events.map(\.eventID)).count == events.count else { throw NativeDeviceSyncContractError(.invalidValue, "batch") }
-        self.batchID = batchID.lowercased(); self.events = events
+
+    public init(events: [NativeDeviceAuditEvent]) throws {
+        try self.init(batchID: Self.batchID(for: events), events: events)
     }
+
+    public init(batchID: String, events: [NativeDeviceAuditEvent]) throws {
+        let expectedBatchID = try Self.batchID(for: events)
+        guard batchID == expectedBatchID else { throw NativeDeviceSyncContractError(.invalidValue, "batch_id") }
+        self.batchID = batchID; self.events = events
+    }
+
+    /// Returns the stable identity of the ordered event content only. The
+    /// outer batch envelope is deliberately excluded so batch_id cannot hash
+    /// itself.
+    public static func batchID(for events: [NativeDeviceAuditEvent]) throws -> String {
+        guard !events.isEmpty,
+              events.count <= Self.maxEvents,
+              Set(events.map(\.eventID)).count == events.count,
+              zip(events, events.dropFirst()).allSatisfy({ $1.previousHash == $0.eventHash }) else {
+            throw NativeDeviceSyncContractError(.invalidValue, "batch")
+        }
+        let eventObjects = try events.map { event -> [String: Any] in
+            guard let object = try JSONSerialization.jsonObject(with: event.canonicalData()) as? [String: Any] else {
+                throw NativeDeviceSyncContractError(.invalidValue, "batch events")
+            }
+            return object
+        }
+        let content = try NativeStrictJSON.data(["events": eventObjects])
+        let digest = Data(SHA256.hash(data: content)).map { String(format: "%02x", $0) }.joined()
+        return "audit-\(digest)"
+    }
+
     public func canonicalData() throws -> Data { try NativeStrictJSON.data(["batch_id": batchID, "events": try events.map { try JSONSerialization.jsonObject(with: $0.canonicalData()) }]) }
 
     public static func decode(_ data: Data) throws -> NativeDeviceAuditBatch {

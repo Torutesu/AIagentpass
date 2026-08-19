@@ -52,6 +52,19 @@ func deviceAuditOutboxSurvivesRestart() throws {
     #expect(try Data(contentsOf: root.appendingPathComponent("event_\(event.eventID).json")) == event.canonicalData())
 }
 
+@Test("device audit outbox returns pending events in hash-chain order")
+func deviceAuditOutboxOrdersPendingByChain() throws {
+    let root = try outboxRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try outboxEvent("99999999-9999-4999-8999-999999999999")
+    let second = try outboxEvent("11111111-1111-4111-8111-111111111111", previousHash: first.eventHash)
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
+    _ = try outbox.enqueue(first)
+    _ = try outbox.enqueue(second)
+
+    #expect(try outbox.pending() == [first, second])
+}
+
 @Test("device audit head metadata is closed canonical and resumes the next hash after restart")
 func deviceAuditOutboxPersistsCloudHead() throws {
     let root = try outboxRoot()
@@ -103,6 +116,18 @@ func deviceAuditOutboxCrashReplay() throws {
     try restarted.acknowledge(response)
 }
 
+@Test("device audit outbox returns pending events in hash-chain order")
+func deviceAuditOutboxPendingUsesChainOrder() throws {
+    let root = try outboxRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try outboxEvent("ffffffff-ffff-4fff-8fff-ffffffffffff")
+    let second = try outboxEvent("11111111-1111-4111-8111-111111111111", previousHash: first.eventHash)
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
+    _ = try outbox.enqueue(first)
+    _ = try outbox.enqueue(second)
+    #expect(try outbox.pending() == [first, second])
+}
+
 @Test("device audit outbox rejects event equivocation and unknown acknowledgements")
 func deviceAuditOutboxRejectsEquivocation() throws {
     let root = try outboxRoot()
@@ -134,6 +159,43 @@ func deviceAuditOutboxRejectsHeadEquivocation() throws {
     )
     #expect(throws: AgentPassNativeError.self) { try outbox.acknowledge(equivocation) }
     #expect(try outbox.currentHead() == NativeDeviceAuditHead(lastHash: first.eventHash, lastEventID: first.eventID))
+}
+
+@Test("device audit outbox rejects a stale head acknowledgement of a pending event")
+func deviceAuditOutboxRejectsStaleAcknowledgementOfPendingEvent() throws {
+    let root = try outboxRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try outboxEvent("18181818-1818-4818-8818-181818181818")
+    let second = try outboxEvent("19191919-1919-4919-8919-191919191919", previousHash: first.eventHash)
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
+    _ = try outbox.enqueue(first)
+    try outbox.acknowledge(outboxResponse(for: first))
+    _ = try outbox.enqueue(second)
+
+    let stale = NativeDeviceAuditIngestionResponse(
+        deviceID: "55555555-5555-4555-8555-555555555555",
+        acceptedEventIDs: [second.eventID], duplicateEventIDs: [], gapCount: 0,
+        headHash: first.eventHash, headEventID: first.eventID, chainStatus: "continuous"
+    )
+    #expect(throws: AgentPassNativeError.self) { try outbox.acknowledge(stale) }
+    #expect(try outbox.pending() == [second])
+}
+
+@Test("device audit outbox rejects a genesis acknowledgement of a pending event")
+func deviceAuditOutboxRejectsGenesisAcknowledgementOfPendingEvent() throws {
+    let root = try outboxRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let event = try outboxEvent("20202020-2020-4020-8020-202020202020")
+    let outbox = try NativeDeviceAuditOutbox(rootPath: root.path)
+    _ = try outbox.enqueue(event)
+
+    let genesis = NativeDeviceAuditIngestionResponse(
+        deviceID: "55555555-5555-4555-8555-555555555555",
+        acceptedEventIDs: [event.eventID], duplicateEventIDs: [], gapCount: 0,
+        headHash: String(repeating: "0", count: 64), headEventID: nil, chainStatus: "continuous"
+    )
+    #expect(throws: AgentPassNativeError.self) { try outbox.acknowledge(genesis) }
+    #expect(try outbox.pending() == [event])
 }
 
 @Test("device audit outbox removes only accepted and duplicate IDs")

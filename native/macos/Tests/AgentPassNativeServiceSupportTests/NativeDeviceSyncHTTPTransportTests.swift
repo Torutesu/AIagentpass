@@ -237,7 +237,7 @@ struct NativeDeviceSyncHTTPTransportTests {
     @Test func auditUploadUsesDeviceAuthAndDecodesTheBoundedIngestionEnvelope() async throws {
         let signer = TransportTestSigner()
         let event = try auditEvent()
-        let batch = try NativeDeviceAuditBatch(batchID: "66666666-6666-4666-8666-666666666666", events: [event])
+        let batch = try NativeDeviceAuditBatch(events: [event])
         let responseBody = try NativeStrictJSON.data([
             "ingestion": [
                 "device_id": transportDeviceID,

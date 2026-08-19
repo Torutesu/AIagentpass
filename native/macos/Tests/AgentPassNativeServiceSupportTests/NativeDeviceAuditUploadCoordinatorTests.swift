@@ -5,11 +5,13 @@ import Testing
 
 private actor FakeAuditUploader: NativeDeviceAuditBatchUploading {
     private(set) var calls = 0
+    private(set) var batches: [NativeDeviceAuditBatch] = []
     var response: NativeDeviceAuditIngestionResponse?
     var failure: NativeDeviceSyncHTTPTransportError?
 
     func uploadAuditBatch(_ batch: NativeDeviceAuditBatch) async throws -> NativeDeviceAuditIngestionResponse {
         calls += 1
+        batches.append(batch)
         if let failure { throw failure }
         guard let response else { throw NativeDeviceSyncHTTPTransportError.transportFailure }
         return response
@@ -53,6 +55,9 @@ func uploadCoordinatorRetriesWithoutDeletingOnFailure() async throws {
     #expect(try await coordinator.flush() == 1)
     #expect(try outbox.pending().isEmpty)
     #expect(await fake.calls == 2)
+    let batches = await fake.batches
+    let expectedBatchID = try NativeDeviceAuditBatch.batchID(for: [event])
+    #expect(batches.map(\.batchID) == [expectedBatchID, expectedBatchID])
 }
 
 @Test("upload coordinator bounds retry attempts and never loops indefinitely")
