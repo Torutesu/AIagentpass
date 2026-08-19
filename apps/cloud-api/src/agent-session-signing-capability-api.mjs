@@ -204,7 +204,7 @@ export function createAgentSessionSigningCapabilityApi({
     } catch (error) {
       throw mapSessionBindingError(error);
     }
-    assertSessionBinding(binding, route);
+    const boundSession = assertSessionBinding(binding, route);
 
     let issued;
     try {
@@ -219,7 +219,7 @@ export function createAgentSessionSigningCapabilityApi({
     } catch (error) {
       throw mapIssuanceError(error);
     }
-    const normalized = normalizePublicResponse(issued, route, body.request_id);
+    const normalized = normalizePublicResponse(issued, route, body.request_id, boundSession.agent_id);
     return response(201, normalized);
   }
 
@@ -413,21 +413,33 @@ function assertSessionBinding(value, route) {
   // A boolean success result cannot prove which tenant/device/session was
   // authorized. Accepting it would turn a miswired binder into a fail-open
   // path from Device authentication directly to capability issuance.
+  // `agent_id` is required as well: the route is Session-scoped, while the
+  // signed capability carries the Agent audience that the caller will use.
   if (!value || typeof value !== "object" || Array.isArray(value) || value.authorized === false || value.active === false || value.verified === false) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
   if (value.authorized !== true && value.verified !== true && value.active !== true) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
+  const bound = {};
   for (const [key, expected] of [["organization_id", route.organizationId], ["device_id", route.deviceId], ["session_id", route.sessionId]]) {
     const camel = key.replace(/_([a-z])/gu, (_, character) => character.toUpperCase());
-    const candidate = value[key] ?? value[camel];
-    if (candidate !== undefined && candidate !== expected) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH, { status: 403 });
+    const candidates = [value[key], value[camel]].filter((candidate) => candidate !== undefined);
+    if (candidates.length === 0) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
+    if (candidates.some((candidate) => candidate !== expected) || new Set(candidates).size !== 1) {
+      throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH, { status: 403 });
+    }
+    bound[key] = expected;
   }
+  const agentId = value.agent_id ?? value.agentId;
+  if (typeof agentId !== "string" || !UUID.test(agentId)) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
+  if (value.agent_id !== undefined && value.agentId !== undefined && value.agent_id !== value.agentId) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH, { status: 403 });
+  bound.agent_id = agentId;
+  return Object.freeze(bound);
 }
 
-function normalizePublicResponse(value, route, expectedRequestId) {
+function normalizePublicResponse(value, route, expectedRequestId, expectedAgentId) {
   try {
     if (!isPlainObject(value)) throw new Error("response");
     assertExactKeys(value, RESPONSE_KEYS);
     if (!UUID.test(value.request_id ?? "") || value.request_id !== expectedRequestId) throw new Error("request_id");
-    const capability = normalizeCapability(value.capability, route);
+    const capability = normalizeCapability(value.capability, route, expectedAgentId);
     const metadata = normalizeMetadata(value.metadata, capability.statement);
     return deepFreeze({ capability, metadata, request_id: value.request_id });
   } catch (error) {
@@ -436,7 +448,7 @@ function normalizePublicResponse(value, route, expectedRequestId) {
   }
 }
 
-function normalizeCapability(value, route) {
+function normalizeCapability(value, route, expectedAgentId) {
   if (!isPlainObject(value)) throw new Error("capability");
   assertExactKeys(value, CAPABILITY_KEYS);
   if (value.version !== 1 || value.type !== "agentpass.agent-signing-capability" || !SHA256.test(value.statement_hash ?? "") || !validSignature(value.signature)) throw new Error("capability envelope");
@@ -445,6 +457,7 @@ function normalizeCapability(value, route) {
   assertExactKeys(statement, STATEMENT_KEYS);
   if (statement.version !== 1 || statement.type !== value.type || !UUID.test(statement.capability_id ?? "")
     || statement.organization_id !== route.organizationId || statement.device_id !== route.deviceId || statement.session_id !== route.sessionId
+    || statement.agent_id !== expectedAgentId
     || statement.one_use !== true || statement.operation !== AGENT_SIGNING_CAPABILITY_OPERATION
     || statement.key_purpose !== AGENT_SIGNING_CAPABILITY_KEY_PURPOSE || statement.algorithm !== "ed25519"
     || statement.max_signatures !== 1 || statement.issuer !== "agentpass-cloud"

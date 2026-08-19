@@ -118,7 +118,7 @@ function fixture({ response = successResponse(), serviceError = undefined, servi
     sessionBinder: async (input) => {
       calls.bind.push(structuredClone(input));
       if (binder) return binder(input);
-      return { authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session };
+      return { authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session, agent_id: IDS.agent };
     },
     ...(rateLimit ? { rateLimiter: { async acquire(input) { calls.rate.push(input); return rateLimit(input); } } } : {})
   });
@@ -214,6 +214,44 @@ test("rejects a boolean session-binder result instead of failing open", async ()
   assert.deepEqual(f.calls.issue, []);
 });
 
+test("rejects an under-specified session binding before capability issuance", async () => {
+  for (const [binding, expectedCode] of [
+    [{ authorized: true }, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED],
+    [{ authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session }, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED],
+    [{ authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session, agent_id: "not-a-uuid" }, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED],
+    [{ authorized: true, organization_id: IDS.organization, organizationId: IDS.device, device_id: IDS.device, session_id: IDS.session, agent_id: IDS.agent }, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH],
+    [{ authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session, agent_id: IDS.agent, agentId: IDS.device }, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH]
+  ]) {
+    const f = fixture({ binder: async () => binding });
+    const result = await f.api.handle(requestFor(f, { nonce: `capability-device-nonce-binding-shape-${crypto.randomBytes(8).toString("hex")}` }));
+    assertError(result, 403, expectedCode);
+    assert.equal(f.calls.issue.length, 0);
+  }
+});
+
+test("rejects conflicting snake-case and camel-case audience claims", async () => {
+  const f = fixture({ binder: async () => ({
+    authorized: true,
+    organization_id: IDS.organization,
+    organizationId: "88888888-8888-4888-8888-888888888888",
+    device_id: IDS.device,
+    session_id: IDS.session,
+    agent_id: IDS.agent
+  }) });
+  const result = await f.api.handle(requestFor(f, { nonce: "capability-device-nonce-binding-alias-conflict-0001" }));
+  assertError(result, 403, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.AUDIENCE_MISMATCH);
+  assert.equal(f.calls.issue.length, 0);
+});
+
+test("rejects a capability whose agent audience differs from the authoritative Session binding", async () => {
+  const f = fixture({
+    response: successResponse({ capability: { statement: { agent_id: "88888888-8888-4888-8888-888888888888" } } })
+  });
+  const result = await f.api.handle(requestFor(f, { nonce: "capability-device-nonce-agent-audience-0001" }));
+  assertError(result, 503, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.UNAVAILABLE);
+  assert.equal(f.calls.issue.length, 1);
+});
+
 test("creates a Session-bound issuance service only after Device authentication and binding", async () => {
   const factoryCalls = [];
   let calls;
@@ -231,7 +269,7 @@ test("creates a Session-bound issuance service only after Device authentication 
     organization_id: IDS.organization,
     device_id: IDS.device,
     session_id: IDS.session,
-    binding: { authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session }
+    binding: { authorized: true, organization_id: IDS.organization, device_id: IDS.device, session_id: IDS.session, agent_id: IDS.agent }
   });
   assert.deepEqual(calls, [{ request_id: IDS.request }]);
 });
