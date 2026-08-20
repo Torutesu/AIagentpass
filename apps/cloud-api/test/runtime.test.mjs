@@ -182,7 +182,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(degraded.status, 503);
   const degradedBody = await degraded.json();
   assert.equal(degradedBody.code, "agent_session_signer_unavailable");
-  assert.deepEqual(degradedBody.checks.agent_session_signer, { ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+  assert.deepEqual(degradedBody.checks.agent_session_signer, { ok: false, purpose: "agentpass.agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
   signerHealthy = true;
   qualificationSignerHealthy = false;
   const qualificationDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });

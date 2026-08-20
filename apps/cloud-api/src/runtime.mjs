@@ -33,6 +33,7 @@ import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
 import { verifyOfflineAuditExport } from "./audit-export-offline-verifier.mjs";
 import { createHostedPromotionEvidenceV3Signer } from "./promotion-evidence-v3-signer.mjs";
 import { PROMOTION_EVIDENCE_V3_ALGORITHM, PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION, PROMOTION_EVIDENCE_V3_PURPOSE } from "./promotion-evidence-v3-statement.mjs";
+import { SIGNER_PURPOSE_REGISTRY } from "./signer-purpose-registry.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -372,14 +373,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
         trackInFlight: postgresRuntime.trackInFlight,
         readiness: createHostedReadiness(postgresRuntime.readiness, [
-          { name: "agent_session_signer", purpose: "agent-session-grant", unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner },
-          { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
-          { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner },
-          { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner },
-          { name: "capability_signer", purpose: CAPABILITY_SIGNER_PURPOSE, unavailableCode: "capability_signer_unavailable", signer: capabilitySigner },
-          { name: "control_bundle_signer", purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, unavailableCode: "control_bundle_signer_unavailable", signer: controlBundleSigner },
-          { name: "audit_anchor_signer", purpose: AUDIT_ANCHOR_PURPOSE, unavailableCode: "audit_anchor_signer_unavailable", signer: auditAnchorSigner },
-          { name: "promotion_evidence_signer", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, unavailableCode: "promotion_evidence_signer_unavailable", signer: promotionEvidenceSigner }
+          { name: "agent_session_signer", registryName: "agent_session_grant", purpose: "agentpass.agent-session-grant", unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner, lifecycle: durableAgentSession.lifecycle },
+          { name: "qualification_manifest_signer", registryName: "qualification_manifest", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner, lifecycle: durableQualificationManifest.lifecycle },
+          { name: "possession_receipt_signer", registryName: "possession_receipt", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner, lifecycle: durablePossessionReceipt.lifecycle },
+          { name: "refresh_hint_signer", registryName: "refresh_hint", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner, lifecycle: durableRefreshHint.lifecycle },
+          { name: "capability_signer", registryName: "capability", purpose: CAPABILITY_SIGNER_PURPOSE, unavailableCode: "capability_signer_unavailable", signer: capabilitySigner, lifecycle: durableCapability.lifecycle },
+          { name: "control_bundle_signer", registryName: "control_bundle", purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, unavailableCode: "control_bundle_signer_unavailable", signer: controlBundleSigner, lifecycle: durableControlBundle.lifecycle },
+          { name: "audit_anchor_signer", registryName: "audit_anchor", purpose: AUDIT_ANCHOR_PURPOSE, unavailableCode: "audit_anchor_signer_unavailable", signer: auditAnchorSigner, lifecycle: durableAuditAnchor.lifecycle },
+          { name: "promotion_evidence_signer", registryName: "promotion_evidence", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, unavailableCode: "promotion_evidence_signer_unavailable", signer: promotionEvidenceSigner, lifecycle: durablePromotionEvidence.lifecycle }
         ]),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
@@ -682,6 +683,7 @@ export function createHostedReadiness(databaseReadiness, signers) {
   return async function hostedReadiness() {
     const databaseReport = await databaseReadiness();
     const checks = {};
+    const managedSigners = {};
     let signerFailure;
     for (const dependency of signers) {
       let report;
@@ -700,19 +702,35 @@ export function createHostedReadiness(databaseReadiness, signers) {
           || keyRing.keys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
             || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "") || !["active", "retiring"].includes(key.status))) throw new Error("invalid verification key metadata");
         report = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
+        if (dependency.registryName !== undefined) {
+          const expected = SIGNER_PURPOSE_REGISTRY[dependency.registryName];
+          const active = dependency.lifecycle?.keys?.filter((key) => key?.state === "active");
+          if (!expected || !dependency.lifecycle || dependency.lifecycle.purpose !== expected.purpose || dependency.lifecycle.algorithm !== expected.managed_algorithm
+            || active?.length !== 1 || active[0].key_id !== value.key_id || active[0].public_key_fingerprint !== value.public_key_fingerprint
+            || active[0].state !== "active") throw new Error("invalid authoritative signer lifecycle");
+          managedSigners[dependency.registryName] = Object.freeze({ ok: true, code: "ready", state: active[0].state, purpose: expected.purpose, domain: expected.domain, algorithm: expected.managed_algorithm, registry_version: expected.registry_version, protocol_version: expected.protocol_version, signing_version: expected.signing_version, key_id: active[0].key_id, key_version: active[0].key_version, lifecycle_version: active[0].state_version, public_key_fingerprint: active[0].public_key_fingerprint });
+        }
       } catch {
         signerFailure ??= dependency.unavailableCode;
         report = Object.freeze({ ok: false, purpose: dependency.purpose, algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+        if (dependency.registryName !== undefined) {
+          const expected = SIGNER_PURPOSE_REGISTRY[dependency.registryName];
+          managedSigners[dependency.registryName] = Object.freeze({ ok: false, code: "provider_unavailable", state: "failed", purpose: expected?.purpose ?? dependency.purpose, domain: expected?.domain ?? null, algorithm: expected?.managed_algorithm ?? "ed25519", registry_version: expected?.registry_version ?? null, protocol_version: expected?.protocol_version ?? null, signing_version: expected?.signing_version ?? null, key_id: null, key_version: null, lifecycle_version: null, public_key_fingerprint: null });
+        }
       }
       checks[dependency.name] = report;
     }
     if (!databaseReport || typeof databaseReport !== "object" || Array.isArray(databaseReport)) throw new Error("invalid database readiness");
+    const managedNames = Object.keys(SIGNER_PURPOSE_REGISTRY);
+    const managedContractActive = signers.some((dependency) => dependency.registryName !== undefined);
+    const managedReady = managedNames.length === 8 && managedNames.every((name) => managedSigners[name]?.ok === true);
+    const managedFailure = managedReady ? "ready" : managedNames.map((name) => managedSigners[name]).find((value) => value?.ok !== true)?.code ?? "provider_unavailable";
     return Object.freeze({
       ...databaseReport,
-      ready: databaseReport.ready === true && signerFailure === undefined,
-      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined ? databaseReport.status : "not_ready",
-      code: databaseReport.ready !== true ? databaseReport.code : signerFailure === undefined ? databaseReport.code : signerFailure,
-      checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
+      ready: databaseReport.ready === true && signerFailure === undefined && (!managedContractActive || managedReady),
+      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && (!managedContractActive || managedReady) ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signerFailure === undefined && (!managedContractActive || managedReady) ? databaseReport.code : signerFailure ?? managedFailure,
+      checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks, managed_signers: Object.freeze({ version: 1, cardinality: managedNames.length, ok: managedReady, code: managedFailure, signers: Object.freeze(managedSigners) }) })
     });
   };
 }

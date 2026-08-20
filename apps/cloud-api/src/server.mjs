@@ -1792,7 +1792,7 @@ function publicReadinessReport(value) {
 
 function publicReadinessChecks(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
+  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
@@ -1834,6 +1834,7 @@ function publicReadinessChecks(value) {
       || (signer.key_id !== null && typeof signer.key_id !== "string")
       || (signer.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   }
+  if (managedSigners !== undefined) validateManagedSignerReadiness(managedSigners);
   return Object.freeze({
     database: Object.freeze({ ok: database.ok, probe: database.probe }),
     schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
@@ -1841,11 +1842,23 @@ function publicReadinessChecks(value) {
     drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight }),
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
     ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
+    ...(managedSigners === undefined ? {} : { managed_signers: Object.freeze({ version: 1, cardinality: managedSigners.cardinality, ok: managedSigners.ok, code: managedSigners.code, signers: Object.freeze(Object.fromEntries(MANAGED_SIGNER_NAMES.map((name) => [name, Object.freeze({ ...managedSigners.signers[name] })]))) }) }),
     ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
     ...(qualificationManifestSigner === undefined ? {} : { qualification_manifest_signer: Object.freeze({ ok: qualificationManifestSigner.ok, purpose: qualificationManifestSigner.purpose, algorithm: qualificationManifestSigner.algorithm, key_id: qualificationManifestSigner.key_id, public_key_fingerprint: qualificationManifestSigner.public_key_fingerprint }) }),
     ...(possessionReceiptSigner === undefined ? {} : { possession_receipt_signer: Object.freeze({ ok: possessionReceiptSigner.ok, purpose: possessionReceiptSigner.purpose, algorithm: possessionReceiptSigner.algorithm, key_id: possessionReceiptSigner.key_id, public_key_fingerprint: possessionReceiptSigner.public_key_fingerprint }) }),
     ...Object.fromEntries(additionalSigners.filter(([, signer]) => signer !== undefined).map(([name, signer]) => [name, Object.freeze({ ok: signer.ok, purpose: signer.purpose, algorithm: signer.algorithm, key_id: signer.key_id, public_key_fingerprint: signer.public_key_fingerprint })]))
   });
+}
+
+const MANAGED_SIGNER_NAMES = Object.freeze(["capability", "control_bundle", "refresh_hint", "possession_receipt", "agent_session_grant", "qualification_manifest", "audit_anchor", "promotion_evidence"]);
+const MANAGED_SIGNER_CODES = new Set(["ready", "provider_unavailable", "metadata_invalid", "metadata_mismatch", "keyring_invalid", "lifecycle_unavailable", "lifecycle_inactive", "draining", "closed", "not_ready"]);
+
+function validateManagedSignerReadiness(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.cardinality !== 8 || typeof value.ok !== "boolean" || typeof value.code !== "string" || !MANAGED_SIGNER_CODES.has(value.code) || !value.signers || typeof value.signers !== "object" || Array.isArray(value.signers) || Object.keys(value.signers).sort().join(",") !== [...MANAGED_SIGNER_NAMES].sort().join(",")) throw new Error("invalid managed signer readiness");
+  for (const name of MANAGED_SIGNER_NAMES) {
+    const signer = value.signers[name];
+    if (!signer || typeof signer !== "object" || Array.isArray(signer) || typeof signer.ok !== "boolean" || typeof signer.code !== "string" || !MANAGED_SIGNER_CODES.has(signer.code) || !["active", "failed", "retiring"].includes(signer.state) || typeof signer.purpose !== "string" || typeof signer.domain !== "string" && signer.domain !== null || signer.algorithm !== "ed25519" || !Number.isSafeInteger(signer.registry_version) || signer.registry_version < 1 || !Number.isSafeInteger(signer.protocol_version) || signer.protocol_version < 1 || !Number.isSafeInteger(signer.signing_version) || signer.signing_version < 1 || (signer.key_id !== null && typeof signer.key_id !== "string") || (signer.key_version !== null && (!Number.isSafeInteger(signer.key_version) || signer.key_version < 1)) || (signer.lifecycle_version !== null && (!Number.isSafeInteger(signer.lifecycle_version) || signer.lifecycle_version < 1)) || (signer.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(signer.public_key_fingerprint))) throw new Error("invalid managed signer readiness");
+  }
 }
 
 function publicMetricsReport(value) {
