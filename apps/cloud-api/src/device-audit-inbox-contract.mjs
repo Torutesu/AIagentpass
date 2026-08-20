@@ -76,7 +76,9 @@ export function normalizeStoredDeviceAuditInboxEntry(entry) {
 }
 
 function normalizeStoredEntry(value) {
+  const inboxId = value?.inbox_id === undefined ? undefined : String(value.inbox_id);
   if (!isObject(value) || !UUID.test(String(value.organization_id ?? "")) || !UUID.test(String(value.device_id ?? ""))
+    || (inboxId !== undefined && !UUID.test(inboxId))
     || !BATCH_ID.test(String(value.batch_id ?? "")) || !DIGEST.test(String(value.payload_sha256 ?? ""))
     || !STATES.has(value.state) || !Number.isSafeInteger(value.attempt) || value.attempt < 0 || value.attempt > MAX_ATTEMPTS
     || (value.claim_token_digest !== null && !DIGEST.test(String(value.claim_token_digest)))
@@ -86,6 +88,7 @@ function normalizeStoredEntry(value) {
   if (sha256(payload) !== value.payload_sha256) throw invalid("payload_digest");
   return Object.freeze({
     organization_id: value.organization_id,
+    ...(inboxId === undefined ? {} : { inbox_id: inboxId }),
     device_id: value.device_id,
     batch_id: value.batch_id,
     payload_sha256: value.payload_sha256,
