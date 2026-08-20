@@ -583,6 +583,12 @@ jobs:
           bundle="$BUNDLE_ROOT/qualification-bundle.json"
           signature="$BUNDLE_ROOT/qualification-bundle.sig"
           umask 077
+          cleanup_private_key() {
+            if [[ -n "${private_key:-}" ]]; then
+              /bin/rm -f -- "$private_key"
+            fi
+          }
+          trap cleanup_private_key EXIT HUP INT TERM
           printf '%s' "$BUNDLE_PRIVATE_KEY_B64" | base64 --decode > "$private_key"
           chmod 0600 "$private_key"
           common=(
@@ -594,7 +600,6 @@ jobs:
           )
           node scripts/release/qualification/create-signed-qualification-bundle.mjs "${common[@]}" --output "$bundle" --signature "$signature" --private-key "$private_key"
           node scripts/release/qualification/verify-signed-qualification-bundle.mjs "${common[@]}" --bundle "$bundle" --signature "$signature" --public-key "${MANIFEST%/*}/release-manifest.public.pem" --fingerprint "$RELEASE_MANIFEST_FINGERPRINT"
-          rm -f -- "$private_key"
           printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
           printf 'signature=%s\n' "$signature" >> "$GITHUB_OUTPUT"
 
