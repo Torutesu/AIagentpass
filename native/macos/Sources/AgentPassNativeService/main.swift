@@ -296,8 +296,6 @@ private struct ServiceRefreshHintKey: Decodable {
     }
 }
 
-private let dedicatedChildHelperBundleIdentifier = "dev.agentpass.git-sign-xpc"
-
 /// Returns only the fixed Child-helper requirement provisioned by the signed
 /// product configuration. The Host and management requirements are separate
 /// principals and are never valid fallbacks for this listener.
@@ -319,11 +317,30 @@ internal func deriveDedicatedChildCodeSigningRequirement(
           !hostRequirement.isEmpty,
           !managementRequirement.isEmpty,
           requirement != hostRequirement,
-          requirement != managementRequirement,
-          requirement.contains("anchor apple generic"),
-          requirement.components(separatedBy: "identifier \"").count == 2,
-          requirement.contains("identifier \"\(dedicatedChildHelperBundleIdentifier)\""),
-          requirement.range(of: #"\bor\b"#, options: .regularExpression) == nil else {
+          requirement != managementRequirement else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.contains("anchor apple generic") else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.components(separatedBy: "identifier \"").count == 2 else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    // Keep the fixed principal literal in the requirement parser. This avoids
+    // interpolating attacker-controlled or configuration-derived text into the
+    // Security requirement boundary.
+    guard requirement.contains("identifier \"dev.agentpass.git-sign-xpc\"") else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.range(of: #"\bor\b"#, options: .regularExpression) == nil else {
         throw AgentPassNativeError.invalidConfiguration(
             "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
         )
