@@ -36,6 +36,7 @@ import {
   promotionEvidenceV3StatementHash,
   PromotionEvidenceV3Error,
 } from "../src/promotion-evidence-v3-statement.mjs";
+import { createHostedPromotionEvidenceV3Signer } from "../src/promotion-evidence-v3-signer.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
 const FIXTURE_PATH = path.join(ROOT, "contracts", "fixtures", "promotion-evidence-v3.valid.json");
@@ -247,4 +248,31 @@ test("v3 fixture is canonical, cryptographically shaped, and schema-compatible",
   duplicate.statement.qualification_report_digests[1] = duplicate.statement.qualification_report_digests[0];
   assert.equal(validate(duplicate), false);
   expectCode(() => normalizePromotionEvidenceV3(duplicate), PROMOTION_EVIDENCE_V3_ERROR_CODES.ORDERING);
+});
+
+test("hosted v3 signer emits an envelope accepted by the v3 normalizer and schema", async () => {
+  const pair = crypto.generateKeyPairSync("ed25519");
+  const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const now = NOW;
+  const signer = createHostedPromotionEvidenceV3Signer({
+    provider: {
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      key_id: statement().key_id,
+      key_version: statement().key_version,
+      async publicKeyMetadata() { return { algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM, key_id: statement().key_id, public_key: publicKey }; },
+      async sign(input) { return crypto.sign(null, input.bytes, pair.privateKey); },
+    },
+    keyId: statement().key_id,
+    keyVersion: statement().key_version,
+    lifecycleVersion: statement().lifecycle_version,
+    publicKey,
+    now: () => now,
+  });
+  const output = await signer.sign(statement());
+  const normalized = normalizePromotionEvidenceV3(output, { now, allowExpired: false, allowFuture: false });
+  assert.equal(normalized.version, PROMOTION_EVIDENCE_V3_VERSION);
+  assert.equal(normalized.statement_hash, promotionEvidenceV3StatementHash(normalized.statement, { now, allowExpired: false, allowFuture: false }));
+  assert.equal(crypto.verify(null, promotionEvidenceV3SigningData(normalized.statement, { now, allowExpired: false, allowFuture: false }), pair.publicKey, Buffer.from(normalized.signature, "base64url")), true);
 });

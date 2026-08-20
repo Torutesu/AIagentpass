@@ -31,8 +31,8 @@ import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PUR
 import { createAuditAnchorPublicKeyResolver } from "./audit-anchor-public-key-resolver.mjs";
 import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
 import { verifyOfflineAuditExport } from "./audit-export-offline-verifier.mjs";
-import { createHostedPromotionEvidenceSigner } from "./promotion-evidence-signer.mjs";
-import { PROMOTION_EVIDENCE_ALGORITHM, PROMOTION_EVIDENCE_PROTOCOL_VERSION, PROMOTION_EVIDENCE_PURPOSE } from "./promotion-evidence-statement.mjs";
+import { createHostedPromotionEvidenceV3Signer } from "./promotion-evidence-v3-signer.mjs";
+import { PROMOTION_EVIDENCE_V3_ALGORITHM, PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION, PROMOTION_EVIDENCE_V3_PURPOSE } from "./promotion-evidence-v3-statement.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -190,14 +190,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const durablePromotionEvidence = await bindHostedManagedSignerProvider({
         postgresRuntime,
         provider: promotionEvidenceSignerProvider,
-        purpose: PROMOTION_EVIDENCE_PURPOSE,
+        purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
         keyId: config.promotionEvidenceKeyId,
-        version: PROMOTION_EVIDENCE_PROTOCOL_VERSION,
-        algorithm: PROMOTION_EVIDENCE_ALGORITHM,
+        version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+        algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
         publicKey: config.promotionEvidencePublicKey,
         publicKeyFingerprint: promotionEvidenceFingerprint
       });
-      promotionEvidenceSigner = createHostedPromotionEvidenceSigner({
+      promotionEvidenceSigner = createHostedPromotionEvidenceV3Signer({
         provider: durablePromotionEvidence.provider,
         keyId: config.promotionEvidenceKeyId,
         keyVersion: durablePromotionEvidence.key_version,

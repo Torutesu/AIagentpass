@@ -84,7 +84,7 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
     controlBundleSignerProvider: purposeProvider(controlBundlePair, 2),
     capabilitySignerProvider: purposeProvider(capabilityPair, 1),
     auditAnchorSignerProvider: purposeProvider(auditAnchorPair, 1),
-    promotionEvidenceSignerProvider: purposeProvider(promotionEvidencePair, 2),
+    promotionEvidenceSignerProvider: purposeProvider(promotionEvidencePair, 3),
     env: {
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: refreshPair.publicKey.export({ type: "spki", format: "pem" }).toString(),
