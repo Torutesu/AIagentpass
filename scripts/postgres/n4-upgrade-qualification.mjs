@@ -223,14 +223,33 @@ export function assertN4MigrationHistory({
 }
 
 export function parseN4AuthorityTapEvidence(filePath) {
-  if (!filePath) return Object.freeze({ required: true, present: false, label: N4_AUTHORITY_TAP_LABEL, test_files: N4_AUTHORITY_TEST_FILES });
+  if (!filePath) throw new Error("N4 authority TAP evidence is required");
   const output = readFileSync(filePath);
-  const text = output.toString("utf8");
-  if (/^Bail out!/mu.test(text) || /(^|[\t\r\n ])# (?:SKIP|TODO)([\t\r\n ]|$)/mu.test(text)) {
-    throw new Error("N4 authority TAP contains an incomplete test");
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(output); } catch { throw new Error("N4 authority TAP is not valid UTF-8"); }
+  const lines = text.split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+  if (lines[0] !== "TAP version 13") throw new Error("N4 authority TAP is missing TAP version 13");
+  let plan;
+  let tests = 0;
+  let ok = 0;
+  const numbers = new Set();
+  for (const [index, line] of lines.entries()) {
+    if (index > 0 && /^\s*TAP version\b/iu.test(line)) throw new Error("N4 authority TAP has a duplicate version");
+    if (/^\s*Bail out!/iu.test(line) || /^\s*not ok(?:\s|$)/iu.test(line) || /(^|\s)#\s*(?:skip|todo)(?:\s|$)/iu.test(line)) throw new Error("N4 authority TAP contains an incomplete test");
+    if (/^1\.\./u.test(line)) {
+      const match = /^1\.\.([1-9][0-9]*)(?:\s+#.*)?$/u.exec(line);
+      if (!match || plan !== undefined) throw new Error("N4 authority TAP has an invalid or duplicate plan");
+      plan = Number(match[1]);
+      continue;
+    }
+    const record = /^(ok)\s+([1-9][0-9]*)(?:\s+-.*)?(?:\s+#.*)?$/u.exec(line);
+    if (record) {
+      const number = Number(record[2]);
+      if (numbers.has(number)) throw new Error("N4 authority TAP has duplicate test numbers");
+      numbers.add(number); tests += 1; ok += 1;
+    }
   }
-  const tests = [...text.matchAll(/^ok\s+/gmu)].length;
-  if (tests < 1) throw new Error("N4 authority TAP contains no passing tests");
+  if (plan === undefined || plan !== tests || ok !== plan || tests < 1) throw new Error("N4 authority TAP has an incomplete or inconsistent plan");
   return Object.freeze({
     required: true,
     present: true,

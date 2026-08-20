@@ -81,7 +81,7 @@ BEGIN
   END IF;
 
   INSERT INTO public.platform_device_audit_tenant_context (
-    backend_pid, transaction_id, organization_id, member_id
+    backend_pid, transaction_id, organization_id, member_id, device_id
   ) VALUES (
     pg_backend_pid(), current_transaction_id, asserted_organization_id, p_member_id, NULL
   );
