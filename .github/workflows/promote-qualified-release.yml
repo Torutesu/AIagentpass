@@ -1,10 +1,14 @@
 name: Promote qualified release
 
-run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }} / ${{ inputs.cloud_qualification_run_id }} / ${{ inputs.macos_qualification_run_id }} / ${{ inputs.ci_run_id }})
+run-name: Promote qualified release (${{ inputs.source_sha }} / ${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }} / ${{ inputs.cloud_qualification_run_id }} / ${{ inputs.macos_qualification_run_id }} / ${{ inputs.ci_run_id }})
 
 on:
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: Exact 40-character source SHA bound to the release manifest and annotated release tag
+        required: true
+        type: string
       release_run_id:
         description: Successful Release candidate workflow run ID
         required: true
@@ -31,7 +35,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}-${{ inputs.cloud_qualification_run_id }}-${{ inputs.macos_qualification_run_id }}-${{ inputs.ci_run_id }}
+  group: promote-qualified-release-${{ inputs.source_sha }}-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}-${{ inputs.cloud_qualification_run_id }}-${{ inputs.macos_qualification_run_id }}-${{ inputs.ci_run_id }}
   cancel-in-progress: false
 
 env:
@@ -52,6 +56,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
+      REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
       CLOUD_QUALIFICATION_RUN_ID: ${{ inputs.cloud_qualification_run_id }}
@@ -83,6 +88,7 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "$CANONICAL_REPOSITORY" ]] || { echo "canonical repository required" >&2; exit 1; }
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "protected main ref required" >&2; exit 1; }
+          [[ "$REQUESTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be a full lowercase SHA-1" >&2; exit 1; }
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$CLOUD_QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "cloud_qualification_run_id must be a decimal run ID" >&2; exit 1; }
@@ -184,6 +190,10 @@ jobs:
           jq -e --arg name "$EXPECTED_CANDIDATE_ARTIFACT" --arg run "$RELEASE_RUN_ID" '
             ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
           ' "$release_artifacts" >/dev/null
+          candidate_artifact_digest="$(jq -er --arg name "$EXPECTED_CANDIDATE_ARTIFACT" --arg run "$RELEASE_RUN_ID" '
+            .artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run) | .digest
+          ' "$release_artifacts")"
+          [[ "$candidate_artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "candidate artifact digest is missing or invalid" >&2; exit 1; }
           for artifact_name in "$EXPECTED_APPLE_ARTIFACT" "$EXPECTED_INTEL_ARTIFACT" "$EXPECTED_SUMMARY_ARTIFACT"; do
             jq -e --arg name "$artifact_name" --arg run "$QUALIFICATION_RUN_ID" '
               ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
@@ -193,8 +203,9 @@ jobs:
           release_head_sha="$(jq -er '.head_sha' "$release_run")"
           qualification_head_sha="$(jq -er '.head_sha' "$qualification_run")"
           ci_head_sha="$(jq -er '.head_sha' "$ci_run")"
-          [[ "$qualification_head_sha" == "$release_head_sha" ]] || { echo "qualification run is not on the exact release source SHA" >&2; exit 1; }
-          [[ "$ci_head_sha" == "$release_head_sha" ]] || { echo "CI run is not on the exact release source SHA" >&2; exit 1; }
+          [[ "$release_head_sha" == "$REQUESTED_SOURCE_SHA" ]] || { echo "release run is not on the manually selected source SHA" >&2; exit 1; }
+          [[ "$qualification_head_sha" == "$REQUESTED_SOURCE_SHA" ]] || { echo "qualification run is not on the exact requested source SHA" >&2; exit 1; }
+          [[ "$ci_head_sha" == "$REQUESTED_SOURCE_SHA" ]] || { echo "CI run is not on the exact requested source SHA" >&2; exit 1; }
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/commits/$release_head_sha" > "$ci_commit"
           ci_tree="$(jq -er '.commit.tree.sha' "$ci_commit")"
@@ -211,6 +222,8 @@ jobs:
             printf 'cloud_qualification_run_id=%s\n' "$CLOUD_QUALIFICATION_RUN_ID"
             printf 'macos_qualification_run_id=%s\n' "$MACOS_QUALIFICATION_RUN_ID"
             printf 'ci_run_id=%s\n' "$CI_RUN_ID"
+            printf 'source_sha=%s\n' "$REQUESTED_SOURCE_SHA"
+            printf 'candidate_artifact_digest=%s\n' "$candidate_artifact_digest"
             printf 'release_head_sha=%s\n' "$release_head_sha"
             printf 'qualification_head_sha=%s\n' "$qualification_head_sha"
             printf 'ci_head_sha=%s\n' "$ci_head_sha"
@@ -225,7 +238,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.preflight.outputs.release_head_sha }}
+          ref: ${{ steps.preflight.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
           clean: true
@@ -244,7 +257,7 @@ jobs:
       - id: external-qualification
         name: Verify and retain exact Cloud and macOS qualification artifacts
         env:
-          SOURCE_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
         shell: bash
         run: |
@@ -415,6 +428,7 @@ jobs:
           MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
           RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          REQUESTED_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -434,6 +448,7 @@ jobs:
           if (controller.notarization.status !== 'accepted_stapled' || !Array.isArray(controller.notarization.evidence) || controller.notarization.evidence.length !== 2) throw new Error('release manifest controller notarization is incomplete');
           if (!manifest.source || typeof manifest.source.tag !== 'string' || !/^v[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?$/.test(manifest.source.tag)) throw new Error('release manifest has no canonical release tag');
           if (manifest.source.tag !== `v${manifest.version}`) throw new Error('release tag and manifest version disagree');
+          if (manifest.source.commit !== process.env.REQUESTED_SOURCE_SHA || manifest.source.commit !== process.env.RELEASE_RUN_HEAD_SHA) throw new Error('release manifest source commit is not bound to the selected manual-dispatch source SHA');
           if (fingerprint !== process.env.RELEASE_MANIFEST_FINGERPRINT) throw new Error('release fingerprint binding changed');
           const product = manifest.artifacts.find((item) => item.role === 'product');
           const bytes = fs.readFileSync(packagePath);
@@ -449,6 +464,7 @@ jobs:
           MANIFEST_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
           MANIFEST_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
           RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          REQUESTED_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           ALLOWED_SIGNERS: ${{ env.RELEASE_ALLOWED_SIGNERS }}
         shell: bash
         run: |
@@ -471,6 +487,8 @@ jobs:
           tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
           tag_tree="$(git rev-parse "$RELEASE_TAG^{tree}")"
           [[ "$tag_commit" == "$MANIFEST_SOURCE_COMMIT" ]] || { echo "annotated tag commit differs from signed manifest" >&2; exit 1; }
+          [[ "$tag_commit" == "$REQUESTED_SOURCE_SHA" ]] || { echo "annotated release tag does not bind the selected source SHA" >&2; exit 1; }
+          [[ "$RELEASE_RUN_HEAD_SHA" == "$REQUESTED_SOURCE_SHA" ]] || { echo "release run source differs from the selected source SHA" >&2; exit 1; }
           [[ "$tag_tree" == "$MANIFEST_SOURCE_TREE" ]] || { echo "annotated tag tree differs from signed manifest" >&2; exit 1; }
           git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
           [[ "$(git show "$tag_commit:package.json" | node -e 'let s="";process.stdin.on("data",(chunk)=>s+=chunk).on("end",()=>process.stdout.write(`v${JSON.parse(s).version}`))')" == "$RELEASE_TAG" ]] || { echo "tag and package version disagree" >&2; exit 1; }
@@ -543,6 +561,42 @@ jobs:
           if (summary.ok !== true || summary.qualified !== true || summary.production !== true || summary.source_commit !== manifest.source.commit || summary.artifact_name !== product.name || summary.artifact_sha256 !== expectedPackageDigest || summary.release_manifest_sha256 !== expectedManifestDigest) throw new Error('qualification summary is not bound to the selected release');
           if (summary.artifact_sha256 !== product.sha256) throw new Error('qualification summary product digest differs from signed manifest');
           NODE
+
+      - id: signed_qualification_bundle
+        name: Create and independently verify the detached signed qualification bundle
+        env:
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.candidate_artifact_digest }}
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+          QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
+          DISPATCH_BINDING: ${{ steps.catalog.outputs.dispatch_binding }}
+          QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
+          BUNDLE_ROOT: ${{ steps.paths.outputs.promotion_root }}/output
+          BUNDLE_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${BUNDLE_PRIVATE_KEY_B64:?release manifest private key is required to sign the qualification bundle}"
+          private_key="$BUNDLE_ROOT/qualification-bundle.private.pem"
+          bundle="$BUNDLE_ROOT/qualification-bundle.json"
+          signature="$BUNDLE_ROOT/qualification-bundle.sig"
+          umask 077
+          printf '%s' "$BUNDLE_PRIVATE_KEY_B64" | base64 --decode > "$private_key"
+          chmod 0600 "$private_key"
+          common=(
+            --repository "$CANONICAL_REPOSITORY" --source-sha "$SOURCE_SHA" --release-tag "$RELEASE_TAG"
+            --candidate-artifact-name "$EXPECTED_CANDIDATE_ARTIFACT" --candidate-artifact-digest "$CANDIDATE_ARTIFACT_DIGEST"
+            --release-run-id "$RELEASE_RUN_ID" --qualification-run-id "$QUALIFICATION_RUN_ID"
+            --cloud-qualification-run-id "$CLOUD_QUALIFICATION_RUN_ID" --macos-qualification-run-id "$MACOS_QUALIFICATION_RUN_ID" --ci-run-id "$CI_RUN_ID"
+            --manifest "$MANIFEST" --package "$PRODUCT_PKG" --summary "$QUALIFICATION_SUMMARY" --dispatch-binding "$DISPATCH_BINDING" --qualification-root "$QUALIFICATION_ROOT"
+          )
+          node scripts/release/qualification/create-signed-qualification-bundle.mjs "${common[@]}" --output "$bundle" --signature "$signature" --private-key "$private_key"
+          node scripts/release/qualification/verify-signed-qualification-bundle.mjs "${common[@]}" --bundle "$bundle" --signature "$signature" --public-key "${MANIFEST%/*}/release-manifest.public.pem" --fingerprint "$RELEASE_MANIFEST_FINGERPRINT"
+          rm -f -- "$private_key"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'signature=%s\n' "$signature" >> "$GITHUB_OUTPUT"
 
       - name: CI candidate/source/gate preflight
         env:
@@ -648,6 +702,8 @@ jobs:
           INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
           QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
           OPERATOR_POLICY: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
+          QUALIFICATION_BUNDLE: ${{ steps.signed_qualification_bundle.outputs.bundle }}
+          QUALIFICATION_BUNDLE_SIGNATURE: ${{ steps.signed_qualification_bundle.outputs.signature }}
           QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
           EXTERNAL_QUALIFICATION_ROOT: ${{ steps.paths.outputs.promotion_root }}/qualification
         shell: bash
@@ -671,6 +727,8 @@ jobs:
             /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/$lane/workflow-jobs.json" "$QUALIFICATION_ASSETS/p1-$lane-workflow-jobs.json"
           done
           /usr/bin/install -m 0644 "$EXTERNAL_QUALIFICATION_ROOT/qualification-verification.json" "$QUALIFICATION_ASSETS/p1-qualification-verification.json"
+          /usr/bin/install -m 0644 "$QUALIFICATION_BUNDLE" "$QUALIFICATION_ASSETS/p1-qualification-bundle.json"
+          /usr/bin/install -m 0644 "$QUALIFICATION_BUNDLE_SIGNATURE" "$QUALIFICATION_ASSETS/p1-qualification-bundle.sig"
           (
             cd "$QUALIFICATION_ASSETS"
             /usr/bin/shasum -a 256 p0c-* > P0C-SHA256SUMS
@@ -701,6 +759,8 @@ jobs:
             "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-workflow-run.json" \
             "$QUALIFICATION_ASSETS/p1-macos-hardware-qualification-x86_64-workflow-jobs.json" \
             "$QUALIFICATION_ASSETS/p1-qualification-verification.json" \
+            "$QUALIFICATION_ASSETS/p1-qualification-bundle.json" \
+            "$QUALIFICATION_ASSETS/p1-qualification-bundle.sig" \
             "$QUALIFICATION_ASSETS/P1-QUALIFICATION-SHA256SUMS"
 
       - name: Publish the fully uploaded public release

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { createSignedQualificationBundle, verifySignedQualificationBundle } from "./qualification-bundle.mjs";
 import { validateArtifact, validateQualificationMetadata, validateSuccessfulJobs, validateWorkflowRun, verifyDownloadedArtifactDigest } from "./verify-github-run-artifacts.mjs";
 
 const repository = "Torutesu/AIagentpass";
@@ -135,4 +139,151 @@ test("job and artifact validators bind IDs to the selected workflow run", () => 
     name: `cloud-production-qualification-${sourceSha}`,
     outputName: "cloud-production-qualification"
   }), /live and bound/u);
+});
+
+function canonical(value) {
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function bundleFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-qualification-bundle-"));
+  const candidate = path.join(directory, "candidate");
+  const qualification = path.join(directory, "qualification");
+  const output = path.join(directory, "output");
+  fs.mkdirSync(candidate, { mode: 0o700 });
+  fs.mkdirSync(output, { mode: 0o700 });
+  fs.mkdirSync(qualification, { mode: 0o700 });
+  const packageName = "AgentPass-v1.2.3-macos-universal.pkg";
+  const packageBytes = Buffer.from("signed package bytes");
+  const packagePath = path.join(candidate, packageName);
+  fs.writeFileSync(packagePath, packageBytes, { mode: 0o600 });
+  const sourceSha = "a".repeat(40);
+  const productSha = createHash("sha256").update(packageBytes).digest("hex");
+  const manifestPath = path.join(candidate, "AgentPass-v1.2.3.release-manifest.json");
+  fs.writeFileSync(manifestPath, canonical({
+    schema_version: 4,
+    product: "AgentPass",
+    source: { commit: sourceSha, tree: "b".repeat(40), tag: "v1.2.3" },
+    artifacts: [{ role: "product", name: packageName, bytes: packageBytes.length, sha256: productSha }]
+  }), { mode: 0o600 });
+  const runIds = {
+    release_run_id: "1001",
+    qualification_run_id: "1002",
+    cloud_qualification_run_id: "1003",
+    macos_qualification_run_id: "1004",
+    ci_run_id: "1005"
+  };
+  const retained = [
+    ["cloud-production-qualification", `cloud-production-qualification-${sourceSha}`],
+    ["macos-hardware-qualification-arm64", `macos-hardware-qualification-arm64-${sourceSha}`],
+    ["macos-hardware-qualification-x86_64", `macos-hardware-qualification-x86_64-${sourceSha}`]
+  ];
+  const records = [];
+  for (const [index, [directoryName, artifactName]] of retained.entries()) {
+    const laneDirectory = path.join(qualification, directoryName);
+    fs.mkdirSync(laneDirectory, { mode: 0o700 });
+    const archiveBytes = Buffer.from(`archive-${directoryName}`);
+    const archiveSha = createHash("sha256").update(archiveBytes).digest("hex");
+    const runId = index === 0 ? runIds.cloud_qualification_run_id : runIds.macos_qualification_run_id;
+    fs.writeFileSync(path.join(laneDirectory, "artifact.zip"), archiveBytes, { mode: 0o600 });
+    fs.writeFileSync(path.join(laneDirectory, "artifact-metadata.json"), canonical({
+      id: String(3001 + index), name: artifactName, digest: `sha256:${archiveSha}`, size_in_bytes: archiveBytes.length,
+      outputName: directoryName, archive_download_url: `https://api.github.com/repos/${repository}/actions/artifacts/${3001 + index}/zip`
+    }), { mode: 0o600 });
+    fs.writeFileSync(path.join(laneDirectory, "workflow-run.json"), canonical({
+      id: Number(runId), repository: { full_name: repository }, head_repository: { full_name: repository }, head_sha: sourceSha,
+      status: "completed", conclusion: "success"
+    }), { mode: 0o600 });
+    fs.writeFileSync(path.join(laneDirectory, "workflow-jobs.json"), canonical({ jobs: [] }), { mode: 0o600 });
+    const metadataBytes = canonical({
+      id: String(3001 + index), name: artifactName, digest: `sha256:${archiveSha}`, size_in_bytes: archiveBytes.length,
+      outputName: directoryName, archive_download_url: `https://api.github.com/repos/${repository}/actions/artifacts/${3001 + index}/zip`
+    });
+    const workflowRunBytes = canonical({
+      id: Number(runId), repository: { full_name: repository }, head_repository: { full_name: repository }, head_sha: sourceSha,
+      status: "completed", conclusion: "success"
+    });
+    const workflowJobsBytes = canonical({ jobs: [] });
+    records.push({
+      name: artifactName, digest: `sha256:${archiveSha}`, run_id: runId, source_sha: sourceSha, archive: "artifact.zip",
+      metadata_sha256: createHash("sha256").update(metadataBytes).digest("hex"),
+      workflow_run_sha256: createHash("sha256").update(workflowRunBytes).digest("hex"),
+      workflow_jobs_sha256: createHash("sha256").update(workflowJobsBytes).digest("hex")
+    });
+  }
+  const verification = {
+    schema_version: 1,
+    repository,
+    source_sha: sourceSha,
+    cloud: records[0],
+    macos: { run_id: runIds.macos_qualification_run_id, source_sha: sourceSha, artifacts: records.slice(1) }
+  };
+  fs.writeFileSync(path.join(qualification, "qualification-verification.json"), canonical(verification), { mode: 0o600 });
+  const summaryPath = path.join(directory, "qualification-summary.json");
+  const dispatchBindingPath = path.join(directory, "qualification-dispatch-binding.json");
+  const summaryBytes = canonical({ ok: true, qualified: true, production: true });
+  fs.writeFileSync(summaryPath, summaryBytes, { mode: 0o600 });
+  fs.writeFileSync(dispatchBindingPath, canonical({
+    schema_version: 1, release_run_id: runIds.release_run_id, qualification_run_id: runIds.qualification_run_id,
+    candidate_artifact_name: "notarized-release-candidate", qualification_summary_sha256: createHash("sha256").update(summaryBytes).digest("hex")
+  }), { mode: 0o600 });
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateKeyPath = path.join(directory, "bundle-private.pem");
+  const publicKeyPath = path.join(directory, "bundle-public.pem");
+  fs.writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+  fs.writeFileSync(publicKeyPath, publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
+  const fingerprint = `SHA256:${createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
+  return { directory, manifestPath, packagePath, qualification, summaryPath, dispatchBindingPath, privateKeyPath, publicKeyPath, fingerprint, sourceSha, runIds };
+}
+
+function bundleOptions(fixture) {
+  return {
+    repository,
+    sourceSha: fixture.sourceSha,
+    releaseTag: "v1.2.3",
+    candidateArtifactName: "notarized-release-candidate",
+    candidateArtifactDigest: digest("d"),
+    manifestPath: fixture.manifestPath,
+    packagePath: fixture.packagePath,
+    summaryPath: fixture.summaryPath,
+    dispatchBindingPath: fixture.dispatchBindingPath,
+    qualificationRoot: fixture.qualification,
+    ...fixture.runIds
+  };
+}
+
+test("creates and verifies a detached qualification bundle bound to source, candidate, package, manifest, retained evidence, and every run ID", () => {
+  const fixture = bundleFixture();
+  const bundlePath = path.join(fixture.directory, "qualification-bundle.json");
+  const signaturePath = path.join(fixture.directory, "qualification-bundle.sig");
+  const options = { ...bundleOptions(fixture), outputPath: bundlePath, signaturePath, privateKeyPath: fixture.privateKeyPath };
+  const created = createSignedQualificationBundle(options);
+  assert.equal(created.source_sha, fixture.sourceSha);
+  assert.equal(created.retained_artifacts.length, 3);
+  assert.deepEqual(created.retained_artifacts.map((item) => item.run_id), [fixture.runIds.cloud_qualification_run_id, fixture.runIds.macos_qualification_run_id, fixture.runIds.macos_qualification_run_id]);
+  assert.deepEqual(verifySignedQualificationBundle({
+    ...bundleOptions(fixture), bundlePath, signaturePath, publicKeyPath: fixture.publicKeyPath, expectedFingerprint: fixture.fingerprint
+  }), { ok: true, bundle_sha256: createHash("sha256").update(fs.readFileSync(bundlePath)).digest("hex"), signature_verified: true });
+});
+
+test("rejects a signed qualification bundle when a selected run ID or retained archive changes", () => {
+  const fixture = bundleFixture();
+  const bundlePath = path.join(fixture.directory, "qualification-bundle.json");
+  const signaturePath = path.join(fixture.directory, "qualification-bundle.sig");
+  createSignedQualificationBundle({ ...bundleOptions(fixture), outputPath: bundlePath, signaturePath, privateKeyPath: fixture.privateKeyPath });
+  assert.throws(() => verifySignedQualificationBundle({
+    ...bundleOptions(fixture), qualification_run_id: "9999", bundlePath, signaturePath, publicKeyPath: fixture.publicKeyPath, expectedFingerprint: fixture.fingerprint
+  }), /run IDs/u);
+  const originalManifest = fs.readFileSync(fixture.manifestPath);
+  const substitutedManifest = JSON.parse(originalManifest);
+  substitutedManifest.source.commit = "f".repeat(40);
+  fs.writeFileSync(fixture.manifestPath, canonical(substitutedManifest), { mode: 0o600 });
+  assert.throws(() => verifySignedQualificationBundle({
+    ...bundleOptions(fixture), bundlePath, signaturePath, publicKeyPath: fixture.publicKeyPath, expectedFingerprint: fixture.fingerprint
+  }), /source/u);
+  fs.writeFileSync(fixture.manifestPath, originalManifest, { mode: 0o600 });
+  fs.appendFileSync(path.join(fixture.qualification, "cloud-production-qualification", "artifact.zip"), "mutation");
+  assert.throws(() => verifySignedQualificationBundle({
+    ...bundleOptions(fixture), bundlePath, signaturePath, publicKeyPath: fixture.publicKeyPath, expectedFingerprint: fixture.fingerprint
+  }), /digest mismatch/u);
 });

@@ -179,10 +179,22 @@ async function retainArtifact({ artifact, run, jobs, root }) {
   const bytes = await readFile(archivePath);
   try { verifyDownloadedArtifactDigest(bytes, artifact.digest); } catch (error) { throw new Error(`${error.message}: ${artifact.name}`); }
   await chmod(archivePath, 0o600);
-  await writeFile(path.join(directory, "artifact-metadata.json"), `${JSON.stringify(artifact, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  await writeFile(path.join(directory, "workflow-run.json"), `${JSON.stringify(run, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  await writeFile(path.join(directory, "workflow-jobs.json"), `${JSON.stringify(jobs, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  return Object.freeze({ name: artifact.name, digest: artifact.digest, archive: archivePath });
+  const metadataBytes = Buffer.from(`${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+  const workflowRunBytes = Buffer.from(`${JSON.stringify(run, null, 2)}\n`, "utf8");
+  const workflowJobsBytes = Buffer.from(`${JSON.stringify(jobs, null, 2)}\n`, "utf8");
+  await writeFile(path.join(directory, "artifact-metadata.json"), metadataBytes, { mode: 0o600, flag: "wx" });
+  await writeFile(path.join(directory, "workflow-run.json"), workflowRunBytes, { mode: 0o600, flag: "wx" });
+  await writeFile(path.join(directory, "workflow-jobs.json"), workflowJobsBytes, { mode: 0o600, flag: "wx" });
+  return Object.freeze({
+    name: artifact.name,
+    digest: artifact.digest,
+    run_id: String(run.id),
+    source_sha: run.head_sha,
+    archive: "artifact.zip",
+    metadata_sha256: createHash("sha256").update(metadataBytes).digest("hex"),
+    workflow_run_sha256: createHash("sha256").update(workflowRunBytes).digest("hex"),
+    workflow_jobs_sha256: createHash("sha256").update(workflowJobsBytes).digest("hex")
+  });
 }
 
 export async function retainQualificationEvidence({ metadata, raw, outputRoot }) {
@@ -201,7 +213,11 @@ export async function retainQualificationEvidence({ metadata, raw, outputRoot })
     repository: metadata.repository,
     source_sha: metadata.source_sha,
     cloud: retained.cloud,
-    macos: retained.macos
+    macos: {
+      run_id: metadata.macos.run.id,
+      source_sha: metadata.source_sha,
+      artifacts: retained.macos
+    }
   };
   await writeFile(path.join(root, "qualification-verification.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   return Object.freeze(report);

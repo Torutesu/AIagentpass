@@ -127,22 +127,21 @@
     "probe": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "owner_uid", "mode", "sha256", "expected_sha256", "signing_identity", "expected_signing_identity", "verified_before_execution", "verified_after_execution"],
+      "required": ["path", "owner_uid", "mode", "sha256", "expected_sha256", "signing_identity", "expected_signing_identity", "ancestor_directories_protected", "acl_checked", "executed_from_staging_copy", "verified_before_execution", "verified_after_execution"],
       "properties": {
         "path": { "$ref": "#/$defs/absolute_path" },
         "owner_uid": { "const": 0 },
         "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
         "sha256": { "$ref": "#/$defs/digest" },
-        "expected_sha256": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "expected_sha256": { "$ref": "#/$defs/digest" },
         "signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
         "expected_signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
+        "ancestor_directories_protected": { "const": true },
+        "acl_checked": { "const": true },
+        "executed_from_staging_copy": { "const": true },
         "verified_before_execution": { "const": true },
         "verified_after_execution": { "const": true }
-      },
-      "anyOf": [
-        { "type": "object", "required": ["expected_sha256"], "properties": { "expected_sha256": { "$ref": "#/$defs/digest" } } },
-        { "type": "object", "required": ["expected_signing_identity"], "properties": { "expected_signing_identity": { "$ref": "#/$defs/developer_id_application" } } }
-      ]
+      }
     },
     "launchd_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["service_label", "host_pid", "child_pid", "host_identity", "child_identity", "identity_match"], "properties": { "service_label": { "type": "string", "minLength": 1 }, "host_pid": { "type": "integer", "minimum": 1 }, "child_pid": { "type": "integer", "minimum": 1 }, "host_identity": { "type": "object" }, "child_identity": { "type": "object" }, "identity_match": { "const": true } } } } }] },
     "nsxpc_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["mach_service", "connection_accepted", "authorized_client", "wrong_identity_denied"], "properties": { "mach_service": { "type": "string", "minLength": 1 }, "connection_accepted": { "const": true }, "authorized_client": { "const": true }, "wrong_identity_denied": { "const": true } } } } }] },

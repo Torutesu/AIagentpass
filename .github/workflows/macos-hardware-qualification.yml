@@ -107,11 +107,12 @@ jobs:
           EXPECTED_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
           EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
         run: scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$EXPECTED_FINGERPRINT" "$EXPECTED_TEAM_ID"
-      - name: Require fixed physical probes
+      - name: Require fixed physical probes and protected staging directory
         env:
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
           AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
           AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+          AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR: ${{ vars.AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR }}
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256 }}
           AGENTPASS_NSXPC_PROBE_SHA256: ${{ vars.AGENTPASS_NSXPC_PROBE_SHA256 }}
           AGENTPASS_CRASH_RESTART_PROBE_SHA256: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SHA256 }}
@@ -120,17 +121,55 @@ jobs:
           AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          for value in "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "$AGENTPASS_NSXPC_PROBE" "$AGENTPASS_CRASH_RESTART_PROBE"; do
-            [[ -n "$value" && "$value" == /* && -f "$value" && -x "$value" && ! -L "$value" ]] || { echo "all three fixed physical probes must exist as non-symlink executables" >&2; exit 1; }
-            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "fixed probes must be root-owned" >&2; exit 1; }
+          check_acl_free() {
+            local value="$1" label="$2" permissions
+            permissions="$(/bin/ls -lde "$value" 2>/dev/null | /usr/bin/awk 'NR == 1 { print $1 }')"
+            [[ -n "$permissions" && "$permissions" != *+ ]] || { echo "$label has an ACL or could not be inspected" >&2; exit 1; }
+          }
+          check_probe_path() {
+            local value="$1" label="$2" current mode
+            [[ -n "$value" && "$value" == /* && -f "$value" && -x "$value" && ! -L "$value" ]] || { echo "$label must be a regular non-symlink executable" >&2; exit 1; }
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "$label must be root-owned" >&2; exit 1; }
             mode="$(stat -f '%Lp' "$value")"
-            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "fixed probes must not be writable" >&2; exit 1;; esac
-          done
+            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label must not be writable" >&2; exit 1;; esac
+            check_acl_free "$value" "$label"
+            current="$(dirname "$value")"
+            while true; do
+              [[ -d "$current" && ! -L "$current" ]] || { echo "$label has an unprotected ancestor directory" >&2; exit 1; }
+              [[ "$(stat -f '%Su' "$current")" == root ]] || { echo "$label ancestor directory must be root-owned" >&2; exit 1; }
+              mode="$(stat -f '%Lp' "$current")"
+              case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label ancestor directory must not be writable" >&2; exit 1;; esac
+              check_acl_free "$current" "$label ancestor directory"
+              [[ "$current" == / ]] && break
+              current="$(dirname "$current")"
+            done
+          }
+          check_staging_directory() {
+            local value="$1" label="$2" current mode
+            [[ -n "$value" && "$value" == /* && -d "$value" && ! -L "$value" ]] || { echo "$label must be an existing non-symlink directory" >&2; exit 1; }
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "$label must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label must not be writable" >&2; exit 1;; esac
+            check_acl_free "$value" "$label"
+            current="$(dirname "$value")"
+            while true; do
+              [[ -d "$current" && ! -L "$current" ]] || { echo "$label has an unprotected ancestor directory" >&2; exit 1; }
+              [[ "$(stat -f '%Su' "$current")" == root ]] || { echo "$label ancestor directory must be root-owned" >&2; exit 1; }
+              mode="$(stat -f '%Lp' "$current")"
+              case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label ancestor directory must not be writable" >&2; exit 1;; esac
+              check_acl_free "$current" "$label ancestor directory"
+              [[ "$current" == / ]] && break
+              current="$(dirname "$current")"
+            done
+          }
+          check_staging_directory "$AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR" "probe staging directory"
+          check_probe_path "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "launchd host-child probe"
+          check_probe_path "$AGENTPASS_NSXPC_PROBE" "NSXPC probe"
+          check_probe_path "$AGENTPASS_CRASH_RESTART_PROBE" "crash/restart probe"
           developer_id_re='^Developer ID Application: [^()]+ \([A-Z0-9]{10}\)$'
           check_probe_binding() {
             local digest="$1" identity="$2" label="$3"
-            [[ -n "$digest" || -n "$identity" ]] || { echo "$label has no protected digest or signing identity binding" >&2; exit 1; }
-            [[ -z "$digest" || "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "$label expected SHA-256 is invalid" >&2; exit 1; }
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "$label exact expected SHA-256 is required and invalid" >&2; exit 1; }
             [[ -z "$identity" || "$identity" =~ $developer_id_re ]] || { echo "$label expected signing identity is invalid" >&2; exit 1; }
           }
           check_probe_binding "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256" "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY" "launchd host-child probe"
@@ -147,6 +186,7 @@ jobs:
           AGENTPASS_QUALIFICATION_SOURCE_TREE: ${{ inputs.source_tree }}
           AGENTPASS_QUALIFICATION_EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
           AGENTPASS_QUALIFICATION_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR: ${{ vars.AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR }}
           AGENTPASS_QUALIFICATION_OUTPUT: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
           AGENTPASS_RUNNER_ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
           AGENTPASS_RUNNER_ATTESTATION_SIGNATURE: ${{ env.RUNNER_ATTESTATION_SIGNATURE }}

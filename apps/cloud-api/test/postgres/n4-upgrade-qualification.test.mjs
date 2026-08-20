@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -19,6 +21,7 @@ import {
   assertPlatformSessionUpgrade,
   assertReviewedN4MigrationSet,
   buildN4UpgradePlan,
+  parseN4AuthorityTapEvidence,
   runN4UpgradeQualification
 } from "../../../../scripts/postgres/n4-upgrade-qualification.mjs";
 import { loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
@@ -84,6 +87,65 @@ function upgradedSessions() {
     revoke_reason: "request_binding_migration"
   }];
 }
+
+test("N4 authority TAP evidence is required, complete, and byte-digest bound", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "agentpass-n4-tap-"));
+  try {
+    const writeTap = (bytes) => {
+      const filePath = path.join(directory, "authority.tap");
+      writeFileSync(filePath, bytes);
+      return filePath;
+    };
+    const validTap = Buffer.from("TAP version 13\r\n1..2\r\nok 1 - migration\r\nok 2 - integration\r\n", "utf8");
+    const evidence = parseN4AuthorityTapEvidence(writeTap(validTap));
+    assert.equal(evidence.required, true);
+    assert.equal(evidence.present, true);
+    assert.equal(evidence.tests, 2);
+    assert.equal(evidence.tap_sha256, crypto.createHash("sha256").update(validTap).digest("hex"));
+    assert.notEqual(evidence.present, false);
+
+    for (const invalidTap of [
+      "TAP version 13\n1..1\nnot ok 1 - failed\n",
+      "TAP version 13\n1..1\nok 1 - skipped # skip unavailable\n",
+      "TAP version 13\n1..1\nok 1 - todo # todo later\n",
+      "TAP version 13\n1..1\nok missing-number\n",
+      "TAP version 13\n1..1\nok1 - missing separator\n",
+      "TAP version 13\n1..1\nok 01 - malformed number\n",
+      "TAP version 13\n1..2\nok 1 - first\nok 1 - duplicate\n",
+      "TAP version 13\n1..2\nok 1 - first\nok 3 - wrong number\n",
+      "TAP version 13\n1..2\nok 1 - only one\n"
+    ]) {
+      assert.throws(() => parseN4AuthorityTapEvidence(writeTap(Buffer.from(invalidTap, "utf8"))));
+    }
+
+    assert.throws(() => parseN4AuthorityTapEvidence(), /evidence is required/u);
+    assert.throws(() => parseN4AuthorityTapEvidence(path.join(directory, "missing.tap")));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("N4 qualification rejects missing authority TAP before opening a database", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "agentpass-n4-missing-tap-"));
+  try {
+    let factoryCalled = false;
+    await assert.rejects(
+      () => runN4UpgradeQualification({
+        adminUrl: "postgresql://postgres:secret@db.example.test/agentpass?sslmode=verify-full",
+        migrationUrl: "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full",
+        authorityTapPath: path.join(directory, "missing.tap"),
+        databaseFactory: async () => {
+          factoryCalled = true;
+          throw new Error("database factory must not be reached");
+        }
+      }),
+      /ENOENT/u
+    );
+    assert.equal(factoryCalled, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("N4 plan is exactly 53→54 and names the reviewed migration head", async () => {
   const migrations = await loadSqlMigrations();

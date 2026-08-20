@@ -223,7 +223,7 @@ export function assertN4MigrationHistory({
 }
 
 export function parseN4AuthorityTapEvidence(filePath) {
-  if (!filePath) throw new Error("N4 authority TAP evidence is required");
+  if (typeof filePath !== "string" || filePath.length === 0) throw new Error("N4 authority TAP evidence is required");
   const output = readFileSync(filePath);
   let text;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(output); } catch { throw new Error("N4 authority TAP is not valid UTF-8"); }
@@ -237,15 +237,19 @@ export function parseN4AuthorityTapEvidence(filePath) {
     if (index > 0 && /^\s*TAP version\b/iu.test(line)) throw new Error("N4 authority TAP has a duplicate version");
     if (/^\s*Bail out!/iu.test(line) || /^\s*not ok(?:\s|$)/iu.test(line) || /(^|\s)#\s*(?:skip|todo)(?:\s|$)/iu.test(line)) throw new Error("N4 authority TAP contains an incomplete test");
     if (/^1\.\./u.test(line)) {
-      const match = /^1\.\.([1-9][0-9]*)(?:\s+#.*)?$/u.exec(line);
+      const match = /^1\.\.([1-9][0-9]*)(?:[ \t]+#.*)?$/u.exec(line);
       if (!match || plan !== undefined) throw new Error("N4 authority TAP has an invalid or duplicate plan");
       plan = Number(match[1]);
+      if (!Number.isSafeInteger(plan)) throw new Error("N4 authority TAP plan is too large");
       continue;
     }
-    const record = /^(ok)\s+([1-9][0-9]*)(?:\s+-.*)?(?:\s+#.*)?$/u.exec(line);
-    if (record) {
-      const number = Number(record[2]);
+    if (/^ok/u.test(line)) {
+      const record = /^ok[ \t]+([1-9][0-9]*)(?:[ \t]+.*)?$/u.exec(line);
+      if (!record) throw new Error("N4 authority TAP has a malformed top-level test number");
+      const number = Number(record[1]);
+      if (!Number.isSafeInteger(number)) throw new Error("N4 authority TAP has an invalid top-level test number");
       if (numbers.has(number)) throw new Error("N4 authority TAP has duplicate test numbers");
+      if (number !== tests + 1) throw new Error("N4 authority TAP has an invalid top-level test number");
       numbers.add(number); tests += 1; ok += 1;
     }
   }
@@ -275,6 +279,7 @@ function requireN4MigrationUrl(value) {
 export async function runN4UpgradeQualification({ adminUrl, migrationUrl, databaseFactory = createDisposablePostgres, authorityTapPath } = {}) {
   const admin = requireN4AdminUrl(adminUrl);
   const migration = requireN4MigrationUrl(migrationUrl);
+  const authorityTestEvidence = parseN4AuthorityTapEvidence(authorityTapPath ?? process.env.AGENTPASS_N4_AUTHORITY_TAP);
   if (typeof databaseFactory !== "function") throw new TypeError("N4 database factory is invalid");
   const migrations = await loadSqlMigrations();
   const [scenario] = buildN4UpgradePlan(migrations);
@@ -291,7 +296,7 @@ export async function runN4UpgradeQualification({ adminUrl, migrationUrl, databa
   });
   try {
     const report = await qualifyScenario({ database, migrationPool, migrations, scenario });
-    return Object.freeze({ ...report, authority_test_evidence: parseN4AuthorityTapEvidence(authorityTapPath ?? process.env.AGENTPASS_N4_AUTHORITY_TAP) });
+    return Object.freeze({ ...report, authority_test_evidence: authorityTestEvidence });
   } finally {
     await migrationPool.end().catch(() => {});
     await database.close();

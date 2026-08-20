@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
-import { validate } from "./hardware-qualification.mjs";
+import os from "node:os";
+import path from "node:path";
+import { aclLineHasEntries, probeSnapshot, validate } from "./hardware-qualification.mjs";
 
 const digest = "a".repeat(64);
 const fingerprint = `SHA256:${"A".repeat(43)}`;
@@ -21,7 +24,7 @@ const base = () => {
     artifact: { path: "/opt/agentpass/release/AgentPass-v1.2.3-macos-universal.pkg", name: "AgentPass-v1.2.3-macos-universal.pkg", bytes: 42, sha256: digest, signed: true, signing_identity: "Developer ID Installer: AgentPass (ABCDE12345)", team_id: "ABCDE12345" },
     machine: { architecture: "arm64", hardware_class: "apple_silicon", model_identifier: "Mac15,7", os_version: "15.6.1", os_build: "24G90", native_execution: true, vm_detected: false, rosetta_detected: false },
     runner_attestation: { path: "/opt/agentpass/macos/runner-attestation.json", bytes: 200, sha256: digest, signature_path: "/opt/agentpass/macos/runner-attestation.sig", signature_sha256: digest, public_key_path: "/opt/agentpass/macos/runner-attestation.pem", public_key_fingerprint: fingerprint, signed: true, owner_uid: 0, mode: 0o600, ...runner },
-    checks: Object.fromEntries(Object.keys(observations).map((name) => [name, { status: "passed", exit_code: 0, executable_sha256: digest, stdout_sha256: digest, stderr_sha256: digest, probe: { path: `/opt/agentpass/probes/${name}`, owner_uid: 0, mode: 0o555, sha256: digest, expected_sha256: digest, signing_identity: null, expected_signing_identity: null, verified_before_execution: true, verified_after_execution: true }, observed: observations[name] }])),
+    checks: Object.fromEntries(Object.keys(observations).map((name) => [name, { status: "passed", exit_code: 0, executable_sha256: digest, stdout_sha256: digest, stderr_sha256: digest, probe: { path: `/opt/agentpass/probes/${name}`, owner_uid: 0, mode: 0o555, sha256: digest, expected_sha256: digest, signing_identity: null, expected_signing_identity: null, ancestor_directories_protected: true, acl_checked: true, executed_from_staging_copy: true, verified_before_execution: true, verified_after_execution: true }, observed: observations[name] }])),
     qualified: true
   };
 };
@@ -50,15 +53,47 @@ test("rejects probes that are not root-owned, non-writable, and execution-rechec
 test("rejects probes without a protected digest or valid Developer ID identity", () => {
   const unbound = base();
   unbound.checks.nsxpc.probe.expected_sha256 = null;
-  assert.throws(() => validate(unbound), /digest or signing identity|expected/u);
+  assert.throws(() => validate(unbound), /exact expected SHA-256|expected/u);
   const invalidIdentity = base();
-  invalidIdentity.checks.nsxpc.probe.expected_sha256 = null;
   invalidIdentity.checks.nsxpc.probe.expected_signing_identity = "Ad Hoc";
   invalidIdentity.checks.nsxpc.probe.signing_identity = "Ad Hoc";
   assert.throws(() => validate(invalidIdentity), /identity/u);
   const mismatchedIdentity = base();
-  mismatchedIdentity.checks.nsxpc.probe.expected_sha256 = null;
   mismatchedIdentity.checks.nsxpc.probe.expected_signing_identity = "Developer ID Application: AgentPass (ABCDE12345)";
   mismatchedIdentity.checks.nsxpc.probe.signing_identity = "Developer ID Application: Other (ABCDE12345)";
   assert.throws(() => validate(mismatchedIdentity), /identity/u);
+});
+
+test("rejects reports that omit the ancestor, ACL, or staging-copy execution proof", () => {
+  for (const field of ["ancestor_directories_protected", "acl_checked", "executed_from_staging_copy"]) {
+    const value = base();
+    delete value.checks.nsxpc.probe[field];
+    assert.throws(() => validate(value), /missing or unknown|did not prove/u);
+  }
+});
+
+test("treats an ACL marker as unsafe and requires protected staging-copy execution", () => {
+  assert.equal(aclLineHasEntries("drwxr-xr-x  4 root  wheel  128 Aug 20 00:00 /opt"), false);
+  assert.equal(aclLineHasEntries("drwxr-xr-x+ 4 root  wheel  128 Aug 20 00:00 /opt"), true);
+  const value = base();
+  value.checks.nsxpc.probe.executed_from_staging_copy = false;
+  assert.throws(() => validate(value), /staging-copy execution/u);
+});
+
+test("rejects symlinked and writable ancestor paths before opening a probe", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-probe-"));
+  try {
+    const protectedName = path.join(temporary, "protected");
+    fs.mkdirSync(protectedName);
+    const executable = path.join(protectedName, "probe");
+    fs.writeFileSync(executable, "#!/bin/sh\nprintf '{\"status\":\"passed\"}'\n", { mode: 0o555 });
+    fs.chmodSync(protectedName, 0o777);
+    assert.throws(() => probeSnapshot(executable, "adversarial writable ancestor"), /parent directory is not protected/u);
+
+    const symlinked = path.join(temporary, "symlinked");
+    fs.symlinkSync(protectedName, symlinked);
+    assert.throws(() => probeSnapshot(path.join(symlinked, "probe"), "adversarial symlinked ancestor"), /parent directory is not protected/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 });
