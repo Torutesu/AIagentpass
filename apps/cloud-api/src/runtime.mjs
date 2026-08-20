@@ -375,7 +375,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           { name: "agent_session_signer", purpose: "agent-session-grant", unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner },
           { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
           { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner },
-          { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner }
+          { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner },
+          { name: "capability_signer", purpose: CAPABILITY_SIGNER_PURPOSE, unavailableCode: "capability_signer_unavailable", signer: capabilitySigner },
+          { name: "control_bundle_signer", purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, unavailableCode: "control_bundle_signer_unavailable", signer: controlBundleSigner },
+          { name: "audit_anchor_signer", purpose: AUDIT_ANCHOR_PURPOSE, unavailableCode: "audit_anchor_signer_unavailable", signer: auditAnchorSigner },
+          { name: "promotion_evidence_signer", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, unavailableCode: "promotion_evidence_signer_unavailable", signer: promotionEvidenceSigner }
         ]),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
@@ -671,10 +675,10 @@ function deriveHostedAnonymousBucketId(secret, purpose) {
   return `${bytes.subarray(0, 4).toString("hex")}-${bytes.subarray(4, 6).toString("hex")}-${bytes.subarray(6, 8).toString("hex")}-${bytes.subarray(8, 10).toString("hex")}-${bytes.subarray(10, 16).toString("hex")}`;
 }
 
-function createHostedReadiness(databaseReadiness, signers) {
+export function createHostedReadiness(databaseReadiness, signers) {
   if (typeof databaseReadiness !== "function" || !Array.isArray(signers) || signers.length < 1
     || signers.some(({ name, purpose, unavailableCode, signer }) => typeof name !== "string" || typeof purpose !== "string" || typeof unavailableCode !== "string"
-      || typeof signer?.health !== "function" || typeof signer?.verificationKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
+      || typeof signer?.publicKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
   return async function hostedReadiness() {
     const databaseReport = await databaseReadiness();
     const checks = {};
@@ -682,7 +686,12 @@ function createHostedReadiness(databaseReadiness, signers) {
     for (const dependency of signers) {
       let report;
       try {
-        const [value, keyRing] = await Promise.all([dependency.signer.health(), dependency.signer.verificationKeyMetadata()]);
+        const value = typeof dependency.signer.health === "function"
+          ? await dependency.signer.health()
+          : await readinessHealthFromMetadata(dependency.signer, dependency.purpose);
+        const keyRing = typeof dependency.signer.verificationKeyMetadata === "function"
+          ? await dependency.signer.verificationKeyMetadata()
+          : readinessKeyRingFromHealth(value);
         if (!value || value.ready !== true || typeof value.purpose !== "string" || value.algorithm !== "ed25519"
           || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
         if (!keyRing || keyRing.version !== 1 || keyRing.purpose !== value.purpose || keyRing.active_key_id !== value.key_id
@@ -706,4 +715,16 @@ function createHostedReadiness(databaseReadiness, signers) {
       checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
     });
   };
+}
+
+async function readinessHealthFromMetadata(signer, expectedPurpose) {
+  const metadata = await signer.publicKeyMetadata();
+  if (!metadata || typeof metadata !== "object" || metadata.purpose !== expectedPurpose || metadata.algorithm !== "ed25519"
+    || typeof metadata.key_id !== "string" || typeof metadata.public_key !== "string") throw new Error("invalid signer metadata");
+  return Object.freeze({ ready: true, purpose: metadata.purpose, algorithm: metadata.algorithm, key_id: metadata.key_id, public_key_fingerprint: publicKeyFingerprint(metadata.public_key) });
+}
+
+function readinessKeyRingFromHealth(value) {
+  if (!value || value.ready !== true || typeof value.purpose !== "string" || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
+  return Object.freeze({ version: 1, purpose: value.purpose, active_key_id: value.key_id, keys: Object.freeze([Object.freeze({ key_id: value.key_id, algorithm: "ed25519", public_key_fingerprint: value.public_key_fingerprint, status: "active" })]) });
 }

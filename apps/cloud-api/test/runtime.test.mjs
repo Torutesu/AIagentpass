@@ -160,7 +160,23 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const probeHeaders = { "AgentPass-Operational-Token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET };
   const ready = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(ready.status, 200);
-  assert.equal((await ready.json()).checks.agent_session_signer.ok, true);
+  const readyBody = await ready.json();
+  assert.equal(readyBody.checks.agent_session_signer.ok, true);
+  assert.deepEqual(Object.keys(readyBody.checks).filter((key) => key.endsWith("_signer")).sort(), [
+    "agent_session_signer",
+    "audit_anchor_signer",
+    "capability_signer",
+    "control_bundle_signer",
+    "possession_receipt_signer",
+    "promotion_evidence_signer",
+    "qualification_manifest_signer",
+    "refresh_hint_signer"
+  ]);
+  for (const name of ["agent_session_signer", "audit_anchor_signer", "capability_signer", "control_bundle_signer", "possession_receipt_signer", "promotion_evidence_signer", "qualification_manifest_signer", "refresh_hint_signer"]) {
+    assert.equal(readyBody.checks[name].ok, true);
+    assert.equal(readyBody.checks[name].algorithm, "ed25519");
+    assert.match(readyBody.checks[name].public_key_fingerprint, /^[0-9a-f]{64}$/u);
+  }
   signerHealthy = false;
   const degraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(degraded.status, 503);
