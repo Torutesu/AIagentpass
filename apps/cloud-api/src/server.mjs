@@ -11,6 +11,7 @@ import {
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_GAUGE_KEYS, OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
+import { createPlatformPromotionHttpApi, isPlatformPromotionPath } from "./platform-promotion-http-api.mjs";
 import { canonicalAuditExportEntry, foldAuditExportRoot } from "./postgres/audit-export-snapshot-reader.mjs";
 import {
   normalizePossessionReceiptStatement,
@@ -22,6 +23,7 @@ import {
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
 const HUMAN_AUTH_SESSION_PATH = "/api/auth/session";
+const HUMAN_AUTH_SESSION_SWITCH_PATH = "/api/auth/session/organization-switch";
 const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
 const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
 const HUMAN_AUTH_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
@@ -55,7 +57,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, platformPromotionApi, platformPromotionRepository, platformAuthenticator, platformAuthBinding, platformAuditAppender, platformPromotionEnabled = false, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -78,6 +80,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   }
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
   if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
+  if (platformPromotionApi !== undefined && (!platformPromotionApi || typeof platformPromotionApi.handle !== "function")) throw new TypeError("platformPromotionApi must expose handle()");
+  if (platformAuditAppender !== undefined && typeof platformAuditAppender !== "function") throw new TypeError("platformAuditAppender must be a function");
+  if ((platformPromotionRepository !== undefined) !== (platformAuthenticator !== undefined)) throw new TypeError("platformPromotionRepository and platformAuthenticator must be configured together");
+  if (typeof platformPromotionEnabled !== "boolean") throw new TypeError("platformPromotionEnabled must be a boolean");
+  if (platformPromotionEnabled && typeof platformAuditAppender !== "function") throw new TypeError("enabled Platform promotion requires a durable audit appender");
+  const effectivePlatformPromotionApi = platformPromotionApi ?? (platformPromotionRepository ? createPlatformPromotionHttpApi({ repository: platformPromotionRepository, authenticate: platformAuthenticator, auditAppender: platformAuditAppender, requireAudit: platformPromotionEnabled, expectedWorkloadAudience: platformAuthBinding?.audience, expectedSpiffeId: platformAuthBinding?.mtls?.spiffe_id, now }) : undefined);
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
@@ -169,6 +177,26 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
+      if (isPlatformPromotionPath(url.pathname)) {
+        if (!effectivePlatformPromotionApi) {
+          if (platformPromotionEnabled) return send(response, 503, { error: { code: "platform_promotion_unavailable", message: "Platform promotion API is unavailable" }, request_id: requestId });
+          return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
+        }
+        let bodyBytes;
+        try { bodyBytes = await readBody(request, 256 * 1024); }
+        catch { return send(response, 400, { error: { code: "invalid_platform_request", message: "Platform promotion request is invalid" }, request_id: requestId }); }
+        let result;
+        try {
+          result = await effectivePlatformPromotionApi.handle({ method: request.method, url: request.url, request, headers: request.headers, body: bodyBytes, requestId });
+        } catch (error) {
+          const status = platformPromotionErrorStatus(error?.status);
+          const code = platformPromotionErrorCode(error?.code);
+          return send(response, status, { error: { code, message: status === 401 ? "Authentication failed" : status === 403 ? "Authorization denied" : status === 400 ? "Platform promotion request is invalid" : "Platform promotion API is unavailable" }, request_id: requestId });
+        }
+        const normalized = normalizePlatformPromotionResult({ ...result, body: { ...result?.body, request_id: requestId }, request_id: requestId });
+        if (!normalized) return send(response, 503, { error: { code: "platform_promotion_unavailable", message: "Platform promotion API is unavailable" }, request_id: requestId });
+        return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
+      }
       if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH.test(url.pathname)
@@ -512,7 +540,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           });
           const createdAt = new Date(now()).toISOString();
           const expiresAt = new Date(now() + ttlMs).toISOString();
-          const candidate = await resolveActiveReleaseCandidate(store, body.candidate_id);
+          const candidate = await resolveActiveReleaseCandidate(store, body.candidate_id, organizationId);
           const possessionReceiptVerification = await loadPossessionReceiptVerification(possessionReceiptSigner);
           const candidateBinding = makeCandidateBinding({
             enrollmentId,
@@ -611,7 +639,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           const credential = request.headers["agentpass-enrollment-credential"];
           if (typeof credential !== "string" || !BASE64URL_32.test(credential) || Buffer.from(credential, "base64url").length !== 32 || Buffer.from(credential, "base64url").toString("base64url") !== credential) throw apiError("invalid_enrollment_credential", 401, "Device enrollment credential is invalid");
           const candidateBinding = parseV2CandidateBindingHeader(request.headers["agentpass-enrollment-candidate-binding"]);
-          const expectedCandidate = await resolveActiveReleaseCandidate(store, body.candidate_id);
+          const expectedCandidate = await resolveActiveReleaseCandidate(store, body.candidate_id, body.organization_id);
           const expectedBinding = makeCandidateBinding({
             enrollmentId: body.enrollment_id,
             organizationId: body.organization_id,
@@ -642,21 +670,25 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           const pendingDevice = typeof store.getDevice === "function" ? await store.getDevice({ organizationId: body.organization_id, deviceId: body.device_id }) : undefined;
           const deviceKeyEpoch = nextEnrollmentDeviceKeyEpoch(pendingDevice);
           const issuedAt = new Date(now()).toISOString();
-          const possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
-            version: 1,
-            enrollment_id: body.enrollment_id,
-            organization_id: body.organization_id,
-            device_id: body.device_id,
-            candidate_id: expectedCandidate.candidate_id,
-            artifact_sha256: expectedCandidate.artifact_sha256,
-            source_commit: expectedCandidate.source_commit,
-            team_id: expectedCandidate.team_id,
-            device_key_fingerprint: body.device_key_fingerprint,
-            device_key_epoch: deviceKeyEpoch,
-            challenge_nonce_digest: challengeNonceDigest,
-            issued_at: issuedAt
-          });
-          const device = await completeV2EnrollmentInStore(store, {
+          let possessionReceipt = await existingPossessionReceiptForEnrollment(store, body.organization_id, body.device_id, body.enrollment_id);
+          const hadCommittedReceipt = Boolean(possessionReceipt);
+          if (!possessionReceipt) {
+            possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
+              version: 1,
+              enrollment_id: body.enrollment_id,
+              organization_id: body.organization_id,
+              device_id: body.device_id,
+              candidate_id: expectedCandidate.candidate_id,
+              artifact_sha256: expectedCandidate.artifact_sha256,
+              source_commit: expectedCandidate.source_commit,
+              team_id: expectedCandidate.team_id,
+              device_key_fingerprint: body.device_key_fingerprint,
+              device_key_epoch: deviceKeyEpoch,
+              challenge_nonce_digest: challengeNonceDigest,
+              issued_at: issuedAt
+            });
+          }
+          const completionInput = {
             proofVersion: 2,
             enrollmentId: body.enrollment_id,
             organizationId: body.organization_id,
@@ -672,7 +704,16 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
             challengeNonceDigest,
             possessionReceipt,
             completedAt: issuedAt
-          });
+          };
+          let device;
+          try {
+            device = await completeV2EnrollmentInStore(store, completionInput);
+          } catch (error) {
+            if (error?.code !== "ERR_ENROLLMENT_CONSUMED" || hadCommittedReceipt) throw error;
+            const committedReceipt = await existingPossessionReceiptForEnrollment(store, body.organization_id, body.device_id, body.enrollment_id);
+            if (!committedReceipt) throw error;
+            device = await completeV2EnrollmentInStore(store, { ...completionInput, possessionReceipt: committedReceipt });
+          }
           if (typeof store.getDeviceEnrollmentPossessionReceipt !== "function" && typeof store.appendDevicePossessionReceipt === "function") {
             await store.appendDevicePossessionReceipt({ organizationId: body.organization_id, deviceId: body.device_id, receipt: possessionReceipt });
           }
@@ -704,10 +745,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         rejectUnknown(body, new Set(["version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key"]), "device_enrollment");
         if (body.version !== 1 || body.enrollment_id !== match.enrollmentId || !body.device_key || typeof body.device_key !== "object" || Array.isArray(body.device_key)) throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
         rejectUnknown(body.device_key, new Set(["algorithm", "spki_pem"]), "device_key");
+        if (url.search) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
         const credential = request.headers["agentpass-enrollment-credential"];
         if (typeof credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(credential)) throw apiError("invalid_enrollment_credential", 401, "Device enrollment credential is invalid");
         validateEnrollmentPublicKey(body.device_key.algorithm, body.device_key.spki_pem);
-        validateEnrollmentProof(request.url, bodyBytes, body.device_key.algorithm, body.device_key.spki_pem, credential, request.headers["agentpass-enrollment-signature"]);
+        validateEnrollmentProof(url.pathname, bodyBytes, body.device_key.algorithm, body.device_key.spki_pem, credential, request.headers["agentpass-enrollment-signature"]);
         if (!controlBundleSigner) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
         const controlMetadata = await loadControlBundlePublicMetadata(controlBundleSigner);
         const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
@@ -821,7 +863,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         if (url.search || principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's enrollment receipt");
         const readReceipt = store.getDevicePossessionReceipt ?? store.getDeviceEnrollmentPossessionReceipt;
         if (typeof readReceipt !== "function") throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable");
-        const receipt = await readReceipt.call(store, { organizationId, deviceId: match.deviceId });
+        const receipt = validatePossessionReceiptResponse(await readReceipt.call(store, { organizationId, deviceId: match.deviceId }), { organizationId, deviceId: match.deviceId });
         return { body: { receipt } };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
@@ -941,7 +983,7 @@ function isExactHumanAuthPath(url, method = undefined) {
   if (url.hash) return false;
   if (HUMAN_AGENT_SESSION_GRANT_PATH.test(url.pathname)) return true;
   if (HUMAN_QUALIFICATION_GRANT_BATCH_PATH.test(url.pathname)) return true;
-  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
+  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_SESSION_SWITCH_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
   if (isExactHumanOrganizationPath(url, method)) return true;
   return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }
@@ -997,6 +1039,29 @@ function normalizeHumanAuthResult(result) {
   }
 }
 
+function normalizePlatformPromotionResult(result) {
+  try {
+    if (!result || typeof result !== "object" || Array.isArray(result) || !Number.isSafeInteger(result.status) || result.status < 200 || result.status > 599
+      || !result.body || typeof result.body !== "object" || Array.isArray(result.body)) return undefined;
+    const responseBody = { ...result.body };
+    if (result.request_id !== undefined) responseBody.request_id = result.request_id;
+    const encoded = Buffer.from(canonicalJson(responseBody), "utf8");
+    if (encoded.length > 256 * 1024) return undefined;
+    const headers = {};
+    if (result.headers !== undefined && (!result.headers || typeof result.headers !== "object" || Array.isArray(result.headers))) return undefined;
+    for (const [name, value] of Object.entries(result.headers ?? {})) {
+      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || typeof value !== "string" || value.length > 8192 || /[\u0000-\u001f\u007f]/u.test(value)) return undefined;
+      const normalizedName = name.toLowerCase();
+      if (headers[normalizedName] !== undefined || new Set(["connection", "content-length", "keep-alive", "transfer-encoding", "upgrade"]).has(normalizedName)) return undefined;
+      headers[normalizedName] = value;
+    }
+    headers["content-type"] ??= "application/json; charset=utf-8";
+    headers["cache-control"] = "no-store";
+    headers["content-length"] = String(encoded.length);
+    return { status: result.status, encoded, headers };
+  } catch { return undefined; }
+}
+
 function normalizeAgentSessionDeviceResult(result) {
   try {
     if (!result || typeof result !== "object" || Array.isArray(result) || !Number.isSafeInteger(result.status) || result.status < 200 || result.status > 599) return undefined;
@@ -1050,12 +1115,12 @@ function idempotencyKey(request, route) {
 
 async function requireRecentWebAuthn({ verifier, principal, proof, organizationId, operation, now }) {
   if (typeof verifier !== "function") throw apiError("recent_auth_unavailable", 503, "Recent WebAuthn verification is unavailable");
-  if (typeof proof !== "string" || proof.length < 32 || proof.length > 4096 || /[\u0000-\u001f\u007f]/.test(proof)) throw apiError("recent_auth_required", 401, "Recent WebAuthn authentication is required");
+  if (typeof proof !== "string" || !UUID_VALUE.test(proof) || proof !== proof.toLowerCase()) throw apiError("recent_auth_required", 401, "Recent WebAuthn authentication is required");
   let result;
   try { result = await verifier({ proof, principal: { ...principal }, organization_id: organizationId, operation, now }); }
   catch { throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed"); }
   const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified"];
-  if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== expectedKeys.sort().join(",") || result.verified !== true || result.consumed !== true || result.member_id !== principal.member_id || result.organization_id !== organizationId || result.operation !== operation || typeof result.challenge_id !== "string" || !/^[0-9a-f-]{36}$/.test(result.challenge_id)) {
+  if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== expectedKeys.sort().join(",") || result.verified !== true || result.consumed !== true || result.challenge_id !== proof || result.member_id !== principal.member_id || result.organization_id !== organizationId || result.operation !== operation) {
     throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed");
   }
   const authenticatedAt = typeof result.authenticated_at === "string" ? Date.parse(result.authenticated_at) : result.authenticated_at;
@@ -1514,13 +1579,45 @@ function validateEnrollmentProofV2(requestPath, body, credentialDigest, nonce, c
   if (!valid) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
 }
 
-async function resolveActiveReleaseCandidate(store, candidateId) {
+async function resolveActiveReleaseCandidate(store, candidateId, organizationId) {
   let candidate;
-  if (typeof store.resolveActiveReleaseCandidate === "function") candidate = await store.resolveActiveReleaseCandidate({ candidateId });
-  else if (typeof store.getReleaseCandidate === "function") candidate = await store.getReleaseCandidate({ candidateId });
+  const scope = organizationId === undefined ? { candidateId } : { candidateId, organizationId };
+  if (typeof store.resolveActiveReleaseCandidate === "function") candidate = await store.resolveActiveReleaseCandidate(scope);
+  else if (typeof store.getReleaseCandidate === "function") candidate = await store.getReleaseCandidate(scope);
   else throw apiError("release_candidate_unavailable", 503, "Release candidate registry is unavailable");
   if (!candidate || candidate.candidate_id !== candidateId || candidate.status !== "active") throw apiError("release_candidate_unavailable", 409, "Release candidate is unavailable");
   return candidate;
+}
+
+async function existingPossessionReceiptForEnrollment(store, organizationId, deviceId, enrollmentId) {
+  const read = store.getDeviceEnrollmentPossessionReceipt ?? store.getDevicePossessionReceipt;
+  if (typeof read !== "function") return undefined;
+  let receipt;
+  try {
+    receipt = await read.call(store, { organizationId, deviceId });
+  } catch (error) {
+    if (error?.code === "ERR_NOT_FOUND" || error?.status === 404) return undefined;
+    throw error;
+  }
+  return receipt?.statement?.enrollment_id === enrollmentId ? receipt : undefined;
+}
+
+function validatePossessionReceiptResponse(receipt, { organizationId, deviceId }) {
+  try {
+    const keys = ["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).sort().join(",") !== keys.slice().sort().join(",")) throw new Error("receipt envelope is invalid");
+    const statement = normalizePossessionReceiptStatement(receipt.statement);
+    if (statement.organization_id !== organizationId || statement.device_id !== deviceId
+      || receipt.version !== POSSESSION_RECEIPT_VERSION || receipt.purpose !== POSSESSION_RECEIPT_PURPOSE
+      || !POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS.includes(receipt.algorithm)
+      || typeof receipt.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(receipt.key_id)
+      || !SHA256_HEX.test(receipt.statement_hash ?? "") || receipt.statement_hash !== sha256Text(canonicalJson(statement))
+      || !BASE64URL_SIGNATURE.test(receipt.signature) || Buffer.from(receipt.signature, "base64url").length !== 64
+      || Buffer.from(receipt.signature, "base64url").toString("base64url") !== receipt.signature) throw new Error("receipt binding is invalid");
+    return Object.freeze({ ...receipt, statement });
+  } catch {
+    throw apiError("possession_receipt_unavailable", 503, "Possession receipt is invalid");
+  }
 }
 
 async function createV2EnrollmentInStore(store, input) {
@@ -1766,7 +1863,9 @@ function authorizedOperationalProbe(request, secret) {
   const supplied = request.headers["agentpass-operational-token"];
   if (typeof supplied !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(supplied)) return false;
   const bytes = Buffer.from(supplied, "base64url");
-  return bytes.length === 32 && crypto.timingSafeEqual(bytes, secret);
+  return bytes.length === 32
+    && bytes.toString("base64url") === supplied
+    && crypto.timingSafeEqual(bytes, secret);
 }
 
 function recordOperationalMetric(metrics, method, amount = 1) {
@@ -1787,7 +1886,32 @@ function publicReadinessReport(value) {
   const output = { version: 1, ready: value.ready, status: value.status, code: value.code };
   if (value.checks !== undefined) output.checks = publicReadinessChecks(value.checks);
   if (value.metrics !== undefined) output.metrics = publicMetricsReport(value.metrics);
+  if (value.deployment_identity !== undefined) output.deployment_identity = publicDeploymentIdentity(value.deployment_identity);
   return Object.freeze(output);
+}
+
+function publicDeploymentIdentity(value) {
+  const keys = ["version", "configured", "ready", "source_commit", "source_tree", "image_digest", "deployment_id", "revision", "schema_digest", "catalog_digest", "database_schema_digest"];
+  const complete = value?.source_commit !== null && /^[0-9a-f]{40}$/u.test(value?.source_commit ?? "")
+    && value?.source_tree !== null && /^[0-9a-f]{40}$/u.test(value?.source_tree ?? "")
+    && value?.image_digest !== null && /^sha256:[0-9a-f]{64}$/u.test(value?.image_digest ?? "")
+    && value?.deployment_id !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value?.deployment_id ?? "")
+    && value?.revision !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value?.revision ?? "")
+    && value?.schema_digest !== null && /^[0-9a-f]{64}$/u.test(value?.schema_digest ?? "")
+    && value?.catalog_digest !== null && /^[0-9a-f]{64}$/u.test(value?.catalog_digest ?? "")
+    && value?.database_schema_digest !== null && /^[0-9a-f]{64}$/u.test(value?.database_schema_digest ?? "");
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== keys.slice().sort().join(",")
+    || value.version !== 1 || typeof value.configured !== "boolean" || typeof value.ready !== "boolean"
+    || (value.source_commit !== null && !/^[0-9a-f]{40}$/u.test(value.source_commit))
+    || (value.source_tree !== null && !/^[0-9a-f]{40}$/u.test(value.source_tree))
+    || (value.image_digest !== null && !/^sha256:[0-9a-f]{64}$/u.test(value.image_digest))
+    || (value.deployment_id !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.deployment_id))
+    || (value.revision !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.revision))
+    || (value.schema_digest !== null && !/^[0-9a-f]{64}$/u.test(value.schema_digest))
+    || (value.catalog_digest !== null && !/^[0-9a-f]{64}$/u.test(value.catalog_digest))
+    || (value.database_schema_digest !== null && !/^[0-9a-f]{64}$/u.test(value.database_schema_digest))
+    || (value.configured && (value.ready !== true || !complete)) || (!value.configured && (value.ready !== false || complete))) throw new Error("invalid deployment identity");
+  return Object.freeze({ version: 1, configured: value.configured, ready: value.ready, source_commit: value.source_commit, source_tree: value.source_tree, image_digest: value.image_digest, deployment_id: value.deployment_id, revision: value.revision, schema_digest: value.schema_digest, catalog_digest: value.catalog_digest, database_schema_digest: value.database_schema_digest });
 }
 
 function publicReadinessChecks(value) {
@@ -1892,6 +2016,19 @@ function sendNoContent(response, headers = {}) {
 }
 
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
+function platformPromotionErrorStatus(status) { return new Set([400, 401, 403, 404, 409, 503]).has(status) ? status : 503; }
+function platformPromotionErrorCode(code) {
+  return new Set([
+    "invalid_platform_request",
+    "not_found",
+    "platform_authentication_failed",
+    "platform_authentication_unavailable",
+    "platform_authorization_denied",
+    "platform_promotion_conflict",
+    "platform_promotion_unavailable",
+    "platform_audit_unavailable"
+  ]).has(code) ? code : "platform_promotion_unavailable";
+}
 function mapRefreshRequestRepositoryError(error) {
   if (error?.status) return error;
   if (error?.code === "ERR_NOT_FOUND") return apiError("not_found", 404, "Resource not found");

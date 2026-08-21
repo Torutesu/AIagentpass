@@ -11,13 +11,14 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "e2e": "playwright test",
+    "e2e": "env -u NODE_OPTIONS -u NODE_DEBUG node scripts/run-browser-e2e.mjs",
     "e2e:headed": "playwright test --headed",
     "e2e:list": "playwright test --list",
     "e2e:report": "playwright show-report",
     "e2e:install": "playwright install chromium"
   },
   "dependencies": {
+    "@cloudflare/workerd-darwin-arm64": "^1.20260804.1",
     "@simplewebauthn/browser": "13.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

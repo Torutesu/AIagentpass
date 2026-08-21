@@ -54,13 +54,28 @@ test("session material stays out of React state, browser storage, and logs", asy
   assert.doesNotMatch(source, /useState\([^\n]*(?:csrf|csrf_token|organizationId|authorization|challenge|assertion)/i);
   assert.match(source, /let result: ConsoleSession \| undefined/);
   assert.match(source, /let pending: Promise<ConsoleSession> \| undefined/);
-  assert.match(source, /return Object\.freeze\(\{ get, clear \}\)/);
+  assert.match(source, /return Object\.freeze\(\{ get, clear(?:, replace)? \}\)/);
   assert.match(source, /const \[preflight, setPreflight\] = useState<PublicEnrollmentPreflight \| null>\(null\)/);
-  assert.match(source, /const \[enrollmentStoreId\] = useState\(allocateEnrollmentStoreId\)/);
-  assert.match(source, /const enrollmentStores = new Map<number, Record<string, unknown>>\(\)/);
+  assert.doesNotMatch(source, /enrollmentStores|writeEnrollmentStore|readEnrollmentStore|allocateEnrollmentStoreId/);
+  assert.doesNotMatch(source, /navigator\.clipboard|ClipboardItem|secret-output|enrollmentJson|enrollmentVisible|setEnrollmentVisible/);
+  assert.doesNotMatch(source, /<pre[^>]*>\s*\{[^}]*invitation/);
   assert.doesNotMatch(source, /useState<Record<string, string> \| null>/);
   assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
   assert.doesNotMatch(source, /set(?:Csrf|CSRF|OrganizationId|Authorization)/);
+});
+
+test("enrollment credentials use only the validated live handoff and are discarded on failure", async () => {
+  const source = await componentSource();
+  const setup = functionBody(source, "SetupSurface", "AgentsSurface");
+  const handoffPost = setup.indexOf("await postBrowserCliHandoff");
+  const handoffClear = setup.indexOf("liveHandoffRef.current = null;");
+
+  assert.ok(handoffClear >= 0 && handoffClear < handoffPost, "the one-shot handoff reference must be consumed before POST");
+  assert.match(setup, /await postBrowserCliHandoff\(\{[\s\S]*?invitation,[\s\S]*?\}\);\s*onLiveHandoffStatus\("delivered"\)/);
+  assert.match(setup, /credentialは表示せず破棄しました/);
+  assert.doesNotMatch(setup, /set[A-Za-z]*(?:Credential|Invitation|EnrollmentVisible)/);
+  assert.doesNotMatch(setup, /navigator\.clipboard|ClipboardItem|localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(setup, /<pre|secret-output|標準入力|一度だけ表示/);
 });
 
 test("abort and unauthorized responses clear safely and permit a later retry", async () => {
@@ -79,7 +94,8 @@ test("abort and unauthorized responses clear safely and permit a later retry", a
   assert.match(source, /function clearConsoleSessionOnUnauthorized\(error: unknown\)/);
   assert.match(source, /error instanceof WebAuthnClientError && \(error\.status === 401 \|\| error\.status === 403\)/);
   assert.match(source, /clearConsoleSessionOnUnauthorized\(error\);/);
-  assert.match(context, /if \(pending === shared\) pending = undefined/);
+  assert.match(context, /if \(pending !== shared\) return value/);
+  assert.match(context, /pending = undefined/);
   assert.match(context, /if \(!session \|\| result === session\) result = undefined/);
   assert.match(source, /const controller = new AbortController\(\)/);
   assert.match(source, /return \(\) => controller\.abort\(\)/);
@@ -130,4 +146,16 @@ test("session role is strictly parsed and authority-changing controls are least-
   assert.match(source, /canManage && device\.deviceId/);
   assert.doesNotMatch(source, /badge: "3"/);
   assert.doesNotMatch(source, /useState\("\/work\/repo"\)/);
+});
+
+test("help modal exposes an accessible dialog and a keyboard focus trap", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /aria-controls="help-modal"/);
+  assert.match(source, /helpModalRef/);
+  assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy"/);
+  assert.match(source, /event\.key === "Escape"/);
+  assert.match(source, /event\.key !== "Tab"/);
+  assert.match(source, /previousModalFocusRef/);
+  assert.match(source, /previous\?\.focus\(\)/);
 });

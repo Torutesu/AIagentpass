@@ -8,6 +8,27 @@ STAPLER_RESULT="$3"
 for name in AGENTPASS_NOTARY_KEY_ID AGENTPASS_NOTARY_ISSUER_ID AGENTPASS_NOTARY_PRIVATE_KEY_PATH; do
   [[ -n "${!name:-}" ]] || { echo "$name is required" >&2; exit 1; }
 done
+TEAM_ID="${AGENTPASS_TEAM_ID:-}"
+[[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "AGENTPASS_TEAM_ID is required and must be a 10-character Team ID" >&2; exit 1; }
+[[ "$CONTROLLER" == /* && "$NOTARY_RESULT" == /* && "$STAPLER_RESULT" == /* ]] || { echo "Controller and evidence paths must be absolute" >&2; exit 2; }
+FAILURE_MARKER="${CONTROLLER}.notarization-failed"
+LOCK_DIR="${CONTROLLER}.notarization.lock"
+[[ ! -e "$FAILURE_MARKER" && ! -L "$FAILURE_MARKER" ]] || { echo "Controller has a prior notarization failure and must be rebuilt" >&2; exit 1; }
+[[ ! -e "$LOCK_DIR" && ! -L "$LOCK_DIR" ]] || { echo "Controller notarization is already in progress" >&2; exit 1; }
+if ! /bin/mkdir "$LOCK_DIR"; then echo "Unable to acquire controller notarization lock" >&2; exit 1; fi
+notarization_cleanup() {
+  status=$?
+  if [[ "$status" -ne 0 ]]; then
+    # A directory marker is created atomically and cannot follow a symlink.
+    # Keep the lock if marker creation fails so the artifact remains blocked.
+    if /bin/mkdir "$FAILURE_MARKER" 2>/dev/null; then /bin/rmdir "$LOCK_DIR" 2>/dev/null || true; fi
+  else
+    /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+  rm -rf -- "${TEMP_DIR:-}" 2>/dev/null || true
+  exit "$status"
+}
+trap notarization_cleanup EXIT
 [[ "$(basename "$CONTROLLER")" == "AgentPassQualificationController.app" && -d "$CONTROLLER" && ! -L "$CONTROLLER" ]] || { echo "Unsafe controller input" >&2; exit 1; }
 [[ -f "$AGENTPASS_NOTARY_PRIVATE_KEY_PATH" && ! -L "$AGENTPASS_NOTARY_PRIVATE_KEY_PATH" && "$(/usr/bin/stat -f '%l' "$AGENTPASS_NOTARY_PRIVATE_KEY_PATH")" == "1" ]] || { echo "Unsafe notary private key" >&2; exit 1; }
 KEY_MODE="$(/usr/bin/stat -f '%Lp' "$AGENTPASS_NOTARY_PRIVATE_KEY_PATH")"
@@ -20,10 +41,21 @@ done
 if /usr/bin/find -P "$CONTROLLER" -type l -print -quit | /usr/bin/grep -q .; then echo "Controller contains a symlink" >&2; exit 1; fi
 if /usr/bin/find -P "$CONTROLLER" -type f \( -perm -002 -o -perm -020 \) -print -quit | /usr/bin/grep -q .; then echo "Controller contains writable files" >&2; exit 1; fi
 /usr/bin/codesign --verify --strict --verbose=4 "$CONTROLLER"
+CONTROLLER_DETAILS="$(/usr/bin/codesign -dv --verbose=4 "$CONTROLLER" 2>&1)"
+/usr/bin/grep -q '^Authority=Developer ID Application: ' <<<"$CONTROLLER_DETAILS" || { echo "Controller is not Developer ID Application signed" >&2; exit 1; }
+/usr/bin/grep -Eq "^TeamIdentifier=${TEAM_ID}$" <<<"$CONTROLLER_DETAILS" || { echo "Controller Developer ID Team ID mismatch" >&2; exit 1; }
+/usr/bin/grep -Eq '^flags=.*runtime' <<<"$CONTROLLER_DETAILS" || { echo "Controller is missing hardened runtime" >&2; exit 1; }
+/usr/bin/grep -q '^Timestamp=' <<<"$CONTROLLER_DETAILS" || { echo "Controller is missing a secure signing timestamp" >&2; exit 1; }
+CONTROLLER_BINARY="$CONTROLLER/Contents/MacOS/agentpass-qualification-controller"
+[[ -f "$CONTROLLER_BINARY" && ! -L "$CONTROLLER_BINARY" && -x "$CONTROLLER_BINARY" ]] || { echo "Controller executable is missing" >&2; exit 1; }
+CONTROLLER_ARCHITECTURES="$(/usr/bin/lipo -archs "$CONTROLLER_BINARY" 2>/dev/null)" || { echo "Unable to inspect controller architectures" >&2; exit 1; }
+case "$CONTROLLER_ARCHITECTURES" in
+  "arm64 x86_64"|"x86_64 arm64") ;;
+  *) echo "Controller must contain exactly arm64 and x86_64 slices: $CONTROLLER_ARCHITECTURES" >&2; exit 1 ;;
+esac
 
 umask 077
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentpass-controller-notary.XXXXXX")"
-trap 'rm -rf -- "$TEMP_DIR"' EXIT
 SUBMISSION="$TEMP_DIR/AgentPassQualificationController.zip"
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$CONTROLLER" "$SUBMISSION"
 /usr/bin/xcrun notarytool submit "$SUBMISSION" --wait --output-format json \
@@ -48,4 +80,5 @@ set -e
 
 /usr/bin/install -m 0600 "$TEMP_DIR/notarytool-result.json" "$NOTARY_RESULT"
 /usr/bin/install -m 0600 "$TEMP_DIR/stapler-result.txt" "$STAPLER_RESULT"
+echo "submission_sha256=$(/usr/bin/shasum -a 256 "$SUBMISSION" | /usr/bin/awk '{print $1}')"
 echo "Controller notarization accepted and stapled app validated"

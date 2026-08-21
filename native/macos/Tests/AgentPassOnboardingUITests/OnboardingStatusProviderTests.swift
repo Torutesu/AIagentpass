@@ -4,6 +4,8 @@ import Testing
 @testable import AgentPassOnboardingUI
 
 private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"state":"app_verified","updated_at":"2030-01-01T00:00:00.000Z","setup_complete":false,"next_actions":[{"id":"initialize_local_config","target_state":"local_config_initialized","command":"agentpass setup continue"}],"history_length":2}"#
+private let doctorReport = #"{"schema_version":1,"state":"healthy","ok":true,"generated_at":"2030-01-01T00:00:00.000Z","mode":"production-native","checks":[{"id":"app.code_identity","state":"healthy","severity":"info","summary":"ok"},{"id":"release.installed_receipt","state":"healthy","severity":"info","summary":"ok"}],"summary":{"healthy":2,"action_required":0,"degraded":0,"blocked":0},"host":{"platform":"darwin","architecture":"arm64"}}"#
+private let nativeStatus = #"{"health":{"ok":true,"version":13},"audit":{"configured":true}}"#
 
 @Test func providerUsesFixedExecutableAndArgumentsAndAdapter() async throws {
     let invocation = InvocationRecorder()
@@ -20,6 +22,38 @@ private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e45
     #expect(recorded?.timeout == 2)
     #expect(model.state == .appVerified)
     #expect(model.interaction == .readOnly)
+}
+
+@Test func providerBindsDoctorAndNativeDiagnosticsToTheValidatedViewModel() async throws {
+    let recorder = ArgumentsRecorder()
+    let provider = AgentPassOnboardingStatusProvider { executable, arguments, maximumBytes, timeout in
+        await recorder.append(arguments)
+        #expect(executable == AgentPassOnboardingStatusProvider.executableURL)
+        #expect(maximumBytes == AgentPassOnboardingStatusProvider.defaultMaximumOutputBytes)
+        #expect(timeout == AgentPassOnboardingStatusProvider.defaultTimeout)
+        switch arguments {
+        case AgentPassOnboardingStatusProvider.arguments:
+            return Data(validStatus.utf8)
+        case AgentPassOnboardingStatusProvider.doctorArguments:
+            return Data(doctorReport.utf8)
+        case AgentPassOnboardingStatusProvider.nativeStatusArguments:
+            return Data(nativeStatus.utf8)
+        default:
+            Issue.record("Unexpected command arguments")
+            return Data()
+        }
+    }
+
+    let model = try await provider.status()
+    let arguments = await recorder.values
+    #expect(arguments.count == 3)
+    #expect(arguments.contains(AgentPassOnboardingStatusProvider.arguments))
+    #expect(arguments.contains(AgentPassOnboardingStatusProvider.doctorArguments))
+    #expect(arguments.contains(AgentPassOnboardingStatusProvider.nativeStatusArguments))
+    #expect(model.distribution.developerID == .verified)
+    #expect(model.distribution.releaseReceipt == .verified)
+    #expect(model.capability.secureEnclave == .verified)
+    #expect(model.safeRecoveryActions.contains(where: { $0.id == .revoke }))
 }
 
 @Test func providerRejectsMalformedOutputWithoutSurfacingContents() async {
@@ -89,7 +123,8 @@ private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e45
     let provider = AgentPassOnboardingStatusProvider(
         timeout: 2,
         maximumOutputBytes: 4096,
-        executableURL: fixture.executable
+        executableURL: fixture.executable,
+        commandRunner: fixtureRunner
     )
     let status = try await provider.status()
     #expect(status.state == .appVerified)
@@ -112,7 +147,8 @@ private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e45
     let provider = AgentPassOnboardingStatusProvider(
         timeout: 2,
         maximumOutputBytes: 1024,
-        executableURL: fixture.executable
+        executableURL: fixture.executable,
+        commandRunner: fixtureRunner
     )
     do {
         _ = try await provider.status()
@@ -142,7 +178,8 @@ private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e45
     let provider = AgentPassOnboardingStatusProvider(
         timeout: 0.05,
         maximumOutputBytes: 1024,
-        executableURL: fixture.executable
+        executableURL: fixture.executable,
+        commandRunner: fixtureRunner
     )
     do {
         _ = try await provider.status()
@@ -155,6 +192,37 @@ private let validStatus = #"{"version":1,"initialized":true,"journal_id":"123e45
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+}
+
+@Test func productionRunnerRejectsAnUntrustedExecutableBeforeLaunchingIt() async throws {
+    let fixture = try executableFixture("#!/bin/sh\nprintf '%s' '\(validStatus)'\n")
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+    let provider = AgentPassOnboardingStatusProvider(
+        executableURL: fixture.executable
+    )
+    do {
+        _ = try await provider.status()
+        Issue.record("Expected executable trust failure")
+    } catch let error as AgentPassOnboardingStatusProviderError {
+        #expect(error == .untrustedExecutable)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+private func fixtureRunner(
+    executableURL: URL,
+    arguments: [String],
+    maximumOutputBytes: Int,
+    timeout: TimeInterval
+) async throws -> Data {
+    try await AgentPassOnboardingStatusProvider.runProcessForTesting(
+        executableURL: executableURL,
+        arguments: arguments,
+        maximumOutputBytes: maximumOutputBytes,
+        timeout: timeout
+    )
 }
 
 private enum FakeFailure: Error {
@@ -187,6 +255,16 @@ private actor InvocationRecorder {
     private(set) var value: Value?
 
     func record(executable: URL, arguments: [String], maximumBytes: Int, timeout: TimeInterval) {
-        value = Value(executable: executable, arguments: arguments, maximumBytes: maximumBytes, timeout: timeout)
+        if value == nil {
+            value = Value(executable: executable, arguments: arguments, maximumBytes: maximumBytes, timeout: timeout)
+        }
+    }
+}
+
+private actor ArgumentsRecorder {
+    private(set) var values: [[String]] = []
+
+    func append(_ arguments: [String]) {
+        values.append(arguments)
     }
 }

@@ -112,9 +112,13 @@ database_privileges_ok AS (
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
       has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts') THEN
+      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'platform_promotion_approvals') THEN
         NOT has_table_privilege('agentpass_app', oid, 'INSERT')
         AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
+        AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
+      WHEN relname IN ('platform_promotion_issuances', 'platform_deployment_state') THEN
+        has_table_privilege('agentpass_app', oid, 'INSERT')
+        AND has_table_privilege('agentpass_app', oid, 'UPDATE')
         AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
       ELSE
         has_table_privilege('agentpass_app', oid, 'INSERT')

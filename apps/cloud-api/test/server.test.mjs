@@ -16,7 +16,16 @@ const org = "11111111-1111-4111-8111-111111111111";
 const deviceId = "22222222-2222-4222-8222-222222222222";
 const agentId = "33333333-3333-4333-8333-333333333333";
 const policyId = "44444444-4444-4444-8444-444444444444";
+const recentProof = "99999999-9999-4999-8999-999999999999";
+const refreshOwnerProof = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const refreshRetryProof = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const refreshAdminProof = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const refreshAdminSuccessProof = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const refreshWrongOperationProof = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const refreshBodyProof = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const refreshEmptyProof = "88888888-8888-4888-8888-888888888888";
 const now = Date.parse("2026-08-12T00:00:00.000Z");
+const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 async function fixture(t, apiOptions = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-api-"));
@@ -35,7 +44,7 @@ async function fixture(t, apiOptions = {}) {
   const refreshHintKeys = crypto.generateKeyPairSync("ed25519");
   const { storeDecorator, ...cloudApiOptions } = apiOptions;
   const apiStore = typeof storeDecorator === "function" ? storeDecorator(store) : store;
-  const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, refreshHintService: { publicKeyMetadata: async () => ({ key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHintKeys.publicKey.export({ type: "spki", format: "pem" }).toString() }), poll: async () => null }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
+  const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, refreshHintService: { publicKeyMetadata: async () => ({ key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHintKeys.publicKey.export({ type: "spki", format: "pem" }).toString() }), poll: async () => null }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === recentProof, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -83,7 +92,7 @@ async function v2Fixture(t, apiOptions = {}) {
     possessionReceiptSigner: receiptSigner,
     enrollmentCredentialSecret: Buffer.alloc(32, 0x42),
     now: () => now,
-    verifyRecentWebAuthn: async ({ principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }),
+    verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: now }),
     ...apiOptions
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -181,7 +190,7 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   assert.equal((await withoutRecentAuth.json()).error.code, "recent_auth_required");
   const issued = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
     method: "POST",
-    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": recentProof },
     body: enrollmentBody
   });
   assert.equal(issued.status, 201, JSON.stringify(await issued.clone().json()));
@@ -189,7 +198,7 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   assert.match(invitation.credential, /^[A-Za-z0-9_-]{43}$/);
   const retried = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
     method: "POST",
-    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": recentProof },
     body: enrollmentBody
   });
   assert.equal(retried.status, 201, JSON.stringify(await retried.clone().json()));
@@ -200,6 +209,9 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   const proof = Buffer.from(["AgentPass-Enrollment-Proof-v1", "POST", invitation.endpoint, crypto.createHash("sha256").update(requestBody).digest("hex"), crypto.createHash("sha256").update(invitation.credential).digest("hex")].join("\n"));
   const signature = crypto.sign("sha256", proof, { key: keys.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64");
   const enrollmentHeaders = { "content-type": "application/json", "AgentPass-Enrollment-Credential": invitation.credential, "AgentPass-Enrollment-Signature": signature };
+  const querySubstitution = await fetch(`${f.base}${invitation.endpoint}?unexpected=1`, { method: "POST", headers: enrollmentHeaders, body: requestBody });
+  assert.equal(querySubstitution.status, 401);
+  assert.equal((await querySubstitution.json()).error.code, "invalid_enrollment_proof");
   const badCredential = crypto.randomBytes(32).toString("base64url");
   const badProof = Buffer.from(["AgentPass-Enrollment-Proof-v1", "POST", invitation.endpoint, crypto.createHash("sha256").update(requestBody).digest("hex"), crypto.createHash("sha256").update(badCredential).digest("hex")].join("\n"));
   const badHeaders = { "content-type": "application/json", "AgentPass-Enrollment-Credential": badCredential, "AgentPass-Enrollment-Signature": crypto.sign("sha256", badProof, { key: keys.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64") };
@@ -229,7 +241,7 @@ test("v2 enrollment is candidate-bound end to end and receipt reads are exact-de
   const f = await v2Fixture(t);
   const publicKey = f.completionKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
   const fingerprint = `SHA256:${crypto.createHash("sha256").update(crypto.createPublicKey(publicKey).export({ type: "spki", format: "der" })).digest("base64url")}`;
-  const issueHeaders = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-v2-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" };
+  const issueHeaders = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-v2-0001", "AgentPass-Recent-Auth": recentProof };
   const issueBody = { proof_version: 2, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, enrollment_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", device_id: deviceId, label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 };
   const forbiddenArtifact = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, { method: "POST", headers: issueHeaders, body: JSON.stringify({ ...issueBody, artifact_sha256: f.candidate.artifact_sha256 }) });
   assert.equal(forbiddenArtifact.status, 400);
@@ -303,7 +315,7 @@ test("v2 enrollment issuance fails closed when the possession receipt signer or 
     const fingerprint = `SHA256:${crypto.createHash("sha256").update(f.completionKeys.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
     const response = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
       method: "POST",
-      headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": `issue-v2-invalid-${Math.random()}`, "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+      headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": `issue-v2-invalid-${Math.random()}`, "AgentPass-Recent-Auth": recentProof },
       body: JSON.stringify({ proof_version: 2, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, enrollment_id: crypto.randomUUID(), device_id: crypto.randomUUID(), label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 })
     });
     assert.equal(response.status, 503);
@@ -315,10 +327,10 @@ test("v2 enrollment issuance fails closed when the possession receipt signer or 
 });
 
 test("recent WebAuthn authorization is exact-operation bound and must be atomically consumed", async (t) => {
-  const f = await fixture(t, { verifyRecentWebAuthn: async ({ principal, organization_id }) => ({ verified: true, consumed: false, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation: "organization.emergency_stop", authenticated_at: now }) });
+  const f = await fixture(t, { verifyRecentWebAuthn: async ({ proof, principal, organization_id }) => ({ verified: true, consumed: false, challenge_id: proof, member_id: principal.member_id, organization_id, operation: "organization.emergency_stop", authenticated_at: now }) });
   const response = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
     method: "POST",
-    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-wrong-binding", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-wrong-binding", "AgentPass-Recent-Auth": recentProof },
     body: JSON.stringify({ enrollment_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc", label: "Rejected Mac", platform: "macos", ttl_ms: 600_000 })
   });
   assert.equal(response.status, 401);
@@ -551,7 +563,7 @@ test("operator routes expose metadata and persist device, policy, and capability
 
   const deviceRevocation = await fetch(`${f.base}/v1/organizations/${org}/devices/${deviceId}/revoke`, {
     method: "POST",
-    headers: { ...auth, "content-type": "application/json", "idempotency-key": "revoke-device-0001", "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { ...auth, "content-type": "application/json", "idempotency-key": "revoke-device-0001", "agentpass-recent-auth": recentProof },
     body: JSON.stringify({ reason: "lost-device" })
   });
   assert.equal(deviceRevocation.status, 201, JSON.stringify(await deviceRevocation.clone().json()));
@@ -578,21 +590,21 @@ test("device revoke requires operation-bound recent WebAuthn while retaining the
     ],
     verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => {
       operations.push(operation);
-      return { verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation: returnWrongOperation ? "organization.emergency_stop" : operation, authenticated_at: now };
+      return { verified: proof === recentProof, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation: returnWrongOperation ? "organization.emergency_stop" : operation, authenticated_at: now };
     }
   });
   const endpoint = `${f.base}/v1/organizations/${org}/devices/${deviceId}/revoke`;
   const baseHeaders = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "revoke-device-recent-auth-0001" };
-  const viewer = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, authorization: `Bearer ${viewerToken}`, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "viewer-must-not-revoke" }) });
+  const viewer = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, authorization: `Bearer ${viewerToken}`, "agentpass-recent-auth": recentProof }, body: JSON.stringify({ reason: "viewer-must-not-revoke" }) });
   assert.equal(viewer.status, 403);
   const missing = await fetch(endpoint, { method: "POST", headers: baseHeaders, body: JSON.stringify({ reason: "missing-proof" }) });
   assert.equal(missing.status, 401);
   assert.equal(operations.length, 0);
-  const wrongOperation = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "wrong-operation" }) });
+  const wrongOperation = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": recentProof }, body: JSON.stringify({ reason: "wrong-operation" }) });
   assert.equal(wrongOperation.status, 401);
   assert.deepEqual(operations, ["device.revoke"]);
   returnWrongOperation = false;
-  const accepted = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "verified-proof" }) });
+  const accepted = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": recentProof }, body: JSON.stringify({ reason: "verified-proof" }) });
   assert.equal(accepted.status, 201, JSON.stringify(await accepted.clone().json()));
   assert.deepEqual(operations, ["device.revoke", "device.revoke"]);
 });
@@ -625,13 +637,13 @@ test("owner and admin can request an authority-neutral device wake with exact in
     }),
     verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => {
       operations.push(operation);
-      const wrongOperation = proof === "webauthn-wrong-operation-proof-abcdefghijklmnopqrstuvwxyz";
+      const wrongOperation = proof === refreshWrongOperationProof;
       const replayed = consumedProofs.has(proof);
-      if (!replayed && !wrongOperation && typeof proof === "string" && proof.startsWith("webauthn-")) consumedProofs.add(proof);
+      if (!replayed && !wrongOperation && typeof proof === "string" && UUID_VALUE.test(proof)) consumedProofs.add(proof);
       return {
         verified: !replayed && !wrongOperation,
         consumed: !replayed && !wrongOperation,
-        challenge_id: "99999999-9999-4999-8999-999999999999",
+        challenge_id: proof,
         member_id: principal.member_id,
         organization_id,
         operation: wrongOperation ? "device.revoke" : operation,
@@ -651,7 +663,7 @@ test("owner and admin can request an authority-neutral device wake with exact in
     body
   });
 
-  const owner = await request(ownerToken, "wake-owner-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  const owner = await request(ownerToken, "wake-owner-0001", refreshOwnerProof);
   assert.equal(owner.status, 202, JSON.stringify(await owner.clone().json()));
   const ownerBody = await owner.json();
   assert.deepEqual(Object.keys(ownerBody).sort(), ["refresh_request", "request_id"]);
@@ -681,18 +693,18 @@ test("owner and admin can request an authority-neutral device wake with exact in
   assert.equal(auditAfterOwner.at(-1).event_type, "device.refresh_requested");
   assert.deepEqual(auditAfterOwner.at(-1).details, { desired_generation: null, status: "no_pending_refresh" });
 
-  const exactReplay = await request(ownerToken, "wake-owner-0001", "webauthn-owner-retry-proof-abcdefghijklmnopqrstuvwxyz");
+  const exactReplay = await request(ownerToken, "wake-owner-0001", refreshRetryProof);
   assert.equal(exactReplay.status, 202);
   assert.deepEqual((await exactReplay.json()).refresh_request, ownerBody.refresh_request);
   assert.equal((await f.store.listAdminAuditEvents({ organizationId: org })).filter((event) => event.event_type === "device.refresh_requested").length, 1, "an exact replay must not duplicate the audit event");
   assert.deepEqual(operations.slice(0, 2), ["device.refresh.request", "device.refresh.request"]);
 
-  const admin = await request(adminToken, "wake-admin-0001", "webauthn-admin-proof-abcdefghijklmnopqrstuvwxyz");
+  const admin = await request(adminToken, "wake-admin-0001", refreshAdminProof);
   assert.equal(admin.status, 202, JSON.stringify(await admin.clone().json()));
   assert.equal((await admin.json()).refresh_request.device_id, deviceId);
   assert.equal(calls.length, 3);
 
-  const adminSuccess = await request(adminToken, "wake-admin-0002", "webauthn-valid-proof-2-abcdefghijklmnopqrstuvwxyz");
+  const adminSuccess = await request(adminToken, "wake-admin-0002", refreshAdminSuccessProof);
   assert.equal(adminSuccess.status, 202, JSON.stringify(await adminSuccess.clone().json()));
   assert.equal((await adminSuccess.json()).refresh_request.device_id, deviceId);
   assert.equal(calls.length, 4);
@@ -702,34 +714,34 @@ test("owner and admin can request an authority-neutral device wake with exact in
   assert.equal((await missing.json()).error.code, "recent_auth_required");
   assert.equal(calls.length, 4);
 
-  const wrongOperation = await request(ownerToken, "wake-wrong-0001", "webauthn-wrong-operation-proof-abcdefghijklmnopqrstuvwxyz");
+  const wrongOperation = await request(ownerToken, "wake-wrong-0001", refreshWrongOperationProof);
   assert.equal(wrongOperation.status, 401);
   assert.equal((await wrongOperation.json()).error.code, "recent_auth_failed");
   assert.equal(calls.length, 4);
 
-  const replay = await request(ownerToken, "wake-replay-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  const replay = await request(ownerToken, "wake-replay-0001", refreshOwnerProof);
   assert.equal(replay.status, 401);
   assert.equal((await replay.json()).error.code, "recent_auth_failed");
   assert.equal(calls.length, 4);
 
-  const viewer = await request(viewerToken, "wake-viewer-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  const viewer = await request(viewerToken, "wake-viewer-0001", refreshOwnerProof);
   assert.equal(viewer.status, 403);
   assert.equal((await viewer.json()).error.code, "role_denied");
   assert.equal(calls.length, 4);
 
-  const bodySubstitution = await request(ownerToken, "wake-body-0001", "webauthn-body-proof-abcdefghijklmnopqrstuvwxyz", '{"desired_generation":99}');
+  const bodySubstitution = await request(ownerToken, "wake-body-0001", refreshBodyProof, '{"desired_generation":99}');
   assert.equal(bodySubstitution.status, 400);
   assert.equal((await bodySubstitution.json()).error.code, "invalid_refresh_request");
   assert.equal(calls.length, 4);
 
-  const emptyBody = await request(ownerToken, "wake-empty-0001", "webauthn-empty-body-proof-abcdefghijklmnopqrstuvwxyz", "");
+  const emptyBody = await request(ownerToken, "wake-empty-0001", refreshEmptyProof, "");
   assert.equal(emptyBody.status, 400);
   assert.equal((await emptyBody.json()).error.code, "invalid_refresh_request");
   assert.equal(calls.length, 4);
 
   const wrongTenant = await fetch(`${f.base}/v1/organizations/${otherOrganization}/devices/${deviceId}/refresh-requests`, {
     method: "POST",
-    headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json", "idempotency-key": "wake-tenant-0001", "agentpass-recent-auth": "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json", "idempotency-key": "wake-tenant-0001", "agentpass-recent-auth": refreshOwnerProof },
     body: "{}"
   });
   assert.equal(wrongTenant.status, 403);
@@ -737,7 +749,7 @@ test("owner and admin can request an authority-neutral device wake with exact in
 });
 
 test("refresh request rejects caller fields, missing idempotency, unavailable store methods, and repository details", async (t) => {
-  const proof = "webauthn-proof-abcdefghijklmnopqrstuvwxyz";
+  const proof = recentProof;
   const endpointSuffix = `/v1/organizations/${org}/devices/${deviceId}/refresh-requests`;
   const baseHeaders = { authorization: `Bearer ${"ap_owner_token_abcdefghijklmnopqrstuvwxyz"}`, "content-type": "application/json", "agentpass-recent-auth": proof };
 

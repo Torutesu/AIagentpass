@@ -18,7 +18,7 @@ function repositories(overrides = {}) {
     "appendAdminAuditEvent", "assignBundleHead", "completeDeviceEnrollment", "createAgent", "createDevice",
     "createDeviceEnrollment", "createPolicy", "createRevocation", "getAuditHealth", "getOrganization",
     "ingestDeviceAuditEvents", "issueCapabilityMetadata", "listAdminAuditEvents", "listAgents", "listCapabilities",
-    "listDeviceAuditEvents", "listDeviceReadModels", "listDevices", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
+    "listDeviceAuditEvents", "listDeviceReadModels", "listDevices", "getDevice", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
     "reserveCapability", "updatePolicy", "snapshotAndAssignBundleHead", "pollDeviceRefresh",
     "getDeviceRefreshState", "acknowledgeBundle", "requestDeviceWake"
   ];
@@ -72,6 +72,34 @@ test("exposes hosted device-plane methods without widening the enumerable admin 
     assert.equal(input.principal?.private_key, undefined);
   }
   assert.deepEqual(Object.keys(store).sort(), [...CONTROL_PLANE_STORE_METHODS].sort());
+});
+
+test("exposes v2 enrollment methods as non-enumerable, tenant-scoped opt-in APIs", async () => {
+  const calls = [];
+  const resourceRepository = {
+    async resolveActiveReleaseCandidate(input) { calls.push({ method: "resolveActiveReleaseCandidate", input }); return { candidate_id: input.candidateId }; },
+    async createDeviceEnrollmentV2(input) { calls.push({ method: "createDeviceEnrollmentV2", input }); return { enrollment_id: input.enrollmentId }; },
+    async completeDeviceEnrollmentV2(input) { calls.push({ method: "completeDeviceEnrollmentV2", input }); return { device_id: input.deviceId }; },
+    async getDeviceEnrollmentPossessionReceipt(input) { calls.push({ method: "getDeviceEnrollmentPossessionReceipt", input }); return { enrollment_id: "44444444-4444-4444-8444-444444444444" }; },
+    async getDevice(input) { calls.push({ method: "getDevice", input }); return { device_id: input.deviceId }; }
+  };
+  const store = createPostgresControlPlaneStore({ resourceRepository });
+  for (const method of ["resolveActiveReleaseCandidate", "createDeviceEnrollmentV2", "completeDeviceEnrollmentV2", "getDeviceEnrollmentPossessionReceipt", "getDevice"]) {
+    assert.equal(typeof store[method], "function");
+    assert.equal(Object.getOwnPropertyDescriptor(store, method).enumerable, false);
+    assert.equal(Object.keys(store).includes(method), false);
+  }
+
+  await store.resolveActiveReleaseCandidate({ candidateId: "release-2026-08" });
+  await store.createDeviceEnrollmentV2({ organizationId, enrollmentId: "44444444-4444-4444-8444-444444444444", principalId: memberId });
+  await store.completeDeviceEnrollmentV2({ organizationId, deviceId, enrollmentId: "44444444-4444-4444-8444-444444444444" });
+  await store.getDeviceEnrollmentPossessionReceipt({ organizationId, deviceId });
+  await store.getDevice({ organizationId, deviceId });
+
+  assert.deepEqual(calls.map(({ method }) => method), ["resolveActiveReleaseCandidate", "createDeviceEnrollmentV2", "completeDeviceEnrollmentV2", "getDeviceEnrollmentPossessionReceipt", "getDevice"]);
+  assert.equal(calls[1].input.organization_id, organizationId);
+  assert.equal(calls[2].input.organization_id, organizationId);
+  assert.equal(calls[3].input.organization_id, organizationId);
 });
 
 test("qualifies every delegated tenant request without accepting an unscoped call", async () => {

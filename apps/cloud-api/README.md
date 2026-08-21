@@ -43,6 +43,17 @@ The production foundation lives in `src/postgres/` and uses the ordered SQL in `
 
 Hosted additionally requires `AGENTPASS_CAPABILITY_NONCE_SECRET` and `AGENTPASS_OPERATIONAL_PROBE_SECRET`, each a distinct canonical unpadded 32-byte base64url secret shared by the relevant Cloud instances/operators. The capability secret derives retry-stable nonces with a purpose-separated HMAC; PostgreSQL stores only the nonce digest and safe statement metadata. The operational secret authenticates readiness and metrics probes via the `AgentPass-Operational-Token` header. Hosted also requires the owner-recovery notification webhook settings described below; startup fails instead of silently accumulating undeliverable security notifications. Never put these values in a URL or log.
 
+Hosted deployment readiness also carries a secret-free identity projection. Configure
+`AGENTPASS_CLOUD_SOURCE_COMMIT`, `AGENTPASS_CLOUD_SOURCE_TREE`,
+`AGENTPASS_CLOUD_IMAGE_DIGEST`, `AGENTPASS_CLOUD_DEPLOYMENT_ID`,
+`AGENTPASS_CLOUD_DEPLOYMENT_REVISION`, and
+`AGENTPASS_CLOUD_SCHEMA_DIGEST`, `AGENTPASS_CLOUD_CATALOG_DIGEST`, and
+`AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST` together. If the set is missing,
+the process starts only in the unconfigured state; if it is incomplete or malformed,
+startup fails closed. `/health/ready` remains 503 with
+`deployment_identity_unavailable` until an exact source/tree/image/revision/schema/catalog/database
+identity is present; it never reports a green hosted deployment from a partial identity.
+
 Human authentication modules provide opaque hash-only sessions, exact-origin and session-bound CSRF enforcement, PostgreSQL-backed one-time WebAuthn registration/authentication challenges, a maintained `@simplewebauthn/server` verifier adapter, and operation-bound recent authorization. A recent authorization is consumed atomically for one member, organization, and operation; it is not a reusable bearer token. Migration `0004_human_identity_and_webauthn_registration.sql` adds immutable provider/subject mappings and passkey metadata while challenges retain the exact RP/origin/UV/session/member/organization binding.
 
 When Human Auth is enabled, capability issuance also requires the PostgreSQL organization, member, device, and agent projection to exist. The exact canonical signed-statement hash and issuing membership version are recorded before a bearer envelope is returned. Membership reduction revokes those rows transactionally; every subsequent device bundle fetch merges the bounded, unexpired PostgreSQL revocation set into `revoked_capabilities`. If the authority projection is missing, unavailable, malformed, or exceeds the ControlBundle protocol bound, issuance/bundle generation fails closed. Existing installed bundles learn the change through the authenticated Device API refresh route. Hosted Cloud uses a commit-only PostgreSQL notification as a wake-up hint and always performs a final authoritative query, so lost or duplicated notifications do not change correctness.

@@ -11,6 +11,7 @@ import {
   canonicalEnrollmentProof,
   canonicalEnrollmentProofV2,
   createDeviceEnrollmentClient,
+  createV2DeviceEnrollmentClient,
   deviceEnrollmentEvidence,
   verifyDeviceEnrollmentReceipt
 } from "../lib/device-enrollment-client.mjs";
@@ -22,6 +23,14 @@ const BASE_URL = "https://api.example.test/v1";
 const CREDENTIAL = "Abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
 const CHALLENGE_NONCE = "A".repeat(43);
 const CHALLENGE_ID = ENROLLMENT;
+
+test("the production factory cannot silently fall back to legacy v1", () => {
+  const pair = keys();
+  assert.throws(() => createV2DeviceEnrollmentClient(input(pair)), (error) => {
+    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+    return true;
+  });
+});
 
 function keys(algorithm = "p256-sha256") {
   const pair = algorithm === "ed25519"
@@ -437,6 +446,44 @@ test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256
   assert.equal(receiptReads, 2);
   const ed = keys("ed25519");
   assert.throws(() => createDeviceEnrollmentClient({ ...input(ed, { deviceKey: { algorithm: "ed25519", spkiPem: ed.publicPem }, keyFingerprint: fingerprint(ed) }), proofVersion: 2, qualification: "p256-sha256", challengeId: CHALLENGE_ID, challengeNonce: CHALLENGE_NONCE, candidateBinding: candidate(ed), signer: signWith(ed, "ed25519"), fetchImpl: async () => jsonResponse(enrolledResponse(ed)) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+});
+
+test("retries a preflight receipt failure without ever retrying the one-time POST", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  let gets = 0;
+  let posts = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") {
+        gets += 1;
+        if (gets === 1) throw new TypeError("temporary network failure before POST");
+        if (gets === 2) return new Response("", { status: 401 });
+        return jsonResponse({ request_id: "receipt-after-post", receipt }, 200);
+      }
+      posts += 1;
+      return jsonResponse(enrolledResponse(pair));
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => {
+    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+    assert.equal(error.details.phase, "preflight");
+    return true;
+  });
+  assert.equal(client.status(), "ready");
+  assert.equal((await client.enroll()).status, "enrolled");
+  assert.equal(posts, 1);
+  assert.equal(gets, 3);
 });
 
 test("does not turn a received HTTP failure into response-loss recovery", async () => {

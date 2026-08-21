@@ -10,7 +10,11 @@
         "summary": "Complete a one-time device enrollment",
         "description": "Consumes the one-time enrollment credential and proof-of-possession, then returns the active device identity epoch and the two purpose-separated public trust roots required by the native client. The enrollment response never contains private key material or an enrollment credential. The response is no-store and includes a request_id envelope field.",
         "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
+        "parameters": [
+          { "$ref": "#/components/parameters/EnrollmentId" },
+          { "$ref": "#/components/parameters/EnrollmentNonceOptional" },
+          { "$ref": "#/components/parameters/EnrollmentCandidateBindingOptional" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -29,10 +33,18 @@
           "201": { "$ref": "#/components/responses/DeviceEnrollmentCompleted" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "$ref": "#/components/responses/Conflict" },
           "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "$ref": "#/components/responses/InternalError" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
-        }
+        },
+        "x-agentpass-transport": { "cache-control": "no-store", "redirects": "forbidden", "additionalProperties": false },
+        "x-agentpass-v2-required-headers": ["AgentPass-Enrollment-Nonce", "AgentPass-Enrollment-Candidate-Binding"],
+        "x-agentpass-v2-header-parameters": [
+          { "$ref": "#/components/parameters/EnrollmentNonce" },
+          { "$ref": "#/components/parameters/EnrollmentCandidateBinding" }
+        ]
       }
     },
     "/organizations/{organization_id}/devices/{device_id}/enrollment-receipt": {
@@ -51,6 +63,7 @@
           "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "$ref": "#/components/responses/InternalError" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -226,10 +239,16 @@
       "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session", "description": "Hosted Human session forwarded only by the same-origin Console BFF. The session must carry at least the auditor role for the path organization." },
       "auditReader": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque", "description": "Evaluation-profile auditor credential. Hosted production uses humanSession instead. The organization and device path/query scope remains authoritative; a credential never widens either scope." },
       "enrollmentCredential": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Credential", "description": "One-time 256-bit credential; only its SHA-256 digest is retained by the Control Plane." },
-      "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, and enrollment-credential SHA-256." }
+      "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, enrollment-credential SHA-256, challenge nonce, and candidate-binding SHA-256." },
+      "enrollmentNonce": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Nonce", "description": "The exact one-time challenge nonce returned by v2 issuance. It is checked against the signed request body and the server-derived candidate binding." },
+      "enrollmentCandidateBinding": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Candidate-Binding", "description": "Canonical JSON candidate binding returned by v2 issuance. It is checked against the server-side release candidate, tenant, enrollment, device, key fingerprint, and expiry." }
     },
     "parameters": {
       "EnrollmentId": { "name": "enrollment_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "EnrollmentNonce": { "name": "AgentPass-Enrollment-Nonce", "in": "header", "required": true, "description": "Required for v2 completion; must exactly equal body.challenge.nonce.", "schema": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" } },
+      "EnrollmentCandidateBinding": { "name": "AgentPass-Enrollment-Candidate-Binding", "in": "header", "required": true, "description": "Required for v2 completion; canonical JSON returned by issuance and bound to the active release candidate.", "schema": { "type": "string", "minLength": 2, "maxLength": 4096 } },
+      "EnrollmentNonceOptional": { "name": "AgentPass-Enrollment-Nonce", "in": "header", "required": false, "description": "Required when the request body selects proof_version 2; must exactly equal body.challenge.nonce. Not used by v1 completion.", "schema": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" } },
+      "EnrollmentCandidateBindingOptional": { "name": "AgentPass-Enrollment-Candidate-Binding", "in": "header", "required": false, "description": "Required when the request body selects proof_version 2; canonical JSON returned by issuance. Not used by v1 completion.", "schema": { "type": "string", "minLength": 2, "maxLength": 4096 } },
       "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "GrantId": { "name": "grant_id", "in": "path", "required": true, "description": "Agent Session Grant identifier. The body statement.grant_id must exactly equal this path value.", "schema": { "type": "string", "format": "uuid" } },

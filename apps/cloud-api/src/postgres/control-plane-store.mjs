@@ -162,6 +162,48 @@ export function createPostgresControlPlaneStore(options = {}) {
       enumerable: false,
       value: devicePlaneDelegate(authorityRepository, "getDeviceRefreshState", "getDeviceRefreshState")
     },
+    getDevice: {
+      enumerable: false,
+      value: async (input = {}) => {
+        const fn = resourceRepository?.getDevice;
+        if (typeof fn !== "function") throw unavailable("getDevice");
+        return callRepository(fn, resourceRepository, "getDevice", qualifyTenant(input, "getDevice"));
+      }
+    },
+    // v2 enrollment/release methods are opt-in so older enumerable adapters
+    // cannot accidentally depend on the newer possession contract.
+    resolveActiveReleaseCandidate: {
+      enumerable: false,
+      value: async (input = {}) => {
+        const fn = resourceRepository?.resolveActiveReleaseCandidate;
+        if (typeof fn !== "function") throw unavailable("resolveActiveReleaseCandidate");
+        return callRepository(fn, resourceRepository, "resolveActiveReleaseCandidate", cloneInput(input));
+      }
+    },
+    createDeviceEnrollmentV2: {
+      enumerable: false,
+      value: async (input = {}) => {
+        const fn = resourceRepository?.createDeviceEnrollmentV2;
+        if (typeof fn !== "function") throw unavailable("createDeviceEnrollmentV2");
+        return callRepository(fn, resourceRepository, "createDeviceEnrollmentV2", addAuthorityContext(qualifyTenant(input, "createDeviceEnrollmentV2")));
+      }
+    },
+    completeDeviceEnrollmentV2: {
+      enumerable: false,
+      value: async (input = {}) => {
+        const fn = resourceRepository?.completeDeviceEnrollmentV2;
+        if (typeof fn !== "function") throw unavailable("completeDeviceEnrollmentV2");
+        return callRepository(fn, resourceRepository, "completeDeviceEnrollmentV2", qualifyTenant(input, "completeDeviceEnrollmentV2"));
+      }
+    },
+    getDeviceEnrollmentPossessionReceipt: {
+      enumerable: false,
+      value: async (input = {}) => {
+        const fn = resourceRepository?.getDeviceEnrollmentPossessionReceipt;
+        if (typeof fn !== "function") throw unavailable("getDeviceEnrollmentPossessionReceipt");
+        return callRepository(fn, resourceRepository, "getDeviceEnrollmentPossessionReceipt", qualifyTenant(input, "getDeviceEnrollmentPossessionReceipt"));
+      }
+    },
     acknowledgeBundle: {
       enumerable: false,
       value: devicePlaneDelegate(authorityRepository, "acknowledgeBundle", "acknowledgeBundle")

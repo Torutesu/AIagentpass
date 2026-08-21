@@ -29,7 +29,7 @@ const TEST_MIGRATION_CHECKSUM = crypto.createHash("sha256").update(TEST_MIGRATIO
 const MIGRATION_TARGET_MANIFEST = Object.freeze({
   schema: "agentpass.cutover.target.v1",
   target: { id: "prod-postgres-primary", database_url_sha256: crypto.createHash("sha256").update(DATABASE_URL).digest("hex"), migrations: [{ version: 1, checksum: TEST_MIGRATION_CHECKSUM }] },
-  deployment: { id: "deploy-2026-08-13", revision: "release-2026-08-13", traffic_generation: "42", application_version: "cutover-operations" }
+  deployment: { id: "deploy-2026-08-13", revision: "release-2026-08-13", rollback_target_revision: "release-2026-08-12", traffic_generation: "42", application_version: "cutover-operations" }
 });
 const DATABASE_ENV = Object.freeze({
   AGENTPASS_CLOUD_PROFILE: "hosted",
@@ -48,6 +48,7 @@ const CLEAN_STATUS = Object.freeze({
   dirty: false,
   dirtyRows: []
 });
+const DEPLOYMENT_IDENTITY = Object.freeze({ version: 1, configured: true, ready: true, source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`, deployment_id: "deploy-2026-08-13", revision: "release-2026-08-13", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64) });
 
 class QueryRecorder {
   constructor() { this.calls = []; }
@@ -163,13 +164,21 @@ test("readiness requires available metrics and configured application readiness"
     preflight: async () => CLEAN_PREFLIGHT,
     databaseHealth: async () => ({ ready: true, code: "ready" }),
     metrics: async () => ({ available: true, lock_waits: 0, pool: { total: 2, idle: 2, waiting: 0 } }),
-    applicationReadiness: async () => ({ configured: true, ready: true }), now: () => NOW
+    applicationReadiness: async () => ({ configured: true, ready: true, deployment_identity: DEPLOYMENT_IDENTITY }), now: () => NOW
   });
   assert.equal(ready.ready, true);
   for (const [metrics, application] of [[{ available: false, lock_waits: null, pool: null }, { configured: true, ready: true }], [{ available: true, lock_waits: 0, pool: null }, { configured: false, ready: true }]]) {
     const blocked = await evaluateReadiness({ status: async () => CLEAN_STATUS, preflight: async () => CLEAN_PREFLIGHT, databaseHealth: async () => ({ ready: true }), metrics: async () => metrics, applicationReadiness: async () => application, now: () => NOW });
     assert.equal(blocked.ready, false);
   }
+});
+
+test("cutover readiness rejects a Cloud identity for a different deployment revision", async () => {
+  const control = operations({ applicationReadiness: async () => ({ configured: true, ready: true, deployment_identity: { ...DEPLOYMENT_IDENTITY, revision: "release-not-the-target" } }) });
+  const result = await control.readiness();
+  assert.equal(result.ready, false);
+  assert.equal(result.application.ready, false);
+  assert.equal(result.application.deployment_identity.revision, "release-not-the-target");
 });
 
 test("drain evidence is authenticated and bound to deployment, revision, traffic generation, and nonce", () => {
@@ -187,9 +196,9 @@ test("drain evidence is authenticated and bound to deployment, revision, traffic
 
 test("readiness sends the required operational token only to the explicitly allowed origin and streams a hard 64KiB cap", async () => {
   let request;
-  const response = { ok: true, body: { getReader() { let done = false; return { async read() { if (done) return { done: true }; done = true; return { done: false, value: new TextEncoder().encode('{"ready":true}') }; }, releaseLock() {} }; } } };
+  const response = { ok: true, body: { getReader() { let done = false; return { async read() { if (done) return { done: true }; done = true; return { done: false, value: new TextEncoder().encode(JSON.stringify({ ready: true, deployment_identity: DEPLOYMENT_IDENTITY })) }; }, releaseLock() {} }; } } };
   const result = await fetchReadiness("https://health.example/health/ready", 5_000, async (url, options) => { request = { url, options }; return response; }, OPERATIONAL_SECRET, "https://health.example");
-  assert.deepEqual(result, { configured: true, ready: true });
+  assert.deepEqual(result, { configured: true, ready: true, deployment_identity: DEPLOYMENT_IDENTITY });
   assert.equal(request.options.headers["AgentPass-Operational-Token"], OPERATIONAL_SECRET);
   assert.equal(JSON.stringify(result).includes(OPERATIONAL_SECRET), false);
   assert.deepEqual(await fetchReadiness("https://health.example/health/ready", 5_000, async () => ({ ok: true, body: { getReader() { return { async read() { return { done: false, value: new Uint8Array(64 * 1024 + 1) }; }, async cancel() {}, releaseLock() {} }; } } }), OPERATIONAL_SECRET, "https://health.example"), { configured: true, ready: false });
@@ -212,6 +221,21 @@ test("rollback only calls the injected application traffic controller and never 
   const noController = await executeCutoverCommand({ command: "rollback", options: { confirm: true }, operations: { async rollback() { return executeTrafficRollback(); } } });
   assert.equal(noController.ok, false);
   assert.equal(noController.code, CUTOVER_DIAGNOSTICS.ROLLBACK_ACTION_REQUIRED);
+});
+
+test("real cutover rollback output carries target revision, completion, post-rollback readiness, and identity", async () => {
+  const control = operations({
+    trafficController: { async rollbackApplicationTraffic() {} },
+    applicationReadiness: async () => ({ configured: true, ready: true, deployment_identity: { ...DEPLOYMENT_IDENTITY, revision: MIGRATION_TARGET_MANIFEST.deployment.rollback_target_revision } }),
+  });
+  const result = await control.rollback({ reason: "qualification" });
+  assert.equal(result.executed, true);
+  assert.equal(result.deployment_id, MIGRATION_TARGET_MANIFEST.deployment.id);
+  assert.equal(result.current_revision, MIGRATION_TARGET_MANIFEST.deployment.revision);
+  assert.equal(result.rollback_target_revision, MIGRATION_TARGET_MANIFEST.deployment.rollback_target_revision);
+  assert.equal(result.post_rollback_ready, true);
+  assert.deepEqual(result.deployment_identity, { ...DEPLOYMENT_IDENTITY, revision: MIGRATION_TARGET_MANIFEST.deployment.rollback_target_revision });
+  assert.equal(result.completed_at, NOW.toISOString());
 });
 
 test("CLI errors are stable and do not echo secret-bearing argv or environment", async () => {

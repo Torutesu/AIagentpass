@@ -382,6 +382,17 @@ test("complete production configuration wires only the pinned signedConsoleIdent
   const calls = [];
   const postgres = fakePostgresRuntime();
   const logs = [];
+  const productionEnv = {
+    ...fixture.env,
+    AGENTPASS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+    AGENTPASS_CLOUD_SOURCE_TREE: "b".repeat(40),
+    AGENTPASS_CLOUD_IMAGE_DIGEST: `sha256:${"c".repeat(64)}`,
+    AGENTPASS_CLOUD_DEPLOYMENT_ID: "staging-api",
+    AGENTPASS_CLOUD_DEPLOYMENT_REVISION: "revision-current",
+    AGENTPASS_CLOUD_SCHEMA_DIGEST: "d".repeat(64),
+    AGENTPASS_CLOUD_CATALOG_DIGEST: "e".repeat(64),
+    AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: "f".repeat(64)
+  };
   const logger = {
     info(...args) { logs.push(args); },
     warn(...args) { logs.push(args); },
@@ -392,7 +403,7 @@ test("complete production configuration wires only the pinned signedConsoleIdent
     // bearer database. The profile rejects such a path before composition.
     fs.unlinkSync(fixture.tokenRecordsPath);
     const runtime = await createCloudRuntime({
-      env: fixture.env,
+      env: productionEnv,
       ...signerProviders(fixture),
       logger,
       postgresFactory: async () => postgres,

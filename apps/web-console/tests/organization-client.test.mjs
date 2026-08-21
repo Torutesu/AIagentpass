@@ -17,23 +17,40 @@ const requestId = "66666666-6666-4666-8666-666666666666";
 const recentAuthId = "77777777-7777-4777-8777-777777777777";
 const csrf = "C".repeat(43);
 const token = "T".repeat(43);
-const date = "2026-08-12T00:00:00.000Z";
+const date = "2099-08-12T00:00:00.000Z";
 
-function sessionResponse() {
+function sessionResponse(activeOrganizationId = organizationId) {
   return json({
     session: {
       version: 1,
       session_id: "88888888-8888-4888-8888-888888888888",
       member_id: memberId,
-      organization_id: organizationId,
+      organization_id: activeOrganizationId,
       role: "owner",
       created_at: date,
-      expires_at: "2026-08-12T08:00:00.000Z",
+      expires_at: "2099-08-12T08:00:00.000Z",
       recent_auth_at: null,
     },
     csrf_token: csrf,
   }, 201);
 }
+
+test("switches the server-backed session organization and refreshes the cached session", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/session/organization-switch") return sessionResponse(secondOrganizationId, 200);
+    throw new Error(`unexpected ${url}`);
+  };
+  const client = createOrganizationClient({ fetchImpl });
+  const switched = await client.switchOrganization({ organizationId: secondOrganizationId });
+  assert.equal(switched.organizationId, secondOrganizationId);
+  assert.equal(calls[1].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].init.body), { organization_id: secondOrganizationId });
+  assert.equal(calls[1].init.headers.get("agentpass-csrf"), csrf);
+  assert.equal((await client.getSession()).organizationId, secondOrganizationId);
+});
 
 function organization(id = organizationId, name = "AgentPass Team", version = 2) {
   return { organization_id: id, name, version, created_at: date, updated_at: date };
@@ -95,7 +112,7 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
     if (url.endsWith(`/members/${memberId}/role`)) return json({ request_id: requestId, member: member("admin", 4) });
     if (url.endsWith(`/members/${memberId}/remove`)) return json({ request_id: requestId, member: member("admin", 5) });
     if (url.endsWith(`/invitations/${invitationId}/revoke`)) return json({ request_id: requestId, invitation: invitation("revoked", 2) });
-    if (url === "/api/auth/invitations/accept") return json({ request_id: requestId, invitation: invitation("accepted", 2), member: member("viewer", 1) }, 201);
+    if (url === "/api/auth/invitations/accept") return json({ request_id: requestId, member: member("viewer", 1) }, 201);
     throw new Error(`unexpected ${init.method} ${url}`);
   };
   const client = createOrganizationClient({
@@ -125,9 +142,12 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
   assert.equal(removeCall.init.headers.get("agentpass-recent-auth"), recentAuthId);
   assert.equal(removeCall.init.headers.get("if-match"), '"4"');
   assert.equal(removeCall.init.body, undefined);
-  assert.deepEqual(recentAuthCalls.map((item) => item.operation), ["human.organizations.member.role.update", "human.organizations.member.remove"]);
 
   await client.revokeInvitation({ organizationId, invitationId, expectedVersion: 1, idempotencyKey: "revoke-team-1" });
+  const revokeCall = calls.find((call) => call.url.endsWith(`/invitations/${invitationId}/revoke`));
+  assert.equal(revokeCall.init.headers.get("agentpass-recent-auth"), recentAuthId);
+  assert.equal(revokeCall.init.headers.get("if-match"), '"1"');
+  assert.deepEqual(recentAuthCalls.map((item) => item.operation), ["human.organizations.member.role.update", "human.organizations.member.remove", "human.organizations.invitation.revoke"]);
   await client.acceptInvitation({ oneTimeToken: token, idempotencyKey: "accept-team-1" });
   for (const call of calls.filter((item) => item.url !== "/api/auth/session")) {
     assert.equal(call.init.headers.get("agentpass-csrf"), csrf);
@@ -156,7 +176,7 @@ test("classifies expired and recent-auth failures for actionable organization UI
   const expired = createOrganizationClient({ fetchImpl: async (url) => {
     if (url === "/api/auth/session") return sessionResponse();
     return json({ error: { code: "invitation_expired", message: "Invitation expired" } }, 410);
-  } });
+  }, authorizeRecentAuthImpl: async () => ({ authorization_id: recentAuthId }) });
   await assert.rejects(() => expired.revokeInvitation({ organizationId, invitationId, expectedVersion: 1, idempotencyKey: "expired-invite-1" }), (error) => error instanceof OrganizationClientError && error.code === "expired" && error.status === 410);
 
   const recentAuth = createOrganizationClient({

@@ -80,13 +80,18 @@ test("reuses one bootstrap result for every read and mutation in a Security life
   assert.deepEqual(JSON.parse(calls[3].init.body), { label: "仕事用Touch ID", expected_version: 2 });
   assert.deepEqual(JSON.parse(calls[4].init.body), { expected_version: 3 });
   assert.equal(calls[4].init.headers.get("agentpass-recent-auth"), authorizationId);
-  assert.deepEqual(authorizations.map(({ operation, organizationId, csrfToken }) => ({ operation, organizationId, csrfToken })), [{ operation: "human.management.credential.revoke", organizationId, csrfToken: csrf }]);
+  assert.deepEqual(authorizations.map(({ operation, organizationId, csrfToken }) => ({ operation, organizationId, csrfToken })), [
+    { operation: "human.management.credential.revoke", organizationId, csrfToken: csrf },
+    { operation: "human.management.session.revoke", organizationId, csrfToken: csrf },
+  ]);
+  assert.equal(calls[5].init.headers.get("agentpass-recent-auth"), authorizationId);
   assert.deepEqual(JSON.parse(calls[5].init.body), { expected_version: 4 });
 });
 
 test("revokes all other sessions through the existing per-session contract", async () => {
   const calls = [];
-  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url, init) => {
+  const authorizations = [];
+  const client = createSecurityClient({ authenticateRecentAuthImpl: async (input) => { authorizations.push(input); return authorize(); }, fetchImpl: async (url, init) => {
     calls.push({ url: String(url), init });
     if (url === "/api/auth/session") return sessionResponse();
     if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
@@ -102,6 +107,12 @@ test("revokes all other sessions through the existing per-session contract", asy
     `/api/auth/security/sessions/${otherSessionId}/revoke`,
     "/api/auth/security/sessions/55555555-5555-4555-8555-555555555555/revoke",
   ]);
+  assert.equal(authorizations.length, 2);
+  assert.deepEqual(authorizations.map(({ operation }) => operation), [
+    "human.management.session.revoke",
+    "human.management.session.revoke",
+  ]);
+  for (const call of calls.filter((item) => item.url.includes("/security/sessions/"))) assert.equal(call.init.headers.get("agentpass-recent-auth"), authorizationId);
 });
 
 test("current-session revoke closes the lifecycle without bootstrapping a replacement", async () => {

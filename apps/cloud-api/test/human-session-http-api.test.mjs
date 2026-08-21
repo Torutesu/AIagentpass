@@ -15,8 +15,9 @@ const ORIGIN = "https://console.agentpass.test";
 const CSRF_TOKEN = "c".repeat(43);
 const SESSION_COOKIE = "__Host-agentpass_session=" + "s".repeat(43) + "; Path=/; HttpOnly; Secure; SameSite=Strict";
 const IDENTITY_ASSERTION = Object.freeze({ provider: "opaque", assertion: "must-not-be-decoded-here" });
+const OTHER_ORGANIZATION_ID = "44444444-4444-4444-8444-444444444444";
 
-function session() {
+function session(overrides = {}) {
   return {
     version: 1,
     session_id: "11111111-1111-4111-8111-111111111111",
@@ -25,7 +26,8 @@ function session() {
     role: "owner",
     created_at: "2026-08-12T00:00:00.000Z",
     expires_at: "2026-08-12T08:00:00.000Z",
-    recent_auth_at: null
+    recent_auth_at: null,
+    ...overrides
   };
 }
 
@@ -46,6 +48,11 @@ function fixture(overrides = {}) {
         clearCookie: "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
         setCookie: "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"
       };
+    },
+    async switchOrganization(input) {
+      calls.switchOrganization = input;
+      if (overrides.switchError) throw overrides.switchError;
+      return overrides.switched ?? { session: session({ organization_id: OTHER_ORGANIZATION_ID }), csrf_token: CSRF_TOKEN, setCookie: SESSION_COOKIE };
     }
   };
   const api = createHumanSessionHttpApi({
@@ -67,10 +74,10 @@ function fixture(overrides = {}) {
   return { api, calls };
 }
 
-function request(body = "{}", headers = {}, method = "POST") {
+function request(body = "{}", headers = {}, method = "POST", url = HUMAN_SESSION_HTTP_PATHS.session) {
   return {
     method,
-    url: HUMAN_SESSION_HTTP_PATHS.session,
+    url,
     headers: {
       origin: ORIGIN,
       "content-type": "application/json",
@@ -83,6 +90,15 @@ function request(body = "{}", headers = {}, method = "POST") {
 function assertNoStore(result) {
   assert.match(result.headers["Cache-Control"], /\bno-store\b/);
 }
+
+test("switches organization through the authenticated session rotation endpoint", async () => {
+  const f = fixture();
+  const result = await f.api.handle(request(JSON.stringify({ organization_id: OTHER_ORGANIZATION_ID }), { cookie: SESSION_COOKIE, "agentpass-csrf": CSRF_TOKEN }, "POST", HUMAN_SESSION_HTTP_PATHS.switchOrganization));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.session.organization_id, OTHER_ORGANIZATION_ID);
+  assert.match(result.headers["Set-Cookie"], /agentpass_session/u);
+  assert.equal(f.calls.switchOrganization.organization_id, OTHER_ORGANIZATION_ID);
+});
 
 test("issues a session from an opaque adapter assertion with an exact response contract", async () => {
   const { api, calls } = fixture();

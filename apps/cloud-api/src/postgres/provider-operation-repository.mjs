@@ -169,7 +169,7 @@ export function createPostgresProviderOperationRepository({
       }
       const result = await tx.query(`UPDATE managed_signer_provider_operations
         SET state='accepted',uncertain_reason=NULL,signature=$3,public_key_der=$4,provider_receipt_provider=$5,provider_receipt_id=$6
-        WHERE purpose=$1 AND operation_id=$2
+        WHERE purpose=$1 AND operation_id=$2 AND state IN ('started','uncertain')
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
@@ -188,7 +188,7 @@ export function createPostgresProviderOperationRepository({
       const row = await selectOperation(tx, operation, true);
       if (row?.state === "committed") { assertIdentity(row, operation); return publicRecord(row); }
       requireClaim(row, operation, claimToken, ["accepted"]);
-      return commitRow(tx, operation);
+      return commitRow(tx, operation, ["accepted"]);
     }));
   }
 
@@ -202,7 +202,7 @@ export function createPostgresProviderOperationRepository({
       if (!["accepted", "uncertain"].includes(row.state) || !hasOutput(row)) {
         fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
       }
-      return commitRow(tx, operation);
+      return commitRow(tx, operation, ["accepted", "uncertain"]);
     }));
   }
 
@@ -391,14 +391,16 @@ async function setClaim(client, operation, token, state, leaseMs) {
   return result.rows[0];
 }
 
-async function commitRow(client, operation) {
+async function commitRow(client, operation, states) {
+  if (!Array.isArray(states) || states.length === 0) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
+  const statePlaceholders = states.map((_, index) => `$${index + 3}`).join(",");
   const result = await client.query(`UPDATE managed_signer_provider_operations
     SET state='committed',uncertain_reason=NULL,claim_token_digest=NULL,claim_expires_at=NULL
-    WHERE purpose=$1 AND operation_id=$2
+    WHERE purpose=$1 AND operation_id=$2 AND state IN (${statePlaceholders})
     RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
       key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
       claim_expires_at > clock_timestamp() AS claim_active,
-      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
+      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id, ...states]);
   if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
   return publicRecord(result.rows[0]);
 }

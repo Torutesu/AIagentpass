@@ -116,6 +116,46 @@ REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agen
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
 
+-- Platform approval is migration/admin input, never an application write
+-- surface.  Issuance and deployment state are runtime state-machine surfaces:
+-- the app may insert/update them, but cannot delete authority rows.  These
+-- conditional revokes also make a second roles.sql application safe before
+-- or after migrations 0044/0047 exist.
+DO $$
+BEGIN
+  IF to_regclass('public.platform_promotion_approvals') IS NOT NULL THEN
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.platform_promotion_approvals FROM agentpass_app;
+  END IF;
+  IF to_regclass('public.platform_promotion_issuances') IS NOT NULL THEN
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.platform_promotion_issuances FROM agentpass_app;
+  END IF;
+  IF to_regclass('public.platform_deployment_state') IS NOT NULL THEN
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.platform_deployment_state FROM agentpass_app;
+  END IF;
+  IF to_regclass('public.platform_promotion_audit_events') IS NOT NULL THEN
+    GRANT SELECT, INSERT ON TABLE public.platform_promotion_audit_events TO agentpass_app;
+    REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.platform_promotion_audit_events FROM agentpass_app;
+    GRANT SELECT ON TABLE public.platform_promotion_audit_events TO agentpass_backup;
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.platform_promotion_audit_events FROM agentpass_backup;
+  END IF;
+  IF to_regclass('public.human_identity_assertion_replays') IS NOT NULL THEN
+    REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE public.human_identity_assertion_replays FROM agentpass_app, agentpass_backup;
+  END IF;
+  IF to_regprocedure('public.agentpass_consume_human_identity_assertion(bytea,timestamptz)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.agentpass_consume_human_identity_assertion(bytea,timestamptz) TO agentpass_app;
+  END IF;
+  IF to_regprocedure('public.agentpass_prune_human_identity_assertion_replays(integer)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.agentpass_prune_human_identity_assertion_replays(integer) TO agentpass_app;
+  END IF;
+END
+$$;
+
 -- backup: read-only table and sequence-state access. It cannot consume or
 -- mutate sequences and cannot execute functions.
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO agentpass_backup;

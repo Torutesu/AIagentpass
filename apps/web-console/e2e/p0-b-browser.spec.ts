@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { test as base, expect, type Page, type Route } from "@playwright/test";
-import { disposeVirtualAuthenticator } from "./support/browser-fixtures";
+import { deploymentReadiness, disposeVirtualAuthenticator } from "./support/browser-fixtures";
 
 type Role = "owner" | "admin" | "auditor" | "viewer";
 type WakeStatus = "accepted" | "coalesced" | "no_pending_refresh";
@@ -167,6 +167,7 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
     const url = new URL(request.url());
     if (state.sessionExpired) return json(route, { error: { code: "session_expired", message: "Session expired" } }, 401);
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, summary());
+    if (request.method() === "GET" && url.searchParams.get("resource") === "deployment-readiness") return json(route, deploymentReadiness());
     if (request.method() === "GET") return json(route, { capabilities: [], revocations: [], events: [] });
     if (request.method() !== "POST") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
 

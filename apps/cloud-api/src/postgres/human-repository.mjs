@@ -15,6 +15,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     createSession,
     createSessionWithLimit,
     rotateSession,
+    switchSessionOrganization,
     findSessionByTokenHash,
     updateSessionActivity,
     revokeSession,
@@ -127,13 +128,42 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     });
   }
 
+  async function switchSessionOrganization(input) {
+    const oldSessionId = uuid(input?.old_session_id ?? input?.oldSessionId);
+    const oldTokenHash = bytes32(input?.old_token_hash ?? input?.oldTokenHash);
+    const memberId = uuid(input?.member_id ?? input?.memberId);
+    const oldOrganizationId = uuid(input?.old_organization_id ?? input?.oldOrganizationId);
+    const targetOrganizationId = uuid(input?.target_organization_id ?? input?.targetOrganizationId);
+    const record = input?.session;
+    if (!record || typeof record !== "object") throw new TypeError("switch session record is invalid");
+    const sessionId = uuid(record.session_id);
+    const createdAt = timestamp(record.created_at);
+    const expiresAt = timestamp(record.expires_at);
+    const lastSeenAt = timestamp(record.last_seen_at);
+    const idleExpiresAt = timestamp(record.idle_expires_at);
+    const switchedAt = timestamp(input?.switched_at ?? input?.switchedAt);
+    const reason = bounded(input?.reason ?? "organization_switch", 128);
+    return inTransaction(async (transactionClient) => {
+      await lockSessionSet(transactionClient, memberId);
+      for (const organizationId of [oldOrganizationId, targetOrganizationId].sort()) await lockOrganization(transactionClient, organizationId);
+      const old = await transactionClient.query(`SELECT s.id FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.token_hash=$2 AND s.member_id=$3 AND s.organization_id=$4 AND s.revoked_at IS NULL AND s.expires_at>$5 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$5) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch FOR UPDATE`, [oldSessionId, oldTokenHash, memberId, oldOrganizationId, switchedAt]);
+      if (old.rowCount !== 1) return null;
+      const created = await transactionClient.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,organization_authority_epoch,membership_session_epoch,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,o.authority_epoch,m.session_epoch,$4,$5,$6,$7,$8,$9,NULL,NULL,NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.member_id=$2 AND m.organization_id=$3 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [sessionId, memberId, targetOrganizationId, bytes32(record.token_hash), bytes32(record.csrf_token_hash), createdAt, expiresAt, lastSeenAt, idleExpiresAt]);
+      if (created.rowCount !== 1) throw new TypeError("target organization membership is unavailable");
+      const revoked = await transactionClient.query("UPDATE human_sessions SET revoked_at=COALESCE(revoked_at,$2),revoke_reason=COALESCE(revoke_reason,$3),version=version+1,recent_auth_at=NULL,recent_auth_challenge_id=NULL,recent_auth_organization_id=NULL,recent_auth_operation=NULL,recent_auth_consumed_at=NULL WHERE id=$1 AND token_hash=$4 AND revoked_at IS NULL RETURNING id", [oldSessionId, switchedAt, reason, oldTokenHash]);
+      if (revoked.rowCount !== 1) throw new Error("organization switch lost its old session lock");
+      return sessionRow(created.rows[0]);
+    });
+  }
+
   async function findSessionByTokenHash(input) {
     const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
     return sessionRow(result.rows?.[0]);
   }
 
   async function updateSessionActivity(input) {
-    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
+    const activityAt = input.activity_at ?? input.activityAt ?? input.last_seen_at ?? input.lastSeenAt;
+    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND s.expires_at>$4 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$4) AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt, activityAt]);
     return sessionRow(result.rows?.[0]);
   }
 
@@ -183,7 +213,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function consumeRecentAuth(input) {
-    const result = await client.query(`UPDATE human_sessions s SET recent_auth_consumed_at=$7 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.recent_auth_organization_id=$3 AND s.organization_id=$3 AND s.recent_auth_operation=$4 AND s.recent_auth_challenge_id=$5 AND s.recent_auth_context_hash IS NOT DISTINCT FROM $6::bytea AND s.recent_auth_consumed_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>$7 AND s.recent_auth_at>$7-INTERVAL '5 minutes' AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.recent_auth_at AS authenticated_at, encode(s.recent_auth_context_hash, 'hex') AS context_hash`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), contextHashBytes(input.context_hash), input.consumed_at]);
+    const result = await client.query(`UPDATE human_sessions s SET recent_auth_consumed_at=$7 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.recent_auth_organization_id=$3 AND s.organization_id=$3 AND s.recent_auth_operation=$4 AND s.recent_auth_challenge_id=$5 AND s.recent_auth_context_hash IS NOT DISTINCT FROM $6::bytea AND s.recent_auth_consumed_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>$7 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$7) AND s.recent_auth_at>$7-INTERVAL '5 minutes' AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.recent_auth_at AS authenticated_at, encode(s.recent_auth_context_hash, 'hex') AS context_hash`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), contextHashBytes(input.context_hash), input.consumed_at]);
     return result.rowCount === 1 ? result.rows[0] : null;
   }
 

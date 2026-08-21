@@ -106,3 +106,26 @@ test("preserves PostgreSQL Date millisecond precision in an authorization", asyn
   });
   assert.equal(result.authenticated_at, precise.getTime());
 });
+
+test("enforces recent-auth freshness and returned principal bindings in the service boundary", async () => {
+  const now = authenticatedAt + 1;
+  let mode = "stale";
+  const service = createRecentAuthService({
+    ceremony: { begin() {}, async consume() {} },
+    sessionRepository: {
+      async bindRecentAuth() { return true; },
+      async consumeRecentAuth() {
+        if (mode === "stale") return { authenticated_at: now - 5 * 60 * 1000 - 1 };
+        if (mode === "future") return { authenticated_at: now + 30 * 1000 + 1 };
+        return { authenticated_at: now, session_id: "55555555-5555-4555-8555-555555555555" };
+      }
+    }
+  });
+  const input = { proof: challengeId, principal: { session_id: session.session_id, member_id: session.member_id }, organization_id: session.organization_id, operation, now };
+
+  assert.equal((await service.authorize(input)).verified, false);
+  mode = "future";
+  assert.equal((await service.authorize(input)).verified, false);
+  mode = "principal-substitution";
+  assert.equal((await service.authorize(input)).verified, false);
+});

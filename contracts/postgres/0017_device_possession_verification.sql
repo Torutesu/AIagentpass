@@ -175,7 +175,8 @@ LANGUAGE plpgsql
 IMMUTABLE
 AS $$
 DECLARE
-  item record;
+  item_key text;
+  item_value jsonb;
   key_count integer;
 BEGIN
   IF jsonb_typeof(statement_value) <> 'object' THEN
@@ -194,14 +195,14 @@ BEGIN
     RETURN false;
   END IF;
 
-  FOR item IN SELECT object_entry.key, object_entry.value
+  FOR item_key, item_value IN SELECT object_entry.key, object_entry.value
     FROM jsonb_each(statement_value) AS object_entry(key, value) LOOP
-    IF item.key NOT IN (
+    IF item_key NOT IN (
       'version', 'enrollment_id', 'organization_id', 'device_id',
       'candidate_id', 'artifact_sha256', 'source_commit', 'team_id',
       'device_key_fingerprint', 'device_key_epoch',
       'challenge_nonce_digest', 'issued_at'
-    ) OR jsonb_typeof(item.value) NOT IN ('string', 'number') THEN
+    ) OR jsonb_typeof(item_value) NOT IN ('string', 'number') THEN
       RETURN false;
     END IF;
   END LOOP;

@@ -72,6 +72,28 @@ export function consoleSummary() {
   };
 }
 
+export function deploymentReadiness() {
+  return {
+    version: 1,
+    ready: true,
+    status: "ready",
+    code: "ready",
+    deployment_identity: {
+      version: 1,
+      configured: true,
+      ready: true,
+      source_commit: "a".repeat(40),
+      source_tree: "b".repeat(40),
+      image_digest: `sha256:${"c".repeat(64)}`,
+      deployment_id: "deployment-e2e",
+      revision: "revision-e2e",
+      schema_digest: "d".repeat(64),
+      catalog_digest: "e".repeat(64),
+      database_schema_digest: "f".repeat(64),
+    },
+  };
+}
+
 export type VirtualAuthenticator = Readonly<{
   cdp: Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
   authenticatorId: string;

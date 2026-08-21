@@ -10,6 +10,7 @@ const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
 const PENDING_DEVICE_ID = "33333333-3333-4333-8333-333333333333";
 const NOW = Date.parse("2026-08-13T00:00:00.000Z");
+const RECENT_PROOF = "99999999-9999-4999-8999-999999999999";
 const TOKEN = "ap_owner_token_managed_control_bundle_abcdefghijklmnopqrstuvwxyz";
 const KEY_ID = "control-bundle-managed-2026-08";
 const ISSUER = "agentpass-cloud";
@@ -104,7 +105,7 @@ function createFixture(t, bundleSigner, { enrollmentCredentialSecret = Buffer.al
     },
     enrollmentCredentialSecret,
     now: () => NOW,
-    verifyRecentWebAuthn: async ({ organization_id, principal, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: NOW })
+    verifyRecentWebAuthn: async ({ proof, organization_id, principal, operation }) => ({ verified: true, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: NOW })
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
     t.after(async () => new Promise((done) => server.close(done)));
@@ -139,7 +140,7 @@ test("exposes only managed public metadata on legacy enrollment completion", asy
   const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const issueResponse = await fetch(`${fixture.base}/v1/organizations/${ORGANIZATION_ID}/device-enrollments`, {
     method: "POST",
-    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", "idempotency-key": "managed-enrollment-issue-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", "idempotency-key": "managed-enrollment-issue-0001", "AgentPass-Recent-Auth": RECENT_PROOF },
     body: JSON.stringify({ enrollment_id: enrollmentId, device_id: PENDING_DEVICE_ID, label: "Build Mac", platform: "macos", ttl_ms: 600_000 })
   });
   assert.equal(issueResponse.status, 201, JSON.stringify(await issueResponse.clone().json()));

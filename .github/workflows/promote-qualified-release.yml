@@ -13,6 +13,10 @@ on:
         description: Successful P0-C hardware qualification workflow run ID
         required: true
         type: string
+      ci_run_id:
+        description: Successful canonical CI workflow run ID for the promoted source commit
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -25,6 +29,7 @@ concurrency:
 env:
   CANONICAL_REPOSITORY: Torutesu/AIagentpass
   EXPECTED_CANDIDATE_ARTIFACT: notarized-release-candidate
+  EXPECTED_INTEGRITY_ARTIFACT: release-integrity-evidence
   EXPECTED_APPLE_ARTIFACT: p0c-hardware-apple-silicon
   EXPECTED_INTEL_ARTIFACT: p0c-hardware-intel-t2
   EXPECTED_SUMMARY_ARTIFACT: p0c-hardware-qualification-summary
@@ -42,12 +47,23 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
       RELEASE_ALLOWED_SIGNERS: ${{ vars.AGENTPASS_RELEASE_ALLOWED_SIGNERS }}
       APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
       INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
       APPROVED_OPERATOR_POLICY_JSON: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON }}
+      EXPECTED_KMS_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST }}
+      EXPECTED_KMS_RUN_ID: ${{ vars.AGENTPASS_KMS_QUALIFICATION_RUN_ID }}
+      EXPECTED_KMS_JOB_ID: ${{ vars.AGENTPASS_KMS_QUALIFICATION_JOB_ID }}
+      EXPECTED_PLATFORM_AUTH_PRIMARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST }}
+      EXPECTED_PLATFORM_AUTH_SECONDARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST }}
+      EXPECTED_PLATFORM_AUTH_RUN_ID: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID }}
+      EXPECTED_PLATFORM_AUTH_JOB_ID: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID }}
+      RELEASE_EVIDENCE_INDEX_JSON: ${{ vars.AGENTPASS_RELEASE_EVIDENCE_INDEX_JSON }}
+      EXTERNAL_QUALIFICATION_EVIDENCE_JSON: ${{ vars.AGENTPASS_EXTERNAL_QUALIFICATION_EVIDENCE_JSON }}
+      EXTERNAL_QUALIFICATION_BINDING_JSON: ${{ vars.AGENTPASS_EXTERNAL_QUALIFICATION_BINDING_JSON }}
 
     steps:
       - id: paths
@@ -68,9 +84,11 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "$CANONICAL_REPOSITORY" ]] || { echo "canonical repository required" >&2; exit 1; }
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "protected main ref required" >&2; exit 1; }
-          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
-          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ || "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{19}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ || "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{19}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ || "$CI_RUN_ID" =~ ^[1-9][0-9]{19}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
           [[ "$RELEASE_RUN_ID" != "$QUALIFICATION_RUN_ID" ]] || { echo "release and qualification runs must be distinct" >&2; exit 1; }
+          [[ "$CI_RUN_ID" != "$RELEASE_RUN_ID" && "$CI_RUN_ID" != "$QUALIFICATION_RUN_ID" ]] || { echo "CI run must be distinct from release and qualification runs" >&2; exit 1; }
           : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest fingerprint is required}"
           : "${EXPECTED_TEAM_ID:?release Team ID is required}"
           : "${RELEASE_ALLOWED_SIGNERS:?annotated-tag signer policy is required}"
@@ -82,8 +100,14 @@ jobs:
           release_run="$PROMOTION_ROOT/api/release-run.json"
           qualification_run="$PROMOTION_ROOT/api/qualification-run.json"
           release_artifacts="$PROMOTION_ROOT/api/release-artifacts.json"
+          release_jobs="$PROMOTION_ROOT/api/release-jobs.json"
           qualification_artifacts="$PROMOTION_ROOT/api/qualification-artifacts.json"
           qualification_jobs="$PROMOTION_ROOT/api/qualification-jobs.json"
+          ci_run="$PROMOTION_ROOT/api/ci-run.json"
+          ci_jobs="$PROMOTION_ROOT/api/ci-jobs.json"
+          ci_commit="$PROMOTION_ROOT/api/ci-commit.json"
+          release_evidence="$PROMOTION_ROOT/api/release-workflow-evidence.json"
+          qualification_evidence="$PROMOTION_ROOT/api/qualification-workflow-evidence.json"
 
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > "$release_run"
@@ -92,9 +116,17 @@ jobs:
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" > "$release_artifacts"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" > "$release_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
           gh api --method GET -H 'Accept: application/vnd.github+json' \
             "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID" > "$ci_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/git/commits/$(jq -er '.head_sha' "$ci_run")" > "$ci_commit"
 
           jq -e --arg repo "$CANONICAL_REPOSITORY" --arg run "$RELEASE_RUN_ID" '
             (.id | tostring) == $run and
@@ -120,6 +152,32 @@ jobs:
             .head_branch == "main" and
             (.head_sha | test("^[0-9a-f]{40}$"))
           ' "$qualification_run" >/dev/null
+          release_head_sha="$(jq -er '.head_sha' "$release_run")"
+          qualification_head_sha="$(jq -er '.head_sha' "$qualification_run")"
+          node scripts/release/ci-preflight.mjs github-evidence \
+            "$release_run" "$release_jobs" "$release_artifacts" "$CANONICAL_REPOSITORY" \
+            "Release candidate" ".github/workflows/release-candidate.yml" "workflow_dispatch" \
+            "$RELEASE_RUN_ID" "$release_head_sha" \
+            --job=verify-source --job=signed-candidate \
+            --artifact="$EXPECTED_CANDIDATE_ARTIFACT" --artifact="$EXPECTED_INTEGRITY_ARTIFACT" > "$release_evidence"
+          node scripts/release/ci-preflight.mjs github-evidence \
+            "$qualification_run" "$qualification_jobs" "$qualification_artifacts" "$CANONICAL_REPOSITORY" \
+            "P0-C hardware qualification" ".github/workflows/p0c-hardware-qualification.yml" "workflow_dispatch" \
+            "$QUALIFICATION_RUN_ID" "$qualification_head_sha" \
+            --job=validate-candidate --job=aggregate-qualification --job=apple-silicon-qualification --job=intel-t2-qualification \
+            --artifact="$EXPECTED_APPLE_ARTIFACT" --artifact="$EXPECTED_INTEL_ARTIFACT" --artifact="$EXPECTED_SUMMARY_ARTIFACT" > "$qualification_evidence"
+          jq -e --arg run "$RELEASE_RUN_ID" --arg sha "$release_head_sha" '
+            (.total_count == (.jobs | length)) and
+            (.jobs | length == 2) and
+            (all(.jobs[]; (.run_id | tostring) == $run and .head_sha == $sha and .status == "completed" and .conclusion == "success")) and
+            (([.jobs[].name] | sort) == ["signed-candidate", "verify-source"])
+          ' "$release_jobs" >/dev/null
+          jq -e --arg run "$QUALIFICATION_RUN_ID" --arg sha "$qualification_head_sha" '
+            (.total_count == (.jobs | length)) and
+            (.jobs | length == 4) and
+            (all(.jobs[]; (.run_id | tostring) == $run and .head_sha == $sha and .status == "completed" and .conclusion == "success")) and
+            (([.jobs[].name] | sort) == ["aggregate-qualification", "apple-silicon-qualification", "intel-t2-qualification", "validate-candidate"])
+          ' "$qualification_jobs" >/dev/null
           jq -e '
             ([.jobs[] | select(.name == "validate-candidate" and .conclusion == "success" and any(.steps[]?; .name == "Validate exact same-repository release-candidate run" and .conclusion == "success"))] | length) == 1 and
             ([.jobs[] | select(.name == "aggregate-qualification" and .conclusion == "success")] | length) == 1
@@ -128,19 +186,35 @@ jobs:
           jq -e --arg name "$EXPECTED_CANDIDATE_ARTIFACT" --arg run "$RELEASE_RUN_ID" '
             ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
           ' "$release_artifacts" >/dev/null
+          jq -e --arg name "$EXPECTED_INTEGRITY_ARTIFACT" --arg run "$RELEASE_RUN_ID" '
+            ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
+          ' "$release_artifacts" >/dev/null
           for artifact_name in "$EXPECTED_APPLE_ARTIFACT" "$EXPECTED_INTEL_ARTIFACT" "$EXPECTED_SUMMARY_ARTIFACT"; do
             jq -e --arg name "$artifact_name" --arg run "$QUALIFICATION_RUN_ID" '
               ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
             ' "$qualification_artifacts" >/dev/null
           done
 
-          release_head_sha="$(jq -er '.head_sha' "$release_run")"
-          qualification_head_sha="$(jq -er '.head_sha' "$qualification_run")"
+          node scripts/release/ci-preflight.mjs github \
+            "$ci_run" "$ci_jobs" "$release_head_sha" "$CANONICAL_REPOSITORY" "$CI_RUN_ID" > "$PROMOTION_ROOT/api/ci-preflight.json"
+          ci_head_sha="$(jq -er '.head_sha' "$ci_run")"
+          ci_run_attempt="$(jq -er '.run_attempt | tostring' "$ci_run")"
+          node scripts/release/ci-preflight.mjs github-commit \
+            "$ci_commit" "$CANONICAL_REPOSITORY" "$release_head_sha" > "$PROMOTION_ROOT/api/ci-commit-binding.json"
+          independent_tree_sha="$(jq -er '.tree_sha' "$PROMOTION_ROOT/api/ci-commit-binding.json")"
+          [[ "$independent_tree_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "independent GitHub tree lookup is invalid" >&2; exit 1; }
+          [[ "$release_head_sha" == "$qualification_head_sha" && "$release_head_sha" == "$ci_head_sha" ]] || {
+            echo "release, qualification, and CI runs are not bound to one source commit" >&2
+            exit 1
+          }
           {
             printf 'release_run_id=%s\n' "$RELEASE_RUN_ID"
             printf 'qualification_run_id=%s\n' "$QUALIFICATION_RUN_ID"
             printf 'release_head_sha=%s\n' "$release_head_sha"
             printf 'qualification_head_sha=%s\n' "$qualification_head_sha"
+            printf 'ci_head_sha=%s\n' "$ci_head_sha"
+            printf 'ci_run_attempt=%s\n' "$ci_run_attempt"
+            printf 'independent_tree_sha=%s\n' "$independent_tree_sha"
           } >> "$GITHUB_OUTPUT"
 
           # Completed-run metadata does not expose workflow_dispatch inputs in the
@@ -164,8 +238,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
-          mkdir -m 0700 -p "$PROMOTION_ROOT/candidate" "$PROMOTION_ROOT/apple" "$PROMOTION_ROOT/intel" "$PROMOTION_ROOT/summary" "$PROMOTION_ROOT/output"
+          [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/integrity" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
+          mkdir -m 0700 -p "$PROMOTION_ROOT/candidate" "$PROMOTION_ROOT/integrity" "$PROMOTION_ROOT/apple" "$PROMOTION_ROOT/intel" "$PROMOTION_ROOT/summary" "$PROMOTION_ROOT/output"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -174,6 +248,14 @@ jobs:
           run-id: ${{ steps.preflight.outputs.release_run_id }}
           github-token: ${{ github.token }}
           path: ${{ steps.paths.outputs.promotion_root }}/candidate
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-integrity-evidence
+          repository: Torutesu/AIagentpass
+          run-id: ${{ steps.preflight.outputs.release_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.paths.outputs.promotion_root }}/integrity
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -199,11 +281,27 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ steps.paths.outputs.promotion_root }}/summary
 
+      - name: Secret-scan every promoted artifact, archive, and expanded PKG before cataloging
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_scan="$RUNNER_TEMP/agentpass-candidate-artifact-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          promoted_scan="$RUNNER_TEMP/agentpass-promoted-artifact-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          [[ ! -e "$candidate_scan" && ! -e "$promoted_scan" ]] || { echo "promotion scan evidence path already exists" >&2; exit 1; }
+          node scripts/release/ci-preflight.mjs artifact-scan \
+            "$PROMOTION_ROOT/candidate" "$candidate_scan"
+          cmp -s "$candidate_scan" "$PROMOTION_ROOT/integrity/artifact-scan.json" || { echo "candidate artifact scan evidence changed after release" >&2; exit 1; }
+          node scripts/release/ci-preflight.mjs artifact-scan \
+            "$PROMOTION_ROOT" "$promoted_scan"
+          install -m 0644 "$promoted_scan" "$PROMOTION_ROOT/output/promoted-artifact-scan.json"
+
       - id: catalog
         name: Catalog only the exact downloaded candidate and qualification evidence
         shell: bash
         env:
+          CI_RUN_ID: ${{ env.CI_RUN_ID }}
           CANDIDATE_DIR: ${{ steps.paths.outputs.promotion_root }}/candidate
+          INTEGRITY_DIR: ${{ steps.paths.outputs.promotion_root }}/integrity
           APPLE_DIR: ${{ steps.paths.outputs.promotion_root }}/apple
           INTEL_DIR: ${{ steps.paths.outputs.promotion_root }}/intel
           SUMMARY_DIR: ${{ steps.paths.outputs.promotion_root }}/summary
@@ -214,6 +312,7 @@ jobs:
           import path from 'node:path';
           import crypto from 'node:crypto';
           import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './scripts/release/n3e/controller-identity-contract.mjs';
+          import { assertTerminalResults } from './scripts/release/ci-preflight.mjs';
 
           const safeName = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
           const filesIn = (directory, label) => {
@@ -232,6 +331,9 @@ jobs:
           };
           const candidate = path.resolve(process.env.CANDIDATE_DIR);
           const candidateNames = filesIn(candidate, 'candidate artifact');
+          const integrity = path.resolve(process.env.INTEGRITY_DIR);
+          const integrityNames = filesIn(integrity, 'release integrity evidence');
+          if (integrityNames.length !== 4 || !integrityNames.includes('ci-preflight.json') || !integrityNames.includes('artifact-scan.json') || !integrityNames.includes('kms-qualification.json') || !integrityNames.includes('platform-auth-qualification.json')) throw new Error('release integrity evidence artifact is not exact');
           const manifestName = exactly(candidateNames, (name) => name.endsWith('.release-manifest.json'), 'release manifest');
           const signatureName = exactly(candidateNames, (name) => name.endsWith('.release-manifest.sig'), 'release manifest signature');
           const sbomName = exactly(candidateNames, (name) => name.endsWith('.spdx.json'), 'SBOM');
@@ -255,11 +357,27 @@ jobs:
           const controllerEvidence = controller.notarization?.evidence;
           if (!controller.notarization || controller.notarization.status !== 'accepted_stapled' || !Array.isArray(controller.notarization.submission_ids) || controller.notarization.submission_ids.length === 0 || !Array.isArray(controllerEvidence) || controllerEvidence.length !== 2 || new Set(controllerEvidence.map((item) => item.kind)).size !== 2 || !controllerEvidence.some((item) => item.kind === 'notarytool_result') || !controllerEvidence.some((item) => item.kind === 'stapler_result')) throw new Error('candidate controller notarization is incomplete');
           for (const evidence of controllerEvidence) { if (!safeName(evidence.name)) throw new Error('candidate controller notarization evidence name is unsafe'); const bytes = fs.readFileSync(path.join(candidate, evidence.name)); if (bytes.length !== evidence.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== evidence.sha256) throw new Error('candidate controller notarization evidence digest mismatch'); }
+          const ciEvidencePath = path.join(integrity, 'ci-preflight.json');
+          const ciEvidence = JSON.parse(fs.readFileSync(ciEvidencePath, 'utf8'));
+          if (!ciEvidence || ciEvidence.run_id !== process.env.CI_RUN_ID || ciEvidence.head_sha !== manifest.source.commit || !Array.isArray(ciEvidence.terminal_results)) throw new Error('candidate CI evidence is not bound to the selected run and source');
+          assertTerminalResults(ciEvidence.terminal_results, { expectedSha: manifest.source.commit, expectedRunId: process.env.CI_RUN_ID });
+          const readApiEvidence = (name, runId, expectedArtifacts) => {
+            const evidence = JSON.parse(fs.readFileSync(path.join(process.env.PROMOTION_ROOT, 'api', name), 'utf8'));
+            if (evidence.repository !== 'Torutesu/AIagentpass' || evidence.run_id !== runId || evidence.head_sha !== manifest.source.commit || evidence.status !== 'completed' || evidence.conclusion !== 'success' || !/^[1-9][0-9]*$/.test(evidence.run_attempt) || evidence.artifacts?.length !== expectedArtifacts.length || evidence.artifacts.some((item) => !expectedArtifacts.includes(item.name) || !/^sha256:[0-9a-f]{64}$/.test(item.digest) || item.run_id !== runId || item.head_sha !== manifest.source.commit || item.status !== 'completed' || item.conclusion !== 'success')) throw new Error(`${name} is not consistently bound to the selected repository, run, source, terminal state, and artifact digests`);
+            return evidence;
+          };
+          readApiEvidence('release-workflow-evidence.json', process.env.RELEASE_RUN_ID, ['notarized-release-candidate', 'release-integrity-evidence']);
+          readApiEvidence('qualification-workflow-evidence.json', process.env.QUALIFICATION_RUN_ID, ['p0c-hardware-apple-silicon', 'p0c-hardware-intel-t2', 'p0c-hardware-qualification-summary']);
+          const scanEvidence = JSON.parse(fs.readFileSync(path.join(integrity, 'artifact-scan.json'), 'utf8'));
+          if (scanEvidence.version !== 1 || scanEvidence.clean !== true || !Array.isArray(scanEvidence.files)) throw new Error('candidate artifact scan evidence is invalid');
           const fixed = new Set([manifestName, signatureName, sbomName, packageName, migrationName, 'release-manifest.public.pem', 'release-attestation.json', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', controllerArchive.name, identityDocument.name, ...controllerEvidence.map((item) => item.name)]);
           if (candidateNames.length !== fixed.size || candidateNames.some((name) => !fixed.has(name))) throw new Error('candidate artifact contains unexpected or missing files');
           const product = manifest.artifacts?.filter((item) => item.role === 'product');
           if (product?.length !== 1 || product[0].name !== packageName || product[0].name === controllerArchive.name) throw new Error('candidate product is not manifest-bound');
           if (!/^[0-9a-f]{64}$/.test(product[0].sha256) || manifest.candidate_id !== `release-pkg-sha256-v1-${product[0].sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
+          const scannedProduct = scanEvidence.files.find((item) => item.path === packageName && item.kind === 'pkg' && item.sha256 === product[0].sha256);
+          const scannedController = scanEvidence.files.find((item) => item.path === controllerArchive.name && item.kind === 'archive' && item.sha256 === controllerArchive.sha256);
+          if (!scannedProduct || !scannedController) throw new Error('candidate artifact scan evidence does not cover the manifest-bound PKG and controller archive');
 
           const lane = (directory, label) => {
             const root = path.resolve(directory);
@@ -285,6 +403,7 @@ jobs:
           const output = process.env.GITHUB_OUTPUT;
           const values = {
             manifest: path.join(candidate, manifestName),
+            migration_manifest: path.join(candidate, migrationName),
             signature: path.join(candidate, signatureName),
             public_key: path.join(candidate, 'release-manifest.public.pem'),
             artifact: path.join(candidate, packageName),
@@ -299,7 +418,9 @@ jobs:
             intel_public_key: path.join(process.env.INTEL_DIR, 'operator-public.pem'),
             intel_evidence: path.join(process.env.INTEL_DIR, 'evidence'),
             retained_summary: path.join(summary, 'qualification-summary.json'),
-            dispatch_binding: path.join(summary, 'qualification-dispatch-binding.json')
+            dispatch_binding: path.join(summary, 'qualification-dispatch-binding.json'),
+            kms_qualification: path.join(integrity, 'kms-qualification.json'),
+            platform_auth_qualification: path.join(integrity, 'platform-auth-qualification.json')
           };
           for (const [key, value] of Object.entries(values)) fs.appendFileSync(output, `${key}=${value}\n`);
           NODE
@@ -312,6 +433,8 @@ jobs:
           MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
           RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          CI_HEAD_SHA: ${{ steps.preflight.outputs.ci_head_sha }}
+          INDEPENDENT_TREE_SHA: ${{ steps.preflight.outputs.independent_tree_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -336,8 +459,103 @@ jobs:
           const bytes = fs.readFileSync(packagePath);
           if (!product || product.name !== path.basename(packagePath) || product.bytes !== bytes.length || product.sha256 !== crypto.createHash('sha256').update(bytes).digest('hex')) throw new Error('product package is not exactly manifest-bound');
           if (manifest.candidate_id !== `release-pkg-sha256-v1-${product.sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_tag=${manifest.source.tag}\nsource_commit=${manifest.source.commit}\nsource_tree=${manifest.source.tree}\n`);
+          const product = manifest.artifacts.find((item) => item.role === 'product');
+          if (!product || !/^[0-9a-f]{64}$/.test(product.sha256)) throw new Error('signed manifest product digest is missing');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_tag=${manifest.source.tag}\nsource_commit=${manifest.source.commit}\nsource_tree=${manifest.source.tree}\nproduct_artifact_sha256=${product.sha256}\n`);
           NODE
+
+      - id: qualification-evidence
+        name: Verify canonical KMS and Platform Auth qualification evidence for the exact release SHA
+        env:
+          KMS_EVIDENCE: ${{ steps.catalog.outputs.kms_qualification }}
+          PLATFORM_AUTH_EVIDENCE: ${{ steps.catalog.outputs.platform_auth_qualification }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          EXPECTED_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
+          EXPECTED_KMS_DEPLOYMENT_DIGEST: ${{ env.EXPECTED_KMS_DEPLOYMENT_DIGEST }}
+          EXPECTED_KMS_RUN_ID: ${{ env.EXPECTED_KMS_RUN_ID }}
+          EXPECTED_KMS_JOB_ID: ${{ env.EXPECTED_KMS_JOB_ID }}
+          EXPECTED_PLATFORM_AUTH_RUN_ID: ${{ env.EXPECTED_PLATFORM_AUTH_RUN_ID }}
+          EXPECTED_PLATFORM_AUTH_JOB_ID: ${{ env.EXPECTED_PLATFORM_AUTH_JOB_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - "$KMS_EVIDENCE" "$PLATFORM_AUTH_EVIDENCE" "$EXPECTED_SOURCE_COMMIT" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [kmsPath, platformPath, expectedSourceCommit] = process.argv.slice(2);
+          for (const file of [kmsPath, platformPath]) {
+            const bytes = fs.readFileSync(file);
+            const text = bytes.toString('utf8');
+            let value;
+            try { value = JSON.parse(text); } catch { throw new Error(`qualification evidence is not JSON: ${file}`); }
+            if (text !== canonicalJson(value)) throw new Error(`qualification evidence is not canonical JSON: ${file}`);
+            if (value.status !== 'passed' || value.qualified !== true || value.source_commit !== expectedSourceCommit) throw new Error(`qualification evidence is not passed and source-bound: ${file}`);
+          }
+          NODE
+          node scripts/release/ci-preflight.mjs kms-qualification "$KMS_EVIDENCE" "$EXPECTED_SOURCE_COMMIT" "$EXPECTED_SOURCE_TREE" "$EXPECTED_KMS_DEPLOYMENT_DIGEST" "$EXPECTED_KMS_RUN_ID" "$EXPECTED_KMS_JOB_ID" > "$PROMOTION_ROOT/output/kms-qualification-verification.json"
+          node scripts/release/ci-preflight.mjs platform-auth-qualification "$PLATFORM_AUTH_EVIDENCE" "$EXPECTED_SOURCE_COMMIT" "$EXPECTED_SOURCE_TREE" "$EXPECTED_PLATFORM_AUTH_PRIMARY_DEPLOYMENT_DIGEST" "$EXPECTED_PLATFORM_AUTH_SECONDARY_DEPLOYMENT_DIGEST" "$EXPECTED_PLATFORM_AUTH_RUN_ID" "$EXPECTED_PLATFORM_AUTH_JOB_ID" > "$PROMOTION_ROOT/output/platform-auth-qualification-verification.json"
+          node --input-type=module - "$PROMOTION_ROOT/output/kms-qualification-verification.json" "$PROMOTION_ROOT/output/platform-auth-qualification-verification.json" "$EXPECTED_SOURCE_COMMIT" <<'NODE'
+          import fs from 'node:fs';
+          const [kmsPath, platformPath, expectedSourceCommit] = process.argv.slice(2);
+          const results = [
+            ['KMS qualification', JSON.parse(fs.readFileSync(kmsPath, 'utf8'))],
+            ['Platform Auth qualification', JSON.parse(fs.readFileSync(platformPath, 'utf8'))]
+          ];
+          for (const [label, result] of results) {
+            if (result.status !== 'passed' || result.qualified !== true || result.source_commit !== expectedSourceCommit || !/^[0-9a-f]{64}$/.test(result.evidence_sha256)) throw new Error(`${label} verification result is incomplete`);
+            const line = `${label}: status=passed source_commit=${result.source_commit} evidence_sha256=${result.evidence_sha256}`;
+            console.log(line);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
+          }
+          NODE
+          printf 'kms_evidence_sha256=%s\n' "$(node -p "JSON.parse(require('fs').readFileSync('$PROMOTION_ROOT/output/kms-qualification-verification.json')).evidence_sha256")" >> "$GITHUB_OUTPUT"
+          printf 'platform_auth_evidence_sha256=%s\n' "$(node -p "JSON.parse(require('fs').readFileSync('$PROMOTION_ROOT/output/platform-auth-qualification-verification.json')).evidence_sha256")" >> "$GITHUB_OUTPUT"
+
+      - id: external-qualification
+        name: Verify aggregate external qualification before promotion
+        env:
+          EVIDENCE_JSON: ${{ env.EXTERNAL_QUALIFICATION_EVIDENCE_JSON }}
+          BINDING_JSON: ${{ env.EXTERNAL_QUALIFICATION_BINDING_JSON }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          EXPECTED_SOURCE_TREE: ${{ steps.preflight.outputs.independent_tree_sha }}
+          EXPECTED_RELEASE_ARTIFACT_SHA256: ${{ steps.release.outputs.product_artifact_sha256 }}
+          EXPECTED_CI_RUN_ID: ${{ env.CI_RUN_ID }}
+          EXPECTED_CI_RUN_ATTEMPT: ${{ steps.preflight.outputs.ci_run_attempt }}
+          EVIDENCE_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/output/external-qualification.json
+          BINDING_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/output/external-qualification-binding.json
+          VERIFICATION_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/output/external-qualification-verification.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${EVIDENCE_JSON:?protected aggregate external qualification evidence is required}"
+          : "${BINDING_JSON:?protected aggregate external qualification binding is required}"
+          node --input-type=module - "$EVIDENCE_OUTPUT" "$BINDING_OUTPUT" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [evidencePath, bindingPath] = process.argv.slice(2);
+          const evidenceText = process.env.EVIDENCE_JSON;
+          const bindingText = process.env.BINDING_JSON;
+          let evidence; let binding;
+          try { evidence = JSON.parse(evidenceText); binding = JSON.parse(bindingText); } catch { throw new Error('protected aggregate qualification inputs must be JSON'); }
+          if (evidenceText !== canonicalJson(evidence) || bindingText !== canonicalJson(binding)) throw new Error('protected aggregate qualification inputs must be canonical JSON');
+          const expected = {
+            repository: process.env.CANONICAL_REPOSITORY,
+            source_commit: process.env.EXPECTED_SOURCE_COMMIT,
+            source_tree: process.env.EXPECTED_SOURCE_TREE,
+            release_artifact_sha256: process.env.EXPECTED_RELEASE_ARTIFACT_SHA256,
+            ci_run_id: process.env.EXPECTED_CI_RUN_ID,
+            ci_run_attempt: process.env.EXPECTED_CI_RUN_ATTEMPT
+          };
+          for (const [key, value] of Object.entries(expected)) if (binding[key] !== value) throw new Error(`aggregate qualification binding ${key} does not match the selected promotion candidate`);
+          for (const [output, text] of [[evidencePath, evidenceText], [bindingPath, bindingText]]) {
+            const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+            try { fs.writeSync(fd, text, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          }
+          NODE
+          node scripts/release/ci-preflight.mjs external-qualification "$EVIDENCE_OUTPUT" "$BINDING_OUTPUT" > "$VERIFICATION_OUTPUT"
+          node scripts/release/ci-preflight.mjs secret-scan "$EVIDENCE_OUTPUT" "$BINDING_OUTPUT" "$VERIFICATION_OUTPUT" >/dev/null
+          install -m 0644 "$EVIDENCE_OUTPUT" "$PROMOTION_ROOT/integrity/external-qualification.json"
+          install -m 0644 "$VERIFICATION_OUTPUT" "$PROMOTION_ROOT/integrity/external-qualification-verification.json"
 
       - id: source
         name: Verify annotated tag and source identity before promotion
@@ -346,6 +564,8 @@ jobs:
           MANIFEST_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
           MANIFEST_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
           RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          CI_HEAD_SHA: ${{ steps.preflight.outputs.ci_head_sha }}
+          INDEPENDENT_TREE_SHA: ${{ steps.preflight.outputs.independent_tree_sha }}
           ALLOWED_SIGNERS: ${{ env.RELEASE_ALLOWED_SIGNERS }}
         shell: bash
         run: |
@@ -369,6 +589,12 @@ jobs:
           tag_tree="$(git rev-parse "$RELEASE_TAG^{tree}")"
           [[ "$tag_commit" == "$MANIFEST_SOURCE_COMMIT" ]] || { echo "annotated tag commit differs from signed manifest" >&2; exit 1; }
           [[ "$tag_tree" == "$MANIFEST_SOURCE_TREE" ]] || { echo "annotated tag tree differs from signed manifest" >&2; exit 1; }
+          binding="$PROMOTION_ROOT/api/source-binding.json"
+          jq -n --arg release "$RELEASE_RUN_HEAD_SHA" --arg qualification "${{ steps.preflight.outputs.qualification_head_sha }}" \
+            --arg ci "$CI_HEAD_SHA" --arg manifest "$MANIFEST_SOURCE_COMMIT" --arg tree "$MANIFEST_SOURCE_TREE" \
+            --arg independent "$INDEPENDENT_TREE_SHA" \
+            '{releaseHeadSha:$release,qualificationHeadSha:$qualification,ciHeadSha:$ci,manifestSourceCommit:$manifest,manifestSourceTree:$tree,independentTreeSha:$independent}' > "$binding"
+          node scripts/release/ci-preflight.mjs source-binding "$binding" > "$PROMOTION_ROOT/api/source-binding-result.json"
           git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
           [[ "$(git show "$tag_commit:package.json" | node -e 'let s="";process.stdin.on("data",(chunk)=>s+=chunk).on("end",()=>process.stdout.write(`v${JSON.parse(s).version}`))')" == "$RELEASE_TAG" ]] || { echo "tag and package version disagree" >&2; exit 1; }
           printf 'tag_commit=%s\n' "$tag_commit" >> "$GITHUB_OUTPUT"
@@ -441,6 +667,221 @@ jobs:
           if (summary.artifact_sha256 !== product.sha256) throw new Error('qualification summary product digest differs from signed manifest');
           NODE
 
+      - name: Verify externally pinned staging deployment and rollback evidence
+        env:
+          DEPLOYMENT_EVIDENCE_JSON: ${{ vars.AGENTPASS_DEPLOYMENT_EVIDENCE_JSON }}
+          DEPLOYMENT_BINDING_JSON: ${{ vars.AGENTPASS_DEPLOYMENT_BINDING_JSON }}
+          DEPLOYMENT_ATTESTATION_JSON: ${{ vars.AGENTPASS_DEPLOYMENT_ATTESTATION_JSON }}
+          DEPLOYMENT_ATTESTATION_PUBLIC_KEY: ${{ vars.AGENTPASS_DEPLOYMENT_ATTESTATION_PUBLIC_KEY }}
+          DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY: ${{ vars.AGENTPASS_DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY }}
+          DATABASE_SCHEMA_EVIDENCE_JSON: ${{ vars.AGENTPASS_CLOUD_DATABASE_SCHEMA_EVIDENCE_JSON }}
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          MIGRATION_MANIFEST: ${{ steps.catalog.outputs.migration_manifest }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+          RELEASE_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          DEPLOYMENT_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/output/deployment-gate.json
+          DEPLOYMENT_INTEGRITY_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/integrity/deployment-gate.json
+          DEPLOYMENT_EVIDENCE_INTEGRITY_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/integrity/deployment-evidence.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOYMENT_EVIDENCE_JSON:?protected deployment evidence input is required}"
+          : "${DEPLOYMENT_BINDING_JSON:?protected deployment binding input is required}"
+          : "${DEPLOYMENT_ATTESTATION_JSON:?signed deployment attestation input is required}"
+          : "${DEPLOYMENT_ATTESTATION_PUBLIC_KEY:?deployment attestation public key is required}"
+          : "${DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY:?deployment trust root public key is required}"
+          : "${DATABASE_SCHEMA_EVIDENCE_JSON:?database schema evidence is required}"
+          node --input-type=module - "$PROMOTION_ROOT/api/deployment-evidence.json" "$PROMOTION_ROOT/api/deployment-binding.json" "$PROMOTION_ROOT/api/database-schema-evidence.json" <<'NODE'
+          import fs from 'node:fs';
+          const [evidencePath, bindingPath, databaseEvidencePath] = process.argv.slice(2);
+          const attestationPath = `${process.env.PROMOTION_ROOT}/api/deployment-attestation.json`;
+          const publicKeyPath = `${process.env.PROMOTION_ROOT}/api/deployment-attestation-public.pem`;
+          for (const [output, input] of [[evidencePath, process.env.DEPLOYMENT_EVIDENCE_JSON], [bindingPath, process.env.DEPLOYMENT_BINDING_JSON], [attestationPath, process.env.DEPLOYMENT_ATTESTATION_JSON], [databaseEvidencePath, process.env.DATABASE_SCHEMA_EVIDENCE_JSON]]) {
+            if (typeof input !== 'string' || input.length === 0) throw new Error('protected deployment input is missing');
+            let value;
+            try { value = JSON.parse(input); } catch { throw new Error('protected deployment input is not JSON'); }
+            if (input !== JSON.stringify(value, null, 2) + '\n') throw new Error('protected deployment input must be canonical JSON');
+            const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+            try { fs.writeSync(fd, input, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          }
+          const key = process.env.DEPLOYMENT_ATTESTATION_PUBLIC_KEY;
+          if (!key.includes('BEGIN PUBLIC KEY') || !key.includes('END PUBLIC KEY')) throw new Error('deployment attestation public key is not PEM');
+          const keyFd = fs.openSync(publicKeyPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeFileSync(keyFd, key, 'utf8'); fs.fsyncSync(keyFd); } finally { fs.closeSync(keyFd); }
+          NODE
+          npm run release:deployment-gate -- "$PROMOTION_ROOT/api/deployment-evidence.json" "$PROMOTION_ROOT/api/deployment-binding.json" > "$DEPLOYMENT_OUTPUT"
+          node --input-type=module - "$DEPLOYMENT_OUTPUT" "$PROMOTION_ROOT/api/deployment-attestation.json" "$PROMOTION_ROOT/api/deployment-attestation-public.pem" "$MANIFEST" "$PRODUCT_PKG" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import { deriveDeploymentIdentity } from './scripts/release/derive-deployment-identity.mjs';
+          import { readDeploymentAttestationTrust, verifyDeploymentAttestation, verifyDeploymentAttestationTrust } from './scripts/release/deployment-attestation.mjs';
+          import { deploymentEvidenceSHA256 } from './scripts/release/deployment-gate.mjs';
+          import { verifyDatabaseSchemaEvidence } from './scripts/release/database-schema-evidence.mjs';
+          const [evidencePath, attestationPath, publicKeyPath, manifestPath, packagePath] = process.argv.slice(2);
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+          const databaseEvidencePath = `${process.env.PROMOTION_ROOT}/api/database-schema-evidence.json`;
+          const databaseEvidence = JSON.parse(fs.readFileSync(databaseEvidencePath, 'utf8'));
+          const attestation = JSON.parse(fs.readFileSync(attestationPath, 'utf8'));
+          const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
+          const trustManifest = readDeploymentAttestationTrust(`${process.env.GITHUB_WORKSPACE}/ops/trust/deployment-attestation-trust.v1.json`, { rootPublicKey: process.env.DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY });
+          const manifestBytes = fs.readFileSync(manifestPath);
+          const manifest = JSON.parse(manifestBytes);
+          const product = manifest.artifacts?.find((item) => item.role === 'product');
+          const packageDigest = crypto.createHash('sha256').update(fs.readFileSync(packagePath)).digest('hex');
+          const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+          if (evidence.environment !== 'staging' || evidence.source_commit !== manifest.source?.commit || evidence.source_tree !== manifest.source?.tree || evidence.artifact_sha256 !== packageDigest || evidence.release_manifest_sha256 !== manifestDigest || evidence.artifact_sha256 !== product?.sha256) throw new Error('deployment evidence is not bound to the selected release candidate');
+          const derived = deriveDeploymentIdentity({ repositoryRoot: process.env.GITHUB_WORKSPACE, commit: process.env.RELEASE_SOURCE_COMMIT, migrationManifestPath: process.env.MIGRATION_MANIFEST });
+          if (derived.source_commit !== manifest.source?.commit || derived.source_tree !== manifest.source?.tree || evidence.schema_digest !== derived.schema_digest || evidence.catalog_digest !== derived.catalog_digest) throw new Error('deployment evidence schema/catalog identity is not bound to the selected source and candidate migration manifest');
+          if (evidence.run_id !== process.env.GITHUB_RUN_ID || evidence.run_attempt !== process.env.GITHUB_RUN_ATTEMPT || evidence.job_id !== process.env.GITHUB_JOB) throw new Error('deployment evidence is not bound to this promotion run');
+          const expectedDatabaseEvidence = { environment: evidence.environment, deployment_id: evidence.deployment_id, revision: evidence.revision, source_commit: evidence.source_commit, source_tree: evidence.source_tree, database_schema_digest: evidence.database_schema_digest };
+          const verifiedDatabaseEvidence = verifyDatabaseSchemaEvidence(databaseEvidence, { expected: expectedDatabaseEvidence });
+          if (verifiedDatabaseEvidence.readiness_code !== 'ready' || attestation.statement.database_schema_digest !== verifiedDatabaseEvidence.database_schema_digest) throw new Error('deployment evidence and attestation database schema digests are not bound to fresh measured evidence');
+          verifyDeploymentAttestationTrust({ attestation, publicKey, trustManifest });
+          verifyDeploymentAttestation(attestation, { publicKey, expected: { deployment_id: evidence.deployment_id, environment: evidence.environment, service: evidence.service, candidate_id: manifest.candidate_id, revision: evidence.revision, rollback_target_revision: evidence.rollback.rollback_target_revision, source_commit: evidence.source_commit, source_tree: evidence.source_tree, artifact_sha256: evidence.artifact_sha256, release_manifest_sha256: evidence.release_manifest_sha256, image_digest: evidence.image_digest, schema_digest: evidence.schema_digest, catalog_digest: evidence.catalog_digest, database_schema_digest: verifiedDatabaseEvidence.database_schema_digest, run_id: evidence.run_id, run_attempt: evidence.run_attempt, job_id: evidence.job_id, evidence_sha256: deploymentEvidenceSHA256(evidence) } });
+          NODE
+          node scripts/release/ci-preflight.mjs secret-scan "$DEPLOYMENT_OUTPUT" >/dev/null
+          install -m 0644 "$DEPLOYMENT_OUTPUT" "$DEPLOYMENT_INTEGRITY_OUTPUT"
+          install -m 0644 "$PROMOTION_ROOT/api/deployment-evidence.json" "$DEPLOYMENT_EVIDENCE_INTEGRITY_OUTPUT"
+          node scripts/release/ci-preflight.mjs secret-scan "$PROMOTION_ROOT/api/deployment-evidence.json" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$PROMOTION_ROOT/api/database-schema-evidence.json" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$PROMOTION_ROOT/api/deployment-attestation.json" >/dev/null
+          install -m 0644 "$PROMOTION_ROOT/api/deployment-attestation.json" "$PROMOTION_ROOT/integrity/deployment-attestation.json"
+          install -m 0644 "$PROMOTION_ROOT/api/deployment-attestation-public.pem" "$PROMOTION_ROOT/integrity/deployment-attestation-public.pem"
+          install -m 0644 "$PROMOTION_ROOT/api/database-schema-evidence.json" "$PROMOTION_ROOT/integrity/database-schema-evidence.json"
+
+      - name: Verify exact-candidate staging readiness and executed rollback evidence
+        env:
+          STAGING_READINESS_JSON: ${{ vars.AGENTPASS_STAGING_READINESS_JSON }}
+          STAGING_ROLLBACK_JSON: ${{ vars.AGENTPASS_STAGING_ROLLBACK_JSON }}
+          STAGING_BINDING_JSON: ${{ vars.AGENTPASS_STAGING_BINDING_JSON }}
+          STAGING_READINESS_INPUT: ${{ steps.paths.outputs.promotion_root }}/api/staging-readiness.json
+          STAGING_ROLLBACK_INPUT: ${{ steps.paths.outputs.promotion_root }}/api/staging-rollback.json
+          STAGING_BINDING_INPUT: ${{ steps.paths.outputs.promotion_root }}/api/staging-binding.json
+          STAGING_READINESS_RESULT: ${{ steps.paths.outputs.promotion_root }}/integrity/staging-readiness.json
+          STAGING_ROLLBACK_RESULT: ${{ steps.paths.outputs.promotion_root }}/integrity/staging-rollback.json
+          STAGING_BINDING_RESULT: ${{ steps.paths.outputs.promotion_root }}/integrity/staging-binding.json
+          DEPLOYMENT_EVIDENCE_FILE: ${{ steps.paths.outputs.promotion_root }}/api/deployment-evidence.json
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGING_READINESS_JSON:?protected staging readiness evidence is required}"
+          : "${STAGING_ROLLBACK_JSON:?protected staging rollback evidence is required}"
+          : "${STAGING_BINDING_JSON:?protected staging binding is required}"
+          umask 077
+          node --input-type=module - "$STAGING_READINESS_INPUT" "$STAGING_ROLLBACK_INPUT" "$STAGING_BINDING_INPUT" "$STAGING_BINDING_RESULT" "$DEPLOYMENT_EVIDENCE_FILE" "$MANIFEST" "$PRODUCT_PKG" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+
+          const [readinessPath, rollbackPath, bindingPath, bindingOutput, deploymentPath, manifestPath, packagePath] = process.argv.slice(2);
+          const writeExclusive = (file, text) => {
+            const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+            try { fs.writeSync(fd, text, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          };
+          const readCanonicalEnv = (name) => {
+            const text = process.env[name];
+            if (typeof text !== 'string' || text.length === 0) throw new Error(`${name} is required`);
+            let value;
+            try { value = JSON.parse(text); } catch { throw new Error(`${name} is not JSON`); }
+            if (text !== `${canonicalJson(value)}\n`) throw new Error(`${name} must be canonical JSON`);
+            return { value, text };
+          };
+          const same = (left, right) => canonicalJson(left) === canonicalJson(right);
+          const readiness = readCanonicalEnv('STAGING_READINESS_JSON');
+          const rollback = readCanonicalEnv('STAGING_ROLLBACK_JSON');
+          const suppliedBinding = readCanonicalEnv('STAGING_BINDING_JSON');
+          const deployment = JSON.parse(fs.readFileSync(deploymentPath, 'utf8'));
+          const manifestBytes = fs.readFileSync(manifestPath);
+          const manifest = JSON.parse(manifestBytes);
+          const packageBytes = fs.readFileSync(packagePath);
+          const artifactSha256 = crypto.createHash('sha256').update(packageBytes).digest('hex');
+          const manifestSha256 = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+          const product = manifest.artifacts?.filter((item) => item?.role === 'product');
+          if (product?.length !== 1 || product[0].sha256 !== artifactSha256 || manifest.candidate_id !== `release-pkg-sha256-v1-${artifactSha256}`) {
+            throw new Error('staging binding cannot be derived from the selected release candidate');
+          }
+          if (deployment.status !== 'passed' || deployment.qualified !== true || deployment.environment !== 'staging') {
+            throw new Error('staging binding requires the already-qualified staging deployment evidence');
+          }
+          const expectedCandidate = {
+            artifact_sha256: artifactSha256,
+            candidate_id: manifest.candidate_id,
+            release_manifest_sha256: manifestSha256,
+            source_commit: manifest.source?.commit,
+            source_tree: manifest.source?.tree
+          };
+          const expectedDeployment = {
+            deployment_digest: deployment.deployment_digest,
+            deployment_id: deployment.deployment_id,
+            environment: deployment.environment,
+            image_digest: deployment.image_digest,
+            revision: deployment.revision,
+            service: deployment.service
+          };
+          if (!same(suppliedBinding.value.candidate, expectedCandidate) || !same(suppliedBinding.value.deployment, expectedDeployment)) {
+            throw new Error('staging binding is not exact-bound to candidate/source/tree/artifact/deployment/image digests');
+          }
+          writeExclusive(readinessPath, readiness.text);
+          writeExclusive(rollbackPath, rollback.text);
+          writeExclusive(bindingPath, suppliedBinding.text);
+          writeExclusive(bindingOutput, suppliedBinding.text);
+          NODE
+          promotion_now="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+          node scripts/release/staging-readiness.mjs verify \
+            "$STAGING_READINESS_INPUT" "$STAGING_BINDING_INPUT" --now="$promotion_now" > "$STAGING_READINESS_RESULT"
+          node scripts/release/staging-rollback.mjs verify \
+            "$STAGING_ROLLBACK_INPUT" "$STAGING_BINDING_INPUT" --now="$promotion_now" > "$STAGING_ROLLBACK_RESULT"
+          node --input-type=module - "$STAGING_READINESS_RESULT" "$STAGING_ROLLBACK_RESULT" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          for (const file of process.argv.slice(2)) {
+            const bytes = fs.readFileSync(file);
+            const value = JSON.parse(bytes);
+            if (bytes.toString('utf8') !== `${canonicalJson(value)}\n` || value.status !== 'passed' || value.qualified !== true) {
+              throw new Error(`staging verification did not produce a qualified pass: ${file}`);
+            }
+          }
+          NODE
+          node scripts/release/ci-preflight.mjs secret-scan "$STAGING_READINESS_RESULT" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$STAGING_ROLLBACK_RESULT" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$STAGING_BINDING_RESULT" >/dev/null
+
+      - name: Verify externally reviewed release evidence index operator gate
+        env:
+          EVIDENCE_INDEX_JSON: ${{ env.RELEASE_EVIDENCE_INDEX_JSON }}
+          INDEX_INPUT: ${{ steps.paths.outputs.promotion_root }}/api/release-evidence-index.json
+          INDEX_OUTPUT: ${{ steps.paths.outputs.promotion_root }}/integrity/release-evidence-index.json
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+          DEPLOYMENT_EVIDENCE: ${{ steps.paths.outputs.promotion_root }}/api/deployment-evidence.json
+          RELEASE_RUN: ${{ steps.paths.outputs.promotion_root }}/api/release-run.json
+          RELEASE_JOBS: ${{ steps.paths.outputs.promotion_root }}/api/release-jobs.json
+          QUALIFICATION_RUN: ${{ steps.paths.outputs.promotion_root }}/api/qualification-run.json
+          QUALIFICATION_JOBS: ${{ steps.paths.outputs.promotion_root }}/api/qualification-jobs.json
+          CI_RUN: ${{ steps.paths.outputs.promotion_root }}/api/ci-run.json
+          CI_JOBS: ${{ steps.paths.outputs.promotion_root }}/api/ci-jobs.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${EVIDENCE_INDEX_JSON:?externally reviewed release evidence index is required}"
+          node --input-type=module - "$INDEX_INPUT" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [output] = process.argv.slice(2);
+          let value;
+          try { value = JSON.parse(process.env.EVIDENCE_INDEX_JSON); } catch { throw new Error('release evidence index is not JSON'); }
+          if (process.env.EVIDENCE_INDEX_JSON !== `${canonicalJson(value)}\n`) throw new Error('release evidence index must be canonical JSON');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, process.env.EVIDENCE_INDEX_JSON, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          node scripts/release/evidence-index.mjs verify \
+            "$INDEX_INPUT" "$MANIFEST" "$PRODUCT_PKG" "$DEPLOYMENT_EVIDENCE" \
+            "$RELEASE_RUN" "$RELEASE_JOBS" "$QUALIFICATION_RUN" "$QUALIFICATION_JOBS" "$CI_RUN" "$CI_JOBS" \
+            > "$INDEX_OUTPUT"
+          node scripts/release/ci-preflight.mjs secret-scan "$INDEX_OUTPUT" >/dev/null
+
       - name: Refuse an existing release before creating the public release
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
@@ -468,15 +909,17 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           MANIFEST: ${{ steps.catalog.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
           CANDIDATE_DIR: ${{ steps.paths.outputs.promotion_root }}/candidate
+          INTEGRITY_DIR: ${{ steps.paths.outputs.promotion_root }}/integrity
         shell: bash
         run: |
           set -euo pipefail
-          node --input-type=module - "$RELEASE_TAG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$CANDIDATE_DIR" "$CANONICAL_REPOSITORY" <<'NODE'
+          node --input-type=module - "$RELEASE_TAG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$CANDIDATE_DIR" "$INTEGRITY_DIR" "$CANONICAL_REPOSITORY" <<'NODE'
           import fs from 'node:fs';
           import path from 'node:path';
           import { spawnSync } from 'node:child_process';
-          const [tag, manifestPath, signaturePath, directory, repository] = process.argv.slice(2);
+          const [tag, manifestPath, signaturePath, publicKeyPath, directory, integrityDirectory, repository] = process.argv.slice(2);
           if (!/^Torutesu\/AIagentpass$/.test(repository)) throw new Error('release repository is not canonical');
           const safe = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -488,8 +931,10 @@ jobs:
             ...manifest.external_qualification_controller.notarization.evidence.map((item) => item.name),
             manifest.evidence.checksums?.name
           ];
-          if (names.some((name) => !safe(name)) || new Set(names).size !== names.length) throw new Error('signed manifest upload list contains unsafe or duplicate names');
-          const files = [manifestPath, signaturePath, ...names.map((name) => path.join(directory, name))];
+          const supplementalEvidence = ['ci-preflight.json', 'artifact-scan.json', 'kms-qualification.json', 'platform-auth-qualification.json', 'external-qualification.json', 'external-qualification-verification.json', 'deployment-evidence.json', 'database-schema-evidence.json', 'deployment-gate.json', 'deployment-attestation.json', 'deployment-attestation-public.pem', 'staging-readiness.json', 'staging-rollback.json', 'staging-binding.json', 'release-evidence-index.json'];
+          const uploadNames = [...names, path.basename(publicKeyPath), ...supplementalEvidence];
+          if (uploadNames.some((name) => !safe(name)) || new Set(uploadNames).size !== uploadNames.length) throw new Error('signed manifest upload list contains unsafe or duplicate names');
+          const files = [manifestPath, signaturePath, publicKeyPath, ...names.map((name) => path.join(directory, name)), ...supplementalEvidence.map((name) => path.join(integrityDirectory, name))];
           for (const file of files) {
             const stat = fs.lstatSync(file);
             if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error(`manifest-bound upload is unsafe: ${path.basename(file)}`);
@@ -498,9 +943,8 @@ jobs:
           if (result.error || result.status !== 0) throw new Error('manifest-bound release upload failed');
           NODE
 
-      - name: Upload the verified signed qualification evidence
+      - name: Materialize the final P0-C release assets
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           APPLE_REPORT: ${{ steps.catalog.outputs.apple_report }}
           APPLE_SIGNATURE: ${{ steps.catalog.outputs.apple_signature }}
           APPLE_PUBLIC_KEY: ${{ steps.catalog.outputs.apple_public_key }}
@@ -511,6 +955,7 @@ jobs:
           INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
           QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
           OPERATOR_POLICY: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
+          PROMOTED_SCAN: ${{ steps.paths.outputs.promotion_root }}/output/promoted-artifact-scan.json
           QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
         shell: bash
         run: |
@@ -524,12 +969,40 @@ jobs:
           /usr/bin/install -m 0644 "$INTEL_PUBLIC_KEY" "$QUALIFICATION_ASSETS/p0c-intel-t2-operator.public.pem"
           /usr/bin/install -m 0644 "$QUALIFICATION_SUMMARY" "$QUALIFICATION_ASSETS/p0c-hardware-qualification-summary.json"
           /usr/bin/install -m 0644 "$OPERATOR_POLICY" "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json"
+          /usr/bin/install -m 0644 "$PROMOTED_SCAN" "$QUALIFICATION_ASSETS/p0c-promoted-artifact-scan.json"
           /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-apple-silicon-evidence.tar.gz" -C "$APPLE_EVIDENCE" .
           /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" -C "$INTEL_EVIDENCE" .
           (
             cd "$QUALIFICATION_ASSETS"
             /usr/bin/shasum -a 256 p0c-* > P0C-SHA256SUMS
           )
+
+      - name: 'Final P0-C asset gate: secret scan, regular-file/hardlink checks, and SHA256SUMS binding'
+        env:
+          QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
+          FINAL_SCAN: ${{ runner.temp }}/agentpass-p0c-final-asset-scan-${{ github.run_id }}-${{ github.run_attempt }}.json
+          EXPECTED_SCAN: ${{ steps.paths.outputs.promotion_root }}/output/p0c-final-asset-scan.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$FINAL_SCAN" && ! -e "$EXPECTED_SCAN" ]] || { echo "P0-C final scan evidence path already exists" >&2; exit 1; }
+          node scripts/release/ci-preflight.mjs artifact-scan "$QUALIFICATION_ASSETS" "$FINAL_SCAN"
+          /usr/bin/install -m 0644 "$FINAL_SCAN" "$EXPECTED_SCAN"
+          expected_sums="$RUNNER_TEMP/agentpass-p0c-expected-sha256sums-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          [[ ! -e "$expected_sums" ]] || { echo "P0-C expected digest path already exists" >&2; exit 1; }
+          (
+            cd "$QUALIFICATION_ASSETS"
+            /usr/bin/shasum -a 256 p0c-* > "$expected_sums"
+          )
+          cmp -s "$expected_sums" "$QUALIFICATION_ASSETS/P0C-SHA256SUMS" || { echo "P0-C SHA256SUMS is not bound to the final asset bytes" >&2; exit 1; }
+
+      - name: Upload the verified signed qualification evidence
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
+        shell: bash
+        run: |
+          set -euo pipefail
           gh release upload "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" \
             "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.json" \
             "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.sig" \
@@ -541,7 +1014,104 @@ jobs:
             "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" \
             "$QUALIFICATION_ASSETS/p0c-hardware-qualification-summary.json" \
             "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json" \
+            "$QUALIFICATION_ASSETS/p0c-promoted-artifact-scan.json" \
             "$QUALIFICATION_ASSETS/P0C-SHA256SUMS"
+
+      - name: Re-inspect uploaded P0-C assets before publishing
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          REMOTE_ASSETS: ${{ runner.temp }}/agentpass-p0c-remote-assets-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$REMOTE_ASSETS" ]] || { echo "P0-C remote inspection path already exists" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$REMOTE_ASSETS"
+          gh release download "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" \
+            --pattern 'p0c-*' --pattern 'P0C-SHA256SUMS' --dir "$REMOTE_ASSETS" --clobber
+          remote_scan="$RUNNER_TEMP/agentpass-p0c-remote-asset-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          remote_expected_sums="$RUNNER_TEMP/agentpass-p0c-remote-expected-sha256sums-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          [[ ! -e "$remote_scan" && ! -e "$remote_expected_sums" ]] || { echo "P0-C remote inspection evidence path already exists" >&2; exit 1; }
+          node scripts/release/ci-preflight.mjs artifact-scan "$REMOTE_ASSETS" "$remote_scan"
+          (
+            cd "$REMOTE_ASSETS"
+            /usr/bin/shasum -a 256 p0c-* > "$remote_expected_sums"
+          )
+          cmp -s "$remote_expected_sums" "$REMOTE_ASSETS/P0C-SHA256SUMS" || { echo "uploaded P0-C assets no longer match P0C-SHA256SUMS" >&2; exit 1; }
+
+      - name: Re-inspect every uploaded release asset before publishing
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
+          CANDIDATE_DIR: ${{ steps.paths.outputs.promotion_root }}/candidate
+          INTEGRITY_DIR: ${{ steps.paths.outputs.promotion_root }}/integrity
+          QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
+          REMOTE_ASSETS: ${{ runner.temp }}/agentpass-release-remote-assets-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$REMOTE_ASSETS" ]] || { echo "release remote inspection path already exists" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$REMOTE_ASSETS"
+          gh release download "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" --dir "$REMOTE_ASSETS" --clobber
+          node --input-type=module - "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$CANDIDATE_DIR" "$INTEGRITY_DIR" "$QUALIFICATION_ASSETS" "$REMOTE_ASSETS" <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { buildReleaseAssetInventory, verifyReleaseAssetRoundTrip } from './scripts/release/release-asset-roundtrip.mjs';
+          const [manifestPath, signaturePath, publicKeyPath, candidateDir, integrityDir, qualificationDir, remoteDir] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          const manifestNames = [
+            ...manifest.artifacts.map((item) => item.name),
+            ...manifest.evidence.notarization.evidence.map((item) => item.name),
+            manifest.external_qualification_controller.identity_document.name,
+            ...manifest.external_qualification_controller.notarization.evidence.map((item) => item.name),
+            manifest.evidence.checksums.name
+          ];
+          const supplemental = ['ci-preflight.json', 'artifact-scan.json', 'kms-qualification.json', 'platform-auth-qualification.json', 'external-qualification.json', 'external-qualification-verification.json', 'deployment-evidence.json', 'database-schema-evidence.json', 'deployment-gate.json', 'deployment-attestation.json', 'deployment-attestation-public.pem', 'staging-readiness.json', 'staging-rollback.json', 'staging-binding.json', 'release-evidence-index.json'];
+          const p0c = ['p0c-apple-silicon-report.json', 'p0c-apple-silicon-report.sig', 'p0c-apple-silicon-operator.public.pem', 'p0c-apple-silicon-evidence.tar.gz', 'p0c-intel-t2-report.json', 'p0c-intel-t2-report.sig', 'p0c-intel-t2-operator.public.pem', 'p0c-intel-t2-evidence.tar.gz', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'p0c-promoted-artifact-scan.json', 'P0C-SHA256SUMS'];
+          const inputs = [{ name: path.basename(manifestPath), path: manifestPath }, { name: path.basename(signaturePath), path: signaturePath }, { name: path.basename(publicKeyPath), path: publicKeyPath }, ...manifestNames.map((name) => ({ name, path: path.join(candidateDir, name) })), ...supplemental.map((name) => ({ name, path: path.join(integrityDir, name) })), ...p0c.map((name) => ({ name, path: path.join(qualificationDir, name) }))];
+          const inventory = buildReleaseAssetInventory(inputs);
+          const result = verifyReleaseAssetRoundTrip(inventory, remoteDir);
+          const { canonicalJson } = await import('./packages/protocol/src/index.mjs');
+          fs.writeFileSync(path.join(process.env.PROMOTION_ROOT, 'integrity', 'release-asset-roundtrip.json'), `${canonicalJson(result)}\n`, { mode: 0o600, flag: 'wx' });
+          NODE
+          node scripts/release/verify-release.mjs "$REMOTE_ASSETS/$(basename "$MANIFEST")" "$REMOTE_ASSETS/$(basename "$MANIFEST_SIGNATURE")" "$REMOTE_ASSETS/$(basename "$MANIFEST_PUBLIC_KEY")" "$RELEASE_MANIFEST_FINGERPRINT"
+
+      - name: Retain release asset round-trip evidence
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          ROUNDTRIP_EVIDENCE: ${{ steps.paths.outputs.promotion_root }}/integrity/release-asset-roundtrip.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$ROUNDTRIP_EVIDENCE"
+          gh release upload "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" "$ROUNDTRIP_EVIDENCE"
+
+      - name: Re-inspect retained release asset evidence before publishing
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          ROUNDTRIP_EVIDENCE: ${{ steps.paths.outputs.promotion_root }}/integrity/release-asset-roundtrip.json
+          REMOTE_EVIDENCE: ${{ runner.temp }}/agentpass-release-roundtrip-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$REMOTE_EVIDENCE" ]] || { echo "release round-trip evidence inspection path already exists" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$REMOTE_EVIDENCE"
+          gh release download "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" \
+            --pattern 'release-asset-roundtrip.json' --dir "$REMOTE_EVIDENCE" --clobber
+          [[ -f "$REMOTE_EVIDENCE/release-asset-roundtrip.json" ]] || { echo "published round-trip evidence asset is missing" >&2; exit 1; }
+          cmp -s "$ROUNDTRIP_EVIDENCE" "$REMOTE_EVIDENCE/release-asset-roundtrip.json" || { echo "published round-trip evidence asset changed" >&2; exit 1; }
+          node --input-type=module - "$REMOTE_EVIDENCE/release-asset-roundtrip.json" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const file = process.argv[2];
+          const bytes = fs.readFileSync(file);
+          let value;
+          try { value = JSON.parse(bytes); } catch { throw new Error('published round-trip evidence is not JSON'); }
+          if (bytes.toString('utf8') !== `${canonicalJson(value)}\n`) throw new Error('published round-trip evidence is not canonical JSON');
+          if (value.version !== 1 || value.type !== 'agentpass.release-asset-roundtrip' || !/^[0-9a-f]{64}$/.test(value.inventory_sha256) || !Array.isArray(value.assets) || value.assets.length === 0) throw new Error('published round-trip evidence is incomplete');
+          NODE
+          node scripts/release/ci-preflight.mjs secret-scan "$REMOTE_EVIDENCE/release-asset-roundtrip.json" >/dev/null
 
       - name: Publish the fully uploaded public release
         env:
@@ -558,3 +1128,13 @@ jobs:
           set +e
           chmod -R go-rwx "$PROMOTION_ROOT" 2>/dev/null
           rm -rf -- "$PROMOTION_ROOT"
+          rm -rf -- "$RUNNER_TEMP/agentpass-p0c-remote-assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$RUNNER_TEMP/agentpass-release-remote-assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$RUNNER_TEMP/agentpass-release-roundtrip-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -f -- \
+            "$RUNNER_TEMP/agentpass-candidate-artifact-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" \
+            "$RUNNER_TEMP/agentpass-promoted-artifact-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" \
+            "$RUNNER_TEMP/agentpass-p0c-final-asset-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" \
+            "$RUNNER_TEMP/agentpass-p0c-expected-sha256sums-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt" \
+            "$RUNNER_TEMP/agentpass-p0c-remote-asset-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" \
+            "$RUNNER_TEMP/agentpass-p0c-remote-expected-sha256sums-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"

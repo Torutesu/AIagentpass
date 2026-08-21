@@ -15,7 +15,9 @@ const job = (name) => {
 
 const promote = job('promote');
 const step = (name) => {
-  const nameOffset = promote.indexOf(`name: ${name}`);
+  const nameOffset = [name, `'${name}'`, `"${name}"`]
+    .map((value) => promote.indexOf(`name: ${value}`))
+    .find((offset) => offset !== -1);
   assert.notEqual(nameOffset, -1, `missing step: ${name}`);
   const start = promote.lastIndexOf('      - ', nameOffset);
   assert.notEqual(start, -1, `missing step heading: ${name}`);
@@ -43,7 +45,7 @@ test('promotion is manual-dispatch only, canonical-main only, and protected with
 
 test('all actions are immutable SHAs and only trusted built-in actions are used', () => {
   const uses = [...workflow.matchAll(/uses:\s*([^\s]+)/g)].map(([, value]) => value);
-  assert.equal(uses.length, 6, 'expected checkout, setup-node, and four exact artifact downloads');
+  assert.equal(uses.length, 7, 'expected checkout, setup-node, and five exact artifact downloads');
   for (const use of uses) {
     assert.match(use, /^actions\/(?:checkout|setup-node|download-artifact)@[0-9a-f]{40}$/);
   }
@@ -77,11 +79,14 @@ test('inputs identify exact runs and preflight validates both runs and every art
   for (const artifact of ['EXPECTED_CANDIDATE_ARTIFACT', 'EXPECTED_APPLE_ARTIFACT', 'EXPECTED_INTEL_ARTIFACT', 'EXPECTED_SUMMARY_ARTIFACT']) assert.match(preflight, new RegExp(`\\$${artifact}`));
 });
 
-test('downloads candidate from release run and all three P0-C artifacts from qualification run', () => {
+test('downloads candidate, release integrity, and all three P0-C artifacts from exact runs', () => {
   const downloads = [...promote.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}[\s\S]*?(?=\n\n      - uses:|\n\n      - id:|\n\n      - name:|$)/g)].map((match) => match[0]);
-  assert.equal(downloads.length, 4);
+  assert.equal(downloads.length, 5);
   assert.match(downloads[0], /name: notarized-release-candidate/);
   assert.match(downloads[0], /run-id: \$\{\{ steps\.preflight\.outputs\.release_run_id \}\}/);
+  const integrity = downloads.find((value) => value.includes('name: release-integrity-evidence'));
+  assert.ok(integrity, 'missing release integrity evidence download');
+  assert.match(integrity, /run-id: \$\{\{ steps\.preflight\.outputs\.release_run_id \}\}/);
   for (const [name, output] of [['p0c-hardware-apple-silicon', 'qualification_run_id'], ['p0c-hardware-intel-t2', 'qualification_run_id'], ['p0c-hardware-qualification-summary', 'qualification_run_id']]) {
     const found = downloads.find((value) => value.includes(`name: ${name}`));
     assert.ok(found, `missing download for ${name}`);
@@ -92,6 +97,62 @@ test('downloads candidate from release run and all three P0-C artifacts from qua
   for (const name of ['release-manifest.json', 'release-manifest.sig', 'release-manifest.public.pem', 'report.json', 'report.sig', 'operator-public.pem', 'qualification-summary.json', 'qualification-dispatch-binding.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(catalog, /candidate artifact contains unexpected or missing files/);
   assert.match(catalog, /qualification artifact has unexpected files/);
+});
+
+test('promotion requires canonical, passed, exact-SHA KMS and Platform Auth evidence without changing the existing artifact download contract', () => {
+  const catalog = step('Catalog only the exact downloaded candidate and qualification evidence');
+  const evidence = step('Verify canonical KMS and Platform Auth qualification evidence for the exact release SHA');
+  assert.match(catalog, /integrityNames\.length !== 4/);
+  for (const name of ['kms-qualification.json', 'platform-auth-qualification.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(evidence, /canonicalJson/);
+  assert.match(evidence, /status !== 'passed'/);
+  assert.match(evidence, /qualified !== true/);
+  assert.match(evidence, /source_commit !== expectedSourceCommit/);
+  assert.match(evidence, /kms-qualification/);
+  assert.match(evidence, /platform-auth-qualification/);
+  assert.match(promote, /EXPECTED_PLATFORM_AUTH_PRIMARY_DEPLOYMENT_DIGEST: \$\{\{ vars\.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST \}\}/);
+  assert.match(promote, /EXPECTED_PLATFORM_AUTH_SECONDARY_DEPLOYMENT_DIGEST: \$\{\{ vars\.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST \}\}/);
+  assert.match(evidence, /platform-auth-qualification[^\n]*\$EXPECTED_PLATFORM_AUTH_PRIMARY_DEPLOYMENT_DIGEST[^\n]*\$EXPECTED_PLATFORM_AUTH_SECONDARY_DEPLOYMENT_DIGEST/);
+  assert.match(evidence, /evidence_sha256/);
+  assert.match(evidence, /GITHUB_STEP_SUMMARY/);
+  assert.match(evidence, /source_commit=.*evidence_sha256=/);
+  const deployment = step('Verify externally pinned staging deployment and rollback evidence');
+  assert.match(deployment, /AGENTPASS_DEPLOYMENT_EVIDENCE_JSON/);
+  assert.match(deployment, /AGENTPASS_DEPLOYMENT_BINDING_JSON/);
+  assert.match(deployment, /release:deployment-gate/);
+  assert.match(deployment, /deployment evidence is not bound to the selected release candidate/);
+  assert.match(deployment, /derive-deployment-identity\.mjs/);
+  assert.match(deployment, /deployment evidence schema\/catalog identity is not bound to the selected source and candidate migration manifest/);
+  assert.match(deployment, /DEPLOYMENT_ATTESTATION_JSON/);
+  assert.match(deployment, /DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY/);
+  assert.match(deployment, /AGENTPASS_DEPLOYMENT_TRUST_ROOT_PUBLIC_KEY/);
+  assert.match(deployment, /trust root public key is required/);
+  assert.match(deployment, /verifyDeploymentAttestation/);
+  assert.match(deployment, /deploymentEvidenceSHA256/);
+  assert.match(deployment, /database_schema_digest/);
+  assert.match(deployment, /verifyDeploymentAttestationTrust/);
+  assert.match(deployment, /ops\/trust\/deployment-attestation-trust\.v1\.json/);
+  assert.match(deployment, /deployment evidence is not bound to this promotion run/);
+  assert.match(deployment, /secret-scan/);
+  assert.match(deployment, /scripts\/release\/ci-preflight\.mjs/);
+  assert.doesNotMatch(deployment, /scripts\/ci-preflight\.mjs/);
+  assert.equal([...promote.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}/g)].length, 5,
+    'KMS and Platform Auth evidence must remain inside the existing integrity artifact download');
+});
+
+test('promotion requires the aggregate external qualification envelope and candidate binding', () => {
+  const aggregate = step('Verify aggregate external qualification before promotion');
+  assert.match(promote, /EXTERNAL_QUALIFICATION_EVIDENCE_JSON: \$\{\{ vars\.AGENTPASS_EXTERNAL_QUALIFICATION_EVIDENCE_JSON \}\}/);
+  assert.match(promote, /EXTERNAL_QUALIFICATION_BINDING_JSON: \$\{\{ vars\.AGENTPASS_EXTERNAL_QUALIFICATION_BINDING_JSON \}\}/);
+  assert.match(aggregate, /ci-preflight\.mjs external-qualification/);
+  assert.match(aggregate, /secret-scan/);
+  assert.match(aggregate, /EXTERNAL_QUALIFICATION_EVIDENCE_JSON/);
+  assert.match(aggregate, /EXPECTED_SOURCE_TREE/);
+  assert.match(aggregate, /EXPECTED_RELEASE_ARTIFACT_SHA256/);
+  assert.match(aggregate, /ci_run_attempt/);
+  assert.match(aggregate, /O_EXCL/);
+  assert.match(promote, /external-qualification\.json/);
+  assert.match(promote, /external-qualification-verification\.json/);
 });
 
 test('promotion catalogs the v4 external controller and keeps its archive out of the product binding', () => {
@@ -137,19 +198,64 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.match(create, /gh release create "\$RELEASE_TAG" --repo "\$CANONICAL_REPOSITORY" --draft --verify-tag --target "\$RELEASE_COMMIT"/);
   const upload = step('Upload only the explicit signed-manifest-bound release list');
   assert.match(upload, /manifest\.artifacts\.map/);
+  assert.match(upload, /MANIFEST_PUBLIC_KEY: \$\{\{ steps\.catalog\.outputs\.public_key \}\}/);
   assert.match(upload, /manifest\.evidence\.notarization\.evidence\.map/);
   assert.match(upload, /manifest\.evidence\.checksums/);
   assert.match(upload, /manifest\.external_qualification_controller\.identity_document\.name/);
   assert.match(upload, /manifest\.external_qualification_controller\.notarization\.evidence\.map/);
+  assert.match(upload, /kms-qualification\.json/);
+  assert.match(upload, /platform-auth-qualification\.json/);
+  assert.match(upload, /database-schema-evidence\.json/);
+  assert.match(upload, /MANIFEST_PUBLIC_KEY/);
   assert.match(upload, /spawnSync\('gh', \['release', 'upload', tag, '--repo', repository, \.\.\.files\]/);
   assert.match(upload, /shell: false/);
+  const materialize = step('Materialize the final P0-C release assets');
+  for (const name of ['p0c-apple-silicon-report.json', 'p0c-intel-t2-report.json', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'P0C-SHA256SUMS']) assert.match(materialize, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(materialize, /p0c-apple-silicon-evidence\.tar\.gz/);
+  assert.match(materialize, /p0c-intel-t2-evidence\.tar\.gz/);
+  assert.doesNotMatch(materialize, /gh release upload/);
+  const finalGate = step('Final P0-C asset gate: secret scan, regular-file\/hardlink checks, and SHA256SUMS binding');
+  assert.match(finalGate, /ci-preflight\.mjs artifact-scan/);
+  assert.match(finalGate, /P0-C SHA256SUMS is not bound/);
+  assert.match(finalGate, /cmp -s "\$expected_sums" "\$QUALIFICATION_ASSETS\/P0C-SHA256SUMS"/);
+  assert.doesNotMatch(finalGate, /gh release upload/);
   const qualificationAssets = step('Upload the verified signed qualification evidence');
+  assert.match(qualificationAssets, /gh release upload/);
   for (const name of ['p0c-apple-silicon-report.json', 'p0c-intel-t2-report.json', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'P0C-SHA256SUMS']) assert.match(qualificationAssets, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(qualificationAssets, /p0c-apple-silicon-evidence\.tar\.gz/);
   assert.match(qualificationAssets, /p0c-intel-t2-evidence\.tar\.gz/);
+  const reinspect = step('Re-inspect uploaded P0-C assets before publishing');
+  assert.match(reinspect, /gh release download/);
+  assert.match(reinspect, /pattern 'p0c-\*'/);
+  assert.match(reinspect, /pattern 'P0C-SHA256SUMS'/);
+  assert.match(reinspect, /ci-preflight\.mjs artifact-scan/);
+  assert.match(reinspect, /uploaded P0-C assets no longer match P0C-SHA256SUMS/);
+  const allAssets = step('Re-inspect every uploaded release asset before publishing');
+  assert.match(allAssets, /release download/);
+  assert.match(allAssets, /release-asset-roundtrip\.mjs/);
+  assert.match(allAssets, /verifyReleaseAssetRoundTrip/);
+  assert.match(allAssets, /verify-release\.mjs/);
+  assert.match(allAssets, /database-schema-evidence\.json/);
+  const retained = step('Retain release asset round-trip evidence');
+  assert.match(retained, /release-asset-roundtrip\.json/);
+  assert.match(retained, /gh release upload/);
+  const retainedCheck = step('Re-inspect retained release asset evidence before publishing');
+  assert.match(retainedCheck, /gh release download/);
+  assert.match(retainedCheck, /release-asset-roundtrip\.json/);
+  assert.match(retainedCheck, /cmp -s/);
+  assert.match(retainedCheck, /canonicalJson/);
+  assert.match(retainedCheck, /secret-scan/);
   const publish = step('Publish the fully uploaded public release');
   assert.match(publish, /gh release edit "\$RELEASE_TAG" --repo "\$CANONICAL_REPOSITORY" --draft=false/);
   assert.ok(promote.indexOf('verify-hardware-qualification-set.mjs') < promote.indexOf('gh release create'));
+  assert.ok(promote.indexOf('Materialize the final P0-C release assets') < promote.indexOf('Final P0-C asset gate'));
+  assert.ok(promote.indexOf('Final P0-C asset gate') < promote.indexOf('Upload the verified signed qualification evidence'));
+  assert.ok(promote.indexOf('Upload the verified signed qualification evidence') < promote.indexOf('Re-inspect uploaded P0-C assets before publishing'));
+  assert.ok(promote.indexOf('Re-inspect uploaded P0-C assets before publishing') < promote.indexOf('Re-inspect every uploaded release asset before publishing'));
+  assert.ok(promote.indexOf('Re-inspect every uploaded release asset before publishing') < promote.indexOf('Retain release asset round-trip evidence'));
+  assert.ok(promote.indexOf('Retain release asset round-trip evidence') < promote.indexOf('Re-inspect retained release asset evidence before publishing'));
+  assert.ok(promote.indexOf('Re-inspect retained release asset evidence before publishing') < promote.indexOf('Publish the fully uploaded public release'));
+  assert.ok(promote.indexOf('Retain release asset round-trip evidence') < promote.indexOf('Publish the fully uploaded public release'));
   assert.ok(promote.indexOf('gh release upload') < promote.indexOf('gh release edit'));
 });
 

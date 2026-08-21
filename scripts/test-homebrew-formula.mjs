@@ -45,6 +45,7 @@ requireAbsent(/native\/macos|AgentPass\.app/, "Homebrew evaluation formula must 
 
 requireMatch(/AGENTPASS_DISTRIBUTION=homebrew-evaluation/, "runtime must identify the Homebrew evaluation channel");
 requireMatch(/AGENTPASS_PRODUCTION_XPC_BOUNDARY=unavailable/, "runtime must explicitly disable production XPC claims");
+requireMatch(/system_command\s+"\/usr\/bin\/codesign"[\s\S]*--sign[\s\S]*"-"[\s\S]*--identifier[\s\S]*"dev\.agentpass\.homebrew-evaluation"[\s\S]*bin\/"agentpass"/, "Homebrew CLI wrapper must use the distinct evaluation identity");
 requireMatch(/channel: \"homebrew\"/, "status and doctor output must identify Homebrew");
 requireMatch(/mode: \"evaluation\"/, "status and doctor output must identify evaluation mode");
 requireMatch(/production_xpc_boundary: false/, "status and doctor output must disclaim the production XPC boundary");

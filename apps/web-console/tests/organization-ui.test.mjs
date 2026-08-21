@@ -20,6 +20,13 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /setMembers\(previousMembers\)/);
   assert.match(source, /data-state=\{status\}/);
   assert.match(source, /recent_auth_required/);
+  assert.match(source, /serverCode/);
+  assert.match(source, /idempotency/);
+  assert.match(source, /すでに使用されています/);
+  assert.match(source, /isRetryableMutationError/);
+  assert.match(source, /responseMayHaveCommitted/);
+  assert.match(source, /通信結果を確認/);
+  assert.doesNotMatch(source, /state\.code === "transport_failed" \|\| state\.code === "http_failed"\) \? <button/);
   assert.match(source, /aria-busy/);
   assert.match(source, /role="alert" aria-live="assertive"/);
   assert.match(source, /削除を確定/);
@@ -51,6 +58,7 @@ test("AgentPassConsole exposes the Organization administration view", async () =
   assert.match(source, /import \{ OrganizationPanel \} from "\.\/OrganizationPanel"/);
   assert.match(source, /\| "organizations"/);
   assert.match(source, /label: "Organizations"/);
-  assert.match(source, /activeView === "organizations" \? <OrganizationPanel \/> : null/);
+  assert.match(source, /activeView === "organizations" \? <OrganizationPanel(?: onOrganizationSwitched=\{[^}]+\})? \/> : null/);
   assert.match(source, /organization-content/);
+  assert.match(source, /onOrganizationSwitched=\{handleOrganizationSwitched\}/);
 });

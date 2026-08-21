@@ -242,8 +242,12 @@ test("persists and claims the optional resource context hash exactly", async () 
   assert.equal(result.verified, true);
   assert.equal(result.context_hash, contextHash);
   const claim = client.calls.find(({ sql }) => sql.startsWith("UPDATE webauthn_challenges SET status = 'consuming'"));
-  assert.equal(Buffer.isBuffer(claim.params[2]), true);
-  assert.equal(claim.params[2].toString("hex"), contextHash);
+  assert.equal(Buffer.isBuffer(claim.params[8]), true);
+  assert.equal(claim.params[8].toString("hex"), contextHash);
+  assert.match(claim.text, /session_id = \$3/);
+  assert.match(claim.text, /organization_id = \$4/);
+  assert.match(claim.text, /operation = \$5/);
+  assert.match(claim.text, /challenge_hash = \$10/);
 });
 
 test("consumes through an atomic pending-to-consuming CAS and returns the same public result", async () => {

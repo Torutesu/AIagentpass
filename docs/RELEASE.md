@@ -32,16 +32,18 @@ native/macos/scripts/build-app.sh --universal --output-dir "$PWD/dist" \
   --app-identifier-prefix APPLETEAM1 \
   --service-profile /protected/service.provisionprofile \
   --client-profile /protected/client.provisionprofile
+export AGENTPASS_TEAM_ID=APPLETEAM1
 native/macos/scripts/build-installer.sh \
   --app "$PWD/dist/AgentPass.app" \
   --output "$PWD/dist/AgentPass-v0.18.0-macos-universal.pkg" \
   --identity 'Developer ID Installer: …'
+AGENTPASS_TEAM_ID=APPLETEAM1 \
 AGENTPASS_NOTARY_KEY_ID=… \
 AGENTPASS_NOTARY_ISSUER_ID=… \
 AGENTPASS_NOTARY_PRIVATE_KEY_PATH=/protected/AuthKey.p8 \
 scripts/release/notarize-installer.sh \
-  dist/AgentPass-v0.18.0-macos-universal.pkg \
-  dist/notarytool-result.json dist/stapler-result.txt
+  "$PWD/dist/AgentPass-v0.18.0-macos-universal.pkg" \
+  "$PWD/dist/notarytool-result.json" "$PWD/dist/stapler-result.txt"
 node scripts/release/generate-sbom.mjs dist/AgentPass-v0.18.0.spdx.json
 node scripts/release/generate-manifest.mjs \
   dist/AgentPass-v0.18.0.release-manifest.json \
@@ -231,3 +233,40 @@ independently checked:
 4. signed-manifest verification using the pinned release key;
 5. macOS-specific designated-requirement, entitlement, Gatekeeper, and ticket
    verification.
+
+## Promotion stop conditions
+
+The promotion decision is `STOP` if any condition below is true. These are
+operator stop conditions in addition to the workflow's machine checks:
+
+- the candidate, release manifest, source commit/tree, package, image, SBOM,
+  migration set, or qualification evidence does not bind byte-for-byte;
+- the canonical CI run is not a completed successful `main` run with exactly
+  the six required lanes (`postgres-authority-16`, `postgres-authority-17`,
+  `postgres-integration`, `browser-e2e`, `p0b-live-process`, `test`), or any
+  lane is missing, duplicated, extra, skipped, failed, or `not_proven`;
+- release, KMS, Platform Auth, hardware, or promotion evidence is missing,
+  stale, non-canonical, not source/tree/run/job bound, or contains a secret;
+- any of the eight managed signing purposes is missing, shared, disabled,
+  stale, wrong-purpose, wrong-key-version, backed by local/file material, or
+  fails its readiness canary or drain;
+- Platform Auth cannot prove the platform principal, authenticated mTLS peer,
+  deployment-owned workload identity, and consumed operation-bound recent
+  WebAuthn proof; `404`/`503` is not a degraded success;
+- PostgreSQL cutover, role separation, TLS identity, migration checksum,
+  backup/PITR restore, HA/failover, or authority comparison is not evidenced;
+- a promotion is `reserved`, `uncertain`, or `rejected`, or an operator cannot
+  reconcile it from the durable ledger and exact provider receipt without a
+  blind retry or rebuild;
+- Developer ID signing, notarization acceptance, stapling, Gatekeeper, or both
+  physical Apple silicon and Intel/T2 reports are absent for the same PKG
+  digest;
+- Claude Code/Cursor E2E, staging canary/rollback/recovery drills, or required
+  alert/revocation measurements are absent;
+- an independent security review has an unresolved critical/high (or agreed
+  P0/P1) finding, or the required retest is missing.
+
+Do not waive a stop condition in a release ticket. Record the failed condition,
+candidate digest, stable reason code, owner, and replacement evidence. The
+[incident and revoke runbook](INCIDENT_AND_REVOKE_RUNBOOK.md) governs active
+incidents, uncertain operations, and rollback containment.

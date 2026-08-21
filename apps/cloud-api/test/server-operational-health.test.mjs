@@ -59,6 +59,40 @@ test("malformed operational providers fail closed without reflecting their value
   assert.doesNotMatch(await metrics.text(), /token/u);
 });
 
+test("readiness exposes only the exact secret-free deployment identity", async (t) => {
+  const identity = {
+    version: 1, configured: true, ready: true,
+    source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`,
+    deployment_id: "deployment-staging-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64)
+  };
+  const server = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: { ...identity, provider_token: "must-not-leak" } }), operationalProbeSecret: PROBE_SECRET });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  assert.equal(response.status, 503);
+  assert.doesNotMatch(await response.text(), /must-not-leak|provider_token/u);
+
+  const healthyServer = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: identity }), operationalProbeSecret: PROBE_SECRET });
+  await new Promise((resolve, reject) => { healthyServer.once("error", reject); healthyServer.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => healthyServer.close(resolve)));
+  const healthy = await fetch(`http://127.0.0.1:${healthyServer.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  assert.equal(healthy.status, 200);
+  assert.deepEqual((await healthy.json()).deployment_identity, identity);
+});
+
+test("readiness rejects a configured deployment identity without a database digest", async (t) => {
+  const identity = {
+    version: 1, configured: true, ready: true,
+    source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`,
+    deployment_id: "deployment-staging-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: null
+  };
+  const server = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: identity }), operationalProbeSecret: PROBE_SECRET });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  assert.equal(response.status, 503);
+});
+
 test("readiness exposes only aggregate owner recovery outbox state", async (t) => {
   const report = {
     version: 1,

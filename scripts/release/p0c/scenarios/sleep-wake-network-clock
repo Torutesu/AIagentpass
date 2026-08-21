@@ -244,8 +244,12 @@ export const performSleepWakeNetworkClock = async ({
   return withCheckpoint(
     join(machine.checkpointDirectory, "candidate-checkpoint.json"),
     async () => {
-      const b = await boot(runCommand);
       const old = readMarker(marker, production, fileSystem);
+      // Validate an existing marker before touching machine-specific boot
+      // identity. A tampered checkpoint must fail closed deterministically,
+      // even when the host cannot expose boot identity (for example in a
+      // restricted test runner).
+      const b = await boot(runCommand);
       if (!old) {
         const c = await clocks(runCommand),
           s = await control(runPinned, machine, runCommand, production);

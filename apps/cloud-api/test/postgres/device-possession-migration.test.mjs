@@ -30,11 +30,17 @@ test("0017 stores only challenge digests and rejects non-canonical or nested rec
   const sql = await readFile(migrationUrl, "utf8");
   assert.match(sql, /challenge_nonce_digest bytea[\s\S]*octet_length\(challenge_nonce_digest\) = 32/u);
   assert.match(sql, /SELECT count\(\*\) INTO key_count FROM jsonb_object_keys\(statement_value\)/u);
-  assert.match(sql, /jsonb_typeof\(item\.value\) NOT IN \('string', 'number'\)/u);
+  assert.match(sql, /jsonb_typeof\(item_value\) NOT IN \('string', 'number'\)/u);
   assert.match(sql, /value->>'challenge_nonce_digest' ~ '\^\[0-9a-f\]\{64\}\$'/u);
   assert.doesNotMatch(sql, /\b(?:raw_nonce|nonce_value|credential_secret|private_key)\b/iu);
   assert.match(sql, /device_enrollment_possession_receipts_forward_only[\s\S]*BEFORE UPDATE OR DELETE ON device_enrollment_possession_receipts/u);
   assert.match(sql, /purpose text NOT NULL[\s\S]*device-enrollment-possession-receipt/u);
   assert.match(sql, /signature_algorithm text NOT NULL[\s\S]*ed25519[\s\S]*p256-sha256/u);
   assert.match(sql, /signature_base64url text NOT NULL[\s\S]*\^\[A-Za-z0-9_-\]\{86\}\$/u);
+});
+
+test("0017 avoids record targets in multi-column PL/pgSQL FOR loops", async () => {
+  const sql = await readFile(migrationUrl, "utf8");
+  assert.doesNotMatch(sql, /item\s+record;[\s\S]*?FOR\s+item\s+IN\s+SELECT\s+[^;]*,/u);
+  assert.match(sql, /item_key\s+text;[\s\S]*?item_value\s+jsonb;[\s\S]*?FOR\s+item_key,\s*item_value\s+IN\s+SELECT/u);
 });

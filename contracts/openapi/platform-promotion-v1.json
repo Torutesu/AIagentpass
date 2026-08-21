@@ -1,0 +1,213 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgentPass Platform Promotion HTTP API",
+    "version": "1.0.0",
+    "description": "Deployment-scoped platform promotion authority. This document is intentionally separate from the organization Human and Device APIs; organization sessions, bearer tokens, cookies, and CSRF headers are not accepted here."
+  },
+  "paths": {
+    "/platform/v1/promotions/issue": {
+      "post": {
+        "operationId": "issuePlatformPromotion",
+        "summary": "Reserve a deployment-scoped promotion",
+        "security": [{ "platformMtls": [], "platformRecentAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/PlatformRecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PromotionIssue" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PromotionReserved" },
+          "200": { "$ref": "#/components/responses/PromotionResult" },
+          "400": { "$ref": "#/components/responses/InvalidPlatformRequest" },
+          "401": { "$ref": "#/components/responses/PlatformAuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/PlatformAuthorizationDenied" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/PromotionConflict" },
+          "503": { "$ref": "#/components/responses/PlatformUnavailable" }
+        }
+      }
+    },
+    "/platform/v1/promotions/commit": {
+      "post": {
+        "operationId": "commitPlatformPromotion",
+        "summary": "Commit a reserved platform promotion",
+        "security": [{ "platformMtls": [], "platformRecentAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/PlatformRecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PromotionCommit" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PromotionResult" },
+          "400": { "$ref": "#/components/responses/InvalidPlatformRequest" },
+          "401": { "$ref": "#/components/responses/PlatformAuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/PlatformAuthorizationDenied" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/PromotionConflict" },
+          "503": { "$ref": "#/components/responses/PlatformUnavailable" }
+        }
+      }
+    },
+    "/platform/v1/promotions/reconcile": {
+      "post": {
+        "operationId": "reconcilePlatformPromotion",
+        "summary": "Reconcile an uncertain platform promotion",
+        "security": [{ "platformMtls": [], "platformRecentAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/PlatformRecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PromotionReconcile" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PromotionResult" },
+          "400": { "$ref": "#/components/responses/InvalidPlatformRequest" },
+          "401": { "$ref": "#/components/responses/PlatformAuthenticationFailed" },
+          "403": { "$ref": "#/components/responses/PlatformAuthorizationDenied" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/PromotionConflict" },
+          "503": { "$ref": "#/components/responses/PlatformUnavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "platformMtls": { "type": "mutualTLS", "description": "Deployment-owned mTLS identity; forwarded certificate headers are not an authority source." },
+      "platformRecentAuth": { "type": "apiKey", "in": "header", "name": "agentpass-platform-recent-auth", "description": "One-time recent WebAuthn authorization bound to the exact platform operation." }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._~:-]{7,253}$" }
+      },
+      "PlatformRecentAuth": {
+        "name": "agentpass-platform-recent-auth",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+      }
+    },
+    "requestBodies": {
+      "PromotionIssue": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromotionIssueRequest" } } }
+      },
+      "PromotionCommit": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromotionCommitRequest" } } }
+      },
+      "PromotionReconcile": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromotionReconcileRequest" } } }
+      }
+    },
+    "schemas": {
+      "PromotionAuthority": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment_id", "environment", "promotion_id", "candidate_id", "source_commit", "source_tree", "product_pkg_sha256", "release_manifest_sha256", "sbom_sha256", "image_digest", "qualification_report_digests", "approval_id", "approval_digest", "signer_key_id", "signer_key_version", "signer_lifecycle_version", "expected_deployment_generation"],
+        "properties": {
+          "deployment_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+          "environment": { "type": "string", "enum": ["staging", "production"] },
+          "promotion_id": { "type": "string", "format": "uuid" },
+          "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" },
+          "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "product_pkg_sha256": { "$ref": "#/components/schemas/Sha256" },
+          "release_manifest_sha256": { "$ref": "#/components/schemas/Sha256" },
+          "sbom_sha256": { "$ref": "#/components/schemas/Sha256" },
+          "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "qualification_report_digests": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/components/schemas/Sha256" } },
+          "approval_id": { "type": "string", "format": "uuid" },
+          "approval_digest": { "$ref": "#/components/schemas/Sha256" },
+          "signer_key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+          "signer_key_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "signer_lifecycle_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "expected_deployment_generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      },
+      "PromotionIssueRequest": { "allOf": [{ "$ref": "#/components/schemas/PromotionAuthority" }, { "type": "object", "required": ["provider_operation_id"], "properties": { "provider_operation_id": { "$ref": "#/components/schemas/ProviderOperationId" } } }] },
+      "PromotionCommitRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/PromotionAuthority" },
+          { "type": "object", "additionalProperties": false, "required": ["claim_token", "provider_operation_id", "evidence"], "properties": { "claim_token": { "$ref": "#/components/schemas/ClaimToken" }, "provider_operation_id": { "$ref": "#/components/schemas/ProviderOperationId" }, "evidence": { "$ref": "../schemas/promotion-evidence-v3.schema.json" } } }
+        ]
+      },
+      "PromotionReconcileRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/PromotionAuthority" },
+          { "type": "object", "additionalProperties": false, "required": ["provider_operation_id", "evidence"], "properties": { "provider_operation_id": { "$ref": "#/components/schemas/ProviderOperationId" }, "evidence": { "$ref": "../schemas/promotion-evidence-v3.schema.json" } } }
+        ]
+      },
+      "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+      "ClaimToken": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+      "ProviderOperationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+      "PromotionEvidenceV3": { "$ref": "../schemas/promotion-evidence-v3.schema.json" },
+      "ReservedPromotion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "promotion_id", "authority_digest", "claim_token", "expires_at"],
+        "properties": { "state": { "const": "reserved" }, "promotion_id": { "type": "string", "format": "uuid" }, "authority_digest": { "$ref": "#/components/schemas/Sha256" }, "claim_token": { "$ref": "#/components/schemas/ClaimToken" }, "expires_at": { "type": "string", "format": "date-time" } }
+      },
+      "CommittedPromotion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "promotion_id", "evidence", "generation"],
+        "properties": { "state": { "const": "committed" }, "promotion_id": { "type": "string", "format": "uuid" }, "evidence": { "$ref": "../schemas/promotion-evidence-v3.schema.json" }, "generation": { "type": "integer", "minimum": 1 } }
+      },
+      "StateOnlyPromotion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state"],
+        "properties": { "state": { "enum": ["in_progress", "uncertain", "absent"] } }
+      },
+      "RejectedPromotion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "reason"],
+        "properties": { "state": { "const": "rejected" }, "reason": { "type": "string", "enum": ["approval_expired", "digest_mismatch", "disabled", "operator_rejected"] } }
+      },
+      "PromotionEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "promotion"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "promotion": { "oneOf": [{ "$ref": "#/components/schemas/ReservedPromotion" }, { "$ref": "#/components/schemas/CommittedPromotion" }, { "$ref": "#/components/schemas/StateOnlyPromotion" }, { "$ref": "#/components/schemas/RejectedPromotion" }] } }
+      },
+      "RequestId": { "type": "string", "format": "uuid" },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "error"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "error": { "$ref": "#/components/schemas/Error" } }
+      }
+    },
+    "headers": {
+      "NoStore": { "required": true, "schema": { "const": "no-store" } },
+      "ContentLength": { "required": true, "schema": { "type": "string", "pattern": "^[0-9]+$" } }
+    },
+    "responses": {
+      "PromotionReserved": { "description": "Promotion authority reserved.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["request_id", "promotion"], "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "promotion": { "$ref": "#/components/schemas/ReservedPromotion" } } } } } },
+      "PromotionResult": { "description": "Promotion state result.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromotionEnvelope" } } } },
+      "PromotionConflict": { "description": "Promotion is in progress, uncertain, rejected, or otherwise conflicts with the supplied authority.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PromotionEnvelope" } } } },
+      "InvalidPlatformRequest": { "$ref": "#/components/responses/Error400" },
+      "PlatformAuthenticationFailed": { "$ref": "#/components/responses/Error401" },
+      "PlatformAuthorizationDenied": { "$ref": "#/components/responses/Error403" },
+      "NotFound": { "$ref": "#/components/responses/Error404" },
+      "PlatformUnavailable": { "$ref": "#/components/responses/Error503" },
+      "Error400": { "description": "Platform request is invalid.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }, "examples": { "invalid": { "value": { "request_id": "33333333-3333-4333-8333-333333333333", "error": { "code": "invalid_platform_request", "message": "Platform promotion request is invalid" } } } } } } },
+      "Error401": { "description": "Platform authentication failed.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Error403": { "description": "Platform authorization denied.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Error404": { "description": "Resource not found.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Error503": { "description": "Platform promotion API is unavailable.", "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" }, "Content-Length": { "$ref": "#/components/headers/ContentLength" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    }
+  }
+}

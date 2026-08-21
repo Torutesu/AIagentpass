@@ -2,6 +2,8 @@ import { WebAuthnCeremonyError } from "./webauthn/ceremony.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONTEXT_HASH = /^[0-9a-f]{64}$/;
+const MAX_RECENT_AUTH_AGE_MS = 5 * 60 * 1000;
+const MAX_RECENT_AUTH_FUTURE_SKEW_MS = 30 * 1000;
 
 export function createRecentAuthService({ ceremony, sessionRepository } = {}) {
   if (!ceremony || typeof ceremony.begin !== "function" || typeof ceremony.consume !== "function") throw new TypeError("ceremony is invalid");
@@ -40,7 +42,8 @@ export function createRecentAuthService({ ceremony, sessionRepository } = {}) {
   const authorize = async ({ proof, principal, organization_id, operation, context_hash: requestedContextHash, now } = {}) => {
     let context_hash;
     try { context_hash = optionalContextHash(requestedContextHash); } catch { return failure(principal, organization_id, operation, now); }
-    if (typeof proof !== "string" || !UUID.test(proof) || !principal || !UUID.test(principal.session_id) || !UUID.test(principal.member_id)) return failure(principal, organization_id, operation, now);
+    const currentAt = timestampMillis(now);
+    if (!Number.isSafeInteger(currentAt) || typeof proof !== "string" || !UUID.test(proof) || !principal || !UUID.test(principal.session_id) || !UUID.test(principal.member_id)) return failure(principal, organization_id, operation, now);
     const consumed = await sessionRepository.consumeRecentAuth({
       session_id: principal.session_id,
       challenge_id: proof,
@@ -53,7 +56,13 @@ export function createRecentAuthService({ ceremony, sessionRepository } = {}) {
     if (!consumed) return failure(principal, organization_id, operation, now);
     if ((consumed.context_hash ?? undefined) !== context_hash) return failure(principal, organization_id, operation, now);
     const authenticatedAt = timestampMillis(consumed.authenticated_at);
-    if (!Number.isSafeInteger(authenticatedAt)) return failure(principal, organization_id, operation, now);
+    if (!Number.isSafeInteger(authenticatedAt)
+      || authenticatedAt > currentAt + MAX_RECENT_AUTH_FUTURE_SKEW_MS
+      || currentAt - authenticatedAt >= MAX_RECENT_AUTH_AGE_MS) return failure(principal, organization_id, operation, now);
+    if (consumed.session_id !== undefined && consumed.session_id !== principal.session_id) return failure(principal, organization_id, operation, now);
+    if (consumed.member_id !== undefined && consumed.member_id !== principal.member_id) return failure(principal, organization_id, operation, now);
+    if (consumed.organization_id !== undefined && consumed.organization_id !== organization_id) return failure(principal, organization_id, operation, now);
+    if (consumed.operation !== undefined && consumed.operation !== operation) return failure(principal, organization_id, operation, now);
     return Object.freeze({ verified: true, consumed: true, challenge_id: proof.toLowerCase(), member_id: principal.member_id, organization_id, operation, authenticated_at: authenticatedAt, ...(context_hash === undefined ? {} : { context_hash }) });
   };
 

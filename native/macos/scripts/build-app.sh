@@ -74,6 +74,7 @@ if [[ "$ADHOC" -eq 1 ]]; then
   SIGNING_IDENTITY="-"
 else
   [[ -n "$SIGNING_IDENTITY" ]] || { echo "Production build requires --identity" >&2; exit 1; }
+  [[ "$SIGNING_IDENTITY" == "Developer ID Application:"* ]] || { echo "Production app identity must be a Developer ID Application identity" >&2; exit 1; }
   [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --team-id" >&2; exit 1; }
   [[ "$APP_IDENTIFIER_PREFIX" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --app-identifier-prefix" >&2; exit 1; }
   [[ -n "$SERVICE_PROFILE" && -n "$CLIENT_PROFILE" && -n "$AGENT_PROFILE" && -n "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Production build requires separate helper profiles including the qualification client profile" >&2; exit 1; }
@@ -138,6 +139,39 @@ install_product agentpass-native-agent-host "$AGENT_HOST_APP/Contents/MacOS/agen
 install_product agentpass-atomic-rename "$HELPER_DIR/agentpass-atomic-rename"
 install_product agentpass-qualification-grant-client "$QUALIFICATION_CLIENT_BINARY"
 install -m 0755 "$SCRIPT_DIR/qualification-grant-client-launcher.sh" "$QUALIFICATION_CLIENT"
+
+if [[ "${#ARCHITECTURES[@]}" -eq 2 ]]; then
+  require_universal_binary() {
+    local binary="$1" architectures
+    [[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || {
+      echo "Universal build is missing executable payload: $binary" >&2
+      exit 1
+    }
+    architectures="$(/usr/bin/lipo -archs "$binary" 2>/dev/null)" || {
+      echo "Unable to inspect universal executable: $binary" >&2
+      exit 1
+    }
+    case "$architectures" in
+      "arm64 x86_64"|"x86_64 arm64") ;;
+      *)
+        echo "Universal executable must contain arm64 and x86_64 slices: $binary ($architectures)" >&2
+        exit 1
+        ;;
+    esac
+  }
+
+  for binary in \
+    "$MACOS_DIR/agentpass-onboarding" \
+    "$MACOS_DIR/agentpass-native-manager" \
+    "$SERVICE_APP/Contents/MacOS/agentpass-native-service" \
+    "$CLIENT_APP/Contents/MacOS/agentpass-native-client" \
+    "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host" \
+    "$HELPER_DIR/agentpass-atomic-rename" \
+    "$QUALIFICATION_CLIENT_BINARY"; do
+    require_universal_binary "$binary"
+  done
+fi
+
 install -m 0644 "$RESOURCE_DIR/AgentPass-Info.plist" "$APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeService-Info.plist" "$SERVICE_APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeClient-Info.plist" "$CLIENT_APP/Contents/Info.plist"
@@ -286,4 +320,22 @@ fi
 
 /usr/bin/ditto "$APP" "$TARGET_APP"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$TARGET_APP"
+if [[ "$ADHOC" -eq 0 ]]; then
+  for item in \
+    "$TARGET_APP/Contents/MacOS/agentpass-onboarding" \
+    "$TARGET_APP/Contents/MacOS/agentpass-native-manager" \
+    "$TARGET_APP/Contents/Library/HelperTools/AgentPassNativeService.app" \
+    "$TARGET_APP/Contents/Library/HelperTools/AgentPassNativeClient.app" \
+    "$TARGET_APP/Contents/Library/HelperTools/AgentPassNativeAgentHost.app" \
+    "$TARGET_APP/Contents/Library/HelperTools/agentpass-atomic-rename" \
+    "$TARGET_APP/Contents/Library/HelperTools/agentpass-qualification-grant-client.app/Contents/MacOS/agentpass-qualification-grant-client" \
+    "$TARGET_APP/Contents/Library/HelperTools/agentpass-qualification-grant-client.app" \
+    "$TARGET_APP"; do
+    details="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1)"
+    /usr/bin/grep -q '^Authority=Developer ID Application: ' <<<"$details" || { echo "Production item is not Developer ID Application signed: $item" >&2; exit 1; }
+    /usr/bin/grep -Eq "^TeamIdentifier=${TEAM_ID}$" <<<"$details" || { echo "Production item Team ID mismatch: $item" >&2; exit 1; }
+    /usr/bin/grep -Eq '^flags=.*runtime' <<<"$details" || { echo "Production item is missing hardened runtime: $item" >&2; exit 1; }
+    /usr/bin/grep -q '^Timestamp=' <<<"$details" || { echo "Production item is missing a secure signing timestamp: $item" >&2; exit 1; }
+  done
+fi
 echo "$TARGET_APP"

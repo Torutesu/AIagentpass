@@ -7,6 +7,14 @@ download, verification, Human BFF, and Console checkpoint
 
 Planning date: 2026-08-15
 
+Current evidence authority: the dated
+[production-readiness audit](PRODUCTION_READINESS_AUDIT_2026-08-20.md) is the
+checkout-specific reconciliation of this plan, current source/tests, and
+external evidence. The [incident and revoke runbook](INCIDENT_AND_REVOKE_RUNBOOK.md)
+and [release stop conditions](RELEASE.md#promotion-stop-conditions) are
+operational gates. Statuses such as implemented locally or complete in this
+plan do not imply protected production qualification.
+
 ## 1. Release outcome
 
 The first production release is a headless-first security product for Claude
@@ -58,6 +66,9 @@ Not yet production evidence:
 
 - all eight purposes provisioned and exercised against real managed keys;
 - two-instance/provider-response-loss qualification under real contention;
+- protected Platform authenticator configuration, ingress mTLS, workload
+  identity, durable WebAuthn consumption, rotation, and fail-closed HTTP
+  behavior;
 - protected PostgreSQL cutover, backup, PITR, and restore measurements;
 - immutable signed/notarized universal PKG on physical Apple silicon and Intel;
 - Claude Code and Cursor physical end-to-end qualification;
@@ -72,6 +83,8 @@ Q2D Console operations ─┘                                           │
 Q3A immutable package ─> Q3B physical Mac qualification ────────────┼─> Q4 agent E2E
                                                                     │
 Q1 browser enrollment qualification ────────────────────────────────┘
+
+Platform authenticator qualification ───────────────────────────────────────┘
 
 Q2 + Q3 + Q4 evidence -> Q5 staging drills -> security review -> exact-candidate production promotion
 ```
@@ -308,6 +321,33 @@ Exit gate: no unresolved critical/high issue remains; restore and rollback have
 measured evidence; production, staging, package, SBOM, and release manifest all
 bind the same source and artifact identities.
 
+### Q5 execution packet — Luna 5.6
+
+Execute Q5 from the bounded operator packet in
+[`docs/runbooks/README.md`](runbooks/README.md). Create one redacted evidence
+index before promotion. Every record must include the command, UTC start/end,
+source commit, full source tree, artifact/deployment digest, run/job IDs,
+result digest, environment class, and reviewer. `implemented` or
+`locally-qualified` is not external release approval.
+
+The decision is `STOP` if any one of these is true: the exact six canonical CI
+lanes are not completed successfully for one source SHA/tree; release, KMS,
+Platform Auth, PostgreSQL, hardware, staging, or security-review evidence is
+absent, stale, non-canonical, secret-bearing, or unbound; a signer purpose is
+missing/shared/disabled/stale/wrong-version/local-backed or lacks canary and
+response-loss proof; PostgreSQL 16/17 role/RLS/0047, TLS, checksum,
+backup/PITR/restore, failover, or authority comparison is unproven; an
+issuance is `reserved`, `uncertain`, or `rejected` and cannot be resolved by
+exact lookup; Developer ID, notarization `Accepted`, stapling, Gatekeeper, or
+same-digest Apple silicon and Intel/T2 evidence is absent; revoke bound,
+emergency-stop, rollback, staging, alerting, or agent E2E is unmeasured; or an
+independent review has an open critical/high finding or missing retest.
+
+Use [`RELEASE_PROMOTION_RUNBOOK.md`](runbooks/RELEASE_PROMOTION_RUNBOOK.md),
+[`INCIDENT_REVOKE_RUNBOOK.md`](runbooks/INCIDENT_REVOKE_RUNBOOK.md), and the
+qualification, macOS, staging, and review runbooks linked there. Never edit a
+failed evidence file into a pass; retain it and create a replacement run.
+
 ## 8. Executable implementation backlog
 
 The merge queue below is ordered by authority and evidence dependencies. Every
@@ -326,8 +366,8 @@ and source-bound CI is green.
 | M1a evidence contracts | implemented locally | Q2B-1 | Audit-anchor v1 and promotion-evidence v2 canonical statements, schemas, fixtures, signers, and verifiers. | Canonical round trips and binding/substitution tests; catalog validation. |
 | M1b managed runtime binding | implemented locally | M1a, Q2B-2 | Both evidence signers bind to distinct managed lifecycle repositories and pinned public keys. | Hosted startup rejects a missing, stale, shared, substituted, or local authority. |
 | M1c provider-operation convergence | complete (C1) | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Source-bound PostgreSQL 17 CI evidence verifies six scenarios with zero skips. |
-| M1d authoritative producers | C2 complete; C3 queued | M1c | Audit-export anchor issuance, platform promotion approval, and promotion-evidence v3 issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
-| M1e operator/API surfaces | C2 complete; C3/C4 queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
+| M1d authoritative producers | C2 complete; C3 local foundation implemented | M1c | Audit-export anchor issuance, platform promotion approval, and promotion-evidence v3 issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
+| M1e operator/API surfaces | C2 complete; C3 Platform API local slice implemented | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
 | M2 eight-purpose runtime closure | queued | M1d | Fixed-cardinality readiness, metrics, drain, and secret/image scan for all eight purposes. | Any unhealthy purpose blocks readiness; shutdown leaves no unfenced operation. |
 | M3 two-instance real KMS | blocked on protected infrastructure | M2 | AWS and GCP two-instance fault-matrix evidence bundle. | Every operation reaches one verified result or an explicit durable terminal/operator state. |
 | M4 PostgreSQL production authority | can run parallel with M1–M2 | migrations 0038–0040 | Role-separated CI, TLS/deadline hardening, backup, PITR, restore, and rollback evidence. | App cannot administer/migrate; measured protected-environment RPO/RTO. |
@@ -350,7 +390,7 @@ physical evidence must be attached separately.
 | --- | --- | --- | --- |
 | C1 | Complete provider-operation qualification and retain source-bound evidence. | Real PostgreSQL two-pool matrix plus canonical evidence bound to source, catalog, migration, command, scenarios, and zero skips. | complete at `36a9981`; CI run `31842646306` and independently verified artifact SHA-256 `34a1276aa276a452cf0f6a2bd3a7dfa40d161fbd95ba2c9effb42f179ff9d8c4` |
 | C2 | Implement authoritative audit-export issuance. Reserve an export sequence and payload digest transactionally, sign the frozen audit-anchor statement, commit the receipt, and expose immutable retrieval/verification. | Cross-tenant, range/digest substitution, duplicate request, signer timeout, response loss, restart, stale lifecycle, unsigned export, and local-signer-in-hosted-mode tests. | C1 |
-| C3 | Implement authoritative release-promotion issuance. Bind source commit, candidate/image/PKG/SBOM digests, environment, qualification report digests, signer lifecycle, and approval state; prohibit rebuild-on-promotion. | Candidate/environment/evidence substitution, partial evidence, replay, concurrent promotion, signer failure, emergency disable, and exact-digest verifier compatibility tests. | C1 |
+| C3 | Implement authoritative release-promotion issuance. Bind source commit, candidate/image/PKG/SBOM digests, environment, qualification report digests, signer lifecycle, and approval state; prohibit rebuild-on-promotion. | Candidate/environment/evidence substitution, partial evidence, replay, concurrent promotion, signer failure, emergency disable, and exact-digest verifier compatibility tests. | C1; local migration/repository/Platform API slice is implemented, but real PostgreSQL/provider/KMS evidence remains required |
 | C4 | Add operator reconciliation surfaces for uncertain signer operations and evidence. Provide bounded list/detail/verify and explicit retry/reject controls through the Human BFF. | Owner/Admin/Auditor/Viewer matrix; recent WebAuthn, CSRF, `If-Match`, idempotency, tenant hiding, stale-state, concurrent adjudication, and audit-event tests. | C2, C3 |
 | C5 | Close all-eight-purpose runtime health and shutdown. Add fixed-cardinality readiness, provider/lifecycle probes, drain ordering, operation backlog metrics, and a hosted image/configuration secret scan. | Missing/shared/stale/disabled/wrong-key providers fail readiness; shutdown leaves no unfenced call; logs and metrics contain no request bytes, tenant IDs, claims, raw receipts, or private material. | C2, C3 |
 | C6 | Harden PostgreSQL production authority. Run migrations as migrator, runtime smoke tests as app, backup as backup role; add TLS/deadline/pool/cutover checks. | Negative privilege matrix, concurrent/interrupted migration, checksum drift, read-only DB, wrong TLS identity, encrypted backup, isolated PITR restore, authority comparison, and measured RPO/RTO. | C1; parallel with C2-C5 |
@@ -564,8 +604,15 @@ and returned with the historical-key-verified anchor. New admin events use the
 canonical v2 writer and are independently recomputed; legacy v1 remains
 explicitly linkage-only. C2's remaining product surface is the Human BFF/API
 and Console workflow. C3 has an approval authority but does not yet have the
-promotion issuance ledger, managed-signer transaction, or atomic deployment
-transition.
+managed-signer transaction or atomic deployment transition. Migration
+`0047_platform_promotion_issuance.sql` and the first repository boundary now
+exist locally: candidate/artifact/qualification and approval digests are
+immutable, one open reservation is allowed per deployment/environment, claims
+are opaque and fenced, terminal outcomes are closed, and deployment
+generations are monotonic. The repository supports reservation, exact replay,
+commit, uncertain, and rejection paths but is not yet composed into Cloud
+runtime/API or qualified against real PostgreSQL; no C3 production evidence is
+claimed.
 
 The next implementation commits, in dependency order, are:
 
@@ -674,13 +721,18 @@ Current checkpoint on 2026-08-15:
    atomic deployment transition, historical verifier, and PostgreSQL races.
 6. `C3-operator-api`: platform-only approval/promotion/reconciliation surface;
    Organization membership never grants promotion authority.
-7. `C5-C6-runtime-db`: all-eight readiness/drain plus least-privilege,
+7. `PLATFORM_AUTH_PRODUCTION_OPERATIONS.md` and
+   `PLATFORM_AUTH_QUALIFICATION.md`: production environment contract,
+   secret-free preflight, 404/503 behavior, rotation, and protected
+   four-factor qualification. The local preflight is configuration evidence
+   only.
+8. `C5-C6-runtime-db`: all-eight readiness/drain plus least-privilege,
    TLS/deadline, cutover, backup/PITR, and authority-comparison tooling.
-8. `C8-protected-qualification`: real KMS, two-instance PostgreSQL, retained
+9. `C8-protected-qualification`: real KMS, two-instance PostgreSQL, retained
    evidence, and independent verification.
-9. `C9-release-candidate`: exact universal signed/notarized PKG, direct and
+10. `C9-release-candidate`: exact universal signed/notarized PKG, direct and
    Homebrew delivery, two physical hardware reports.
-10. `C10-C11-release`: Claude Code/Cursor E2E, staging drills, security review,
+11. `C10-C11-release`: Claude Code/Cursor E2E, staging drills, security review,
     exact-digest promotion, canary, and production rollback gate.
 
 ##### Next execution waves and acceptance gates

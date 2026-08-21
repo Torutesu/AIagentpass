@@ -5,6 +5,7 @@ import {
   ORGANIZATION_ID,
   OTHER_MEMBER_ID,
   consoleSummary,
+  deploymentReadiness,
   json,
   session,
   type BrowserRole,
@@ -98,6 +99,7 @@ async function installOrganizationRoutes(page: Page, role: BrowserRole): Promise
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, consoleSummary());
+    if (request.method() === "GET" && url.searchParams.get("resource") === "deployment-readiness") return json(route, deploymentReadiness());
     if (request.method() === "GET") return json(route, { capabilities: [], revocations: [], events: [] });
     return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
   });

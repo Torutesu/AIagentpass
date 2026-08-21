@@ -69,6 +69,14 @@ class Agentpass < Formula
 
       exec "$node" "$cli" "$@"
     SH
+    # The onboarding app accepts only a signed executable with the product
+    # identity. Homebrew remains the evaluation channel, so this wrapper is
+    # deliberately ad-hoc signed with a distinct identity. It must never be
+    # accepted as the production Developer ID helper by the onboarding UI.
+    # Signing after Homebrew has materialized the wrapper keeps the existing
+    # CLI entrypoint and its behavior intact.
+    system_command "/usr/bin/codesign",
+      args: ["--force", "--sign", "-", "--identifier", "dev.agentpass.homebrew-evaluation", bin/"agentpass"]
 
     (bin/"agentpassd").write <<~SH
       #!/bin/sh

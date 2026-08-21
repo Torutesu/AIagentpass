@@ -43,7 +43,7 @@ function withPublicSecurityHeaders(response: Response, url: URL): Response {
   headers.set("X-Frame-Options", "DENY");
   headers.set("X-Permitted-Cross-Domain-Policies", "none");
   headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
-  if (url.pathname === "/api/console" || url.pathname.startsWith("/api/auth/")) {
+  if (url.pathname === "/api/console" || url.pathname.startsWith("/api/auth/") || url.pathname === "/health/ready") {
     headers.set("Cache-Control", "no-store, max-age=0");
     headers.set("Pragma", "no-cache");
     headers.set("Vary", "Cookie, oai-authenticated-user-id, oai-authenticated-user-email");
@@ -67,6 +67,10 @@ function withPublicSecurityHeaders(response: Response, url: URL): Response {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/health/ready") {
+      return withPublicSecurityHeaders(Response.json({ version: 1, ready: true, status: "ready", code: "console_static_ready" }), url);
+    }
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

@@ -62,6 +62,38 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   assert.throws(() => loadRuntimeConfig({}), /profile is required/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_CLOUD_HOST: "example.com" }), /listen host/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db" }), /forbids PostgreSQL/);
+  const platformConfigured = loadRuntimeConfig({ ...hostedEnv(value), AGENTPASS_PLATFORM_AUTH_ENABLED: "true", AGENTPASS_PLATFORM_MTLS_FINGERPRINT256: "aa:".repeat(31) + "aa", AGENTPASS_PLATFORM_MTLS_SPIFFE_ID: "spiffe://agentpass.example/workload/platform-api", AGENTPASS_PLATFORM_WORKLOAD_ID: "spiffe://agentpass.example/workload/platform-api", AGENTPASS_PLATFORM_WORKLOAD_AUDIENCE: "agentpass.platform.promotion" }).platformAuth;
+  assert.deepEqual(platformConfigured, { enabled: true, mtls: { fingerprint256: "AA:".repeat(31) + "AA", spiffe_id: "spiffe://agentpass.example/workload/platform-api" }, workloadId: "spiffe://agentpass.example/workload/platform-api", audience: "agentpass.platform.promotion", requiredRole: "platform_operator", recentAuthHeader: "agentpass-platform-recent-auth" });
+  const platformWithProviders = loadRuntimeConfig({
+    ...hostedEnv(value),
+    AGENTPASS_PLATFORM_AUTH_ENABLED: "true",
+    AGENTPASS_PLATFORM_PRINCIPAL_PROVIDER: "iam",
+    AGENTPASS_PLATFORM_WORKLOAD_PROVIDER: "spiffe",
+    AGENTPASS_PLATFORM_WEBAUTHN_PROVIDER: "postgres"
+  }).platformAuth;
+  assert.deepEqual(platformWithProviders.providers, { principal: "iam", workload: "spiffe", webauthn: "postgres" });
+  assert.deepEqual(loadRuntimeConfig({ ...hostedEnv(value), AGENTPASS_PLATFORM_AUTH_ENABLED: "true" }).platformAuth, {
+    enabled: true,
+    mtls: {},
+    requiredRole: "platform_operator",
+    recentAuthHeader: "agentpass-platform-recent-auth"
+  });
+  assert.throws(() => loadRuntimeConfig({ ...hostedEnv(value), AGENTPASS_PLATFORM_MTLS_FINGERPRINT256: "aa:".repeat(31) + "aa" }), /explicitly enabled/);
+  assert.throws(() => loadRuntimeConfig({ ...hostedEnv(value), AGENTPASS_PLATFORM_AUTH_ENABLED: "true", AGENTPASS_PLATFORM_MTLS_FINGERPRINT256: "aa:".repeat(31) + "aa", AGENTPASS_PLATFORM_MTLS_SPIFFE_ID: "spiffe://agentpass.example/workload/platform-api", AGENTPASS_PLATFORM_WORKLOAD_ID: "spiffe://other.example/workload/platform-api", AGENTPASS_PLATFORM_WORKLOAD_AUDIENCE: "agentpass.platform.promotion" }), /does not match/);
+  assert.deepEqual(loadRuntimeConfig(hostedEnv(value)).deploymentIdentity, { version: 1, configured: true, ready: true, source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`, deployment_id: "deployment-staging-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64) });
+  const deploymentIdentity = loadRuntimeConfig({
+    ...hostedEnv(value),
+    AGENTPASS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+    AGENTPASS_CLOUD_SOURCE_TREE: "b".repeat(40),
+    AGENTPASS_CLOUD_IMAGE_DIGEST: `sha256:${"c".repeat(64)}`,
+    AGENTPASS_CLOUD_DEPLOYMENT_ID: "deployment-staging-1",
+    AGENTPASS_CLOUD_DEPLOYMENT_REVISION: "revision-1",
+    AGENTPASS_CLOUD_SCHEMA_DIGEST: "d".repeat(64),
+    AGENTPASS_CLOUD_CATALOG_DIGEST: "e".repeat(64),
+    AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: "f".repeat(64)
+  }).deploymentIdentity;
+  assert.equal(deploymentIdentity.ready, true);
+  assert.throws(() => loadRuntimeConfig({ ...hostedEnv(value), AGENTPASS_CLOUD_SOURCE_COMMIT: undefined }), /deployment identity/);
   const humanEnv = hostedEnv(value);
   const notification = loadRuntimeConfig(humanEnv).ownerRecoveryNotification;
   assert.deepEqual(notification, {
@@ -322,6 +354,14 @@ function hostedEnv(value) {
     AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "promotion-evidence-2026-08",
     AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: value.promotionEvidenceKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: "f".repeat(64),
+    AGENTPASS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+    AGENTPASS_CLOUD_SOURCE_TREE: "b".repeat(40),
+    AGENTPASS_CLOUD_IMAGE_DIGEST: `sha256:${"c".repeat(64)}`,
+    AGENTPASS_CLOUD_DEPLOYMENT_ID: "deployment-staging-1",
+    AGENTPASS_CLOUD_DEPLOYMENT_REVISION: "revision-1",
+    AGENTPASS_CLOUD_SCHEMA_DIGEST: "d".repeat(64),
+    AGENTPASS_CLOUD_CATALOG_DIGEST: "e".repeat(64),
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: value.ownerRecoveryNotificationAuthorizationPath,

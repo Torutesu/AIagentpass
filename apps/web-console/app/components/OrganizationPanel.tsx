@@ -12,6 +12,7 @@ import {
   type OrganizationInvitation,
   type OrganizationMember,
   type OrganizationRole,
+  type OrganizationSession,
   type RecentAuthInput,
 } from "../organization-client";
 
@@ -19,10 +20,11 @@ export type OrganizationPanelProps = Readonly<{
   client?: OrganizationClient;
   initialOrganizationId?: string;
   authorizeRecentAuthImpl?: (input: RecentAuthInput) => Promise<string | Readonly<{ authorization_id: string }>>;
+  onOrganizationSwitched?: (session: OrganizationSession) => void;
 }>;
 
 type LoadStatus = "idle" | "loading" | "ready" | "empty" | "error";
-type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode }>;
+type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode; serverCode?: string }>;
 type Rollback = () => void;
 type MutationOptions = Readonly<{ optimistic?: () => Rollback; retry?: () => Promise<void>; retryLabel?: string }>;
 type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
@@ -61,7 +63,7 @@ export function getOrganizationPanelVisibility(role: OrganizationRole) {
   return getOrganizationVisibility(role);
 }
 
-export function OrganizationPanel({ client: suppliedClient, initialOrganizationId, authorizeRecentAuthImpl }: OrganizationPanelProps) {
+export function OrganizationPanel({ client: suppliedClient, initialOrganizationId, authorizeRecentAuthImpl, onOrganizationSwitched }: OrganizationPanelProps) {
   const client = useMemo(() => suppliedClient ?? createOrganizationClient({ authorizeRecentAuthImpl }), [suppliedClient, authorizeRecentAuthImpl]);
   const [organizations, setOrganizations] = useState<readonly Organization[]>([]);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<string>(initialOrganizationId ?? "");
@@ -90,24 +92,30 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const [nowMs, setNowMs] = useState(0);
   const loadSequence = useRef(0);
   const selectedOrganizationRef = useRef(initialOrganizationId ?? "");
+  const pendingActionRef = useRef<string | null>(null);
+  const forceSessionRefreshRef = useRef(false);
 
-  const effectiveRole = selectedOrganizationId !== "" && roleOverrides[selectedOrganizationId] !== undefined
-    ? roleOverrides[selectedOrganizationId]
-    : selectedOrganizationId !== "" && selectedOrganizationId === sessionOrganizationId ? sessionRole : "viewer";
+  const effectiveRole = selectedOrganizationId !== "" && selectedOrganizationId === sessionOrganizationId
+    ? sessionRole
+    : selectedOrganizationId !== "" && roleOverrides[selectedOrganizationId] !== undefined ? roleOverrides[selectedOrganizationId] : "viewer";
   const visibility = useMemo(() => getOrganizationPanelVisibility(effectiveRole), [effectiveRole]);
 
   const loadOrganizations = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++loadSequence.current;
     setOrganizationState({ status: "loading" });
     try {
-      const [page, session] = await Promise.all([client.listOrganizations({ signal }), client.getSession({ signal })]);
+      const sessionRequest = forceSessionRefreshRef.current && client.refreshSession !== undefined
+        ? client.refreshSession({ signal })
+        : client.getSession({ signal });
+      forceSessionRefreshRef.current = false;
+      const [page, session] = await Promise.all([client.listOrganizations({ signal }), sessionRequest]);
       if (sequence !== loadSequence.current || signal?.aborted) return;
       setOrganizations(page.items);
       setSessionRole(session.role);
       setSessionOrganizationId(session.organizationId);
       setSessionMemberId(session.memberId);
-      setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
-      const nextId = chooseOrganization(page.items, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
+      setRoleOverrides((current) => ({ ...current, [session.organizationId]: session.role }));
+      const nextId = chooseOrganization(page.items, selectedOrganizationRef.current, session.organizationId);
       selectedOrganizationRef.current = nextId;
       setSelectedOrganizationId(nextId);
       setSelectedOrganization(nextId === "" ? undefined : page.items.find((item) => item.id === nextId));
@@ -117,7 +125,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       if (sequence !== loadSequence.current || signal?.aborted) return;
       setOrganizationState(resourceError(error));
     }
-  }, [client, initialOrganizationId]);
+  }, [client]);
 
   const loadMembers = useCallback(async (organizationId: string, signal?: AbortSignal) => {
     setMemberState({ status: "loading" });
@@ -190,7 +198,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     };
   }, []);
 
-  const selectOrganization = (id: string) => {
+  const applyOrganizationSelection = (id: string) => {
     const next = organizations.find((item) => item.id === id);
     selectedOrganizationRef.current = id;
     setSelectedOrganizationId(id);
@@ -202,11 +210,33 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setInvitationState(INITIAL_RESOURCE);
     setRoleDrafts({});
     setRemovalConfirmationId(null);
+    setOneTimeToken(null);
     setMutationError(INITIAL_RESOURCE);
   };
 
+  const switchOrganization = async (id: string): Promise<void> => {
+    if (id === sessionOrganizationId) {
+      applyOrganizationSelection(id);
+      return;
+    }
+    void runMutation("switch-organization", async () => {
+      const nextSession = await client.switchOrganization({ organizationId: id });
+      setSessionRole(nextSession.role);
+      setSessionOrganizationId(nextSession.organizationId);
+      setSessionMemberId(nextSession.memberId);
+      setRoleOverrides((current) => ({ ...current, [nextSession.organizationId]: nextSession.role }));
+      applyOrganizationSelection(nextSession.organizationId);
+      onOrganizationSwitched?.(nextSession);
+    }, { retry: () => switchOrganization(id), retryLabel: "組織切り替えを再試行" });
+  };
+
+  const selectOrganization = (id: string) => {
+    void switchOrganization(id);
+  };
+
   const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<void> => {
-    if (pendingAction !== null) return;
+    if (pendingActionRef.current !== null) return;
+    pendingActionRef.current = action;
     setPendingAction(action);
     setMutationError(INITIAL_RESOURCE);
     setRetryAction(null);
@@ -218,10 +248,16 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       rollback();
       const nextError = resourceError(error);
       setMutationError(nextError);
-      if ((nextError.code === "recent_auth_required" || nextError.code === "aborted") && options.retry !== undefined) {
+      // A transport failure is ambiguous: the server may have committed the
+      // mutation before the response was lost. Never offer to replay it with
+      // a newly generated idempotency key. The notice below instead performs
+      // an authoritative refresh. Only an explicitly cancelled/expired
+      // human-auth step is safe to retry as the same UI operation.
+      if (options.retry !== undefined && isRetryableMutationError(nextError.code)) {
         setRetryAction({ label: options.retryLabel ?? "本人確認をやり直す", run: options.retry });
       }
     } finally {
+      pendingActionRef.current = null;
       setPendingAction(null);
     }
   };
@@ -269,7 +305,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     if (!selectedOrganization || !visibility.canInvite) return;
     const expiresAt = parseDateTimeLocal(inviteExpiresAt);
     if (expiresAt === undefined) return setMutationError({ status: "error", error: "有効期限を入力してください。" });
-    if (Date.parse(expiresAt) <= Date.now()) return setMutationError({ status: "error", code: "expired", error: "有効期限は現在より後に設定してください。" });
+    if (nowMs === 0 || Date.parse(expiresAt) <= nowMs) return setMutationError({ status: "error", code: "expired", error: "有効期限は現在より後に設定してください。" });
     await runMutation("create-invitation", async () => {
       const result = await client.createInvitation({ organizationId: selectedOrganization.id, role: inviteRole, expiresAt });
       setOneTimeToken(result.oneTimeToken);
@@ -342,6 +378,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   };
 
   const refresh = () => {
+    forceSessionRefreshRef.current = true;
     setMutationError(INITIAL_RESOURCE);
     setRetryAction(null);
     setOneTimeToken(null);
@@ -379,6 +416,14 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
           {selectedOrganization && <div style={panelStyle.row}><span>{selectedOrganization.name} · v{selectedOrganization.version}</span><span style={panelStyle.muted}>更新: {formatDate(selectedOrganization.updatedAt)}</span></div>}
           {visibility.canManageOrganization && selectedOrganization && <form onSubmit={renameOrganization} style={panelStyle.actionRow}><label style={{ ...panelStyle.label, flex: "1 1 280px" }}><span>組織名を変更</span><input value={renameName} onChange={(event) => setRenameName(event.target.value)} maxLength={128} style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pendingAction !== null}>{pendingAction === "rename-organization" ? "変更中…" : "名前を変更"}</button></form>}
           {!visibility.canManageOrganization && <p style={panelStyle.muted}>この組織では閲覧権限のみです。管理操作は表示されません。</p>}
+        </section>
+      )}
+
+      {organizations.length > 0 && (
+        <section style={panelStyle.card} aria-labelledby="organization-create-another-title">
+          <h2 id="organization-create-another-title" style={panelStyle.cardTitle}>別の組織を作成</h2>
+          <p style={panelStyle.muted}>新しい組織は、現在の組織とは独立したAgent管理単位として作成されます。</p>
+          <CreateOrganizationForm name={createName} setName={setCreateName} onSubmit={createOrganization} pending={pendingAction === "create-organization"} />
         </section>
       )}
 
@@ -446,9 +491,13 @@ function ResourceStateView({ state, empty, error }: { state: ResourceState; empt
 }
 
 function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
-  const refreshLabel = state.code === "unauthorized" ? "セッションを更新" : "最新情報を読み込む";
-  const canRefresh = state.code === "conflict" || state.code === "unauthorized";
-  return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && (state.code === "recent_auth_required" || state.code === "aborted") ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
+  const replayedInvitation = state.serverCode !== undefined && /invitation[_-]?replayed|replay|reused/i.test(state.serverCode);
+  const idempotencyConflict = state.serverCode !== undefined && /idempotency/i.test(state.serverCode);
+  const responseMayHaveCommitted = state.code === "transport_failed" || state.code === "http_failed";
+  const refreshLabel = responseMayHaveCommitted ? "通信結果を確認" : state.code === "unauthorized" ? "セッションを更新" : replayedInvitation ? "招待情報を更新" : idempotencyConflict ? "最新状態を確認" : "最新情報を読み込む";
+  const canRefresh = responseMayHaveCommitted || state.code === "conflict" || state.code === "unauthorized";
+  const canRetryAuth = retryAction !== null && (state.code === "recent_auth_required" || state.code === "aborted");
+  return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{canRetryAuth ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
 }
 
 function chooseOrganization(items: readonly Organization[], requested: string, sessionOrganizationId: string): string {
@@ -458,14 +507,21 @@ function chooseOrganization(items: readonly Organization[], requested: string, s
 }
 
 function resourceError(error: unknown): ResourceState {
-  if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", code: "conflict", error: "他の管理者が先に変更しました。最新情報を読み込んでから、もう一度お試しください。" };
+  if (error instanceof OrganizationClientError && error.code === "conflict" && error.serverCode !== undefined && /invitation[_-]?replayed|replay|reused/i.test(error.serverCode)) return { status: "error", code: "conflict", serverCode: error.serverCode, error: "この招待トークンはすでに使用されています。招待相手には新しい招待を発行してください。" };
+  if (error instanceof OrganizationClientError && error.code === "conflict" && error.serverCode !== undefined && /idempotency/i.test(error.serverCode)) return { status: "error", code: "conflict", serverCode: error.serverCode, error: "同じ操作がすでに別の結果として受け付けられています。最新状態を確認してから、必要ならもう一度お試しください。" };
+  if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", code: "conflict", serverCode: error.serverCode, error: "他の管理者が先に変更しました。最新情報を読み込んでから、もう一度お試しください。" };
   if (error instanceof OrganizationClientError && error.code === "expired") return { status: "error", code: "expired", error: "この招待または操作の有効期限が切れています。最新情報を確認してください。" };
   if (error instanceof OrganizationClientError && error.code === "recent_auth_required") return { status: "error", code: "recent_auth_required", error: "安全な本人確認が必要です。もう一度実行してPasskey認証を完了してください。" };
   if (error instanceof OrganizationClientError && error.code === "aborted") return { status: "error", code: "aborted", error: "本人確認がキャンセルされました。必要であれば、もう一度実行してください。" };
   if (error instanceof OrganizationClientError && error.code === "forbidden") return { status: "error", code: "forbidden", error: "この操作を実行する権限がありません。" };
-  if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", error: "セッションの有効期限が切れています。セッションを更新してください。" };
+  if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", serverCode: error.serverCode, error: "セッションの有効期限が切れています。セッションを更新してください。" };
   if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", code: "validation_failed", error: "入力内容を確認してください。" };
+  if (error instanceof OrganizationClientError) return { status: "error", code: error.code, serverCode: error.serverCode, error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
   return { status: "error", error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
+}
+
+function isRetryableMutationError(code: OrganizationClientErrorCode | undefined): boolean {
+  return code === "recent_auth_required" || code === "aborted";
 }
 
 function pendingActionLabel(action: string): string {

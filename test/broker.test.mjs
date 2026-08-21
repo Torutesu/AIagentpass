@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { brokerRequest } from "../lib/broker-client.mjs";
@@ -60,6 +62,74 @@ function signedRequest(fixtureData, overrides = {}) {
   }, fixtureData.identity.private_path);
 }
 
+class FakeBrokerServer extends EventEmitter {
+  constructor(handler, { listenError = null, invokeListenCallback = false } = {}) {
+    super();
+    this.handler = handler;
+    this.listenError = listenError;
+    this.invokeListenCallback = invokeListenCallback;
+    this.listening = false;
+    this.connections = new Set();
+    this.closeCallback = null;
+  }
+
+  listen(_socket, callback) {
+    if (this.listenError) {
+      queueMicrotask(() => this.emit("error", this.listenError));
+      return this;
+    }
+    this.listening = true;
+    queueMicrotask(() => {
+      this.emit("listening");
+      if (this.invokeListenCallback) callback?.();
+    });
+    return this;
+  }
+
+  close(callback) {
+    this.listening = false;
+    this.closeCallback = callback;
+    this.finishCloseIfIdle();
+    return this;
+  }
+
+  accept(connection) {
+    this.connections.add(connection);
+    connection.once("close", () => {
+      this.connections.delete(connection);
+      this.finishCloseIfIdle();
+    });
+    this.handler(connection);
+  }
+
+  finishCloseIfIdle() {
+    if (this.listening || this.connections.size !== 0 || !this.closeCallback) return;
+    const callback = this.closeCallback;
+    this.closeCallback = null;
+    queueMicrotask(() => {
+      this.emit("close");
+      callback();
+    });
+  }
+}
+
+class FakeBrokerConnection extends EventEmitter {
+  constructor() {
+    super();
+    this.destroyed = false;
+    this.destroyError = null;
+  }
+
+  setEncoding() {}
+  setTimeout() {}
+
+  destroy(error) {
+    this.destroyed = true;
+    this.destroyError = error;
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
 test("broker replaces caller key and signs an allowed Git payload", async () => {
   const data = fixture();
   const { configDir, key } = data;
@@ -82,6 +152,64 @@ test("broker denies a protected branch", async () => {
   const { repo, configDir } = data;
   execFileSync("git", ["-C", repo, "branch", "-m", "main"]);
   await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), configDir), /branch_denied/);
+});
+
+test("broker releases its lease after a Unix socket listen error", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "listen-error.sock");
+  const originalCreateServer = net.createServer;
+  net.createServer = (_options, handler) => new FakeBrokerServer(handler, { listenError: Object.assign(new Error("bind failed"), { code: "EADDRINUSE" }) });
+  try {
+    const server = createBroker({ socket, configDir: data.configDir });
+    const [error] = await once(server, "error");
+    assert.equal(error.code, "EADDRINUSE");
+    assert.equal(fs.existsSync(`${socket}.lock`), false);
+  } finally {
+    net.createServer = originalCreateServer;
+  }
+});
+
+test("broker cleans up the lease when socket permission hardening fails", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "chmod-error.sock");
+  const originalCreateServer = net.createServer;
+  const originalChmodSync = fs.chmodSync;
+  net.createServer = (_options, handler) => new FakeBrokerServer(handler, { invokeListenCallback: true });
+  fs.chmodSync = (target, mode) => {
+    if (target === socket && mode === 0o600) throw Object.assign(new Error("chmod failed"), { code: "EACCES" });
+    return originalChmodSync(target, mode);
+  };
+  try {
+    const server = createBroker({ socket, configDir: data.configDir });
+    const [error] = await once(server, "error");
+    assert.equal(error.code, "EACCES");
+    assert.equal(fs.existsSync(`${socket}.lock`), false);
+  } finally {
+    fs.chmodSync = originalChmodSync;
+    net.createServer = originalCreateServer;
+  }
+});
+
+test("broker shutdown destroys a connection that never completes", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "shutdown.sock");
+  const originalCreateServer = net.createServer;
+  let fakeServer;
+  net.createServer = (_options, handler) => {
+    fakeServer = new FakeBrokerServer(handler);
+    return fakeServer;
+  };
+  try {
+    const server = createBroker({ socket, configDir: data.configDir, shutdownTimeoutMs: 20 });
+    const connection = new FakeBrokerConnection();
+    fakeServer.accept(connection);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    assert.equal(connection.destroyed, true);
+    assert.equal(connection.destroyError?.message, "Broker shutdown deadline exceeded");
+  } finally {
+    net.createServer = originalCreateServer;
+  }
 });
 
 test("Unix socket client and broker exchange one bounded request", async () => {

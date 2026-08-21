@@ -199,6 +199,16 @@ export function createCutoverOperations({
     return normalizeMigrationStatus(status);
   };
   const readPreflight = async () => preflightRunner({ client, validate: false });
+  const readApplicationReadiness = async () => {
+    const result = normalizeApplicationReadiness(await applicationReadiness());
+    const target = migrationTargetManifest?.deployment;
+    if (result.ready !== true || target === undefined) return result;
+    const identity = result.deployment_identity;
+    if (identity?.deployment_id !== target.id || identity?.revision !== target.revision) {
+      return Object.freeze({ configured: result.configured, ready: false, deployment_identity: identity });
+    }
+    return result;
+  };
 
   return Object.freeze({
     async preflight() {
@@ -225,7 +235,7 @@ export function createCutoverOperations({
         preflight: readPreflight,
         databaseHealth: () => databaseHealth({ client }),
         metrics: () => metricsReader({ client, pool }),
-        applicationReadiness,
+        applicationReadiness: readApplicationReadiness,
         now
       });
     },
@@ -233,7 +243,22 @@ export function createCutoverOperations({
       return evaluateDrainGate({ input, now, maxAgeMs, secret: drainSecret, expectedBinding: migrationTargetManifest?.deployment });
     },
     async rollback({ reason = "cutover rollback requested" } = {}) {
-      return executeTrafficRollback({ trafficController, reason });
+      const result = await executeTrafficRollback({ trafficController, reason });
+      if (result.executed !== true || migrationTargetManifest?.deployment === undefined) return result;
+      let postRollback;
+      try { postRollback = normalizeApplicationReadiness(await applicationReadiness()); }
+      catch { postRollback = { configured: true, ready: false, deployment_identity: null }; }
+      return Object.freeze({
+        ...result,
+        deployment_id: migrationTargetManifest.deployment.id,
+        current_revision: migrationTargetManifest.deployment.revision,
+        rollback_target_revision: migrationTargetManifest.deployment.rollback_target_revision,
+        completed_at: validIsoTimestamp(now),
+        post_rollback_ready: postRollback.ready === true
+          && postRollback.deployment_identity?.deployment_id === migrationTargetManifest.deployment.id
+          && postRollback.deployment_identity?.revision === migrationTargetManifest.deployment.rollback_target_revision,
+        deployment_identity: postRollback.deployment_identity
+      });
     }
   });
 }
@@ -381,7 +406,23 @@ function normalizeMetrics(result) {
 }
 
 function normalizeApplicationReadiness(result) {
-  return Object.freeze({ configured: result?.configured === true, ready: result?.ready === true });
+  const configured = result?.configured === true;
+  const ready = result?.ready === true;
+  const identity = normalizeDeploymentIdentity(result?.deployment_identity);
+  if (ready && (!configured || identity === null)) return Object.freeze({ configured, ready: false, deployment_identity: null });
+  return Object.freeze({ configured, ready, deployment_identity: identity });
+}
+
+function normalizeDeploymentIdentity(value) {
+  if (value === undefined || value === null) return null;
+  const keys = ["version", "configured", "ready", "source_commit", "source_tree", "image_digest", "deployment_id", "revision", "schema_digest", "catalog_digest"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, keys)
+    || value.version !== 1 || value.configured !== true || value.ready !== true
+    || !/^[0-9a-f]{40}$/u.test(value.source_commit) || !/^[0-9a-f]{40}$/u.test(value.source_tree)
+    || !/^sha256:[0-9a-f]{64}$/u.test(value.image_digest)
+    || !isSafeBindingValue(value.deployment_id) || !isSafeBindingValue(value.revision)
+    || !/^[0-9a-f]{64}$/u.test(value.schema_digest) || !/^[0-9a-f]{64}$/u.test(value.catalog_digest)) return null;
+  return Object.freeze({ ...value });
 }
 
 async function defaultDatabaseHealth({ client }) {
@@ -468,6 +509,7 @@ function parseMigrationTargetManifest(value, databaseUrl, applicationVersion) {
       deployment: Object.freeze({
         id: parsed.deployment.id,
         revision: parsed.deployment.revision,
+        rollback_target_revision: parsed.deployment.rollback_target_revision,
         traffic_generation: parsed.deployment.traffic_generation,
         application_version: parsed.deployment.application_version
       })
@@ -486,7 +528,7 @@ function assertMigrationTargetManifest(manifest, applicationVersion) {
     const migration = target.migrations[index];
     if (!migration || typeof migration !== "object" || Array.isArray(migration) || !exactKeys(migration, ["version", "checksum"]) || migration.version !== index + 1 || !/^[0-9a-f]{64}$/u.test(migration.checksum)) throw invalidEnvironment();
   }
-  if (!deployment || typeof deployment !== "object" || Array.isArray(deployment) || !exactKeys(deployment, ["id", "revision", "traffic_generation", "application_version"]) || !isSafeBindingValue(deployment.id) || !isSafeBindingValue(deployment.revision) || !isSafeBindingValue(deployment.traffic_generation) || deployment.application_version !== applicationVersion) throw invalidEnvironment();
+  if (!deployment || typeof deployment !== "object" || Array.isArray(deployment) || !exactKeys(deployment, ["id", "revision", "rollback_target_revision", "traffic_generation", "application_version"]) || !isSafeBindingValue(deployment.id) || !isSafeBindingValue(deployment.revision) || !isSafeBindingValue(deployment.rollback_target_revision) || !isSafeBindingValue(deployment.traffic_generation) || deployment.application_version !== applicationVersion) throw invalidEnvironment();
   return true;
 }
 
@@ -650,7 +692,8 @@ export async function fetchReadiness(url, timeoutMs, fetchImpl, operationalProbe
     if (!response.ok) return { configured: true, ready: false };
     const body = await readResponseBodyBounded(response);
     const parsed = JSON.parse(body);
-    return { configured: true, ready: parsed?.ready === true };
+    const identity = normalizeDeploymentIdentity(parsed?.deployment_identity);
+    return { configured: true, ready: parsed?.ready === true && identity !== null, deployment_identity: identity };
   } catch {
     return { configured: true, ready: false };
   } finally {

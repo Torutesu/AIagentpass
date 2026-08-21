@@ -102,6 +102,13 @@ const productArtifacts = manifest.artifacts.filter((artifact) => artifact.role =
 if (productArtifacts.length !== 1 || !productArtifacts[0].name.endsWith('.pkg')) throw new Error('release manifest requires exactly one product PKG artifact');
 const productArtifact = productArtifacts[0];
 assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, productArtifact.sha256);
+const trustRootArtifacts = manifest.artifacts.filter((artifact) => artifact.role === 'trust_root');
+if (trustRootArtifacts.length > 1) throw new Error('release manifest contains multiple trust root artifacts');
+if (trustRootArtifacts.length === 1) {
+  const trustRoot = trustRootArtifacts[0];
+  const publicKeyDigest = createHash('sha256').update(publicKeyBytes).digest('hex');
+  if (trustRoot.bytes !== publicKeyBytes.length || trustRoot.sha256 !== publicKeyDigest) throw new Error('release trust root artifact does not match verification public key');
+}
 const controllerArtifacts = manifest.artifacts.filter((artifact) => artifact.role === 'external_qualification_controller');
 if (controllerArtifacts.length !== 1 || controllerArtifacts[0].media_type !== 'application/octet-stream' || !/^AgentPassQualificationController-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?-macos-universal\.tar$/u.test(controllerArtifacts[0].name)) throw new Error('release manifest requires one exact external controller archive');
 if (controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) throw new Error('controller archive version does not match the release');

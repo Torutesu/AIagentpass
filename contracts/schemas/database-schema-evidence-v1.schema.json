@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/database-schema-evidence-v1.schema.json",
+  "title": "AgentPass measured database schema evidence v1",
+  "description": "Fresh, deployment-bound evidence produced by the Cloud readiness schema measurement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "type", "environment", "deployment_id", "revision", "source_commit", "source_tree", "database_schema_digest", "measured_at", "transaction_isolation", "measurement_id", "readiness_code"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.database-schema-evidence" },
+    "environment": { "enum": ["staging", "production"] },
+    "deployment_id": { "$ref": "#/$defs/id" },
+    "revision": { "$ref": "#/$defs/id" },
+    "source_commit": { "$ref": "#/$defs/commit" },
+    "source_tree": { "$ref": "#/$defs/commit" },
+    "database_schema_digest": { "$ref": "#/$defs/digest" },
+    "measured_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "transaction_isolation": { "const": "repeatable_read" },
+    "measurement_id": { "$ref": "#/$defs/id" },
+    "readiness_code": { "const": "ready" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" }
+  }
+}

@@ -81,7 +81,8 @@ public struct OnboardingRootView: View {
         case .loaded(let status):
             LoadedStateView(
                 status: status,
-                copyCommand: copyCommand
+                copyCommand: copyCommand,
+                openTerminalAndCopy: openTerminalAndCopy
             )
         }
     }
@@ -101,6 +102,12 @@ public struct OnboardingRootView: View {
             }
         }
     }
+
+    private func openTerminalAndCopy(_ command: String) {
+        copyCommand(command)
+        _ = NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+    }
+
 }
 
 private struct LoadingStateView: View {
@@ -154,11 +161,13 @@ private struct ErrorStateView: View {
 private struct LoadedStateView: View {
     let status: AgentPassOnboardingViewModel
     let copyCommand: (String) -> Void
+    let openTerminalAndCopy: (String) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 ProgressSection(status: status)
+                DiagnosticsSection(status: status, copyCommand: copyCommand, openTerminalAndCopy: openTerminalAndCopy)
 
                 if let blockedError = status.blockedError {
                     BlockedSection(error: blockedError)
@@ -176,6 +185,94 @@ private struct LoadedStateView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Onboarding status")
+    }
+}
+
+private struct DiagnosticsSection: View {
+  let status: AgentPassOnboardingViewModel
+  let copyCommand: (String) -> Void
+  let openTerminalAndCopy: (String) -> Void
+  @State private var pendingApprovedAction: AgentPassRecoveryAction?
+
+    var body: some View {
+        StatusCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Diagnostics")
+                    .font(.headline)
+
+                DiagnosticRow(label: "Developer ID", state: status.distribution.developerID)
+                DiagnosticRow(label: "Notarization", state: status.distribution.notarization)
+                DiagnosticRow(label: "Release receipt", state: status.distribution.releaseReceipt)
+                DiagnosticRow(label: "Secure Enclave", state: status.capability.secureEnclave)
+
+                Divider()
+
+                ForEach(status.safeRecoveryActions, id: \.id) { action in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(action.title)
+                                .font(.body)
+                            Text(action.explanation)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let inputRequirement = action.inputRequirement {
+                                Text("Input required: \(inputRequirement.displayName)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        Button("Open Terminal & Copy") {
+                            openTerminalAndCopy(action.command)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityHint("Open Terminal and copies the read-only command. It is not executed by this app.")
+                        if action.requiresUserApproval {
+                            Button("Confirm") {
+                                pendingApprovedAction = action
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityHint("Shows a confirmation before copying the approved command. It is not executed by this app.")
+                        }
+                        Button("Copy") {
+                            copyCommand(action.command)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("Copy \(action.title) command")
+                        .accessibilityHint("Copies a display-only recovery command. It is not executed by this app.")
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("AgentPass diagnostics and safe recovery actions")
+        .alert(item: $pendingApprovedAction) { action in
+            Alert(
+                title: Text("Confirm command"),
+                message: Text("The approved command will be copied to Terminal. This app will not execute it."),
+                primaryButton: .destructive(Text("Confirm & Copy")) {
+                    if let command = action.approvedCommand {
+                        openTerminalAndCopy(command)
+                    }
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+}
+
+private struct DiagnosticRow: View {
+    let label: String
+    let state: AgentPassVerificationState
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(state.displayName)
+                .foregroundStyle(state == .verified ? .green : .secondary)
+        }
+        .font(.callout)
     }
 }
 

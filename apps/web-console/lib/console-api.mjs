@@ -291,6 +291,7 @@ async function getResource(query, config, fetchImpl, options) {
     throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
   }
   if (resource === "summary") return getSummary(query, config, fetchImpl, options);
+  if (resource === "deployment-readiness") return getDeploymentReadiness(config, fetchImpl);
   if (resource === "organization") return getSimple(query, "organization", config, fetchImpl, options);
   if (resource === "devices") return getSimple(query, "devices", config, fetchImpl, options);
   if (resource === "agents") return getSimple(query, "agents", config, fetchImpl, options);
@@ -342,7 +343,7 @@ async function getAuditExportDownload(query, config, fetchImpl) {
   try { response = await fetchImpl(url, { method: "GET", headers, redirect: "error", cache: "no-store" }); }
   catch { throw new ConsoleApiError(502, "cloud_api_unavailable", "Cloud API is unavailable"); }
   if (!response || response.status !== 200 || response.headers?.get("set-cookie") !== null
-    || response.headers?.get("content-type") !== "application/json"
+    || response.headers?.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
     || response.headers?.get("content-disposition") !== "attachment; filename=\"agentpass-audit-export.json\""
     || !/^no-store(?:, max-age=0)?$/u.test(response.headers?.get("cache-control") ?? "")
     || response.headers?.get("x-content-type-options") !== "nosniff") throw invalidCloudResponse();
@@ -417,6 +418,68 @@ async function getSummary(query, config, fetchImpl, options) {
       next_cursor: audit.next_cursor,
     },
   };
+}
+
+async function getDeploymentReadiness(config, fetchImpl) {
+  if (config.operationalProbeSecret === undefined) {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  // The operational probe intentionally bypasses the tenant session, so first
+  // validate the browser's Human session through the normal Cloud API path.
+  // Otherwise a syntactically valid forged cookie could read deployment
+  // metadata from the server-side probe.
+  await cloudRequest("GET", "", undefined, config, fetchImpl, undefined);
+  const url = buildCloudHealthUrl(config.url, "/health/ready", config.allowInsecureLoopback);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      headers: new Headers({ accept: "application/json", "agentpass-operational-token": config.operationalProbeSecret }),
+      redirect: "error",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch {
+    clearTimeout(timeoutId);
+    if (controller.signal.aborted) throw new ConsoleApiError(504, "cloud_api_timeout", "Cloud API request timed out");
+    throw new ConsoleApiError(502, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  clearTimeout(timeoutId);
+  if (!response || response.status !== 200 || response.headers?.get("set-cookie") !== null
+    || response.headers?.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+    || !/^no-store(?:, max-age=0)?$/u.test(response.headers?.get("cache-control") ?? "")) {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const raw = await readCloudResponse(response);
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
+  try {
+    const readiness = normalizeDeploymentReadiness(parsed);
+    if (readiness.ready !== true || readiness.status !== "ready") throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+    return readiness;
+  } catch (error) {
+    if (error instanceof ConsoleApiError) throw error;
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+}
+
+function normalizeDeploymentReadiness(value) {
+  const requiredKeys = ["version", "ready", "status", "code", "deployment_identity"];
+  const allowedKeys = [...requiredKeys, "checks", "metrics"];
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => !allowedKeys.includes(key)) || requiredKeys.some((key) => !Object.hasOwn(value, key))
+    || value.version !== 1 || typeof value.ready !== "boolean" || typeof value.status !== "string" || typeof value.code !== "string") throw new Error("invalid readiness");
+  const identity = value.deployment_identity;
+  const identityKeys = ["version", "configured", "ready", "source_commit", "source_tree", "image_digest", "deployment_id", "revision", "schema_digest", "catalog_digest", "database_schema_digest"];
+  if (!isPlainRecord(identity) || Object.keys(identity).sort().join(",") !== identityKeys.slice().sort().join(",")
+    || identity.version !== 1 || identity.configured !== true || identity.ready !== true
+    || !/^[0-9a-f]{40}$/.test(identity.source_commit) || !/^[0-9a-f]{40}$/.test(identity.source_tree)
+    || !/^sha256:[0-9a-f]{64}$/.test(identity.image_digest)
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(identity.deployment_id)
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(identity.revision)
+    || !/^[0-9a-f]{64}$/.test(identity.schema_digest) || !/^[0-9a-f]{64}$/.test(identity.catalog_digest) || !/^[0-9a-f]{64}$/.test(identity.database_schema_digest)) throw new Error("invalid deployment identity");
+  return Object.freeze({ version: 1, ready: value.ready, status: value.status, code: value.code, deployment_identity: Object.freeze({ ...identity }) });
 }
 
 function isAuditRoleDenial(error) {
@@ -952,6 +1015,16 @@ function base64UrlDecode(value) {
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
+function isExactBase64Url32(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const bytes = base64UrlDecode(value);
+    return bytes.byteLength === 32 && base64UrlEncode(bytes) === value;
+  } catch {
+    return false;
+  }
+}
+
 async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
   const operation = normalizeOperation(query.operation ?? query.resource);
   if (operation !== "audit-export" && [query.exportId, query.environment, query.chain, query.organizationId].some((value) => value !== null)) {
@@ -1082,7 +1155,7 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
 
 function normalizeResource(value) {
   if (value === null || value === "" || value === "summary") return "summary";
-  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", "audit-export": "audit-export", "audit-export-download": "audit-export-download", audit: "audit", activity: "activity", health: "health" };
+  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", "audit-export": "audit-export", "audit-export-download": "audit-export-download", "deployment-readiness": "deployment-readiness", audit: "audit", activity: "activity", health: "health" };
   if (aliases[value]) return aliases[value];
   throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
 }
@@ -1469,6 +1542,17 @@ function buildCloudUrl(baseValue, organizationId, suffix, allowInsecureLoopback 
   return `${root}/v1/organizations/${encodeURIComponent(organizationId)}${suffix}`;
 }
 
+function buildCloudHealthUrl(baseValue, suffix, allowInsecureLoopback = false) {
+  let base;
+  try { base = new URL(baseValue); } catch { throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable"); }
+  const isLoopback = base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "::1";
+  if ((base.protocol !== "https:" && !(base.protocol === "http:" && allowInsecureLoopback && isLoopback)) || base.username || base.password || base.search || base.hash) {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const root = `${base.origin}${base.pathname.replace(/\/$/, "")}`;
+  return `${root}${suffix}`;
+}
+
 async function readCloudResponse(response) {
   const contentLength = response.headers?.get("content-length");
   if (contentLength !== null && contentLength !== undefined && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_BYTES) {
@@ -1513,7 +1597,10 @@ async function readConfig(injected) {
   const timeoutMs = typeof timeoutValue === "string" && /^\d+$/.test(timeoutValue)
     ? Math.min(MAX_TIMEOUT_MS, Math.max(1_000, Number(timeoutValue)))
     : DEFAULT_TIMEOUT_MS;
-  const allowInsecureLoopback = source?.AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API === "true";
+  const allowInsecureLoopback = ["development", "test"].includes(source?.NODE_ENV) && source?.AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API === "true";
+  const operationalProbeSecret = typeof source?.AGENTPASS_OPERATIONAL_PROBE_SECRET === "string"
+    && isExactBase64Url32(source.AGENTPASS_OPERATIONAL_PROBE_SECRET)
+    ? source.AGENTPASS_OPERATIONAL_PROBE_SECRET : undefined;
   return {
     url,
     organizationId,
@@ -1522,9 +1609,10 @@ async function readConfig(injected) {
     cursorSecret,
     timeoutMs,
     allowInsecureLoopback,
+    ...(operationalProbeSecret === undefined ? {} : { operationalProbeSecret }),
     // The organization ID is a public tenant-binding field in every control
     // plane read model. Redacting it breaks the browser's cross-tenant check.
-    secrets: [url, cursorSecret, ...(legacy ? [token] : [])],
+    secrets: [url, cursorSecret, ...(legacy ? [token] : []), ...(operationalProbeSecret === undefined ? [] : [operationalProbeSecret])],
   };
 }
 

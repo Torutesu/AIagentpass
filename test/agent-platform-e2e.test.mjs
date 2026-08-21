@@ -80,8 +80,9 @@ test("cloud policy, capability, signing, and emergency stop work end to end", as
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
       body: JSON.stringify({ agent_id: identity.id, device_id: deviceId, scope, ttl_ms: 60_000, sequence })
     });
-    assert.equal(response.status, 201);
-    return (await response.json()).capability;
+    const responseText = await response.text();
+    assert.equal(response.status, 201, responseText);
+    return JSON.parse(responseText).capability;
   }
 
   function request(capability) {
@@ -99,7 +100,7 @@ test("cloud policy, capability, signing, and emergency stop work end to end", as
 
   const stop = await fetch(`${baseUrl}/v1/organizations/${organizationId}/emergency-stop`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": "emergency-stop", "AgentPass-Recent-Auth": "webauthn-challenge-authorization" },
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": "emergency-stop", "AgentPass-Recent-Auth": "99999999-9999-4999-8999-999999999999" },
     body: JSON.stringify({ reason: "incident" })
   });
   assert.equal(stop.status, 201);

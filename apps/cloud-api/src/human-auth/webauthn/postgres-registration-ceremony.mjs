@@ -39,13 +39,18 @@ FROM human_sessions s
 JOIN memberships m
   ON m.organization_id = s.organization_id
  AND m.member_id = s.member_id
+ AND m.id = s.membership_id
+JOIN organizations o ON o.id = s.organization_id
 WHERE s.id = $2
   AND s.member_id = $3
   AND s.organization_id = $4
   AND s.revoked_at IS NULL
   AND s.expires_at > $7
+  AND (s.idle_expires_at IS NULL OR s.idle_expires_at > $7)
   AND m.status = 'active'
   AND m.role = s.role
+  AND o.authority_epoch = s.organization_authority_epoch
+  AND m.session_epoch = s.membership_session_epoch
 RETURNING id, session_id, member_id, organization_id, ceremony, operation,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
   created_at, expires_at, rp_id, origin, user_verification, status`;
@@ -110,6 +115,14 @@ UPDATE webauthn_challenges
 SET status = 'consuming', consume_started_at = $2
 WHERE id = $1
   AND ceremony = 'registration'
+  AND session_id = $3
+  AND member_id = $4
+  AND organization_id = $5
+  AND operation = $6
+  AND rp_id = $7
+  AND origin = $8
+  AND user_verification = $9
+  AND challenge_hash = $10
   AND status = 'pending'
   AND consumed_at IS NULL
   AND expires_at > $2
@@ -283,7 +296,18 @@ export function createPostgresWebAuthnRegistrationCeremony({
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_MISMATCH);
 
     const verifierInput = buildVerifierInput(record, request);
-    const claimed = await dbQuery(CLAIM_SQL, [request.challenge_id, currentIso]);
+    const claimed = await dbQuery(CLAIM_SQL, [
+      request.challenge_id,
+      currentIso,
+      request.session_id,
+      request.member_id,
+      request.organization_id,
+      request.operation,
+      request.rp_id,
+      request.origin,
+      request.user_verification,
+      sha256Bytes(request.challenge)
+    ]);
     if (claimed.rows.length > 1) throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "registration challenge claim returned multiple rows");
     if (claimed.rows.length === 0) {
       record = await loadRecord(request.challenge_id);

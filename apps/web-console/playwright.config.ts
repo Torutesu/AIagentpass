@@ -12,6 +12,7 @@ function boundedTimeout(value: string | undefined, fallback: number, maximum: nu
 
 const webServerTimeout = boundedTimeout(process.env.PLAYWRIGHT_STARTUP_TIMEOUT_MS, 60_000, 180_000);
 const shutdownTimeout = boundedTimeout(process.env.PLAYWRIGHT_CLEANUP_TIMEOUT_MS, 5_000, 30_000);
+const outputDir = process.env.AGENTPASS_PLAYWRIGHT_OUTPUT_DIR ?? "./e2e/test-results";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -22,11 +23,13 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  // Qualification is a complete-set gate; retries would double-count tests
+  // and could hide a flaky first execution in the evidence summary.
+  retries: 0,
   reporter: process.env.CI ? "line" : "list",
-  outputDir: "./e2e/test-results",
+  outputDir,
   use: {
-    baseURL: `http://localhost:${e2ePort}`,
+    baseURL: `http://127.0.0.1:${e2ePort}`,
     ...devices["Desktop Chrome"],
     browserName: "chromium",
     headless: true,
@@ -38,9 +41,11 @@ export default defineConfig({
     screenshot: "off",
   },
   webServer: {
-    command: `npm run dev -- --hostname localhost --port ${e2ePort}`,
+    // Codex/CI shells may inherit NODE_OPTIONS=--inspect=...; the dev server
+    // must not open a public inspector listener during browser qualification.
+    command: `env -u NODE_OPTIONS -u NODE_DEBUG npm run dev -- --hostname 127.0.0.1 --port ${e2ePort}`,
     cwd: ".",
-    url: `http://localhost:${e2ePort}/`,
+    url: `http://127.0.0.1:${e2ePort}/`,
     timeout: webServerTimeout,
     reuseExistingServer: false,
     gracefulShutdown: { signal: "SIGTERM", timeout: shutdownTimeout },

@@ -34,6 +34,7 @@ import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEdit
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
+import { revokeOperations } from "./revoke-command.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -114,7 +115,7 @@ Commands:
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
   session start     issue a short-lived agent session token
-  revoke            immediately deny all operations
+  revoke            immediately deny all operations (native mode invalidates protected sessions)
   restore           re-enable operations after revocation
   git-sign [args]   send a signing request to the broker
   audit [--verify]  print or verify audit logs and checkpoints
@@ -582,13 +583,16 @@ function status() {
   }, null, 2));
 }
 
-function revoke() {
+async function revoke() {
   const config = loadConfig();
-  if (config.native_broker?.enabled) throw new Error("User-state revoke does not control the native service; use `agentpass native revoke-sessions`");
-  const state = loadState();
-  saveState({ ...state, revoked: true, generation: (state.generation ?? 0) + 1, revoked_at: new Date().toISOString() });
-  audit({ operation: "control.revoke", decision: "allow", generation: state.generation + 1 }, defaultConfigDir);
-  console.log("All AgentPass operations revoked.");
+  const result = await revokeOperations({
+    config,
+    configDir: defaultConfigDir,
+    loadState,
+    saveState,
+    audit,
+  });
+  console.log(JSON.stringify(result, null, 2));
 }
 
 function restore() {
@@ -1336,7 +1340,7 @@ try {
   else if (command === "install-hook") installHook();
   else if (command === "push-check") await pushCheck();
   else if (command === "session" && args[0] === "start") await sessionStart();
-  else if (command === "revoke") revoke();
+  else if (command === "revoke") await revoke();
   else if (command === "restore") restore();
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);

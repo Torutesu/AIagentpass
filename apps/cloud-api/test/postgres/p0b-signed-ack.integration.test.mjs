@@ -35,6 +35,7 @@ const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL
   ?? process.env.DATABASE_URL;
 const HALF_ORDER = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
 const ACK_NONCE = "p0b-ack-abcdefghijklmnopqrstuvwxyz-0001";
+const RECENT_PROOF = "99999999-9999-4999-8999-999999999999";
 
 test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model", {
   skip: !DATABASE_URL,
@@ -63,7 +64,7 @@ test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model
       authorization: `Bearer ${fixture.token}`,
       "content-type": "application/json",
       "idempotency-key": "p0b-manual-wake-0001",
-      "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz"
+      "agentpass-recent-auth": RECENT_PROOF
     },
     body: "{}"
   });
@@ -267,9 +268,9 @@ async function createFixture(t) {
     refreshHintService,
     now: () => nowMs,
     verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => ({
-      verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz",
-      consumed: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz",
-      challenge_id: "99999999-9999-4999-8999-999999999999",
+      verified: proof === RECENT_PROOF,
+      consumed: proof === RECENT_PROOF,
+      challenge_id: proof,
       member_id: principal.member_id,
       organization_id,
       operation,

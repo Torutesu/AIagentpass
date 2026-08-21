@@ -359,6 +359,24 @@ test('manifest signature trust root is pinned and private signing inputs reject 
   assert.match(linkedArtifact.stderr, /unsafe release input/);
 });
 
+test('manifest trust-root artifact is bound to the public key used for signature verification', () => {
+  const release = makeRelease('agentpass-release-trust-root-binding-');
+  const manifest = join(release.dir, 'bound.release-manifest.json');
+  const sums = join(release.dir, 'bound.SHA256SUMS');
+  run('generate-manifest.mjs', [...controllerManifestArgs(release, manifest, sums), release.publicKeyFile]);
+  const signature = join(release.dir, 'bound.release-manifest.sig');
+  run('sign-manifest.mjs', [manifest, release.privateKeyFile, signature]);
+
+  const other = crypto.generateKeyPairSync('ed25519');
+  const otherPublicKey = join(release.dir, 'other.public.pem');
+  const otherSignature = join(release.dir, 'other.release-manifest.sig');
+  writeFileSync(otherPublicKey, other.publicKey.export({ type: 'spki', format: 'pem' }), { mode: 0o644 });
+  writeDetachedSignature(otherSignature, readFileSync(manifest), other.privateKey);
+  const failed = spawn('verify-release.mjs', [manifest, otherSignature, otherPublicKey, fingerprint(other.publicKey)]);
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /trust root.*verification public key/iu);
+});
+
 test('private staging freezes every manifest-declared byte before verification', () => {
   const release = makeRelease('agentpass-release-stage-');
   const staging = join(release.dir, 'private-stage');
@@ -419,6 +437,14 @@ test('macOS verifier uses staged payloads and enforces production signing policy
   assert.match(verifier, /verify_no_dangerous_entitlements "\$MANAGER_BINARY" manager/);
   assert.match(verifier, /verify_no_dangerous_entitlements "\$ONBOARDING_BINARY" onboarding/);
   assert.match(verifier, /verify_no_dangerous_entitlements "\$APP" outer/);
+  const notarizeInstaller = readFileSync(scriptPath('notarize-installer.sh'), 'utf8');
+  const notarizeController = readFileSync(scriptPath('notarize-controller.sh'), 'utf8');
+  assert.match(notarizeInstaller, /AGENTPASS_TEAM_ID/);
+  assert.match(notarizeInstaller, /pkgutil --check-signature/);
+  assert.match(notarizeInstaller, /Developer ID Installer/);
+  assert.match(notarizeController, /AGENTPASS_TEAM_ID/);
+  assert.match(notarizeController, /Developer ID Application/);
+  assert.match(notarizeController, /TeamIdentifier=/);
 });
 
 test('component installer excludes protected state and ships fail-closed preservation checks', () => {
@@ -438,6 +464,8 @@ test('component installer excludes protected state and ships fail-closed preserv
   assert.match(build, /--sign "\$IDENTITY"/);
   assert.doesNotMatch(build, /Library\/Application Support\/AgentPass/);
   assert.match(verify, /payload-files/);
+  assert.match(verify, /Installer payload or package scripts contain secret material/);
+  assert.match(verify, /-----BEGIN \(RSA \|EC \|OPENSSH \|ED25519 \)\?PRIVATE KEY-----/);
   assert.match(verify, /Installer payload escapes AgentPass\.app/);
   assert.match(verify, /Installer payload contains protected AgentPass state/);
   assert.match(verify, /install-location.*\/Applications/);
@@ -604,6 +632,19 @@ test('release candidate verifies signed source before the secret-bearing job and
   assert.match(workflow, /notarize-controller\.sh/);
   assert.match(workflow, /--notarization-status=accepted_stapled/);
   assert.match(workflow, /verify-macos-release\.sh/);
+  const candidateScanStart = workflow.indexOf('install -m 0600 "$RUNNER_TEMP/candidate/ci-preflight.json" "$ci_preflight_scan_root/ci-preflight.json"');
+  const preflightScan = workflow.indexOf('node scripts/release/ci-preflight.mjs artifact-scan', candidateScanStart);
+  const preflightCopy = workflow.indexOf('install -m 0644 "$RUNNER_TEMP/candidate/ci-preflight.json" "$integrity_dir/ci-preflight.json"', preflightScan);
+  const candidateRemoval = workflow.indexOf('rm -f "$RUNNER_TEMP/candidate/ci-preflight.json"', preflightCopy);
+  const productScan = workflow.indexOf('node scripts/release/ci-preflight.mjs artifact-scan', candidateRemoval);
+  assert.ok(candidateScanStart >= 0 && preflightScan > candidateScanStart && preflightCopy > preflightScan && candidateRemoval > preflightCopy && productScan > candidateRemoval, "preflight must be scanned separately before the candidate scan");
+  assert.match(workflow, /Require source-bound external qualification evidence inputs[\s\S]*?AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON/);
+  assert.match(workflow, /AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON[\s\S]*?canonical JSON[\s\S]*?kms-qualification/);
+  assert.match(workflow, /ci-preflight\.mjs kms-qualification[\s\S]*?ci-preflight\.mjs platform-auth-qualification/);
+  assert.match(workflow, /AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST/);
+  assert.match(workflow, /AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST/);
+  assert.match(workflow, /platform-auth-qualification[^\n]*\$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST[^\n]*\$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST/);
+  assert.match(workflow, /release-integrity-evidence[\s\S]*?kms-qualification\.json[\s\S]*?platform-auth-qualification\.json/);
   assert.match(workflow, /Validate frozen protocol and schema catalog before signing[\s\S]*?npm run contracts:validate[\s\S]*?node --test test\/contract-catalog\.test\.mjs/);
   assert.doesNotMatch(workflow, /gh release (?:create|upload|edit)|^  publish:/m);
   assert.doesNotMatch(workflow, /NOT_NOTARIZED/);

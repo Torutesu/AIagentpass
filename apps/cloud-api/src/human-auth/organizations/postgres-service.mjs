@@ -113,6 +113,10 @@ export function createPostgresOrganizationService({
     const result = await invoke("renameOrganization", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
+      // Bind the mutation to the exact session authenticated at the HTTP
+      // boundary. The repository re-checks this session and its authority
+      // epochs inside the mutation transaction.
+      actor_session_id: actor.session_id,
       name: input.name,
       expected_version,
       idempotency_key
@@ -204,6 +208,7 @@ export function createPostgresOrganizationService({
     const result = await invoke("createInvitation", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
+      actor_session_id: actor.session_id,
       invitation_id: generatedUuid(randomUUID),
       role,
       token_hash: hashToken(raw_token),
@@ -223,6 +228,7 @@ export function createPostgresOrganizationService({
     const result = await invoke("revokeInvitation", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
+      actor_session_id: actor.session_id,
       invitation_id: requiredInvitationId(input.invitation_id),
       expected_version,
       revoked_at: currentTimestamp(),

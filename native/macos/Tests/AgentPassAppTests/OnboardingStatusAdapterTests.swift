@@ -150,6 +150,39 @@ private func completeStatus() -> String {
     #expect(first.nextAction?.command == "agentpass setup continue")
 }
 
+@Test func parsesProductionDiagnosticsWithoutExposingRawFields() throws {
+    let distribution = try AgentPassDoctorStatusAdapter().distributionStatus(from: Data(doctorReport.utf8))
+    #expect(distribution.developerID == .verified)
+    #expect(distribution.notarization == .verified)
+    #expect(distribution.releaseReceipt == .verified)
+
+    let capability = try AgentPassNativeStatusAdapter().capabilityStatus(from: Data(nativeStatus.utf8))
+    #expect(capability.secureEnclave == .verified)
+    #expect(capability.tpm == .notApplicable)
+}
+
+@Test func recoveryActionsAreCopyOnlyAndNeverContainSecretsOrPaths() throws {
+    let base = try adapter.viewModel(from: status())
+    let model = base.withDiagnostics(AgentPassOnboardingDiagnostics(
+        distribution: AgentPassDistributionStatus(developerID: .blocked, notarization: .actionRequired, releaseReceipt: .unavailable),
+        capability: AgentPassCapabilityStatus(secureEnclave: .verified)
+    ))
+
+    let actions = model.safeRecoveryActions
+    #expect(actions.map(\.id) == [.install, .check, .repair, .revoke])
+    for action in actions {
+        #expect(action.command.hasPrefix("agentpass "))
+        #expect(action.command.contains("--execute") == false)
+        #expect(action.command.localizedCaseInsensitiveContains("token") == false)
+        #expect(action.command.localizedCaseInsensitiveContains("secret") == false)
+        #expect(action.command.contains("/Users/") == false)
+        #expect(action.explanation.localizedCaseInsensitiveContains("execute") == false || action.id == .install)
+    }
+}
+
+private let doctorReport = #"{"schema_version":1,"state":"healthy","ok":true,"generated_at":"2030-01-01T00:00:00.000Z","mode":"production-native","checks":[{"id":"app.code_identity","state":"healthy","severity":"info","summary":"ok"},{"id":"release.installed_receipt","state":"healthy","severity":"info","summary":"ok"}],"summary":{"healthy":2,"action_required":0,"degraded":0,"blocked":0},"host":{"platform":"darwin","architecture":"arm64"}}"#
+private let nativeStatus = #"{"health":{"ok":true,"version":13},"audit":{"configured":true}}"#
+
 private func actionJSON(for id: AgentPassOnboardingActionID, target: AgentPassOnboardingState) -> String {
     "[{\"id\":\"\(id.rawValue)\",\"target_state\":\"\(target.rawValue)\",\"command\":\"agentpass setup continue\",\"description\":\"safe\"}]"
 }

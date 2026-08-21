@@ -42,7 +42,7 @@ test("forwards only the exact Organization API allow-list with bounded query and
     [`/api/auth/organizations/${organizationId}/members/${memberId}/remove`, "POST", undefined, { ...protectedMutation, "if-match": '"4"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/members/${memberId}/remove`],
     [`/api/auth/organizations/${organizationId}/invitations`, "GET", undefined, {}, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations`],
     [`/api/auth/organizations/${organizationId}/invitations`, "POST", { role: "viewer", expires_at: "2026-08-19T00:00:00.000Z" }, mutation, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations`],
-    [`/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, { ...mutation, "if-match": '"1"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`],
+    [`/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, { ...protectedMutation, "if-match": '"1"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`],
     ["/api/auth/invitations/accept", "POST", { one_time_token: token }, mutation, "https://cloud.example.test/api/auth/invitations/accept"]
   ];
   for (const [path, method, body, headers, cloudUrl] of cases) {
@@ -70,6 +70,7 @@ test("fails closed before Cloud for route, query, schema, idempotency, and recen
     request(`/api/auth/organizations/${organizationId}?limit=1`, { method: "PATCH", body: { name: "x", expected_version: 1 }, headers: { "idempotency-key": idempotency } }),
     request("/api/auth/organizations", { method: "POST", body: { name: "x" } }),
     request(`/api/auth/organizations/${organizationId}/members/${memberId}/role`, { method: "PATCH", body: { role: "owner", expected_version: 1 }, headers: { "idempotency-key": idempotency } }),
+    request(`/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`, { method: "POST", headers: { "idempotency-key": idempotency, "if-match": '"1"' } }),
     request(`/api/auth/organizations/${organizationId}/invitations`, { method: "POST", body: { role: "owner", expires_at: "2026-08-19T00:00:00.000Z" }, headers: { "idempotency-key": idempotency } }),
     request("/api/auth/invitations/accept", { method: "POST", body: { one_time_token: "short" }, headers: { "idempotency-key": idempotency } }),
     request("/api/auth/organizations", { headers: { "agentpass-recent-auth": recentAuth } }),

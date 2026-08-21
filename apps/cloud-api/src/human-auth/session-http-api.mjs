@@ -10,15 +10,18 @@ import {
 } from "./rate-limit.mjs";
 
 const SESSION_PATH = "/session";
+const SWITCH_ORGANIZATION_PATH = "/session/organization-switch";
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const TOKEN_HEADER = /^[^\r\n]+$/;
+const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const CLEAR_SESSION_COOKIE = "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
 
 export const HUMAN_SESSION_HTTP_PATHS = Object.freeze({
-  session: SESSION_PATH
+  session: SESSION_PATH,
+  switchOrganization: SWITCH_ORGANIZATION_PATH
 });
 
 export const HUMAN_SESSION_HTTP_ERROR_CODES = Object.freeze({
@@ -111,7 +114,7 @@ export function createHumanSessionHttpApi({
       const request = normalizeRequest(input);
       const resolvedRoute = resolveRoute(request.url);
       if (!resolvedRoute) return response(404, { error: { code: "not_found", message: "Resource not found" } });
-      const route = { ...resolvedRoute, kind: request.method === "DELETE" ? "logout" : "bootstrap" };
+      const route = { ...resolvedRoute, kind: resolvedRoute.kind === "switchOrganization" ? "switchOrganization" : request.method === "DELETE" ? "logout" : "bootstrap" };
       if (request.method !== (route.kind === "logout" ? "DELETE" : "POST")) {
         return response(405, {
           error: {
@@ -127,6 +130,7 @@ export function createHumanSessionHttpApi({
       }
 
       if (route.kind === "logout") return await dispatchLogout(request, requestOrigin);
+      if (route.kind === "switchOrganization") return await dispatchSwitchOrganization(request, requestOrigin);
 
       const body = await readJsonBody(request, maxBodyBytes);
       assertEmptyJsonObject(body);
@@ -195,6 +199,23 @@ export function createHumanSessionHttpApi({
     return response(200, { session: null }, { "Set-Cookie": CLEAR_SESSION_COOKIE });
   }
 
+  async function dispatchSwitchOrganization(request, requestOrigin) {
+    const cookie = header(request.headers, "cookie");
+    if (cookie === undefined) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED, { status: 401 });
+    const csrfToken = header(request.headers, "agentpass-csrf");
+    if (!isOpaqueToken(csrfToken)) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.CSRF_FAILED, { status: 403 });
+    const body = await readJsonBody(request, maxBodyBytes);
+    if (!isObject(body) || Object.keys(body).length !== 1 || typeof body.organization_id !== "string" || !UUID_VALUE.test(body.organization_id)) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+    if (typeof humanSession.switchOrganization !== "function") throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE, { status: 503 });
+    let switched;
+    try {
+      switched = await humanSession.switchOrganization({ method: "POST", origin: requestOrigin, headers: request.headers, cookie, csrfToken, organization_id: body.organization_id });
+    } catch (error) {
+      throw mapSessionError(error);
+    }
+    return sessionResponse(switched, 200);
+  }
+
   return Object.freeze({
     handle,
     paths: HUMAN_SESSION_HTTP_PATHS,
@@ -203,7 +224,7 @@ export function createHumanSessionHttpApi({
   });
 }
 
-function sessionResponse(issued) {
+function sessionResponse(issued, status = 201) {
   if (!isObject(issued) || !isObject(issued.session)) {
     throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE);
   }
@@ -217,7 +238,7 @@ function sessionResponse(issued) {
     throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE);
   }
 
-  return response(201, {
+  return response(status, {
     session: issued.session,
     csrf_token: csrfToken
   }, { "Set-Cookie": setCookie });
@@ -234,6 +255,9 @@ function mapSessionError(error) {
   }
   if (error?.code === HUMAN_SESSION_ERROR_CODES.IDENTITY_REPLAY) {
     return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY, { status: 409, cause: error });
+  }
+  if ([HUMAN_SESSION_ERROR_CODES.INVALID_COOKIE, HUMAN_SESSION_ERROR_CODES.SESSION_NOT_FOUND, HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED, HUMAN_SESSION_ERROR_CODES.SESSION_EXPIRED].includes(error?.code)) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED, { status: 401, cause: error });
   }
   if (error?.code === HUMAN_SESSION_ERROR_CODES.INVALID_INPUT) {
     return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400, cause: error });
@@ -347,7 +371,9 @@ function resolveRoute(rawUrl) {
   } catch {
     return undefined;
   }
-  if (url.search || url.hash || url.pathname !== SESSION_PATH) return undefined;
+  if (url.search || url.hash) return undefined;
+  if (url.pathname === SWITCH_ORGANIZATION_PATH) return { kind: "switchOrganization" };
+  if (url.pathname !== SESSION_PATH) return undefined;
   return { kind: "bootstrap" };
 }
 

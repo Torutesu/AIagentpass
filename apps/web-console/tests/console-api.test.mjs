@@ -16,6 +16,7 @@ const humanEnv = Object.freeze({
   AGENTPASS_ORGANIZATION_ID: env.AGENTPASS_ORGANIZATION_ID,
   AGENTPASS_CONSOLE_CURSOR_SECRET: env.AGENTPASS_CONSOLE_CURSOR_SECRET,
 });
+const PROBE_SECRET = Buffer.alloc(32, 0x51).toString("base64url");
 const sessionCookie = `__Host-agentpass_session=${"s".repeat(43)}`;
 const deviceId = "22222222-2222-4222-8222-222222222222";
 const agentId = "33333333-3333-4333-8333-333333333333";
@@ -121,6 +122,111 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
     assert.equal(call.init.headers.get("authorization"), `Bearer ${env.AGENTPASS_CLOUD_TOKEN}`);
   }
   assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
+});
+
+test("deployment readiness is fetched server-side and exposes only the verified public identity", async () => {
+  const probe = PROBE_SECRET;
+  const api = authenticatedApi({
+    env: { ...env, AGENTPASS_OPERATIONAL_PROBE_SECRET: probe },
+    fetchImpl: async (url, init) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith(`/v1/organizations/${env.AGENTPASS_ORGANIZATION_ID}`)) return response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID } });
+      assert.equal(pathname, "/health/ready");
+      assert.equal(init.headers.get("agentpass-operational-token"), probe);
+      assert.equal(init.headers.get("authorization"), null);
+      const readiness = {
+        version: 1,
+        ready: true,
+        status: "ready",
+        code: "ready",
+        deployment_identity: {
+          version: 1, configured: true, ready: true,
+          source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`,
+          deployment_id: "deployment-123", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64),
+        },
+        checks: { secret: "must-not-reach-browser" },
+      };
+      return new Response(JSON.stringify(readiness), { status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+    },
+  });
+  const result = await api.handle(request("/api/console?resource=deployment-readiness"));
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), {
+    version: 1, ready: true, status: "ready", code: "ready",
+    deployment_identity: {
+      version: 1, configured: true, ready: true,
+      source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`,
+      deployment_id: "deployment-123", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64),
+    },
+  });
+});
+
+test("deployment readiness fails closed when the probe secret or identity is unavailable", async () => {
+  const missingSecret = authenticatedApi({ fetchImpl: async () => { throw new Error("must not fetch"); } });
+  assert.equal((await missingSecret.handle(request("/api/console?resource=deployment-readiness"))).status, 503);
+  const nonCanonical = authenticatedApi({
+    env: { ...env, AGENTPASS_OPERATIONAL_PROBE_SECRET: "q".repeat(43) },
+    fetchImpl: async () => { throw new Error("must not fetch with a non-canonical token"); },
+  });
+  assert.equal((await nonCanonical.handle(request("/api/console?resource=deployment-readiness"))).status, 503);
+  const malformed = authenticatedApi({
+    env: { ...env, AGENTPASS_OPERATIONAL_PROBE_SECRET: PROBE_SECRET },
+    fetchImpl: async (url) => new URL(url).pathname.startsWith("/v1/")
+      ? response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID } })
+      : new Response(JSON.stringify({ version: 1, ready: true, status: "ready", code: "ready" }), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }),
+  });
+  assert.equal((await malformed.handle(request("/api/console?resource=deployment-readiness"))).status, 502);
+});
+
+test("deployment readiness validates the Human session before using the server-only probe", async () => {
+  let probeCalls = 0;
+  const api = createConsoleApi({
+    env: { ...humanEnv, AGENTPASS_OPERATIONAL_PROBE_SECRET: PROBE_SECRET },
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/health/ready") probeCalls += 1;
+      return response({ error: { code: "session_required", message: "session required" } }, 401);
+    },
+  });
+  const result = await api.handle(request("/api/console?resource=deployment-readiness", { headers: { cookie: sessionCookie } }));
+  assert.equal(result.status, 401);
+  assert.equal(probeCalls, 0);
+});
+
+test("deployment readiness rejects degraded upstream state and production loopback configuration", async () => {
+  const degraded = authenticatedApi({
+    env: { ...env, AGENTPASS_OPERATIONAL_PROBE_SECRET: "t".repeat(43) },
+    fetchImpl: async (url) => new URL(url).pathname.startsWith("/v1/")
+      ? response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID } })
+      : new Response(JSON.stringify({ version: 1, ready: false, status: "degraded", code: "database_unavailable", deployment_identity: { version: 1, configured: true, ready: true, source_commit: "a".repeat(40), source_tree: "b".repeat(40), image_digest: `sha256:${"c".repeat(64)}`, deployment_id: "deployment-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64) } }), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }),
+  });
+  assert.equal((await degraded.handle(request("/api/console?resource=deployment-readiness"))).status, 503);
+  const productionLoopback = authenticatedApi({
+    env: { ...env, NODE_ENV: "production", AGENTPASS_OPERATIONAL_PROBE_SECRET: PROBE_SECRET, AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API: "true", AGENTPASS_CLOUD_API_URL: "http://127.0.0.1:8787" },
+    fetchImpl: async () => { throw new Error("must not fetch insecure production cloud"); },
+  });
+  assert.equal((await productionLoopback.handle(request("/api/console?resource=deployment-readiness", { headers: { cookie: sessionCookie } }))).status, 503);
+  for (const nodeEnv of [undefined, "prod", "staging"]) {
+    const unknownEnvironment = authenticatedApi({
+      env: { ...env, NODE_ENV: nodeEnv, AGENTPASS_OPERATIONAL_PROBE_SECRET: PROBE_SECRET, AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API: "true", AGENTPASS_CLOUD_API_URL: "http://127.0.0.1:8787" },
+      fetchImpl: async () => { throw new Error("must not fetch insecure cloud in unknown environment"); },
+    });
+    assert.equal((await unknownEnvironment.handle(request("/api/console?resource=deployment-readiness", { headers: { cookie: sessionCookie } }))).status, 503);
+  }
+});
+
+test("deployment readiness rejects redirects, Set-Cookie, and non-JSON upstream responses", async () => {
+  for (const upstream of [
+    new Response("", { status: 302, headers: { location: "https://attacker.example" } }),
+    new Response("{}", { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store", "set-cookie": "leak=1" } }),
+    new Response("{}", { status: 200, headers: { "content-type": "text/plain", "cache-control": "no-store" } }),
+  ]) {
+    const api = authenticatedApi({
+    env: { ...env, AGENTPASS_OPERATIONAL_PROBE_SECRET: PROBE_SECRET },
+      fetchImpl: async (url) => new URL(url).pathname.startsWith("/v1/")
+        ? response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID } }) : upstream,
+    });
+    assert.equal((await api.handle(request("/api/console?resource=deployment-readiness"))).status, 503);
+  }
 });
 
 test("GET summary keeps viewer resources visible when audit access is role denied", async () => {

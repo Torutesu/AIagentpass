@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 
 const DATABASE_URL = "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full";
 const SECRET = Buffer.alloc(32, 0x31).toString("base64url");
@@ -77,6 +81,9 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.agentSessionLifecycleRepository?.revokeAuthority, "function");
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.issueQualificationGrantBatch, "function");
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.claimQualificationGrantBatch, "function");
+  for (const method of ["reservePromotion", "commitPromotion", "markUncertain", "rejectPromotion", "reconcileUncertainPromotion", "replayPromotion"]) {
+    assert.equal(typeof runtime.promotionIssuanceRepository?.[method], "function", `promotion issuance repository exposes ${method}`);
+  }
   assert.equal(typeof runtime.createManagedSignerKeyLifecycleRepository, "function");
   assert.equal(runtime.createManagedSignerKeyLifecycleRepository({ purpose: "agentpass.agent-session-grant" }).purpose, "agentpass.agent-session-grant");
   assert.equal(runtime.createProviderOperationRepository({ purpose: "agentpass.agent-session-grant", keyId: "agent-key-1", keyVersion: "1" }).purpose, "agentpass.agent-session-grant");
@@ -114,6 +121,17 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
+});
+
+test("PostgreSQL runtime rejects a deployment identity whose schema or catalog digest is not measured locally", async () => {
+  const migrations = await loadSqlMigrations();
+  const schemaManifest = { schema_version: 1, source_commit: "a".repeat(40), source_tree: "b".repeat(40), migrations: migrations.map((migration) => ({ name: migration.name, bytes: Buffer.byteLength(migration.sql), sha256: migration.checksum })) };
+  const schemaDigest = crypto.createHash("sha256").update(`${canonicalJson(schemaManifest)}\n`).digest("hex");
+  const catalogDigest = crypto.createHash("sha256").update(fs.readFileSync(path.resolve(import.meta.dirname, "../../../../contracts/catalog-v1.json"))).digest("hex");
+  const validEnv = { ...env(), AGENTPASS_CLOUD_SOURCE_COMMIT: schemaManifest.source_commit, AGENTPASS_CLOUD_SOURCE_TREE: schemaManifest.source_tree, AGENTPASS_CLOUD_SCHEMA_DIGEST: schemaDigest, AGENTPASS_CLOUD_CATALOG_DIGEST: catalogDigest };
+  const runtime = await createPostgresRuntime({ env: validEnv, PoolClass: FakePool, applicationVersion: "digest-qualification", resolveProcessBindingPolicy: () => true });
+  await runtime.close();
+  await assert.rejects(() => createPostgresRuntime({ env: { ...validEnv, AGENTPASS_CLOUD_CATALOG_DIGEST: "0".repeat(64) }, PoolClass: FakePool }), /digest mismatch/u);
 });
 
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {

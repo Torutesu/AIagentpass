@@ -227,7 +227,7 @@ test("acquires a dedicated transaction connection for every begin", async () => 
 
 test("uses pending-to-consuming CAS and returns the registration service contract", async () => {
   const calls = [];
-  const { ceremony } = create({ verifyAttestation: async (input) => { calls.push(input); return { verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65, 3), sign_count: 7, transports: ["internal"], credential_device_type: "singleDevice", credential_backed_up: false, user_verified: true }; } });
+  const { ceremony, client } = create({ verifyAttestation: async (input) => { calls.push(input); return { verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65, 3), sign_count: 7, transports: ["internal"], credential_device_type: "singleDevice", credential_backed_up: false, user_verified: true }; } });
   const issued = await ceremony.begin(context);
   const result = await ceremony.consume(registration(issued.challenge));
   assert.equal(result.verified, true);
@@ -243,6 +243,12 @@ test("uses pending-to-consuming CAS and returns the registration service contrac
   assert.equal(result.user_verified, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].ceremony.expected_challenge, issued.challenge);
+  const claim = client.calls.find(({ sql }) => sql.startsWith("UPDATE webauthn_challenges SET status = 'consuming'"));
+  assert.match(claim.text, /session_id = \$3/);
+  assert.match(claim.text, /member_id = \$4/);
+  assert.match(claim.text, /organization_id = \$5/);
+  assert.match(claim.text, /operation = \$6/);
+  assert.match(claim.text, /challenge_hash = \$10/);
 });
 
 test("accepts signed clientData extension members emitted by real browsers", async () => {

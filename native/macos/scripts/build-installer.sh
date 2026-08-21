@@ -8,7 +8,7 @@ APP=""
 OUTPUT=""
 IDENTITY=""
 
-usage() { echo "Usage: build-installer.sh --app AgentPass.app --output AgentPass.pkg --identity 'Developer ID Installer: ...'" >&2; exit 2; }
+usage() { echo "Usage: AGENTPASS_TEAM_ID=APPLETEAM1 build-installer.sh --app AgentPass.app --output AgentPass.pkg --identity 'Developer ID Installer: ...'" >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --app) [[ $# -ge 2 ]] || usage; APP="$2"; shift 2 ;;
@@ -18,6 +18,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$APP" && -n "$OUTPUT" && -n "$IDENTITY" ]] || usage
+[[ "$IDENTITY" == "Developer ID Installer:"* ]] || { echo "Installer identity must be a Developer ID Installer identity" >&2; exit 1; }
+TEAM_ID="${AGENTPASS_TEAM_ID:-}"
+[[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "AGENTPASS_TEAM_ID must be a 10-character Team ID" >&2; exit 2; }
 [[ "$APP" == /* && "$OUTPUT" == /* ]] || { echo "App and output paths must be absolute" >&2; exit 2; }
 [[ -d "$APP" && ! -L "$APP" && "$(basename "$APP")" == "AgentPass.app" ]] || { echo "Input must be a real AgentPass.app directory" >&2; exit 1; }
 [[ ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || { echo "Installer output already exists or is a symlink" >&2; exit 1; }
@@ -52,5 +55,8 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT
   --sign "$IDENTITY" \
   "$OUTPUT"
 
-"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT"
+"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT" "$TEAM_ID"
+ARTIFACT_SHA256="$(/usr/bin/shasum -a 256 "$OUTPUT" | /usr/bin/awk '{print $1}')"
+[[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Unable to compute installer artifact SHA-256" >&2; exit 1; }
+echo "artifact_sha256=$ARTIFACT_SHA256" >&2
 echo "$OUTPUT"

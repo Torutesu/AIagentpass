@@ -33,7 +33,11 @@ import Testing
 @Test @MainActor func refreshCanRecoverFromError() async {
     let responses = ResponseSequence(responses: [
         .failure,
-        .success(Data(completeStatus.utf8))
+        .success(Data(completeStatus.utf8)),
+        // A successful status read also performs the fixed doctor and native
+        // diagnostics reads. Keep those optional reads in the test seam.
+        .failure,
+        .failure
     ])
     let provider = AgentPassOnboardingStatusProvider { _, _, _, _ in
         try await responses.next()

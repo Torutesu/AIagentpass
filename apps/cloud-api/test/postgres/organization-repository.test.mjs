@@ -278,6 +278,52 @@ test("revalidates the exact actor session, consumed proof, and authority epochs 
   }
 });
 
+test("rejects stale actor sessions before rename and invitation mutations", async () => {
+  const cases = [
+    ["renameOrganization", {
+      organization_id: ids.organization,
+      actor_member_id: ids.owner,
+      actor_session_id: ACTOR_SESSION_ID,
+      name: "Renamed",
+      expected_version: 1,
+      idempotency_key: "rename-stale-session-1"
+    }],
+    ["createInvitation", {
+      organization_id: ids.organization,
+      actor_member_id: ids.owner,
+      actor_session_id: ACTOR_SESSION_ID,
+      invitation_id: ids.invitation,
+      role: "viewer",
+      token_hash: TOKEN,
+      expires_at: LATER,
+      idempotency_key: "invite-stale-session-1"
+    }],
+    ["revokeInvitation", {
+      organization_id: ids.organization,
+      actor_member_id: ids.owner,
+      actor_session_id: ACTOR_SESSION_ID,
+      invitation_id: ids.invitation,
+      expected_version: 1,
+      revoked_at: NOW,
+      idempotency_key: "revoke-stale-session-1"
+    }]
+  ];
+
+  for (const [method, input] of cases) {
+    const client = new QueueClient([], { sessionAuthority: null });
+    await assert.rejects(
+      repo(client)[method](input),
+      (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_STALE_SESSION",
+      method
+    );
+    const authorization = client.calls.find((call) => call.text.startsWith("SELECT s.id AS session_id"));
+    assert.ok(authorization, `${method} must revalidate the actor session`);
+    assert.deepEqual(authorization.params.slice(0, 3), [ACTOR_SESSION_ID, ids.owner, ids.organization]);
+    assert.equal(client.calls.some((call) => call.text.startsWith("INSERT INTO idempotency_records")), false, method);
+    assert.equal(client.calls.at(-1).text, "ROLLBACK", method);
+  }
+});
+
 test("classifies stale, absent, and out-of-scope member mutations without cross-tenant disclosure", async () => {
   const staleClient = new QueueClient([
     response(), response(), response([{ role: "owner", status: "active" }]),

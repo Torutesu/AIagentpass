@@ -196,7 +196,8 @@ test("production Console contains no sample operational state or permissive summ
     "defaultInitialData", "mergeCloudSummary", "initialData", "プロダクトチーム", "佐藤さん",
     "Hiroko の MacBook Pro", "営業資料リライト", "ランディングページ調整",
   ]) assert.doesNotMatch(source, new RegExp(forbidden, "u"));
-  assert.match(source, /parseConsoleSummary\(await response\.json\(\), \{ organizationId \}\)/u);
+  assert.match(source, /parseConsoleSummary\(summaryBody, \{ organizationId \}\)/u);
+  assert.match(source, /parseDeploymentReadiness\(deploymentBody\)/u);
   assert.match(source, /setData\(emptyConsoleData\(\)\)/u);
   assert.match(source, /const epoch = \+\+summaryEpoch\.current/u);
 });

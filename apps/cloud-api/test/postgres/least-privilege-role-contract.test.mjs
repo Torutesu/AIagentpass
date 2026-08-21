@@ -36,7 +36,13 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   assert.match(sql, /GRANT SELECT ON ALL TABLES IN SCHEMA public TO agentpass_backup/);
   assert.match(sql, /GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_backup/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_backup/);
+  assert.match(sql, /human_identity_assertion_replays FROM agentpass_app, agentpass_backup/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_consume_human_identity_assertion\(bytea,timestamptz\) TO agentpass_app/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_prune_human_identity_assertion_replays\(integer\) TO agentpass_app/);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_app[^\n]*CREATE/i);
+  assert.match(sql, /platform_promotion_approvals[\s\S]*REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER[\s\S]*FROM agentpass_app/u);
+  assert.match(sql, /platform_promotion_issuances[\s\S]*REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER[\s\S]*FROM agentpass_app/u);
+  assert.match(sql, /platform_deployment_state[\s\S]*REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER[\s\S]*FROM agentpass_app/u);
 });
 
 test('checker reads the URL from the environment, enforces verify-full, and measures opaque evidence', async () => {
@@ -48,6 +54,9 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /process\.argv\.length !== 2/);
   assert.match(checker, /current_user/);
   assert.match(checker, /current_user = 'agentpass_migrator'/);
+  assert.match(checker, /platform_promotion_approvals/);
+  assert.match(checker, /platform_promotion_issuances/);
+  assert.match(checker, /platform_deployment_state/);
   for (const privilegeFunction of ['has_schema_privilege', 'has_table_privilege', 'has_sequence_privilege', 'has_function_privilege']) assert.match(checker, new RegExp(privilegeFunction));
   assert.match(checker, /createHash\('sha256'\)/);
   assert.match(checker, /spawnSync\(\s*'psql'/);

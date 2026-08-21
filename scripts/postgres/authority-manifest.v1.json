@@ -1,38 +1,72 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/scripts/postgres/authority-manifest.v1.json",
-  "title": "AgentPass migration 0046 authority object inventory",
+  "title": "AgentPass migration 0047 platform authority boundary inventory",
   "schema_version": 1,
-  "migration_version": 46,
-  "migration": "0046_audit_export_payloads.sql",
-  "tables": ["audit_export_payloads"],
+  "migration_version": 47,
+  "migration": "0047_platform_promotion_issuance.sql",
+  "tables": [
+    "platform_promotion_approvals",
+    "platform_promotion_issuances",
+    "platform_deployment_state",
+    "platform_promotion_audit_events"
+  ],
   "functions": [
-    "agentpass_bind_audit_export_payload",
-    "agentpass_require_audit_export_payload"
+    "agentpass_promotion_digest_array_valid",
+    "agentpass_guard_platform_promotion_issuance",
+    "agentpass_guard_platform_deployment_generation",
+    "agentpass_guard_platform_promotion_audit_event"
   ],
   "triggers": [
-    "audit_export_payloads_immutable",
-    "audit_export_issuances_payload_required"
+    "platform_promotion_issuances_guard",
+    "platform_deployment_generation_guard",
+    "platform_promotion_audit_events_guard"
   ],
   "policies": [
-    "audit_export_payloads_tenant_select",
-    "audit_export_payloads_tenant_insert"
+    "platform_promotion_approvals_runtime_select",
+    "platform_promotion_approvals_migration_all",
+    "platform_promotion_issuances_runtime_select",
+    "platform_promotion_issuances_runtime_insert",
+    "platform_promotion_issuances_runtime_update",
+    "platform_promotion_issuances_migration_all",
+    "platform_deployment_state_runtime_select",
+    "platform_deployment_state_runtime_insert",
+    "platform_deployment_state_runtime_update",
+    "platform_deployment_state_migration_all",
+    "platform_promotion_audit_events_runtime_select",
+    "platform_promotion_audit_events_runtime_insert",
+    "platform_promotion_audit_events_backup_select",
+    "platform_promotion_audit_events_migration_all"
   ],
-  "views": ["audit_export_committed_payloads"],
+  "views": [],
   "table_contracts": {
-    "audit_export_payloads": {
-      "primary_key": ["organization_id", "export_id", "environment", "chain", "idempotency_key"],
-      "columns": ["organization_id", "export_id", "environment", "chain", "idempotency_key", "payload_bytes", "payload_json", "payload_digest", "created_at"],
-      "tenant_column": "organization_id",
+    "platform_promotion_approvals": {
+      "scope": "deployment",
       "rls": "force",
+      "runtime_privileges": ["select"],
       "append_only": true
-    }
-  },
-  "view_contracts": {
-    "audit_export_committed_payloads": {
-      "security_invoker": true,
-      "requires_issuance_state": "committed",
-      "joins": ["audit_export_payloads", "audit_export_issuances"]
+    },
+    "platform_promotion_issuances": {
+      "primary_key": ["deployment_id", "environment", "promotion_id"],
+      "scope": "deployment",
+      "rls": "force",
+      "runtime_privileges": ["select", "insert", "update"],
+      "append_only": false,
+      "state_machine": ["reserved", "committed", "uncertain", "rejected"]
+    },
+    "platform_deployment_state": {
+      "primary_key": ["deployment_id", "environment"],
+      "scope": "deployment",
+      "rls": "force",
+      "runtime_privileges": ["select", "insert", "update"],
+      "append_only": false,
+      "generation_monotonic": true
+    },
+    "platform_promotion_audit_events": {
+      "scope": "deployment",
+      "rls": "force",
+      "runtime_privileges": ["select", "insert"],
+      "append_only": true
     }
   }
 }

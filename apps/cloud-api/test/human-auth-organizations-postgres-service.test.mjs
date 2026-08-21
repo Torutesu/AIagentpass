@@ -166,6 +166,7 @@ test("forwards mutation idempotency keys and injected timestamps and UUIDs", asy
   assert.equal(calls.createOrganizationWithOwner[0].created_at, NOW);
   assert.equal(calls.createOrganizationWithOwner[0].idempotency_key, key);
   assert.equal(calls.renameOrganization[0].idempotency_key, key);
+  assert.equal(calls.renameOrganization[0].actor_session_id, ACTOR.session_id);
   assert.equal(calls.updateMemberRole[0].idempotency_key, key);
   assert.equal(calls.updateMemberRole[0].revoked_at, NOW);
   assert.equal(calls.removeMember[0].removed_at, NOW);
@@ -173,8 +174,10 @@ test("forwards mutation idempotency keys and injected timestamps and UUIDs", asy
   assert.equal(calls.createInvitation[0].invitation_id, ids.invitation2);
   assert.equal(calls.createInvitation[0].created_at, NOW);
   assert.equal(calls.createInvitation[0].idempotency_key, key);
+  assert.equal(calls.createInvitation[0].actor_session_id, ACTOR.session_id);
   assert.equal(calls.revokeInvitation[0].revoked_at, NOW);
   assert.equal(calls.revokeInvitation[0].idempotency_key, key);
+  assert.equal(calls.revokeInvitation[0].actor_session_id, ACTOR.session_id);
   assert.equal(calls.acceptInvitation[0].accepted_at, NOW);
   assert.equal(calls.acceptInvitation[0].idempotency_key, key);
 });

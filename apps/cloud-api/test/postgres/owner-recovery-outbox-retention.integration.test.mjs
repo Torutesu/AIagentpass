@@ -23,7 +23,7 @@ test("real PostgreSQL prunes bounded terminal recovery rows into an immutable se
   const migrationClient = await pool.connect();
   try {
     const result = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-retention-qualification" }).run();
-    assert.equal(result.currentVersion, 46);
+    assert.equal(result.currentVersion , 47);
   } finally {
     migrationClient.release();
   }

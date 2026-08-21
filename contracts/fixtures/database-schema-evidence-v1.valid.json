@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "type": "agentpass.database-schema-evidence",
+  "environment": "staging",
+  "deployment_id": "deployment-staging-1",
+  "revision": "revision-1",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "database_schema_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "measured_at": "2026-08-19T23:59:00.000Z",
+  "transaction_isolation": "repeatable_read",
+  "measurement_id": "readiness-100",
+  "readiness_code": "ready"
+}

@@ -9,6 +9,7 @@ import {
   REGISTRATION_CHALLENGE,
   browserStorageSnapshot,
   consoleSummary,
+  deploymentReadiness,
   disposeVirtualAuthenticator,
   installVirtualAuthenticator,
   json,
@@ -117,6 +118,7 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, consoleSummary());
+    if (request.method() === "GET" && url.searchParams.get("resource") === "deployment-readiness") return json(route, deploymentReadiness());
     if (request.method() === "GET") return json(route, { capabilities: [], revocations: [], events: [] });
     if (request.method() !== "POST" || url.searchParams.get("operation") !== "issue-device-enrollment") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
 
@@ -222,8 +224,8 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   const issue = page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true });
 
   await issue.click();
-  await expect(page.getByText("一度だけ表示しています")).toBeVisible();
-  await expect(page.locator(".secret-output")).toContainText(ENROLLMENT_SECRET);
+  await expect(page.getByRole("alert")).toContainText("credentialはブラウザに表示せず破棄しました");
+  await expect(page.locator(".secret-output")).toHaveCount(0);
   await page.getByRole("button", { name: "表示を消す", exact: true }).click();
 
   await issue.click();
@@ -281,7 +283,8 @@ test("keeps the manual path available only as an explicit advanced fallback", as
   await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
   await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.getByText("一度だけ表示しています")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("credentialはブラウザに表示せず破棄しました");
+  await expect(page.locator(".secret-output")).toHaveCount(0);
   expect(state.enrollmentCalls).toBe(1);
   expect(state.enrollmentBodies[0]).toEqual({ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Advanced E2E Mac", platform: "macos", ttl_ms: 600000 });
 });

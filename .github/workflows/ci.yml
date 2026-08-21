@@ -7,8 +7,592 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  postgres-authority-16:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: agentpass-authority-16
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Configure PostgreSQL 16 TLS and reject plaintext connections
+        env:
+          AGENTPASS_C3_TLS_DIR: ${{ runner.temp }}/agentpass-postgres-tls-16
+        run: |
+          set -euo pipefail
+          tls_dir="$AGENTPASS_C3_TLS_DIR"
+          mkdir -p "$tls_dir"
+          chmod 0700 "$tls_dir"
+          cat > "$tls_dir/server.cnf" <<'EOF'
+          [req]
+          prompt = no
+          distinguished_name = distinguished_name
+          req_extensions = server_extensions
+
+          [distinguished_name]
+          CN = 127.0.0.1
+
+          [server_extensions]
+          basicConstraints = critical, CA:false
+          keyUsage = critical, digitalSignature, keyEncipherment
+          extendedKeyUsage = serverAuth
+          subjectAltName = IP:127.0.0.1,DNS:localhost
+          EOF
+          openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1 \
+            -subj "/CN=AgentPass CI PostgreSQL 16 CA" \
+            -addext "basicConstraints=critical,CA:true,pathlen:1" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.crt"
+          openssl req -new -newkey rsa:2048 -nodes -sha256 \
+            -config "$tls_dir/server.cnf" \
+            -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr"
+          openssl x509 -req -sha256 -days 1 \
+            -in "$tls_dir/server.csr" -CA "$tls_dir/ca.crt" -CAkey "$tls_dir/ca.key" \
+            -set_serial "0x$(openssl rand -hex 16)" \
+            -out "$tls_dir/server.crt" -extfile "$tls_dir/server.cnf" -extensions server_extensions
+          chmod 0600 "$tls_dir"/ca.key "$tls_dir"/server.key "$tls_dir"/server.cnf
+          chmod 0644 "$tls_dir"/ca.crt "$tls_dir"/server.crt
+
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:16" { print $1; exit }')"
+          test -n "$postgres_container"
+          docker cp "$tls_dir/server.crt" "$postgres_container:/var/lib/postgresql/data/server.crt"
+          docker cp "$tls_dir/server.key" "$postgres_container:/var/lib/postgresql/data/server.key"
+          docker cp "$tls_dir/ca.crt" "$postgres_container:/var/lib/postgresql/data/root.crt"
+          docker exec "$postgres_container" sh -c \
+            'chown postgres:postgres /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/server.key /var/lib/postgresql/data/root.crt && chmod 0644 /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/root.crt && chmod 0600 /var/lib/postgresql/data/server.key'
+          docker exec "$postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+            "ALTER SYSTEM SET ssl = 'on'; ALTER SYSTEM SET ssl_min_protocol_version = 'TLSv1.2'; ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/data/server.crt'; ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/data/server.key'; ALTER SYSTEM SET ssl_ca_file = '/var/lib/postgresql/data/root.crt'; ALTER SYSTEM SET archive_mode = 'on'; ALTER SYSTEM SET archive_command = 'test ! -e /var/lib/postgresql/wal-archive/%f && cp %p /var/lib/postgresql/wal-archive/%f'; ALTER SYSTEM SET archive_timeout = '1s';"
+          docker exec "$postgres_container" mkdir -p /var/lib/postgresql/wal-archive
+          docker exec "$postgres_container" chown postgres:postgres /var/lib/postgresql/wal-archive
+          docker exec "$postgres_container" sh -c \
+            "sed -i '1ihostnossl all all all reject' /var/lib/postgresql/data/pg_hba.conf"
+          docker restart "$postgres_container"
+          for attempt in $(seq 1 60); do
+            if docker exec "$postgres_container" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec "$postgres_container" pg_isready -U postgres -d postgres
+      - name: Prepare isolated PostgreSQL 16 C3 qualification database
+        env:
+          PGPASSWORD: agentpass-authority-16
+          PGSSLMODE: verify-full
+          PGSSLROOTCERT: ${{ runner.temp }}/agentpass-postgres-tls-16/ca.crt
+        run: createdb --host=127.0.0.1 --port=5432 --username=postgres agentpass_c3_16
+      - name: Prepare redacted PostgreSQL 16 C3 evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+      - name: Assert PostgreSQL 16 C3 database is connected to major 16
+        env:
+          PGPASSWORD: agentpass-authority-16
+        run: |
+          test "$(PGSSLMODE=verify-full PGSSLROOTCERT="$RUNNER_TEMP/agentpass-postgres-tls-16/ca.crt" psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=agentpass_c3_16 --tuples-only --no-align --command='SHOW server_version_major' | tr -d '[:space:]')" = 16
+          ! PGSSLMODE=disable psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=agentpass_c3_16 --command='SELECT 1' >/dev/null 2>&1
+      - name: Run real PostgreSQL 16 backup restore and PITR qualification
+        env:
+          AGENTPASS_BACKUP_PITR_DIRECTORY: ${{ runner.temp }}/agentpass-backup-pitr-16
+          AGENTPASS_BACKUP_PITR_EXECUTION_INPUT: ${{ github.workspace }}/backup-pitr-evidence/execution-16.json
+          AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT: ${{ github.workspace }}/backup-pitr-evidence/postgres-16.json
+          AGENTPASS_C3_CA_CERT_FILE: ${{ runner.temp }}/agentpass-postgres-tls-16/ca.crt
+          PGPASSWORD: agentpass-authority-16
+          PGSSLMODE: verify-full
+          PGSSLROOTCERT: ${{ runner.temp }}/agentpass-postgres-tls-16/ca.crt
+        run: |
+          set -euo pipefail
+          started_at="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          work_dir="$AGENTPASS_BACKUP_PITR_DIRECTORY"
+          source_db="agentpass_c3_16"
+          restore_db="agentpass_backup_restore_16_${GITHUB_RUN_ID}"
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:16" { print $1; exit }')"
+          test -n "$postgres_container"
+          rm -rf "$work_dir" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          mkdir -p "$work_dir/basebackup" "$work_dir/wal-archive" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          chmod 0700 "$work_dir" "$work_dir/basebackup" "$work_dir/wal-archive" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          client_image="postgres:16"
+          pg_client() {
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              --volume "$AGENTPASS_C3_CA_CERT_FILE:/run/agentpass/ca.crt:ro" \
+              --volume "$work_dir:/work" \
+              --env PGPASSWORD --env PGSSLMODE=verify-full --env PGSSLROOTCERT=/run/agentpass/ca.crt \
+              "$client_image" "$@"
+          }
+
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 <<'SQL'
+          DROP TABLE IF EXISTS public.backup_pitr_probe;
+          CREATE TABLE public.backup_pitr_probe (id integer PRIMARY KEY, marker text NOT NULL);
+          INSERT INTO public.backup_pitr_probe (id, marker) VALUES (1, 'base-marker');
+          SQL
+
+          pg_client pg_dump --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" \
+            --format=custom --file=/work/database.dump --no-owner --no-acl
+          pg_client createdb --host=127.0.0.1 --port=5432 --username=postgres "$restore_db"
+          pg_client pg_restore --host=127.0.0.1 --port=5432 --username=postgres --dbname="$restore_db" \
+            --exit-on-error --no-owner --no-acl /work/database.dump
+          test "$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$restore_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'base-marker'")" = 1
+          pg_client dropdb --host=127.0.0.1 --port=5432 --username=postgres "$restore_db"
+
+          pg_client pg_basebackup --host=127.0.0.1 --port=5432 --username=postgres --pgdata=/work/basebackup \
+            --format=plain --wal-method=stream --checkpoint=fast --progress
+          pitr_target_at="$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -Atc \
+            "SELECT to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS.US+00')")"
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO public.backup_pitr_probe (id, marker) VALUES (2, 'pitr-marker')"
+          wal_segment="$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -Atc 'SELECT pg_switch_wal()')"
+          test -n "$wal_segment"
+          for attempt in $(seq 1 60); do
+            if docker exec "$postgres_container" test -s "/var/lib/postgresql/wal-archive/$wal_segment"; then break; fi
+            sleep 1
+          done
+          docker exec "$postgres_container" test -s "/var/lib/postgresql/wal-archive/$wal_segment"
+          docker cp "$postgres_container:/var/lib/postgresql/wal-archive/." "$work_dir/wal-archive/"
+
+          rm -f "$work_dir/basebackup/postmaster.pid"
+          touch "$work_dir/basebackup/recovery.signal"
+          chmod 0600 "$work_dir/basebackup/recovery.signal"
+          chmod -R u+rwX,go-rwx "$work_dir/basebackup" "$work_dir/wal-archive"
+          pitr_container="agentpass-pitr-16-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm --force "$pitr_container" >/dev/null 2>&1 || true' EXIT
+          pitr_port=5540
+          docker run --detach --name "$pitr_container" --user "$(id -u):$(id -g)" --publish "$pitr_port:5432" \
+            --volume "$work_dir/basebackup:/var/lib/postgresql/data" \
+            --volume "$work_dir/wal-archive:/wal-archive:ro" \
+            "postgres:16" postgres -c "listen_addresses=*" \
+            -c "restore_command=cp /wal-archive/%f %p" \
+            -c "recovery_target_time=$pitr_target_at" \
+            -c "recovery_target_action=promote" \
+            -c "recovery_target_timeline=latest"
+          for attempt in $(seq 1 90); do
+            if docker exec "$pitr_container" pg_isready -U postgres -d "$source_db" >/dev/null 2>&1; then break; fi
+            if [ "$(docker inspect --format '{{.State.Status}}' "$pitr_container")" = exited ]; then
+              docker logs "$pitr_container"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$pitr_container" pg_isready -U postgres -d "$source_db"
+          test "$(docker exec "$pitr_container" psql -U postgres -d "$source_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'base-marker'")" = 1
+          test "$(docker exec "$pitr_container" psql -U postgres -d "$source_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'pitr-marker'")" = 0
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 \
+            -c 'DROP TABLE public.backup_pitr_probe'
+
+          completed_at="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          artifact_sha256="$(node scripts/qualification/postgres-c3-migration-0047.mjs artifact-digest \
+            contracts/postgres/0047_platform_promotion_issuance.sql | node --input-type=module -e \
+            'let data=""; for await (const chunk of process.stdin) data += chunk; process.stdout.write(JSON.parse(data).artifact_sha256)' )"
+          export AGENTPASS_BACKUP_PITR_SOURCE_COMMIT="$GITHUB_SHA"
+          export AGENTPASS_BACKUP_PITR_SOURCE_TREE="$source_tree"
+          export AGENTPASS_BACKUP_PITR_CI_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_BACKUP_PITR_CI_JOB_ID="$GITHUB_JOB"
+          export AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256="$artifact_sha256"
+          export AGENTPASS_BACKUP_PITR_STARTED_AT="$started_at"
+          export AGENTPASS_BACKUP_PITR_COMPLETED_AT="$completed_at"
+          node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          import { canonicalJson } from "./packages/protocol/src/index.mjs";
+
+          const result = {
+            schema_version: 1,
+            kind: "agentpass-backup-pitr-execution-result",
+            source_commit: process.env.AGENTPASS_BACKUP_PITR_SOURCE_COMMIT,
+            source_tree: process.env.AGENTPASS_BACKUP_PITR_SOURCE_TREE,
+            ci_run_id: process.env.AGENTPASS_BACKUP_PITR_CI_RUN_ID,
+            ci_run_attempt: process.env.AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT,
+            ci_job_id: process.env.AGENTPASS_BACKUP_PITR_CI_JOB_ID,
+            artifact_sha256: process.env.AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256,
+            started_at: process.env.AGENTPASS_BACKUP_PITR_STARTED_AT,
+            completed_at: process.env.AGENTPASS_BACKUP_PITR_COMPLETED_AT,
+            execution: { environment: "postgresql", real_execution: true, runner_id: "github-actions/backup-pitr" },
+            backup_restore: { expected: "passed", observed: "passed", status: "passed" },
+            pitr_recovery: { expected: "passed", observed: "passed", status: "passed" }
+          };
+          await writeFile(process.env.AGENTPASS_BACKUP_PITR_EXECUTION_INPUT, `${canonicalJson(result)}\n`, { encoding: "utf8", mode: 0o600 });
+          NODE
+          node scripts/qualification/backup-pitr-evidence.mjs build \
+            "$AGENTPASS_BACKUP_PITR_EXECUTION_INPUT" "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" \
+            --source-commit "$GITHUB_SHA" --source-tree "$source_tree" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --job-id "$GITHUB_JOB" --artifact-sha256 "$artifact_sha256"
+          node scripts/qualification/backup-pitr-evidence.mjs verify "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" \
+            --source-commit "$GITHUB_SHA" --source-tree "$source_tree" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --job-id "$GITHUB_JOB" --artifact-sha256 "$artifact_sha256"
+      - name: Scan PostgreSQL 16 backup and PITR evidence for secrets and unsafe entries
+        run: node scripts/release/archive-secret-scan.mjs "$GITHUB_WORKSPACE/backup-pitr-evidence" > /dev/null
+      - name: Run real PostgreSQL 16 C3 platform promotion qualification
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-authority-16@127.0.0.1:5432/agentpass_c3_16?sslmode=verify-full
+          AGENTPASS_C3_CA_CERT_FILE: ${{ runner.temp }}/agentpass-postgres-tls-16/ca.crt
+          AGENTPASS_C3_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_C3_CI_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_C3_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AGENTPASS_C3_CI_JOB_ID: ${{ github.job }}
+          AGENTPASS_C3_EXPECTED_POSTGRES_MAJOR: "16"
+          AGENTPASS_C3_EXPECTED_DATABASE_NAME: agentpass_c3_16
+          AGENTPASS_C3_EXPECTED_SERVER_PORT: "5432"
+          AGENTPASS_C3_REQUIRE_REAL_DATABASE: "1"
+          AGENTPASS_C3_BACKUP_PITR_EVIDENCE: ${{ github.workspace }}/backup-pitr-evidence/postgres-16.json
+          AGENTPASS_C3_EVIDENCE_OUTPUT: ${{ github.workspace }}/c3-migration-0047-evidence/postgres-16.json
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          export AGENTPASS_C3_SOURCE_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          node --test --test-concurrency=1 \
+            apps/cloud-api/test/postgres/c3-migration-0047-qualification.test.mjs \
+            apps/cloud-api/test/postgres/c3-migration-0047-adversarial.test.mjs
+      - name: Independently verify PostgreSQL 16 C3 evidence binding
+        env:
+          AGENTPASS_C3_EVIDENCE_OUTPUT: ${{ github.workspace }}/c3-migration-0047-evidence/postgres-16.json
+        run: |
+          export AGENTPASS_C3_SOURCE_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          node scripts/qualification/postgres-c3-migration-0047.mjs verify \
+            "$AGENTPASS_C3_EVIDENCE_OUTPUT" "$GITHUB_SHA" "$AGENTPASS_C3_SOURCE_TREE" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" "16" "agentpass_c3_16" "5432"
+      - name: Scan PostgreSQL 16 C3 evidence for secrets and unsafe entries
+        run: node scripts/release/archive-secret-scan.mjs "$GITHUB_WORKSPACE/c3-migration-0047-evidence/postgres-16.json" > /dev/null
+
+      - name: Qualify PostgreSQL 16 schema identity drift detection
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-authority-16@127.0.0.1:5432/agentpass_c3_16?sslmode=verify-full
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/agentpass-postgres-tls-16/ca.crt
+        run: node --test apps/cloud-api/test/postgres/schema-identity.integration.test.mjs
+
+      - name: Retain verified redacted PostgreSQL 16 C3 evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-c3-migration-0047-${{ github.job }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: c3-migration-0047-evidence/postgres-16.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Cleanup PostgreSQL 16 authority state and secret material
+        if: always()
+        env:
+          AGENTPASS_C3_TLS_DIR: ${{ runner.temp }}/agentpass-postgres-tls-16
+          AGENTPASS_BACKUP_PITR_DIRECTORY: ${{ runner.temp }}/agentpass-backup-pitr-16
+          AGENTPASS_PITR_CONTAINER: agentpass-pitr-16-${{ github.run_id }}-${{ github.run_attempt }}
+          AGENTPASS_C3_DATABASE_NAME: agentpass_c3_16
+          AGENTPASS_BACKUP_RESTORE_DATABASE_NAME: agentpass_backup_restore_16_${{ github.run_id }}
+        run: |
+          set -u
+          docker rm --force "$AGENTPASS_PITR_CONTAINER" >/dev/null 2>&1 || true
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:16" { print $1; exit }')"
+          if [ -n "$postgres_container" ]; then
+            docker exec "$postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "DROP DATABASE IF EXISTS \"$AGENTPASS_BACKUP_RESTORE_DATABASE_NAME\" WITH (FORCE); DROP DATABASE IF EXISTS \"$AGENTPASS_C3_DATABASE_NAME\" WITH (FORCE);" \
+              >/dev/null 2>&1 || true
+          fi
+          rm -rf -- "$AGENTPASS_C3_TLS_DIR" "$AGENTPASS_BACKUP_PITR_DIRECTORY" \
+            "$GITHUB_WORKSPACE/backup-pitr-evidence" "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+
+  postgres-authority-17:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: agentpass-authority-17
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Configure PostgreSQL 17 TLS and reject plaintext connections
+        env:
+          AGENTPASS_C3_TLS_DIR: ${{ runner.temp }}/agentpass-postgres-tls-17
+        run: |
+          set -euo pipefail
+          tls_dir="$AGENTPASS_C3_TLS_DIR"
+          mkdir -p "$tls_dir"
+          chmod 0700 "$tls_dir"
+          cat > "$tls_dir/server.cnf" <<'EOF'
+          [req]
+          prompt = no
+          distinguished_name = distinguished_name
+          req_extensions = server_extensions
+
+          [distinguished_name]
+          CN = 127.0.0.1
+
+          [server_extensions]
+          basicConstraints = critical, CA:false
+          keyUsage = critical, digitalSignature, keyEncipherment
+          extendedKeyUsage = serverAuth
+          subjectAltName = IP:127.0.0.1,DNS:localhost
+          EOF
+          openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1 \
+            -subj "/CN=AgentPass CI PostgreSQL 17 CA" \
+            -addext "basicConstraints=critical,CA:true,pathlen:1" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.crt"
+          openssl req -new -newkey rsa:2048 -nodes -sha256 \
+            -config "$tls_dir/server.cnf" \
+            -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr"
+          openssl x509 -req -sha256 -days 1 \
+            -in "$tls_dir/server.csr" -CA "$tls_dir/ca.crt" -CAkey "$tls_dir/ca.key" \
+            -set_serial "0x$(openssl rand -hex 16)" \
+            -out "$tls_dir/server.crt" -extfile "$tls_dir/server.cnf" -extensions server_extensions
+          chmod 0600 "$tls_dir"/ca.key "$tls_dir"/server.key "$tls_dir"/server.cnf
+          chmod 0644 "$tls_dir"/ca.crt "$tls_dir"/server.crt
+
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:17" { print $1; exit }')"
+          test -n "$postgres_container"
+          docker cp "$tls_dir/server.crt" "$postgres_container:/var/lib/postgresql/data/server.crt"
+          docker cp "$tls_dir/server.key" "$postgres_container:/var/lib/postgresql/data/server.key"
+          docker cp "$tls_dir/ca.crt" "$postgres_container:/var/lib/postgresql/data/root.crt"
+          docker exec "$postgres_container" sh -c \
+            'chown postgres:postgres /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/server.key /var/lib/postgresql/data/root.crt && chmod 0644 /var/lib/postgresql/data/server.crt /var/lib/postgresql/data/root.crt && chmod 0600 /var/lib/postgresql/data/server.key'
+          docker exec "$postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+            "ALTER SYSTEM SET ssl = 'on'; ALTER SYSTEM SET ssl_min_protocol_version = 'TLSv1.2'; ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/data/server.crt'; ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/data/server.key'; ALTER SYSTEM SET ssl_ca_file = '/var/lib/postgresql/data/root.crt'; ALTER SYSTEM SET archive_mode = 'on'; ALTER SYSTEM SET archive_command = 'test ! -e /var/lib/postgresql/wal-archive/%f && cp %p /var/lib/postgresql/wal-archive/%f'; ALTER SYSTEM SET archive_timeout = '1s';"
+          docker exec "$postgres_container" mkdir -p /var/lib/postgresql/wal-archive
+          docker exec "$postgres_container" chown postgres:postgres /var/lib/postgresql/wal-archive
+          docker exec "$postgres_container" sh -c \
+            "sed -i '1ihostnossl all all all reject' /var/lib/postgresql/data/pg_hba.conf"
+          docker restart "$postgres_container"
+          for attempt in $(seq 1 60); do
+            if docker exec "$postgres_container" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec "$postgres_container" pg_isready -U postgres -d postgres
+      - name: Prepare isolated PostgreSQL 17 C3 qualification database
+        env:
+          PGPASSWORD: agentpass-authority-17
+          PGSSLMODE: verify-full
+          PGSSLROOTCERT: ${{ runner.temp }}/agentpass-postgres-tls-17/ca.crt
+        run: createdb --host=127.0.0.1 --port=5432 --username=postgres agentpass_c3_17
+      - name: Prepare redacted PostgreSQL 17 C3 evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+      - name: Assert PostgreSQL 17 C3 database is connected to major 17
+        env:
+          PGPASSWORD: agentpass-authority-17
+        run: |
+          test "$(PGSSLMODE=verify-full PGSSLROOTCERT="$RUNNER_TEMP/agentpass-postgres-tls-17/ca.crt" psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=agentpass_c3_17 --tuples-only --no-align --command='SHOW server_version_major' | tr -d '[:space:]')" = 17
+          ! PGSSLMODE=disable psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=agentpass_c3_17 --command='SELECT 1' >/dev/null 2>&1
+      - name: Run real PostgreSQL 17 backup restore and PITR qualification
+        env:
+          AGENTPASS_BACKUP_PITR_DIRECTORY: ${{ runner.temp }}/agentpass-backup-pitr-17
+          AGENTPASS_BACKUP_PITR_EXECUTION_INPUT: ${{ github.workspace }}/backup-pitr-evidence/execution-17.json
+          AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT: ${{ github.workspace }}/backup-pitr-evidence/postgres-17.json
+          AGENTPASS_C3_CA_CERT_FILE: ${{ runner.temp }}/agentpass-postgres-tls-17/ca.crt
+          PGPASSWORD: agentpass-authority-17
+          PGSSLMODE: verify-full
+          PGSSLROOTCERT: ${{ runner.temp }}/agentpass-postgres-tls-17/ca.crt
+        run: |
+          set -euo pipefail
+          started_at="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          work_dir="$AGENTPASS_BACKUP_PITR_DIRECTORY"
+          source_db="agentpass_c3_17"
+          restore_db="agentpass_backup_restore_17_${GITHUB_RUN_ID}"
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:17" { print $1; exit }')"
+          test -n "$postgres_container"
+          rm -rf "$work_dir" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          mkdir -p "$work_dir/basebackup" "$work_dir/wal-archive" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          chmod 0700 "$work_dir" "$work_dir/basebackup" "$work_dir/wal-archive" "$GITHUB_WORKSPACE/backup-pitr-evidence"
+          client_image="postgres:17"
+          pg_client() {
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              --volume "$AGENTPASS_C3_CA_CERT_FILE:/run/agentpass/ca.crt:ro" \
+              --volume "$work_dir:/work" \
+              --env PGPASSWORD --env PGSSLMODE=verify-full --env PGSSLROOTCERT=/run/agentpass/ca.crt \
+              "$client_image" "$@"
+          }
+
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 <<'SQL'
+          DROP TABLE IF EXISTS public.backup_pitr_probe;
+          CREATE TABLE public.backup_pitr_probe (id integer PRIMARY KEY, marker text NOT NULL);
+          INSERT INTO public.backup_pitr_probe (id, marker) VALUES (1, 'base-marker');
+          SQL
+
+          pg_client pg_dump --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" \
+            --format=custom --file=/work/database.dump --no-owner --no-acl
+          pg_client createdb --host=127.0.0.1 --port=5432 --username=postgres "$restore_db"
+          pg_client pg_restore --host=127.0.0.1 --port=5432 --username=postgres --dbname="$restore_db" \
+            --exit-on-error --no-owner --no-acl /work/database.dump
+          test "$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$restore_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'base-marker'")" = 1
+          pg_client dropdb --host=127.0.0.1 --port=5432 --username=postgres "$restore_db"
+
+          pg_client pg_basebackup --host=127.0.0.1 --port=5432 --username=postgres --pgdata=/work/basebackup \
+            --format=plain --wal-method=stream --checkpoint=fast --progress
+          pitr_target_at="$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -Atc \
+            "SELECT to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS.US+00')")"
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO public.backup_pitr_probe (id, marker) VALUES (2, 'pitr-marker')"
+          wal_segment="$(pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -Atc 'SELECT pg_switch_wal()')"
+          test -n "$wal_segment"
+          for attempt in $(seq 1 60); do
+            if docker exec "$postgres_container" test -s "/var/lib/postgresql/wal-archive/$wal_segment"; then break; fi
+            sleep 1
+          done
+          docker exec "$postgres_container" test -s "/var/lib/postgresql/wal-archive/$wal_segment"
+          docker cp "$postgres_container:/var/lib/postgresql/wal-archive/." "$work_dir/wal-archive/"
+
+          rm -f "$work_dir/basebackup/postmaster.pid"
+          touch "$work_dir/basebackup/recovery.signal"
+          chmod 0600 "$work_dir/basebackup/recovery.signal"
+          chmod -R u+rwX,go-rwx "$work_dir/basebackup" "$work_dir/wal-archive"
+          pitr_container="agentpass-pitr-17-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm --force "$pitr_container" >/dev/null 2>&1 || true' EXIT
+          pitr_port=5541
+          docker run --detach --name "$pitr_container" --user "$(id -u):$(id -g)" --publish "$pitr_port:5432" \
+            --volume "$work_dir/basebackup:/var/lib/postgresql/data" \
+            --volume "$work_dir/wal-archive:/wal-archive:ro" \
+            "postgres:17" postgres -c "listen_addresses=*" \
+            -c "restore_command=cp /wal-archive/%f %p" \
+            -c "recovery_target_time=$pitr_target_at" \
+            -c "recovery_target_action=promote" \
+            -c "recovery_target_timeline=latest"
+          for attempt in $(seq 1 90); do
+            if docker exec "$pitr_container" pg_isready -U postgres -d "$source_db" >/dev/null 2>&1; then break; fi
+            if [ "$(docker inspect --format '{{.State.Status}}' "$pitr_container")" = exited ]; then
+              docker logs "$pitr_container"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$pitr_container" pg_isready -U postgres -d "$source_db"
+          test "$(docker exec "$pitr_container" psql -U postgres -d "$source_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'base-marker'")" = 1
+          test "$(docker exec "$pitr_container" psql -U postgres -d "$source_db" -Atc \
+            "SELECT count(*) FROM public.backup_pitr_probe WHERE marker = 'pitr-marker'")" = 0
+          pg_client psql --host=127.0.0.1 --port=5432 --username=postgres --dbname="$source_db" -v ON_ERROR_STOP=1 \
+            -c 'DROP TABLE public.backup_pitr_probe'
+
+          completed_at="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+          source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          artifact_sha256="$(node scripts/qualification/postgres-c3-migration-0047.mjs artifact-digest \
+            contracts/postgres/0047_platform_promotion_issuance.sql | node --input-type=module -e \
+            'let data=""; for await (const chunk of process.stdin) data += chunk; process.stdout.write(JSON.parse(data).artifact_sha256)' )"
+          export AGENTPASS_BACKUP_PITR_SOURCE_COMMIT="$GITHUB_SHA"
+          export AGENTPASS_BACKUP_PITR_SOURCE_TREE="$source_tree"
+          export AGENTPASS_BACKUP_PITR_CI_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_BACKUP_PITR_CI_JOB_ID="$GITHUB_JOB"
+          export AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256="$artifact_sha256"
+          export AGENTPASS_BACKUP_PITR_STARTED_AT="$started_at"
+          export AGENTPASS_BACKUP_PITR_COMPLETED_AT="$completed_at"
+          node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          import { canonicalJson } from "./packages/protocol/src/index.mjs";
+
+          const result = {
+            schema_version: 1,
+            kind: "agentpass-backup-pitr-execution-result",
+            source_commit: process.env.AGENTPASS_BACKUP_PITR_SOURCE_COMMIT,
+            source_tree: process.env.AGENTPASS_BACKUP_PITR_SOURCE_TREE,
+            ci_run_id: process.env.AGENTPASS_BACKUP_PITR_CI_RUN_ID,
+            ci_run_attempt: process.env.AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT,
+            ci_job_id: process.env.AGENTPASS_BACKUP_PITR_CI_JOB_ID,
+            artifact_sha256: process.env.AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256,
+            started_at: process.env.AGENTPASS_BACKUP_PITR_STARTED_AT,
+            completed_at: process.env.AGENTPASS_BACKUP_PITR_COMPLETED_AT,
+            execution: { environment: "postgresql", real_execution: true, runner_id: "github-actions/backup-pitr" },
+            backup_restore: { expected: "passed", observed: "passed", status: "passed" },
+            pitr_recovery: { expected: "passed", observed: "passed", status: "passed" }
+          };
+          await writeFile(process.env.AGENTPASS_BACKUP_PITR_EXECUTION_INPUT, `${canonicalJson(result)}\n`, { encoding: "utf8", mode: 0o600 });
+          NODE
+          node scripts/qualification/backup-pitr-evidence.mjs build \
+            "$AGENTPASS_BACKUP_PITR_EXECUTION_INPUT" "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" \
+            --source-commit "$GITHUB_SHA" --source-tree "$source_tree" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --job-id "$GITHUB_JOB" --artifact-sha256 "$artifact_sha256"
+          node scripts/qualification/backup-pitr-evidence.mjs verify "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" \
+            --source-commit "$GITHUB_SHA" --source-tree "$source_tree" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --job-id "$GITHUB_JOB" --artifact-sha256 "$artifact_sha256"
+      - name: Scan PostgreSQL 17 backup and PITR evidence for secrets and unsafe entries
+        run: node scripts/release/archive-secret-scan.mjs "$GITHUB_WORKSPACE/backup-pitr-evidence" > /dev/null
+      - name: Run real PostgreSQL 17 C3 platform promotion qualification
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-authority-17@127.0.0.1:5432/agentpass_c3_17?sslmode=verify-full
+          AGENTPASS_C3_CA_CERT_FILE: ${{ runner.temp }}/agentpass-postgres-tls-17/ca.crt
+          AGENTPASS_C3_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_C3_CI_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_C3_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AGENTPASS_C3_CI_JOB_ID: ${{ github.job }}
+          AGENTPASS_C3_EXPECTED_POSTGRES_MAJOR: "17"
+          AGENTPASS_C3_EXPECTED_DATABASE_NAME: agentpass_c3_17
+          AGENTPASS_C3_EXPECTED_SERVER_PORT: "5432"
+          AGENTPASS_C3_REQUIRE_REAL_DATABASE: "1"
+          AGENTPASS_C3_BACKUP_PITR_EVIDENCE: ${{ github.workspace }}/backup-pitr-evidence/postgres-17.json
+          AGENTPASS_C3_EVIDENCE_OUTPUT: ${{ github.workspace }}/c3-migration-0047-evidence/postgres-17.json
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          export AGENTPASS_C3_SOURCE_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          node --test --test-concurrency=1 \
+            apps/cloud-api/test/postgres/c3-migration-0047-qualification.test.mjs \
+            apps/cloud-api/test/postgres/c3-migration-0047-adversarial.test.mjs
+      - name: Independently verify PostgreSQL 17 C3 evidence binding
+        env:
+          AGENTPASS_C3_EVIDENCE_OUTPUT: ${{ github.workspace }}/c3-migration-0047-evidence/postgres-17.json
+        run: |
+          export AGENTPASS_C3_SOURCE_TREE="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          node scripts/qualification/postgres-c3-migration-0047.mjs verify \
+            "$AGENTPASS_C3_EVIDENCE_OUTPUT" "$GITHUB_SHA" "$AGENTPASS_C3_SOURCE_TREE" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" "17" "agentpass_c3_17" "5432"
+      - name: Scan PostgreSQL 17 C3 evidence for secrets and unsafe entries
+        run: node scripts/release/archive-secret-scan.mjs "$GITHUB_WORKSPACE/c3-migration-0047-evidence/postgres-17.json" > /dev/null
+
+      - name: Qualify PostgreSQL 17 schema identity drift detection
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-authority-17@127.0.0.1:5432/agentpass_c3_17?sslmode=verify-full
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/agentpass-postgres-tls-17/ca.crt
+        run: node --test apps/cloud-api/test/postgres/schema-identity.integration.test.mjs
+      - name: Retain verified redacted PostgreSQL 17 C3 evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-c3-migration-0047-${{ github.job }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: c3-migration-0047-evidence/postgres-17.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Cleanup PostgreSQL 17 authority state and secret material
+        if: always()
+        env:
+          AGENTPASS_C3_TLS_DIR: ${{ runner.temp }}/agentpass-postgres-tls-17
+          AGENTPASS_BACKUP_PITR_DIRECTORY: ${{ runner.temp }}/agentpass-backup-pitr-17
+          AGENTPASS_PITR_CONTAINER: agentpass-pitr-17-${{ github.run_id }}-${{ github.run_attempt }}
+          AGENTPASS_C3_DATABASE_NAME: agentpass_c3_17
+          AGENTPASS_BACKUP_RESTORE_DATABASE_NAME: agentpass_backup_restore_17_${{ github.run_id }}
+        run: |
+          set -u
+          docker rm --force "$AGENTPASS_PITR_CONTAINER" >/dev/null 2>&1 || true
+          postgres_container="$(docker ps --format '{{.ID}}\t{{.Image}}' | awk '$2 == "postgres:17" { print $1; exit }')"
+          if [ -n "$postgres_container" ]; then
+            docker exec "$postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "DROP DATABASE IF EXISTS \"$AGENTPASS_BACKUP_RESTORE_DATABASE_NAME\" WITH (FORCE); DROP DATABASE IF EXISTS \"$AGENTPASS_C3_DATABASE_NAME\" WITH (FORCE);" \
+              >/dev/null 2>&1 || true
+          fi
+          rm -rf -- "$AGENTPASS_C3_TLS_DIR" "$AGENTPASS_BACKUP_PITR_DIRECTORY" \
+            "$GITHUB_WORKSPACE/backup-pitr-evidence" "$GITHUB_WORKSPACE/c3-migration-0047-evidence"
+
   postgres-integration:
     runs-on: ubuntu-latest
     services:
@@ -84,6 +668,8 @@ jobs:
           export AGENTPASS_C1_POSTGRES_VERSION
           node scripts/postgres/provider-operation-qualification-evidence.mjs write "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json"
           node scripts/postgres/provider-operation-qualification-evidence.mjs verify "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json" "$GITHUB_SHA"
+      - name: Secret-scan C1.5 retained evidence
+        run: node scripts/release/ci-preflight.mjs secret-scan "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json" >/dev/null
       - name: Retain verified source-bound C1.5 provider-operation evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -128,6 +714,8 @@ jobs:
         run: node --test apps/cloud-api/test/postgres/owner-recovery-delivery-binding-upgrade.integration.test.mjs
       - name: Independently verify W1.5 evidence before upload
         run: node scripts/owner-recovery/verify-w15-evidence.mjs "$GITHUB_WORKSPACE/w15-evidence/owner-recovery-race-matrix.json"
+      - name: Secret-scan W1.5 retained evidence
+        run: node scripts/release/ci-preflight.mjs secret-scan "$GITHUB_WORKSPACE/w15-evidence/owner-recovery-race-matrix.json" >/dev/null
       - name: Retain verified secret-free W1.5 evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -150,14 +738,104 @@ jobs:
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
         working-directory: apps/web-console
-      - name: Run WebAuthn, role, device-state, wake, and revoke browser E2E
+      - name: Run dedicated WebAuthn unattended qualification (external bindings required)
+        if: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ENABLED == 'true' }}
+        env:
+          AGENTPASS_WEBAUTHN_QUALIFICATION_MODE: external
+          AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256 }}
+          AGENTPASS_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/agentpass-webauthn-agent-unattended-qualification.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID:?protected WebAuthn qualification runner binding is required}"
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256:?protected WebAuthn qualification artifact binding is required}"
+          [[ "$AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "WebAuthn qualification artifact binding must be SHA-256" >&2; exit 1; }
+          source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          qualification_job_id="$(gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "browser-e2e") | .id' | head -n 1)"
+          [[ "$qualification_job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "current browser-e2e job ID is unavailable" >&2; exit 1; }
+          export AGENTPASS_SOURCE_TREE="$source_tree"
+          export AGENTPASS_QUALIFICATION_RUNNER_ID="$AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID"
+          export AGENTPASS_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_QUALIFICATION_JOB_ID="$qualification_job_id"
+          export AGENTPASS_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_QUALIFICATION_ARTIFACT_SHA256="$AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256"
+          rm -f "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH"
+          report_path="$RUNNER_TEMP/agentpass-webauthn-agent-unattended-playwright-report.json"
+          rm -f "$report_path"
+          npx playwright test e2e/webauthn-agent-unattended-qualification.spec.ts --reporter=json > "$report_path"
+          node --input-type=module - "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH" "$report_path" "$GITHUB_SHA" "$source_tree" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$qualification_job_id" "$AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256" "$AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID" <<'NODE'
+          import fs from "node:fs";
+
+          const [evidencePath, reportPath, expectedCommit, expectedTree, expectedRunId, expectedAttempt, expectedJobId, expectedArtifact, expectedRunner] = process.argv.slice(2);
+          const requiredChecks = ["authenticator_origin_rp", "durable_one_time_consumption", "replay_rejection", "stale_context_rejection", "outage_fail_closed"];
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+          const results = [];
+          function visit(suite) {
+            for (const spec of suite.specs ?? []) for (const test of spec.tests ?? []) for (const result of test.results ?? []) results.push(result);
+            for (const child of suite.suites ?? []) visit(child);
+          }
+          for (const suite of report.suites ?? []) visit(suite);
+          if (results.length !== 1 || results[0].status !== "passed") throw new Error("dedicated WebAuthn qualification did not execute exactly one passing test");
+          if (evidence.schema_version !== 1 || evidence.kind !== "agentpass-webauthn-agent-unattended-e2e" || evidence.status !== "passed" || evidence.qualified !== true || evidence.reason !== null) throw new Error("WebAuthn qualification evidence is not a passing result");
+          if (JSON.stringify(evidence.required_checks) !== JSON.stringify(requiredChecks) || !Array.isArray(evidence.checks) || evidence.checks.length !== requiredChecks.length) throw new Error("WebAuthn qualification check inventory is incomplete");
+          for (const [index, check] of evidence.checks.entries()) {
+            if (check.check_id !== requiredChecks[index] || check.status !== "passed" || check.expected?.type !== "boolean" || check.expected.value !== true || check.observed?.type !== "boolean" || check.observed.value !== true || !/^[0-9a-f]{64}$/.test(check.evidence_sha256)) throw new Error("WebAuthn qualification check is not typed and passing");
+          }
+          const execution = evidence.execution;
+          if (!execution || execution.kind !== "external_runner" || execution.real_execution !== true || execution.runner_id !== expectedRunner || execution.run_id !== expectedRunId || execution.job_id !== expectedJobId || execution.run_attempt !== expectedAttempt || execution.source_commit !== expectedCommit || execution.source_tree !== expectedTree || execution.artifact_sha256 !== expectedArtifact) throw new Error("WebAuthn qualification evidence is not bound to the external run");
+          NODE
+        working-directory: apps/web-console
+      - name: Run WebAuthn, role, device-state, wake, and revoke browser E2E (real browser required)
+        env:
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "54"
+          AGENTPASS_BROWSER_E2E_RESULT_PATH: ${{ github.workspace }}/apps/web-console/e2e/test-results/browser-e2e-result.json
         run: npm run e2e
         working-directory: apps/web-console
+      - name: Copy verified WebAuthn qualification evidence into the browser artifact
+        if: ${{ success() && vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ENABLED == 'true' }}
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/agentpass-webauthn-agent-unattended-qualification.json"
+          install -m 0600 \
+            "$RUNNER_TEMP/agentpass-webauthn-agent-unattended-qualification.json" \
+            "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/webauthn-agent-unattended-qualification.evidence.json"
+      - name: Verify and bind browser E2E evidence before upload
+        env:
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "54"
+        run: |
+          set -euo pipefail
+          source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          bound_path="$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.bound.json"
+          rm -f "$bound_path"
+          node scripts/release/ci-preflight.mjs browser-e2e \
+            "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.json" \
+            "$bound_path" "$GITHUB_SHA" "$source_tree" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" \
+            "$AGENTPASS_EXPECTED_BROWSER_E2E_TESTS"
+          mv "$bound_path" "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.json"
       - name: Reject sensitive browser artifacts
         if: always()
         env:
           AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
         run: node --test test/p0b-artifact-security.test.mjs
+      - name: Retain typed browser E2E result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-e2e-result-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/web-console/e2e/test-results/browser-e2e-result.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain externally bound WebAuthn qualification evidence
+        if: ${{ success() && vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ENABLED == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: webauthn-agent-unattended-qualification-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/web-console/e2e/test-results/webauthn-agent-unattended-qualification.evidence.json
+          if-no-files-found: error
+          retention-days: 30
 
   p0b-live-process:
     runs-on: ubuntu-latest
@@ -234,4 +912,6 @@ jobs:
         timeout-minutes: 10
         run: npm run test:native-durability-model
       - run: npm run release:validate
+      - run: npm run release:workflow-validate
+      - run: node --test scripts/release/sign-deployment-trust.test.mjs scripts/release/validate-promotion-workflow.test.mjs
       - run: npm run lint

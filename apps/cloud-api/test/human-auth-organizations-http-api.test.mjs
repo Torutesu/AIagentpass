@@ -73,7 +73,7 @@ function service(overrides = {}) {
   return { service: result, calls };
 }
 
-function fixture({ role = "owner", sessionError = undefined, serviceOverrides = {}, recentAuthService = undefined, api = {} } = {}) {
+function fixture({ role = "owner", sessionError = undefined, serviceOverrides = {}, recentAuthService = undefined, api = {}, switchSession = undefined } = {}) {
   const calls = { authenticate: [] };
   const { service: organizationService, calls: serviceCalls } = service(serviceOverrides);
   const humanSession = {
@@ -82,7 +82,8 @@ function fixture({ role = "owner", sessionError = undefined, serviceOverrides = 
       calls.authenticate.push(input);
       if (sessionError) throw sessionError;
       return { session: actor({ role }) };
-    }
+    },
+    ...(switchSession === undefined ? {} : { switchOrganization: switchSession })
   };
   return {
     calls: { ...calls, ...serviceCalls },
@@ -137,6 +138,7 @@ test("validates recent-auth dependencies and exposes distinct frozen operations"
   assert.throws(() => createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, now: 1 }), /now must be a function/);
   assert.equal(Object.isFrozen(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS), true);
   assert.notEqual(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
+  assert.notEqual(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation);
 });
 
 test("requires an exact HTTPS Origin, valid session cookie, and CSRF on reads and writes", async () => {
@@ -301,6 +303,29 @@ test("requires operation-bound recent auth before role updates and member remova
   assert.equal(recentCalls[0].organization_id, ORGANIZATION_ID);
 });
 
+test("requires operation-bound recent auth before invitation revoke", async () => {
+  const denied = fixture({ recentAuthService: { authorize: async () => { throw new Error("should not be called without proof"); } }, api: { now: () => NOW } });
+  const missing = await denied.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 } }));
+  assert.equal(missing.status, 401);
+  assert.equal(missing.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+  assert.equal(denied.calls.revokeInvitation.length, 0);
+
+  const recentCalls = [];
+  const allowed = fixture({
+    recentAuthService: {
+      async authorize(input) {
+        recentCalls.push(input);
+        return { authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: input.principal.member_id, operation: input.operation, organization_id: input.organization_id, verified: true };
+      }
+    },
+    api: { now: () => NOW }
+  });
+  const result = await allowed.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(recentCalls.map((call) => call.operation), [HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation]);
+  assert.deepEqual(allowed.calls.revokeInvitation[0].recent_authorization, { session_id: actor().session_id, challenge_id: RECENT_AUTH_PROOF, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation, authenticated_at: NOW });
+});
+
 test("rejects missing, cross-operation, cross-tenant, replayed, failed, stale, and unavailable recent auth without mutation", async () => {
   const protectedRoutes = [
     [HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), "PATCH", { role: "auditor", expected_version: 1 }, "updateMemberRole"],
@@ -371,7 +396,9 @@ test("creates invitations with the raw token exactly once and never exposes it o
   const listed = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID)));
   assert.equal(listed.status, 200);
   assertNoSecret(listed, INVITATION_TOKEN, "token_hash", "public_key");
-  const revoked = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 } }));
+  const recentAuthService = { authorize: async (input) => ({ authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: input.principal.member_id, organization_id: input.organization_id, operation: input.operation, verified: true }) };
+  const secured = fixture({ recentAuthService, api: { now: () => NOW } });
+  const revoked = await secured.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
   assert.equal(revoked.status, 200);
   assertNoSecret(revoked, INVITATION_TOKEN, "token_hash", "public_key");
 });
@@ -387,6 +414,8 @@ test("accepts a one-time token for the authenticated member and never returns to
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.acceptInvitation, { method: "POST", body: { one_time_token: INVITATION_TOKEN } }));
   assert.equal(result.status, 201);
+  assert.match(result.body.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+  assert.deepEqual(Object.keys(result.body).sort(), ["member", "request_id"]);
   assert.deepEqual(calls.acceptInvitation[0], { actor: actor(), one_time_token: INVITATION_TOKEN, idempotency_key: "test-key-1" });
   assertNoSecret(result, INVITATION_TOKEN, "token_hash", "public_key");
 });

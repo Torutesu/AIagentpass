@@ -2,6 +2,11 @@
 
 The human operations surface for AgentPass Cloud. It is a vinext application intended for private OpenAI Sites hosting and talks to the Cloud API only through its server-side bridge.
 
+The deployed Worker exposes a secret-free `GET /health/ready` contract with
+`{version:1,ready:true,status:"ready",code:"console_static_ready"}`. This only
+proves that the Console Worker and its static bundle are serving; it does not
+replace the authenticated Cloud API readiness probe or browser E2E.
+
 ## Prerequisites
 
 - Node.js `>=22.13.0`
@@ -15,6 +20,16 @@ npm run build
 ```
 
 Production human-session bootstrap requires these server-only settings: `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_CONSOLE_ORIGIN`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_IDENTITY_ASSERTION_PRIVATE_KEY` (PKCS#8 Ed25519 PEM), `AGENTPASS_IDENTITY_ASSERTION_ISSUER`, `AGENTPASS_IDENTITY_ASSERTION_AUDIENCE`, and `AGENTPASS_IDENTITY_ASSERTION_KID`. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`. The private key and all assertion configuration stay in the server environment; they are never rendered or returned to the browser. Production login does not require `AGENTPASS_CLOUD_TOKEN` or `AGENTPASS_OPERATOR_USER_IDS`.
+
+For the deployment state shown by an operations surface, also configure the
+server-only `AGENTPASS_OPERATIONAL_PROBE_SECRET` with the exact 32-byte
+canonical, unpadded base64url secret used by Cloud. Non-canonical encodings are
+rejected even when they decode to the same bytes. `GET /api/console?resource=deployment-readiness`
+uses that secret only from the Console server to call Cloud `/health/ready`.
+The browser receives a closed, secret-free projection containing readiness and
+the verified source/tree/image/deployment/revision/schema/catalog/database identity. If
+the probe secret or deployment identity is absent or malformed, the BFF fails
+closed; it never displays an inferred healthy state.
 
 After `getChatGPTUser` has verified the platform SIWC identity, the BFF signs one compact, short-lived identity assertion and sends it to Cloud only in the `agentpass-console-identity` request header. The protected header is exactly `{alg:"EdDSA",kid,typ:"agentpass.console.identity",version:1}`. The payload is exactly `{aud,exp,iat,iss,jti,nbf,org,origin,provider,sub}`; it contains no `kid` or `redirect_uri`. The signature covers `base64url(header) + "." + base64url(payload)`. The session POST body sent upstream is always exactly `{}`. Cloud verifies and consumes `jti` once, then returns only the rotated HttpOnly session cookie and CSRF/session metadata.
 

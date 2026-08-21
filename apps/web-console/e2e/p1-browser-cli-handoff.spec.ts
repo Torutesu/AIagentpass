@@ -7,6 +7,7 @@ import {
   ORGANIZATION_ID,
   browserStorageSnapshot,
   consoleSummary,
+  deploymentReadiness,
   disposeVirtualAuthenticator,
   installVirtualAuthenticator,
   json,
@@ -33,6 +34,7 @@ type HandoffMode = typeof HandoffMode[keyof typeof HandoffMode];
 type HandoffState = {
   preflightCalls: number;
   postBodies: Array<Record<string, unknown>>;
+  consoleMessages: string[];
 };
 
 const activeAuthenticators = new WeakMap<Page, VirtualAuthenticator>();
@@ -82,7 +84,8 @@ function enrollment() {
 }
 
 async function installRoutes(page: Page, mode: HandoffMode): Promise<HandoffState> {
-  const state: HandoffState = { preflightCalls: 0, postBodies: [] };
+  const state: HandoffState = { preflightCalls: 0, postBodies: [], consoleMessages: [] };
+  page.on("console", (message) => state.consoleMessages.push(message.text()));
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -95,6 +98,7 @@ async function installRoutes(page: Page, mode: HandoffMode): Promise<HandoffStat
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, consoleSummary());
+    if (request.method() === "GET" && url.searchParams.get("resource") === "deployment-readiness") return json(route, deploymentReadiness());
     if (request.method() === "GET" && url.searchParams.get("resource") === "capabilities") return json(route, { capabilities: [] });
     if (request.method() === "GET" && url.searchParams.get("resource") === "revocations") return json(route, { revocations: [] });
     if (request.method() === "POST" && url.searchParams.get("operation") === "issue-device-enrollment") return json(route, { enrollment: enrollment() }, 201);
@@ -136,6 +140,15 @@ async function installRoutes(page: Page, mode: HandoffMode): Promise<HandoffStat
   return state;
 }
 
+async function assertNoHandoffSecret(page: Page, state: HandoffState, ...secrets: string[]): Promise<void> {
+  const storage = await browserStorageSnapshot(page);
+  const pageSurface = `${await page.locator("body").textContent() ?? ""}\n${await page.content()}\n${page.url()}\n${state.consoleMessages.join("\n")}`;
+  for (const secret of secrets) expect(pageSurface).not.toContain(secret);
+  expect(storage.local).toEqual({});
+  expect(storage.session).toEqual({});
+  await expect(page.locator(".secret-output")).toHaveCount(0);
+}
+
 async function openLiveSetup(page: Page, mode: HandoffMode): Promise<HandoffState> {
   const state = await installRoutes(page, mode);
   await page.context().grantPermissions(["local-network-access"], { origin: "http://localhost:4173" });
@@ -153,21 +166,20 @@ test("clears malformed launch fragments immediately and shows a safe error", asy
   await expect(page).toHaveURL(/\/$/u);
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
   expect(state.preflightCalls).toBe(0);
-  expect((await browserStorageSnapshot(page)).local).toEqual({});
-  expect((await browserStorageSnapshot(page)).session).toEqual({});
+  await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
 });
 
 test("fails closed on unavailable or substituted-preflight responses without rendering handoff secrets", async ({ page }) => {
-  await installRoutes(page, HandoffMode.corsFailure);
+  const corsFailureState = await installRoutes(page, HandoffMode.corsFailure);
   await page.goto(`/#${HANDOFF_URL}`);
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
-  expect((await page.locator("body").textContent()) ?? "").not.toContain(NONCE);
+  await assertNoHandoffSecret(page, corsFailureState, NONCE, ENROLLMENT_SECRET);
 
   await page.unrouteAll({ behavior: "ignoreErrors" });
-  await installRoutes(page, HandoffMode.substitutedCorrelation);
+  const substitutedState = await installRoutes(page, HandoffMode.substitutedCorrelation);
   await page.goto(`/#${HANDOFF_URL}`);
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
-  expect((await page.locator("body").textContent()) ?? "").not.toContain(NONCE);
+  await assertNoHandoffSecret(page, substitutedState, NONCE, ENROLLMENT_SECRET);
 });
 
 test("posts the exact bound envelope and marks delivery only after the exact ACK", async ({ page }) => {
@@ -180,18 +192,15 @@ test("posts the exact bound envelope and marks delivery only after the exact ACK
   const rendered = (await page.locator("body").textContent()) ?? "";
   expect(rendered).not.toContain(NONCE);
   expect(rendered).not.toContain(ENROLLMENT_SECRET);
-  expect((await browserStorageSnapshot(page)).local).toEqual({});
-  expect((await browserStorageSnapshot(page)).session).toEqual({});
+  await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
 });
 
-test("keeps the one-time manual fallback when the ACK is not exact", async ({ page }) => {
-  await openLiveSetup(page, HandoffMode.invalidAck);
+test("discards the invitation when the ACK is not exact and never renders a manual secret fallback", async ({ page }) => {
+  const state = await openLiveSetup(page, HandoffMode.invalidAck);
   await page.getByLabel("端末名").fill("Fallback handoff Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("標準入力");
-  await expect(page.locator(".secret-output")).toContainText(ENROLLMENT_SECRET);
-  expect((await browserStorageSnapshot(page)).local).toEqual({});
-  expect((await browserStorageSnapshot(page)).session).toEqual({});
+  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("表示せず破棄しました");
+  await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
 });
 
 test.afterEach(async ({ page }) => {

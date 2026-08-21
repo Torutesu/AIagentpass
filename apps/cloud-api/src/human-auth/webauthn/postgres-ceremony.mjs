@@ -35,12 +35,17 @@ INSERT INTO webauthn_challenges (
 SELECT $1, s.id, s.member_id, $3, 'authentication', $4, $5, $6, $7, $8, $9, $10, $11, 'pending'
 FROM human_sessions s
 JOIN memberships m ON m.organization_id = s.organization_id AND m.member_id = s.member_id
+JOIN organizations o ON o.id = s.organization_id
 WHERE s.id = $2
+  AND m.id = s.membership_id
   AND s.organization_id = $3
   AND s.revoked_at IS NULL
   AND s.expires_at > $7
+  AND (s.idle_expires_at IS NULL OR s.idle_expires_at > $7)
   AND m.status = 'active'
   AND m.role = s.role
+  AND o.authority_epoch = s.organization_authority_epoch
+  AND m.session_epoch = s.membership_session_epoch
 RETURNING id, session_id, member_id, organization_id, ceremony, operation,
   encode(context_hash, 'hex') AS context_hash_hex,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
@@ -103,7 +108,15 @@ const CLAIM_SQL = `
 UPDATE webauthn_challenges
 SET status = 'consuming', consume_started_at = $2
 WHERE id = $1
-  AND context_hash IS NOT DISTINCT FROM $3::bytea
+  AND ceremony = 'authentication'
+  AND session_id = $3
+  AND organization_id = $4
+  AND operation = $5
+  AND rp_id = $6
+  AND origin = $7
+  AND user_verification = $8
+  AND context_hash IS NOT DISTINCT FROM $9::bytea
+  AND challenge_hash = $10
   AND status = 'pending'
   AND consumed_at IS NULL
   AND expires_at > $2
@@ -264,7 +277,18 @@ export function createPostgresWebAuthnCeremony({
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) fail(WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH);
 
     const verifierInput = buildVerifierInput(record, request);
-    const claimed = await dbQuery(CLAIM_SQL, [request.challenge_id, currentIso, contextHashBytes(request.context_hash)]);
+    const claimed = await dbQuery(CLAIM_SQL, [
+      request.challenge_id,
+      currentIso,
+      request.session_id,
+      request.organization_id,
+      request.operation,
+      request.rp_id,
+      request.origin,
+      request.user_verification,
+      contextHashBytes(request.context_hash),
+      sha256Bytes(request.challenge)
+    ]);
     if (claimed.rows.length > 1) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "WebAuthn challenge claim returned multiple rows");
     if (claimed.rows.length === 0) {
       record = await loadRecord(request.challenge_id);

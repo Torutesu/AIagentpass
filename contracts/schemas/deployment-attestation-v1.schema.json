@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/deployment-attestation-v1.schema.json",
+  "title": "AgentPass signed deployment attestation v1",
+  "description": "A short-lived signed statement binding one deployed candidate, runtime identity, measured schema/catalog digests, CI run, and deployment evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.deployment-attestation" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "statement_hash": { "$ref": "#/$defs/digest" },
+    "signature_algorithm": { "const": "ed25519" },
+    "signer_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "type", "deployment_id", "environment", "service", "candidate_id", "revision", "rollback_target_revision", "source_commit", "source_tree", "artifact_sha256", "release_manifest_sha256", "image_digest", "schema_digest", "catalog_digest", "database_schema_digest", "run_id", "run_attempt", "job_id", "evidence_sha256", "key_id", "key_version", "issued_at", "expires_at"],
+      "properties": {
+        "version": { "const": 1 }, "type": { "const": "agentpass.deployment-attestation" }, "deployment_id": { "$ref": "#/$defs/id" }, "environment": { "enum": ["staging", "production"] }, "service": { "$ref": "#/$defs/id" },
+        "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" }, "revision": { "$ref": "#/$defs/id" }, "rollback_target_revision": { "$ref": "#/$defs/id" }, "source_commit": { "$ref": "#/$defs/commit" }, "source_tree": { "$ref": "#/$defs/commit" },
+        "artifact_sha256": { "$ref": "#/$defs/digest" }, "release_manifest_sha256": { "$ref": "#/$defs/digest" }, "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "schema_digest": { "$ref": "#/$defs/digest" }, "catalog_digest": { "$ref": "#/$defs/digest" }, "database_schema_digest": { "$ref": "#/$defs/digest" },
+        "run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" }, "run_attempt": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" }, "job_id": { "$ref": "#/$defs/id" }, "evidence_sha256": { "$ref": "#/$defs/digest" }, "key_id": { "$ref": "#/$defs/id" }, "key_version": { "type": "integer", "minimum": 1 },
+        "issued_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }, "expires_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+      }
+    }
+  }
+}

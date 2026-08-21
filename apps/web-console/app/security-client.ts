@@ -129,7 +129,10 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
 
   const revokeSessionRecord = async (id: string, version: number, requestOptions: SecurityRequestOptions, current: boolean): Promise<boolean> => {
     const context = await ensureSession(requestOptions);
-    const recentAuth = current ? await authorize(context, "human.management.session.revoke", requestOptions) : undefined;
+    // Revoking another browser session is still a security-sensitive control.
+    // A stolen but otherwise valid console session must not remove the user's
+    // remaining recovery paths without an operation-bound step-up.
+    const recentAuth = await authorize(context, "human.management.session.revoke", requestOptions);
     const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), recentAuth);
     const revoked = expectSessionMutation(response);
     if (revoked.current) {

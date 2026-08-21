@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { createHostedReadiness } from "../src/runtime.mjs";
+import { createHostedReadiness, createHostedSignerCanary } from "../src/runtime.mjs";
 
 const PURPOSES = [
   "agentpass.agent-session-grant",
@@ -15,7 +15,7 @@ const PURPOSES = [
   "agentpass.promotion-evidence"
 ];
 
-function signer(purpose, { failing = false, rich = false } = {}) {
+function signer(purpose, { failing = false, rich = false, canaryFailing = false } = {}) {
   const pair = crypto.generateKeyPairSync("ed25519");
   const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
   const fingerprint = crypto.createHash("sha256").update(pair.publicKey.export({ type: "spki", format: "der" })).digest("hex");
@@ -24,6 +24,13 @@ function signer(purpose, { failing = false, rich = false } = {}) {
   return {
     fingerprint,
     async publicKeyMetadata() { if (failing) throw new Error("provider unavailable"); return metadata; },
+    canary: createHostedSignerCanary({
+      provider: { async sign({ bytes }) { if (canaryFailing) throw new Error("sign operation failed"); return crypto.sign(null, bytes, pair.privateKey); } },
+      purpose,
+      keyId: metadata.key_id,
+      version: 1,
+      publicKey
+    }),
     ...(rich ? {
       async health() { return health; },
       async verificationKeyMetadata() { return { version: 1, purpose, active_key_id: metadata.key_id, keys: [{ key_id: metadata.key_id, algorithm: "ed25519", public_key_fingerprint: fingerprint, status: "active" }] }; }
@@ -31,16 +38,17 @@ function signer(purpose, { failing = false, rich = false } = {}) {
   };
 }
 
-function dependencies(failingPurpose) {
+function dependencies(failingPurpose, canaryFailingPurpose) {
   const registryNames = ["agent_session_grant", "qualification_manifest", "possession_receipt", "refresh_hint", "capability", "control_bundle", "audit_anchor", "promotion_evidence"];
   return PURPOSES.map((purpose, index) => {
-    const implementation = signer(purpose, { failing: purpose === failingPurpose, rich: index < 4 });
+    const implementation = signer(purpose, { failing: purpose === failingPurpose, canaryFailing: purpose === canaryFailingPurpose, rich: index < 4 });
     return {
       name: `${purpose.replaceAll(/[^a-z0-9]+/giu, "_")}_signer`,
       registryName: registryNames[index],
       purpose,
       unavailableCode: `${purpose.replaceAll(/[^a-z0-9]+/giu, "_")}_unavailable`,
       signer: implementation,
+      canary: implementation.canary,
       lifecycle: { version: 1, purpose, algorithm: "ed25519", keys: [{ key_id: `${purpose}-key`, key_version: 1, public_key_fingerprint: implementation.fingerprint, state: "active", state_version: 1 }] }
     };
   });
@@ -61,6 +69,65 @@ test("hosted readiness covers all eight purposes and normalizes metadata-only si
   }
 });
 
+test("managed signer canary failure makes readiness fail closed", async () => {
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), dependencies(undefined, "agentpass.capability"));
+  const report = await readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "agentpass_capability_unavailable");
+  assert.equal(report.checks.managed_signers.signers.capability.code, "provider_unavailable");
+});
+
+test("managed signer canary rejects a signature from the wrong key", async () => {
+  const expected = crypto.generateKeyPairSync("ed25519");
+  const wrong = crypto.generateKeyPairSync("ed25519");
+  const publicKey = expected.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const canary = createHostedSignerCanary({
+    provider: { async sign({ bytes }) { return crypto.sign(null, bytes, wrong.privateKey); } },
+    purpose: "agentpass.test-canary",
+    keyId: "test-key",
+    version: 1,
+    publicKey
+  });
+  await assert.rejects(canary(), /verification failed/u);
+});
+
+test("managed signer purpose mismatch makes readiness fail closed", async () => {
+  const current = dependencies();
+  const implementation = current[0].signer;
+  const health = await implementation.health();
+  const keyRing = await implementation.verificationKeyMetadata();
+  implementation.health = async () => ({ ...health, purpose: "agentpass.wrong-purpose" });
+  implementation.verificationKeyMetadata = async () => ({ ...keyRing, purpose: "agentpass.wrong-purpose" });
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current);
+  const report = await readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "agentpass_agent_session_grant_unavailable");
+  assert.equal(report.checks.managed_signers.signers.agent_session_grant.ok, false);
+});
+
+test("authoritative lifecycle key mismatch makes readiness fail closed", async () => {
+  const current = dependencies();
+  current[0].lifecycle.keys[0].public_key_fingerprint = "0".repeat(64);
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current);
+  const report = await readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "agentpass_agent_session_grant_unavailable");
+  assert.equal(report.checks.managed_signers.signers.agent_session_grant.state, "failed");
+  assert.equal(report.checks.managed_signers.signers.agent_session_grant.key_id, null);
+});
+
+test("concurrent readiness calls share one canary per active key", async () => {
+  const current = dependencies();
+  let calls = 0;
+  current[0].canary = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current);
+  await Promise.all([readiness(), readiness(), readiness()]);
+  assert.equal(calls, 1);
+});
+
 test("one purpose failure makes hosted readiness fail closed without exposing provider details", async () => {
   const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), dependencies("agentpass.audit-anchor"));
   const report = await readiness();
@@ -75,4 +142,34 @@ test("one purpose failure makes hosted readiness fail closed without exposing pr
     public_key_fingerprint: null
   });
   assert.equal(JSON.stringify(report).includes("provider unavailable"), false);
+});
+
+test("partial deployment identity cannot be accepted as ready", () => {
+  assert.throws(
+    () => createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), dependencies(), {
+      version: 1,
+      configured: true,
+      ready: true
+    }),
+    /deployment identity is invalid/u
+  );
+});
+
+test("unconfigured deployment identity keeps hosted readiness fail closed", async () => {
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), dependencies(), {
+    version: 1,
+    configured: false,
+    ready: false,
+    source_commit: null,
+    source_tree: null,
+    image_digest: null,
+    deployment_id: null,
+    revision: null,
+    schema_digest: null,
+    catalog_digest: null,
+    database_schema_digest: null
+  });
+  const report = await readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "deployment_identity_unavailable");
 });

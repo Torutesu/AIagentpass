@@ -42,7 +42,11 @@ const PROMOTED_SCHEMA_FIXTURES = Object.freeze({
   "purge-receipt-v1.schema.json": "purge-receipt.valid.json",
   "promotion-evidence-v1.schema.json": "promotion-evidence.valid.json",
   "promotion-evidence-v2.schema.json": "promotion-evidence-v2.valid.json",
-  "promotion-evidence-v3.schema.json": "promotion-evidence-v3.valid.json"
+  "promotion-evidence-v3.schema.json": "promotion-evidence-v3.valid.json",
+  "deployment-attestation-v1.schema.json": "deployment-attestation-v1.valid.json",
+  "deployment-attestation-trust-v1.schema.json": "deployment-attestation-trust-v1.valid.json",
+  "database-schema-evidence-v1.schema.json": "database-schema-evidence-v1.valid.json",
+  "platform-auth-qualification-v1.schema.json": "platform-auth-qualification.valid.json"
 });
 const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "bundle-ack-v1.schema.json": "bundle-ack.valid.json",
@@ -140,7 +144,7 @@ for (const [schemaName, fixtureName] of Object.entries(SCHEMA_FIXTURES)) {
   if (!validate || !validate(fixture)) fail(`${fixtureName} does not satisfy ${schemaName}: ${schemaValidator.errorsText(validate?.errors, { separator: "; " })}`);
 }
 
-for (const name of ["human-v1.json", "device-v1.json"]) {
+for (const name of ["human-v1.json", "device-v1.json", "operations-v1.json"]) {
   const document = readJson(path.join("openapi", name));
   if (document.openapi !== "3.1.0") fail(`${name} must use OpenAPI 3.1.0`);
   if (!document.paths || Object.keys(document.paths).length === 0) fail(`${name} must declare paths`);
@@ -191,7 +195,15 @@ if (migrationNames.length < 1 || migrationNames.some((name, index) => Number(nam
 const migrations = migrationNames.map((name) => ({ name, sql: fs.readFileSync(path.join(contracts, "postgres", name), "utf8") }));
 for (const migration of migrations) {
   if (!migration.sql.trim().startsWith("BEGIN;") || !migration.sql.trim().endsWith("COMMIT;")) fail(`${migration.name} must be transactional`);
-  if (/\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE)\b/i.test(migration.sql)) fail(`${migration.name} contains a destructive statement`);
+  // A statement-level BEFORE TRUNCATE trigger is a protective constraint, not
+  // a destructive migration operation. Remove only that grammar before
+  // checking for executable DROP/TRUNCATE statements; an actual TRUNCATE
+  // command remains rejected.
+  const migrationWithoutComments = migration.sql.replace(/--[^\r\n]*/gu, "").replace(/\/\*[\s\S]*?\*\//gu, "");
+  const migrationWithoutProtectiveTruncateTrigger = migrationWithoutComments
+    .replace(/\bBEFORE\s+TRUNCATE\s+ON\b/giu, "BEFORE ON")
+    .replace(/\bREVOKE\s+TRUNCATE\s+ON\b/giu, "REVOKE ON");
+  if (/\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE)\b/i.test(migrationWithoutProtectiveTruncateTrigger)) fail(`${migration.name} contains a destructive statement`);
 }
 const sql = migrations[0].sql;
 for (const table of ["organizations", "memberships", "human_sessions", "webauthn_credentials", "devices", "device_enrollments", "agents", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events", "idempotency_records", "admin_audit_events"]) {
@@ -299,7 +311,7 @@ function validateContractCatalog() {
     const versionMatch = name.match(/-v(\d+)\.schema\.json$/);
     expected.set(["json-schema", `schemas/${name}`, "", "", ""].join("|"), { kind: "json-schema", source: `schemas/${name}`, version: Number(versionMatch?.[1] ?? schema.properties?.version?.const ?? schema.properties?.schema_version?.const ?? 0), requiresTenant: containsKey(schema, "organization_id"), document: schema });
   }
-  for (const name of ["device-v1.json", "human-v1.json"]) {
+  for (const name of ["device-v1.json", "human-v1.json", "platform-promotion-v1.json"]) {
     const document = readJson(path.join("openapi", name));
     for (const [route, methods] of Object.entries(document.paths)) {
       for (const method of ["get", "post", "patch", "put", "delete"]) {
@@ -360,4 +372,4 @@ function validateContractCatalog() {
 
 validateContractCatalog();
 
-if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, ${fixtureFiles.length} fixtures, and ${migrations.length} PostgreSQL migrations\n`);
+if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 3 OpenAPI documents, ${fixtureFiles.length} fixtures, and ${migrations.length} PostgreSQL migrations\n`);

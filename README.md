@@ -1,6 +1,6 @@
 # AgentPass
 
-The current production execution order and exit gates are in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). The implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md).
+The current production execution order and exit gates are in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). The implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md). The current operator packet is indexed in [docs/runbooks/README.md](docs/runbooks/README.md).
 
 AgentPass is an OSS policy broker for coding-agent operations. It keeps signing keys in the platform security boundary and gives an agent permission to perform a narrowly scoped operation, rather than handing the agent a secret.
 
@@ -63,7 +63,18 @@ pbpaste | agentpass setup continue --execute \
 agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 ```
 
-`setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the recommended browser path accepts the short-lived credential through a one-consume in-memory handoff; the recovery path accepts it only through bounded stdin. A fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
+For the manual Console bridge, prepare the public preflight DTO first and
+copy it directly into Console; it is not the one-time enrollment invitation:
+
+```sh
+agentpass setup prepare --json | pbcopy
+```
+
+Console then issues the short-lived v2 invitation after the organization
+approves the device name and WebAuthn operation. Do not save either the DTO or
+the invitation in a repository, URL, environment variable, or shell history.
+
+`setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the recommended browser path accepts the short-lived credential through a one-consume in-memory handoff; the recovery path accepts it only through bounded stdin. A fixed Secure Enclave P-256 key signs the exact v2 enrollment body digest, credential digest, challenge nonce, and candidate-binding digest. The credential is never written to config, logs, results, or journal evidence.
 
 The browser-assisted command above is the recommended non-engineer path. `--console-url` and `--enrollment-url` are independently pinned: the first is the exact HTTPS Console origin that opens in the browser, and the second is the exact Cloud API `/v1` origin used for enrollment. Neither URL is inferred from the other. The URL fragment contains only a short-lived loopback correlation URL. The handoff nonce remains ephemeral in process memory and Console memory, and the invitation remains memory-only on both sides. No nonce or invitation is placed in a URL, browser storage, argv, environment variable, log, or setup journal.
 
@@ -200,9 +211,9 @@ agentpass status
 agentpass audit --verify
 agentpass audit checkpoint > checkpoint.json
 agentpass audit public-key > agentpass-audit.pub
-agentpass revoke    # local broker mode
+agentpass revoke    # local and native mode: one safe emergency-stop entry point
 agentpass restore --confirm RESTORE
-agentpass native revoke-sessions  # native mode: invalidate active authority
+# Native mode is dispatched through the protected broker automatically.
 ```
 
 Copy `checkpoint.json` to an append-only or remote system. The public key verifies who signed a checkpoint; retaining a checkpoint record or its `checkpoint_hash` outside the host is what detects later local history replacement.
@@ -315,6 +326,18 @@ Protected native sessions require human presence only when `agentpass session st
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 
 The authoritative delivery order, acceptance gates, external blockers, and production definition of done are maintained in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) retains the earlier milestone breakdown.
+
+For the current production-readiness decision, use the
+[2026-08-20 audit snapshot](docs/PRODUCTION_READINESS_AUDIT_2026-08-20.md).
+It separates implementation and focused-test evidence from protected external
+qualification. The [incident and revoke runbook](docs/INCIDENT_AND_REVOKE_RUNBOOK.md)
+is the operational procedure for emergency stop, device/agent/session revoke,
+uncertain signing, and exact-candidate rollback.
+
+Promotion remains `STOP` until the external gates in the audit and [release
+promotion runbook](docs/runbooks/RELEASE_PROMOTION_RUNBOOK.md) are evidenced.
+Local/static tests, `not_run` reports, ad-hoc signatures, and documentation
+claims never substitute for protected qualification.
 
 ## License
 

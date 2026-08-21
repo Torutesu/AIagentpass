@@ -33,6 +33,7 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x5b).toString("base64url"),
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
+    AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"),
     AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: "hosted-refresh-public-key-pin",
     AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS: "5000",
     AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
@@ -102,6 +103,7 @@ test("accepts evaluation only with the complete reference file-store boundary", 
   assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
   assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_DATA_DIR: "relative/data" })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
   assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/recovery" })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
+  assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_OPERATIONAL_PROBE_SECRET: SECRET })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
 });
 
 test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites", () => {
@@ -130,6 +132,7 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_HUMAN_CURSOR_SECRET",
     "AGENTPASS_HUMAN_AUTH_SECRET",
     "AGENTPASS_CAPABILITY_NONCE_SECRET",
+    "AGENTPASS_OPERATIONAL_PROBE_SECRET",
     "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY",
     "AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS",
     "AGENTPASS_CLOUD_REFRESH_KEY_ID",
@@ -258,6 +261,10 @@ test("fails closed for partial, malformed, stale, unsafe, and unknown configurat
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HUMAN_CURSOR_SECRET: "cursor-secret-that-must-not-appear-in-errors" })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_OPERATIONAL_PROBE_SECRET: "not-a-32-byte-token" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
   );
   for (const override of [
     { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID: "Uppercase-Is-Not-Canonical" },

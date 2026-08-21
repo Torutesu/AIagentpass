@@ -1,4 +1,8 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { Pool } from "pg";
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import { createMigrationRunner, loadSqlMigrations } from "./migration-runner.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { createPostgresControlPlaneStore } from "./control-plane-store.mjs";
@@ -29,13 +33,16 @@ import { createPostgresProviderOperationMaintenanceRepository } from "./provider
 import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed-signer-provider-operation-maintenance-worker.mjs";
 import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
+import { createPostgresPromotionIssuanceRepository } from "./promotion-issuance-repository.mjs";
+import { createPostgresPlatformPromotionAuditRepository } from "./platform-promotion-audit-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
+import { measurePostgresSchemaIdentity } from "./schema-identity.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, promotionEvidencePublicKey, promotionEvidenceVerifier, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
@@ -54,6 +61,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
+  const expectedDatabaseSchemaDigest = env.AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST;
+  if (expectedDatabaseSchemaDigest !== undefined && !/^[0-9a-f]{64}$/u.test(expectedDatabaseSchemaDigest)) throw new Error("Cloud database schema digest is invalid");
   let migrationRunner;
   let migrations;
   let client;
@@ -97,6 +106,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
 
   try {
     migrations = await loadSqlMigrations();
+    assertDeploymentContractDigests({ env, migrations });
     migrationRunner = createMigrationRunner({ client: pool, applicationVersion, migrations });
     client = await pool.connect();
     await client.query("SELECT set_config('statement_timeout', $1, false)", [`${config.statementTimeoutMs}ms`]);
@@ -149,6 +159,21 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       })
     })
   });
+  const readiness = expectedDatabaseSchemaDigest === undefined ? operationalHealth.readiness : async () => {
+    const report = await operationalHealth.readiness();
+    let connection;
+    let identity;
+    try {
+      connection = await pool.connect();
+      identity = await measurePostgresSchemaIdentity({ client: connection, expectedDigest: expectedDatabaseSchemaDigest });
+    } catch {
+      identity = { ok: false, code: "schema_identity_unavailable", digest: null, destroy: true };
+    } finally {
+      try { connection?.release?.(identity?.destroy === true); } catch { /* preserve fail-closed readiness */ }
+    }
+    if (identity.ok) return report;
+    return Object.freeze({ ...report, ready: false, status: "not_ready", code: identity.code === "schema_identity_mismatch" ? "schema_identity_mismatch" : "schema_identity_unavailable" });
+  };
   async function closePool() {
     if (closed) return;
     if (closePoolPromise) return closePoolPromise;
@@ -263,6 +288,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     client: pool,
     snapshotReader: auditExportSnapshotReader
   });
+  const promotionIssuanceRepository = createPostgresPromotionIssuanceRepository({ client: pool, promotionEvidencePublicKey, evidenceVerifier: promotionEvidenceVerifier });
+  const platformPromotionAuditRepository = createPostgresPlatformPromotionAuditRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -299,6 +326,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,
+    promotionIssuanceRepository,
+    platformPromotionAuditRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
     providerOperationMaintenanceRepository,
@@ -318,8 +347,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     operationalMetrics,
     operationalReport: Object.freeze({ snapshot: operationalHealth.operationalSnapshot }),
     metrics: operationalMetrics,
-    readiness: operationalHealth.readiness,
-    health: operationalHealth.health,
+    readiness,
+    health: readiness,
     trackInFlight: drainController.track,
     beginDrain: drainController.beginDrain,
     drain,
@@ -336,6 +365,30 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     await cleanupConstructionFailure();
     throw error;
   }
+}
+
+function assertDeploymentContractDigests({ env, migrations }) {
+  const expectedSchema = env.AGENTPASS_CLOUD_SCHEMA_DIGEST;
+  const expectedCatalog = env.AGENTPASS_CLOUD_CATALOG_DIGEST;
+  const sourceCommit = env.AGENTPASS_CLOUD_SOURCE_COMMIT;
+  const sourceTree = env.AGENTPASS_CLOUD_SOURCE_TREE;
+  if (expectedSchema === undefined && expectedCatalog === undefined && sourceCommit === undefined && sourceTree === undefined) return;
+  if (typeof expectedSchema !== "string" || !/^[0-9a-f]{64}$/u.test(expectedSchema)
+    || typeof expectedCatalog !== "string" || !/^[0-9a-f]{64}$/u.test(expectedCatalog)
+    || typeof sourceCommit !== "string" || !/^[0-9a-f]{40}$/u.test(sourceCommit)
+    || typeof sourceTree !== "string" || !/^[0-9a-f]{40}$/u.test(sourceTree)) throw new Error("Cloud deployment contract identity is incomplete");
+  const migrationManifest = {
+    schema_version: 1,
+    source_commit: sourceCommit,
+    source_tree: sourceTree,
+    migrations: migrations.map((migration) => ({ name: migration.name, bytes: Buffer.byteLength(migration.sql, "utf8"), sha256: migration.checksum }))
+  };
+  const schemaDigest = crypto.createHash("sha256").update(`${canonicalJson(migrationManifest)}\n`, "utf8").digest("hex");
+  const catalogPath = path.resolve(import.meta.dirname, "../../../../contracts/catalog-v1.json");
+  let catalogBytes;
+  try { catalogBytes = fs.readFileSync(catalogPath); } catch (error) { throw new Error("Cloud contract catalog is unavailable", { cause: error }); }
+  const catalogDigest = crypto.createHash("sha256").update(catalogBytes).digest("hex");
+  if (schemaDigest !== expectedSchema || catalogDigest !== expectedCatalog) throw new Error("Cloud deployment contract digest mismatch");
 }
 
 function authorityReductionAudit({ organization_id, resource, member_id, actor_member_id, capabilities, reduction, occurred_at }) {

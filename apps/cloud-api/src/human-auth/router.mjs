@@ -26,8 +26,8 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
 
   async function handle(input) {
     const url = requestUrl(input);
-    if (url.pathname === SESSION_PATH && !url.search && !url.hash) {
-      return sessionApi.handle(cloneRequest(input, "/session"));
+    if ((url.pathname === SESSION_PATH || url.pathname === `${SESSION_PATH}/organization-switch`) && !url.search && !url.hash) {
+      return sessionApi.handle(cloneRequest(input, url.pathname === `${SESSION_PATH}/organization-switch` ? "/session/organization-switch" : "/session"));
     }
     if ((url.pathname === OPTIONS_PATH || url.pathname === VERIFY_PATH) && !url.search && !url.hash) {
       return webauthnApi.handle(cloneRequest(input, url.pathname));
@@ -60,7 +60,7 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
     return response(404, { error: { code: "not_found", message: "Resource not found" } });
   }
 
-  return Object.freeze({ handle, paths: Object.freeze({ session: SESSION_PATH, options: OPTIONS_PATH, verify: VERIFY_PATH, registrationOptions: REGISTRATION_OPTIONS_PATH, registrationVerify: REGISTRATION_VERIFY_PATH, organizations: ORGANIZATIONS_PATH, acceptInvitation: ACCEPT_INVITATION_PATH }) });
+  return Object.freeze({ handle, paths: Object.freeze({ session: SESSION_PATH, switchOrganization: `${SESSION_PATH}/organization-switch`, options: OPTIONS_PATH, verify: VERIFY_PATH, registrationOptions: REGISTRATION_OPTIONS_PATH, registrationVerify: REGISTRATION_VERIFY_PATH, organizations: ORGANIZATIONS_PATH, acceptInvitation: ACCEPT_INVITATION_PATH }) });
 }
 
 function isOrganizationPath(url) {

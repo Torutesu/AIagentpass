@@ -133,6 +133,8 @@ test("v1 issue shape remains represented beside v2 in Human OpenAPI", () => {
   assert.equal(body.content["application/json"].schema.oneOf[1].$ref, "../schemas/device-enrollment-issue-v2.schema.json");
   assert.equal(openapi.components.schemas.DeviceEnrollmentIssueRequestV1.additionalProperties, false);
   assert.ok(operation["x-agentpass-enrollment-v2"].forbidden_request_fields.includes("artifact_sha256"));
+  assert.equal(operation["x-agentpass-transport"]["cache-control"], "no-store");
+  for (const status of ["429", "500", "503"]) assert.ok(operation.responses[status], `issue must document ${status}`);
 });
 
 test("v2 completion binds the challenge to the candidate and key fingerprint", () => {
@@ -164,6 +166,14 @@ test("v2 completion binds the challenge to the candidate and key fingerprint", (
   const requestSchema = openapi.paths["/enrollments/{enrollment_id}"].post.requestBody.content["application/json"].schema;
   assert.equal(requestSchema.oneOf[0].$ref, "../schemas/device-enrollment-v1.schema.json");
   assert.equal(requestSchema.oneOf[1].$ref, "../schemas/device-enrollment-completion-v2.schema.json");
+  const completion = openapi.paths["/enrollments/{enrollment_id}"].post;
+  assert.deepEqual(completion["x-agentpass-v2-required-headers"].sort(), ["AgentPass-Enrollment-Candidate-Binding", "AgentPass-Enrollment-Nonce"]);
+  assert.deepEqual(completion.parameters.slice(1).map(({ $ref }) => $ref).sort(), [
+    "#/components/parameters/EnrollmentCandidateBindingOptional",
+    "#/components/parameters/EnrollmentNonceOptional"
+  ]);
+  assert.equal(completion["x-agentpass-transport"]["cache-control"], "no-store");
+  for (const status of ["404", "500", "503"]) assert.ok(completion.responses[status], `completion must document ${status}`);
 });
 
 test("device-authenticated receipt endpoint returns a strict signed receipt", () => {
@@ -172,6 +182,8 @@ test("device-authenticated receipt endpoint returns a strict signed receipt", ()
   assert.equal(operation.operationId, "getDeviceEnrollmentPossessionReceipt");
   assert.deepEqual(operation.security, [{ deviceSignature: [] }]);
   assert.equal(operation.responses["200"].$ref, "#/components/responses/DeviceEnrollmentReceipt");
+  assert.equal(operation["x-agentpass-transport"]["cache-control"], "no-store");
+  assert.ok(operation.responses["500"]);
   assert.equal(openapi.components.responses.DeviceEnrollmentReceipt.content["application/json"].schema.$ref, "#/components/schemas/DevicePossessionReceiptV1");
 
   const receipt = {

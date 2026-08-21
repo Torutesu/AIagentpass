@@ -340,6 +340,47 @@ export function createHumanSessionService(options = {}) {
     });
   }
 
+  async function switchOrganization(input = {}) {
+    const authenticated = await authenticateRecord({ ...input, method: input.method ?? "POST" });
+    const oldRecord = authenticated.record;
+    const targetOrganizationId = input.organization_id ?? input.organizationId;
+    if (!isUuid(targetOrganizationId) || targetOrganizationId === oldRecord.organization_id) fail(HUMAN_SESSION_ERROR_CODES.INVALID_INPUT);
+    const now = nowMs();
+    await ensureActive(oldRecord, now);
+    return withLock(locks, oldRecord.member_id, async () => {
+      const token = generateOpaqueToken(randomBytes);
+      const csrfToken = generateOpaqueToken(randomBytes);
+      const createdAt = new Date(now).toISOString();
+      if (Date.parse(oldRecord.expires_at) <= now) fail(HUMAN_SESSION_ERROR_CODES.SESSION_EXPIRED);
+      if (typeof repository.switchSessionOrganization !== "function") fail(HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID);
+      const switched = await repository.switchSessionOrganization({
+        old_session_id: oldRecord.session_id,
+        old_token_hash: oldRecord.token_hash,
+        member_id: oldRecord.member_id,
+        old_organization_id: oldRecord.organization_id,
+        target_organization_id: targetOrganizationId,
+        session: {
+          session_id: randomUuid(randomBytes),
+          member_id: oldRecord.member_id,
+          organization_id: targetOrganizationId,
+          created_at: createdAt,
+          expires_at: oldRecord.expires_at,
+          last_seen_at: createdAt,
+          idle_expires_at: new Date(Math.min(now + idleTtlMs, Date.parse(oldRecord.expires_at))).toISOString(),
+          token_hash: hashOpaqueToken(token),
+          csrf_token_hash: hashOpaqueToken(csrfToken)
+        },
+        switched_at: createdAt,
+        reason: "organization_switch"
+      });
+      if (!switched) fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
+      assertSwitchedSession(oldRecord, switched, targetOrganizationId);
+      await ensureActive(switched, now);
+      const maxAgeSeconds = Math.max(0, Math.floor((Date.parse(switched.expires_at) - now) / 1000));
+      return { session: publicSession(switched), cookie: serializeSessionCookie(token, { maxAgeSeconds }), setCookie: serializeSessionCookie(token, { maxAgeSeconds }), csrfToken, csrf_token: csrfToken };
+    });
+  }
+
   async function logout(input = {}) {
     assertStrictOrigin(input.origin ?? input.requestOrigin ?? headerValue(input.headers, "origin"), expectedOrigin);
     let token;
@@ -381,6 +422,7 @@ export function createHumanSessionService(options = {}) {
     authenticateSession: authenticateRequest,
     getSession,
     rotateSession,
+    switchOrganization,
     logout,
     revokeSession,
     publicSession,
@@ -415,12 +457,15 @@ export function createHumanSessionService(options = {}) {
 
   async function touch(record, now) {
     const nextIdleMs = Math.min(now + idleTtlMs, Date.parse(record.expires_at));
-    const patch = { sessionId: record.session_id, session_id: record.session_id, lastSeenAt: new Date(now).toISOString(), last_seen_at: new Date(now).toISOString(), idleExpiresAt: new Date(nextIdleMs).toISOString(), idle_expires_at: new Date(nextIdleMs).toISOString() };
+    const activityAt = new Date(now).toISOString();
+    const patch = { sessionId: record.session_id, session_id: record.session_id, activityAt, activity_at: activityAt, lastSeenAt: activityAt, last_seen_at: activityAt, idleExpiresAt: new Date(nextIdleMs).toISOString(), idle_expires_at: new Date(nextIdleMs).toISOString() };
     if (typeof repository.updateSessionActivity === "function") {
       const updated = await repository.updateSessionActivity(patch);
       // A concurrent role/revocation/epoch change makes the conditional
       // activity update miss. Never continue with the stale pre-change row.
       if (!updated) fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
+      assertSessionContinuity(record, updated);
+      await ensureActive(updated, now);
       return updated;
     }
     return record;
@@ -448,6 +493,27 @@ export function createHumanSessionService(options = {}) {
     const actual = Buffer.from(hashOpaqueToken(token), "hex");
     const expected = Buffer.from(record.csrf_token_hash, "hex");
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) fail(HUMAN_SESSION_ERROR_CODES.CSRF_INVALID);
+  }
+}
+
+function assertSessionContinuity(previous, next) {
+  if (!next || typeof next !== "object"
+    || next.session_id !== previous.session_id
+    || next.member_id !== previous.member_id
+    || next.membership_id !== previous.membership_id
+    || next.organization_id !== previous.organization_id
+    || next.role !== previous.role) {
+    fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
+  }
+}
+
+function assertSwitchedSession(previous, next, targetOrganizationId) {
+  if (!next || typeof next !== "object"
+    || next.session_id === previous.session_id
+    || next.member_id !== previous.member_id
+    || next.organization_id !== targetOrganizationId
+    || next.recent_auth_at !== null) {
+    fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
   }
 }
 

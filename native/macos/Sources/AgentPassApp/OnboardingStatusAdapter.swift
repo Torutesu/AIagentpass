@@ -111,6 +111,10 @@ public struct AgentPassOnboardingViewModel: Equatable, Sendable {
     public let progress: AgentPassOnboardingProgress
     public let nextAction: AgentPassOnboardingNextAction?
     public let blockedError: AgentPassOnboardingBlockedError?
+    public let diagnostics: AgentPassOnboardingDiagnostics
+
+    public var distribution: AgentPassDistributionStatus { diagnostics.distribution }
+    public var capability: AgentPassCapabilityStatus { diagnostics.capability }
 
     public var isBlocked: Bool { blockedError != nil }
     public var isComplete: Bool { state == .complete }
@@ -119,7 +123,8 @@ public struct AgentPassOnboardingViewModel: Equatable, Sendable {
         initialized: Bool,
         state: AgentPassOnboardingState,
         nextAction: AgentPassOnboardingNextAction?,
-        blockedError: AgentPassOnboardingBlockedError?
+        blockedError: AgentPassOnboardingBlockedError?,
+        diagnostics: AgentPassOnboardingDiagnostics = .unavailable
     ) {
         self.interaction = .readOnly
         self.initialized = initialized
@@ -127,6 +132,17 @@ public struct AgentPassOnboardingViewModel: Equatable, Sendable {
         self.progress = AgentPassOnboardingProgress(state: state)
         self.nextAction = nextAction
         self.blockedError = blockedError
+        self.diagnostics = diagnostics
+    }
+
+    public func withDiagnostics(_ diagnostics: AgentPassOnboardingDiagnostics) -> Self {
+        Self(
+            initialized: initialized,
+            state: state,
+            nextAction: nextAction,
+            blockedError: blockedError,
+            diagnostics: diagnostics
+        )
     }
 }
 
@@ -342,7 +358,7 @@ private func actionSpec(for state: AgentPassOnboardingState) -> ActionSpec? {
     }
 }
 
-private struct JSONDuplicateScanner {
+struct JSONDuplicateScanner {
     private let bytes: [UInt8]
     private var index: Int = 0
 

@@ -20,6 +20,7 @@ export const CLOUD_RUNTIME_PROFILE_ERROR_CODES = Object.freeze({
 
 const PROFILE_ENV = "AGENTPASS_CLOUD_PROFILE";
 const CAPABILITY_NONCE_SECRET_ENV = "AGENTPASS_CAPABILITY_NONCE_SECRET";
+const OPERATIONAL_PROBE_SECRET_ENV = "AGENTPASS_OPERATIONAL_PROBE_SECRET";
 const FILE_STORE_ENV = Object.freeze([
   "AGENTPASS_CLOUD_DATA_DIR",
   "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH"
@@ -68,6 +69,16 @@ const HOSTED_PROMOTION_EVIDENCE_ENV = Object.freeze([
   "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID",
   "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY",
   "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS"
+]);
+const HOSTED_DEPLOYMENT_IDENTITY_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_SOURCE_COMMIT",
+  "AGENTPASS_CLOUD_SOURCE_TREE",
+  "AGENTPASS_CLOUD_IMAGE_DIGEST",
+  "AGENTPASS_CLOUD_DEPLOYMENT_ID",
+  "AGENTPASS_CLOUD_DEPLOYMENT_REVISION",
+  "AGENTPASS_CLOUD_SCHEMA_DIGEST",
+  "AGENTPASS_CLOUD_CATALOG_DIGEST",
+  "AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST"
 ]);
 const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_PROVIDER",
@@ -125,6 +136,7 @@ const PROFILE_RELATED_ENV = new Set([
   ...HOSTED_CAPABILITY_ENV,
   ...HOSTED_AUDIT_ANCHOR_ENV,
   ...HOSTED_PROMOTION_EVIDENCE_ENV,
+  ...HOSTED_DEPLOYMENT_IDENTITY_ENV,
   ...HOSTED_KMS_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
@@ -138,7 +150,8 @@ const PROFILE_RELATED_ENV = new Set([
   "AGENTPASS_HUMAN_CURSOR_SECRET",
   "AGENTPASS_HUMAN_AUTH_SECRET",
   ...OWNER_RECOVERY_NOTIFICATION_ENV,
-  CAPABILITY_NONCE_SECRET_ENV
+  CAPABILITY_NONCE_SECRET_ENV,
+  OPERATIONAL_PROBE_SECRET_ENV
 ]);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const OWNER_RECOVERY_BINDING_IDENTIFIER = /^[a-z0-9][a-z0-9._:-]{0,127}$/u;
@@ -210,7 +223,8 @@ export function parseCloudRuntimeProfile(env = process.env) {
     const humanAuth = parseHumanAuth(env);
     if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete
       || !hostedControlBundle.complete || !hostedCapability.complete || !hostedAuditAnchor.complete || !hostedPromotionEvidence.complete
-      || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+      || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)
+      || !validExactSecret(env[OPERATIONAL_PROBE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -234,9 +248,11 @@ export function parseCloudRuntimeProfile(env = process.env) {
     || HOSTED_CAPABILITY_ENV.some((name) => configured(env, name))
     || HOSTED_AUDIT_ANCHOR_ENV.some((name) => configured(env, name))
     || HOSTED_PROMOTION_EVIDENCE_ENV.some((name) => configured(env, name))
+    || HOSTED_DEPLOYMENT_IDENTITY_ENV.some((name) => configured(env, name))
     || HOSTED_KMS_ENV.some((name) => configured(env, name))
     || ownerRecoveryNotification.present
-    || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
+    || configured(env, CAPABILITY_NONCE_SECRET_ENV)
+    || configured(env, OPERATIONAL_PROBE_SECRET_ENV)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
   }
   if (!fileStore.complete) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
@@ -471,6 +487,12 @@ function validCursorSecret(value) {
     const bytes = Buffer.from(value, "base64url");
     return bytes.length === 32 && bytes.toString("base64url") === value;
   } catch { return false; }
+}
+
+function validExactSecret(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) return false;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.length === 32 && bytes.toString("base64url") === value;
 }
 
 function boundedInteger(value, min, max) {

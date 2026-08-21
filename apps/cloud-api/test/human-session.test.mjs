@@ -59,6 +59,26 @@ class MemorySessionRepository {
     return record ? structuredClone(record) : null;
   }
 
+  async switchSessionOrganization(input) {
+    const old = this.records.get(input.old_session_id);
+    if (!old || old.token_hash !== input.old_token_hash || old.revoked_at) return null;
+    const session = {
+      ...input.session,
+      membership_id: "66666666-6666-4666-8666-666666666666",
+      role: "admin",
+      version: 1,
+      recent_auth_at: null,
+      revoked_at: null,
+      revoke_reason: null,
+      status: "active"
+    };
+    old.revoked_at = input.switched_at;
+    old.revoke_reason = input.reason;
+    old.status = "revoked";
+    this.records.set(session.session_id, structuredClone(session));
+    return structuredClone(session);
+  }
+
   async listSessions({ member_id: memberId, memberId: alternate }) {
     const member = memberId ?? alternate;
     return [...this.records.values()]
@@ -120,6 +140,25 @@ test("issues a 256-bit opaque cookie and stores only hashes", async () => {
   assert.equal(Object.hasOwn(issued.session, "token_hash"), false);
   assert.equal(Object.hasOwn(issued.session, "csrfToken"), false);
   assert.equal(Object.hasOwn(issued.session, "csrf_token_hash"), false);
+});
+
+test("switchOrganization rotates credentials, clears recent auth, and revokes the old session", async () => {
+  const f = fixture();
+  const issued = await issue(f);
+  const oldToken = parseSessionCookie(issued.cookie);
+  const target = "77777777-7777-4777-8777-777777777777";
+  const switched = await f.service.switchOrganization({
+    method: "POST",
+    origin: ORIGIN,
+    cookie: issued.cookie,
+    csrfToken: issued.csrfToken,
+    organization_id: target
+  });
+  assert.equal(switched.session.organization_id, target);
+  assert.notEqual(parseSessionCookie(switched.cookie), oldToken);
+  assert.equal(switched.session.recent_auth_at, null);
+  assert.equal([...f.repository.records.values()].filter((record) => record.status === "revoked").length, 1);
+  await assert.rejects(() => f.service.authenticateRequest({ method: "GET", origin: ORIGIN, cookie: issued.cookie }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
 });
 
 test("uses the repository atomic session ceiling when production storage exposes it", async () => {
@@ -206,6 +245,42 @@ test("fails closed when authority changes between session lookup and activity up
 
   await assert.rejects(
     () => f.service.authenticateRequest({ cookie: issued.cookie, method: "GET", origin: ORIGIN }),
+    (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED
+  );
+});
+
+test("rejects a role or tenant substitution returned by the activity update", async () => {
+  const repository = new MemorySessionRepository();
+  const f = fixture({ repository });
+  const issued = await issue(f);
+  repository.updateSessionActivity = async (input) => ({
+    ...repository.records.get(input.session_id),
+    role: "admin",
+    organization_id: "88888888-8888-4888-8888-888888888888"
+  });
+
+  await assert.rejects(
+    () => f.service.authenticateRequest({ cookie: issued.cookie, method: "GET", origin: ORIGIN }),
+    (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED
+  );
+});
+
+test("rejects a tenant-substituted replacement during organization switch", async () => {
+  const repository = new MemorySessionRepository();
+  const f = fixture({ repository });
+  const issued = await issue(f);
+  repository.switchSessionOrganization = async (input) => ({
+    ...input.session,
+    membership_id: MEMBERSHIP_ID,
+    role: "owner",
+    recent_auth_at: null,
+    token_hash: "a".repeat(64),
+    csrf_token_hash: "b".repeat(64),
+    organization_id: "99999999-9999-4999-8999-999999999999"
+  });
+
+  await assert.rejects(
+    () => f.service.switchOrganization({ cookie: issued.cookie, origin: ORIGIN, csrfToken: issued.csrfToken, organization_id: "77777777-7777-4777-8777-777777777777" }),
     (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED
   );
 });

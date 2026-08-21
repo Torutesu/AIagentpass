@@ -10,6 +10,7 @@ const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organ
 const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
   ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", methods: ["POST", "DELETE"], session: "bootstrap", bodies: { POST: "session-bootstrap", DELETE: "none" }, requireSetCookie: true, delete: Object.freeze({ session: "human", requireCookie: true, requireCsrf: true, allowSetCookie: true, clearCookieOnly: true, requireClearedSessionBody: true }) })],
+  ["/api/auth/session/organization-switch", Object.freeze({ cloudPath: "/api/auth/session/organization-switch", methods: ["POST"], body: "organization-switch", requireCookie: true, requireCsrf: true, allowSetCookie: true, requireSetCookie: true })],
   ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
@@ -170,6 +171,10 @@ function validateBody(value, shape) {
   if (!shape) return;
   if (shape === "session-bootstrap") {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The session request is invalid");
+    return;
+  }
+  if (shape === "organization-switch") {
+    if (!isExactObject(value, ["organization_id"]) || !isUuid(value.organization_id)) fail(400, "invalid_request", "The organization switch request is invalid");
     return;
   }
   if (shape === "empty") {
@@ -368,7 +373,7 @@ function resolveOrganizationRoute(pathname) {
   }
   if (segments[5] === "invitations") {
     if (segments.length === 6) return { cloudPath: `/api/auth/organizations/${organizationId}/invitations`, methods: ["GET", "POST"], queryMethods: ["GET"], idempotencyMethods: ["POST"], bodies: { GET: "none", POST: "invitation-create" }, requireCookie: true, requireCsrf: true };
-    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "revoke") return { cloudPath: `/api/auth/organizations/${organizationId}/invitations/${segments[6].toLowerCase()}/revoke`, methods: ["POST"], body: "none", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true };
+    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "revoke") return { cloudPath: `/api/auth/organizations/${organizationId}/invitations/${segments[6].toLowerCase()}/revoke`, methods: ["POST"], body: "none", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true, requireIfMatch: true };
   }
   return undefined;
 }

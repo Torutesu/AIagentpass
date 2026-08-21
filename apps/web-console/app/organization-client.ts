@@ -1,6 +1,7 @@
 import { authenticateRecentAuth, type AuthorizationResult } from "./webauthn-client.ts";
 
 const SESSION_PATH = "/api/auth/session";
+const SWITCH_ORGANIZATION_PATH = "/api/auth/session/organization-switch";
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const CSRF_HEADER = "agentpass-csrf";
@@ -119,6 +120,8 @@ export type OrganizationClientOptions = Readonly<{
 
 export type OrganizationClient = Readonly<{
   getSession(options?: RequestOptions): Promise<OrganizationSession>;
+  refreshSession?: (options?: RequestOptions) => Promise<OrganizationSession>;
+  switchOrganization(input: Readonly<{ organizationId: string }> & RequestOptions): Promise<OrganizationSession>;
   listOrganizations(options?: RequestOptions & Readonly<{ limit?: number; cursor?: string }>): Promise<OrganizationPage>;
   createOrganization(input: Readonly<{ name: string }> & MutationOptions): Promise<Readonly<{ requestId: string; organization: Organization }>>;
   renameOrganization(input: Readonly<{ organizationId: string; name: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; organization: Organization }>>;
@@ -128,7 +131,7 @@ export type OrganizationClient = Readonly<{
   listInvitations(organizationId: string, options?: RequestOptions & Readonly<{ limit?: number; cursor?: string }>): Promise<InvitationPage>;
   createInvitation(input: Readonly<{ organizationId: string; role: InvitationRole; expiresAt: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>>;
   revokeInvitation(input: Readonly<{ organizationId: string; invitationId: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation }>>;
-  acceptInvitation(input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }>>;
+  acceptInvitation(input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; member: OrganizationMember }>>;
 }>;
 
 export type OrganizationVisibility = Readonly<{
@@ -164,12 +167,24 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
 
   let session: OrganizationSession | undefined;
   let pendingSession: Promise<OrganizationSession> | undefined;
+  let switchSequence = 0;
+
+  const invalidateSession = (): void => {
+    session = undefined;
+    pendingSession = undefined;
+  };
 
   const getSession = async (requestOptions: RequestOptions = {}): Promise<OrganizationSession> => {
-    if (session !== undefined) return session;
+    if (session !== undefined) {
+      assertSessionActive(session);
+      return session;
+    }
     if (pendingSession === undefined) {
       const pending = bootstrapSession(fetchImpl, requestOptions.signal).then((value) => {
-        session = value;
+        assertSessionActive(value);
+        // A request that was invalidated by a 401, refresh, or replacement may
+        // still settle. It must never repopulate the cache with stale identity.
+        if (pendingSession === pending) session = value;
         return value;
       });
       pendingSession = pending;
@@ -180,7 +195,31 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     return pendingSession;
   };
 
+  const refreshSession = async (requestOptions: RequestOptions = {}): Promise<OrganizationSession> => {
+    invalidateSession();
+    return getSession(requestOptions);
+  };
+
   const getRequestContext = async (requestOptions: RequestOptions): Promise<OrganizationSession> => getSession(requestOptions);
+
+  const switchOrganization = async (input: Readonly<{ organizationId: string }> & RequestOptions): Promise<OrganizationSession> => {
+    const organizationId = requiredUuid(input?.organizationId, "organizationId");
+    const sequence = ++switchSequence;
+    const context = await getRequestContext(input);
+    if (context.organizationId === organizationId) throw new OrganizationClientError("validation_failed", "organizationId is already active");
+    const payload = await requestOrganizationJson(fetchImpl, SWITCH_ORGANIZATION_PATH, "POST", { organization_id: organizationId }, context, input, { idempotencyKey: null });
+    const next = parseSessionResponse(payload);
+    assertSessionActive(next);
+    if (next.organizationId !== organizationId || next.memberId !== context.memberId) {
+      throw invalidResponse("Organization switch response is not bound to the requested tenant");
+    }
+    if (sequence !== switchSequence || session !== context) {
+      throw new OrganizationClientError("conflict", "Organization switch was superseded by a newer session change");
+    }
+    session = next;
+    pendingSession = undefined;
+    return next;
+  };
 
   const listOrganizations = async (requestOptions: RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<OrganizationPage> => {
     const context = await getRequestContext(requestOptions);
@@ -254,7 +293,8 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const invitationId = requiredUuid(input?.invitationId, "invitationId");
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
-    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
+    const recentAuth = await resolveRecentAuth(context, organizationId, input?.recentAuth, "human.organizations.invitation.revoke", input?.signal);
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
     return parseInvitationEnvelope(payload, organizationId, invitationId);
   };
 
@@ -280,19 +320,20 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     return requiredUuid(authorizationId, "recentAuth");
   }
 
-  async function requestOrganizationJson(requestFetch: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, requestOptions: RequestOptions, controls: Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string }> = {}): Promise<unknown> {
+  async function requestOrganizationJson(requestFetch: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, requestOptions: RequestOptions, controls: Readonly<{ idempotencyKey?: string | null; expectedVersion?: number; recentAuth?: string }> = {}): Promise<unknown> {
     try {
       return await requestJson(requestFetch, path, method, body, context, requestOptions, controls);
     } catch (error) {
       if (error instanceof OrganizationClientError && error.code === "unauthorized") {
-        session = undefined;
-        pendingSession = undefined;
+        if (session === context) invalidateSession();
+      } else if (error instanceof OrganizationClientError && error.code === "expired") {
+        if (session === context) invalidateSession();
       }
       throw error;
     }
   }
 
-  return Object.freeze({ getSession, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, revokeInvitation, acceptInvitation });
+  return Object.freeze({ getSession, refreshSession, switchOrganization, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, revokeInvitation, acceptInvitation });
 }
 
 export async function getOrganizations(options: OrganizationClientOptions & RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<OrganizationPage> {
@@ -311,15 +352,25 @@ function buildPageQuery(options: Readonly<{ limit?: number; cursor?: string }>):
 
 async function bootstrapSession(fetchImpl: typeof fetch, signal: AbortSignal | undefined): Promise<OrganizationSession> {
   const payload = await requestRawJson(fetchImpl, SESSION_PATH, "POST", {}, undefined, signal);
+  return parseSessionResponse(payload);
+}
+
+function parseSessionResponse(payload: unknown): OrganizationSession {
   if (!isRecord(payload) || !hasExactKeys(payload, ["session", "csrf_token"]) || !isRecord(payload.session) || !hasExactKeys(payload.session, ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]) || !isVersion(payload.session.version) || !UUID.test(payload.session.session_id as string) || !UUID.test(payload.session.member_id as string) || !UUID.test(payload.session.organization_id as string) || !isRole(payload.session.role) || !isDateTime(payload.session.created_at) || !isDateTime(payload.session.expires_at) || !isNullableDateTime(payload.session.recent_auth_at) || typeof payload.csrf_token !== "string" || !CSRF.test(payload.csrf_token)) {
     throw invalidResponse("Session response is invalid");
   }
   return Object.freeze({ version: payload.session.version, sessionId: String(payload.session.session_id).toLowerCase(), memberId: String(payload.session.member_id).toLowerCase(), organizationId: String(payload.session.organization_id).toLowerCase(), role: payload.session.role, createdAt: String(payload.session.created_at), expiresAt: String(payload.session.expires_at), recentAuthAt: payload.session.recent_auth_at === null ? null : String(payload.session.recent_auth_at), csrfToken: payload.csrf_token });
 }
 
-async function requestJson(fetchImpl: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, options: RequestOptions, controls: Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string }> = {}): Promise<unknown> {
-  const idempotencyKey = controls.idempotencyKey ?? (method === "GET" ? undefined : makeIdempotencyKey());
-  if (method !== "GET") assertIdempotencyKey(idempotencyKey);
+function assertSessionActive(value: OrganizationSession): void {
+  if (Date.parse(value.expiresAt) <= Date.now()) {
+    throw new OrganizationClientError("expired", "The organization session has expired", 401, "session_expired");
+  }
+}
+
+async function requestJson(fetchImpl: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, options: RequestOptions, controls: Readonly<{ idempotencyKey?: string | null; expectedVersion?: number; recentAuth?: string }> = {}): Promise<unknown> {
+  const idempotencyKey = controls.idempotencyKey === null ? undefined : controls.idempotencyKey ?? (method === "GET" ? undefined : makeIdempotencyKey());
+  if (method !== "GET" && idempotencyKey !== undefined) assertIdempotencyKey(idempotencyKey);
   const headers = new Headers({ accept: "application/json", "cache-control": "no-store", pragma: "no-cache", [CSRF_HEADER]: context.csrfToken });
   if (body !== undefined) headers.set("content-type", "application/json");
   if (idempotencyKey !== undefined) headers.set("idempotency-key", idempotencyKey);
@@ -386,11 +437,10 @@ function parseInvitationCreated(value: unknown, organizationId: string): Readonl
   return Object.freeze({ requestId: value.request_id.toLowerCase(), invitation: parseInvitation(value.invitation, organizationId), oneTimeToken: value.one_time_token });
 }
 
-function parseInvitationAccepted(value: unknown): Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }> {
-  if (!isRecord(value) || !hasExactKeys(value, ["request_id", "invitation", "member"]) || typeof value.request_id !== "string" || !UUID.test(value.request_id) || !isRecord(value.invitation) || !isRecord(value.member)) throw invalidResponse("Invitation acceptance response is invalid");
-  const invitation = parseInvitation(value.invitation);
-  const member = parseMember(value.member, invitation.organizationId);
-  return Object.freeze({ requestId: value.request_id.toLowerCase(), invitation, member });
+function parseInvitationAccepted(value: unknown): Readonly<{ requestId: string; member: OrganizationMember }> {
+  if (!isRecord(value) || !hasExactKeys(value, ["request_id", "member"]) || typeof value.request_id !== "string" || !UUID.test(value.request_id) || !isRecord(value.member)) throw invalidResponse("Invitation acceptance response is invalid");
+  const member = parseMember(value.member);
+  return Object.freeze({ requestId: value.request_id.toLowerCase(), member });
 }
 
 function parsePage<T>(value: unknown, key: string, parseItem: (value: unknown) => T): Page<T> {

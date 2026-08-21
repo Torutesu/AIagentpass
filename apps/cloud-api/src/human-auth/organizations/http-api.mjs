@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   HUMAN_SESSION_CSRF_HEADER,
   HUMAN_SESSION_ERROR_CODES,
@@ -62,7 +64,8 @@ export const HUMAN_ORGANIZATION_SERVICE_METHODS = Object.freeze([
 
 export const HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS = Object.freeze({
   updateMemberRole: "human.organizations.member.role.update",
-  removeMember: "human.organizations.member.remove"
+  removeMember: "human.organizations.member.remove",
+  revokeInvitation: "human.organizations.invitation.revoke"
 });
 
 export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
@@ -175,6 +178,7 @@ export function createHumanOrganizationsHttpApi({
   origin,
   basePath = "",
   maxBodyBytes = MAX_BODY_BYTES,
+  uuid = randomUUID,
   now = () => Date.now()
 } = {}) {
   assertHumanSession(humanSession);
@@ -184,6 +188,7 @@ export function createHumanOrganizationsHttpApi({
   assertOriginConfiguration(expectedOrigin);
   const normalizedBasePath = normalizeBasePath(basePath);
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) throw new TypeError("maxBodyBytes is invalid");
+  if (typeof uuid !== "function") throw new TypeError("uuid must be a function");
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (!abuseControls || typeof abuseControls.authorize !== "function") throw new TypeError("abuseControls must expose authorize()");
 
@@ -196,6 +201,8 @@ export function createHumanOrganizationsHttpApi({
   async function dispatch(input) {
     try {
       const request = normalizeRequest(input);
+      const requestId = uuid();
+      if (typeof requestId !== "string" || !UUID.test(requestId)) throw new Error("uuid provider returned an invalid request id");
       let route = resolveRoute(request.url, normalizedBasePath);
       if (!route) return response(404, { error: { code: "not_found", message: "Resource not found" } });
       if (route.name === "listOrganizations" && request.method === "POST") route = { ...route, name: "createOrganization", method: "POST", allow: "GET, POST", read: false };
@@ -220,7 +227,7 @@ export function createHumanOrganizationsHttpApi({
       if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey, request);
       if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey);
       if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey, request);
-      return await acceptInvitation(session, body, idempotencyKey);
+      return await acceptInvitation(session, body, idempotencyKey, requestId);
     } catch (error) {
       return mapError(error);
     }
@@ -371,21 +378,22 @@ export function createHumanOrganizationsHttpApi({
     requireRole(actor, ADMIN_OR_OWNER);
     parseBody(body, new Set());
     const expectedVersion = requiredExpectedVersion(request);
+    const recentAuthorization = await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation);
     try {
-      const result = await organizationService.revokeInvitation({ actor, organization_id: route.organizationId, invitation_id: route.invitationId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
+      const result = await organizationService.revokeInvitation({ actor, organization_id: route.organizationId, invitation_id: route.invitationId, expected_version: expectedVersion, idempotency_key: idempotencyKey, recent_authorization: recentAuthorization });
       return response(200, { invitation: normalizeInvitation(result?.invitation ?? result, route.organizationId, route.invitationId) });
     } catch (error) {
       throw mapServiceError(error, "invitation");
     }
   }
 
-  async function acceptInvitation(actor, body, idempotencyKey) {
+  async function acceptInvitation(actor, body, idempotencyKey, requestId) {
     await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationAccept, session: actor, organizationId: actor.organization_id });
     const input = parseBody(body, new Set(["one_time_token"]));
     if (!isOpaqueToken(input.one_time_token)) throw invalidRequest();
     try {
       const result = await organizationService.acceptInvitation({ actor, one_time_token: input.one_time_token, idempotency_key: idempotencyKey });
-      return response(201, { member: normalizeMember(result) });
+      return response(201, { request_id: requestId.toLowerCase(), member: normalizeMember(result) });
     } catch (error) {
       throw mapServiceError(error, "invitation");
     }

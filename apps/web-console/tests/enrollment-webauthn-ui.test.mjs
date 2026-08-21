@@ -39,7 +39,7 @@ test("guided enrollment imports one strict public preflight and keeps the advanc
   assert.match(source, /candidate_binding\.candidate_id !== expectedPreflight\.candidate_id/);
   assert.match(source, /candidate_binding\.device_key_fingerprint !== expectedPreflight\.device_key_fingerprint/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|window\.location\.search|console\.(?:log|info|warn|error)/);
-  assert.match(source, /enrollmentStores|allocateEnrollmentStoreId/);
+  assert.doesNotMatch(source, /enrollmentStores|allocateEnrollmentStoreId/);
   assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
 });
 

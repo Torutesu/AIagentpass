@@ -12,6 +12,28 @@ The remaining production work is split into three independently testable tracks:
 2. v0.19 — bounded checkpoint and anchor-receipt storage with cryptographically continuous archival;
 3. v0.20 — reproducible universal packaging, Developer ID/notarization release automation, installer artifacts, provenance, and hardware qualification.
 
+The Platform authenticator is an additional protected operations gate. Its
+production configuration and qualification contract are maintained in
+[PLATFORM_AUTH_PRODUCTION_OPERATIONS.md](PLATFORM_AUTH_PRODUCTION_OPERATIONS.md)
+and [PLATFORM_AUTH_QUALIFICATION.md](PLATFORM_AUTH_QUALIFICATION.md). The
+secret-free local preflight cannot substitute for real ingress mTLS, workload
+identity, durable WebAuthn, provider/KMS, rotation, or two-instance evidence.
+
+The current code-to-evidence reconciliation is maintained in
+[PRODUCTION_READINESS_AUDIT_2026-08-20.md](PRODUCTION_READINESS_AUDIT_2026-08-20.md).
+Promotion stop conditions are normative in [RELEASE.md](RELEASE.md), and
+emergency containment/revoke/uncertain-signing procedure is in
+[INCIDENT_AND_REVOKE_RUNBOOK.md](INCIDENT_AND_REVOKE_RUNBOOK.md). The design
+and local implementation checkpoints below must not be read as external
+qualification or production approval.
+
+The executable operator packet is indexed in [`docs/runbooks/README.md`](runbooks/README.md).
+Every external gate must have a redacted canonical record bound to the
+candidate source commit, full source tree, artifact/deployment digest, run/job
+IDs, command, timestamps, and result digest. `not_run`, `failed`,
+`not_proven`, skipped, simulated, ad-hoc, or local-only output is a blocker;
+retain it as failure evidence rather than normalizing it into success.
+
 The tracks may be implemented in parallel after this design is accepted, but key lifecycle state is merged before checkpoint archival because archived checkpoints must retain their signing-key generation. Release automation is merged independently and must never expose signing or notarization credentials to pull-request jobs.
 
 ## Global invariants
@@ -298,3 +320,12 @@ Repository work is complete only when scripts fail closed in the absence of thos
 ## Final audit gate
 
 Before marking this plan complete, reviewers must map every invariant and acceptance test above to code, tests, CI output, a signed release artifact, or an explicit external-gate record. “No issue found,” a green unit-test subset, or an ad-hoc signature is not sufficient evidence. At least one independent review must inspect authorization prompts, keychain deletion queries, lifecycle crash recovery, archive boundary calculations, installer preservation rules, and secret exposure in workflows.
+
+The final audit packet must include the completed checklists from
+[`RELEASE_PROMOTION_RUNBOOK.md`](runbooks/RELEASE_PROMOTION_RUNBOOK.md),
+[`INCIDENT_REVOKE_RUNBOOK.md`](runbooks/INCIDENT_REVOKE_RUNBOOK.md),
+[`KMS_POSTGRES_QUALIFICATION_RUNBOOK.md`](runbooks/KMS_POSTGRES_QUALIFICATION_RUNBOOK.md),
+[`MACOS_RELEASE_NOTARIZATION_RUNBOOK.md`](runbooks/MACOS_RELEASE_NOTARIZATION_RUNBOOK.md),
+and [`STAGING_DRILL_SECURITY_REVIEW_RUNBOOK.md`](runbooks/STAGING_DRILL_SECURITY_REVIEW_RUNBOOK.md).
+The approver must verify every stop condition from retained evidence or leave
+the decision explicitly `STOP`; a plan update cannot waive an external gate.
