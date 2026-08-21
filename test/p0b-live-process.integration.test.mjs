@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -183,7 +184,7 @@ async function seedDatabase(pool, organizationId, { refreshNonceKeyId, refreshNo
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "p0b-live-process" }).run();
-    assert.equal(migration.currentVersion , 47);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

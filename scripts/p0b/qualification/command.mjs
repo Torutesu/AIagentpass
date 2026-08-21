@@ -3,8 +3,24 @@ import { spawn } from "node:child_process";
 
 const SKIP_MARKER = Buffer.from("# SKIP", "utf8");
 const MARKER_TAIL_BYTES = SKIP_MARKER.byteLength - 1;
+// The live browser authority matrix has one fixed, non-sensitive marker per
+// bounded failure stage. Keep enough room for the complete matrix while still
+// rejecting an unbounded caller-controlled registry.
+// The protected browser matrix currently has more than 128 fixed stage
+// markers. Keep a finite ceiling above that reviewed registry so adding a
+// marker cannot make qualification fail before the child process starts.
+const MAX_SAFE_FAILURE_MARKERS = 256;
+const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
+const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
+// A provisional TAP marker is intentionally not terminal: a more specific,
+// reviewed marker may be emitted immediately afterwards. It must nevertheless
+// have a bounded lifetime. Without this deadline, a test runner that emits the
+// coarse `not ok` line and then keeps a browser/socket handle open can survive
+// until the supervisor's much larger process timeout.
+const PROVISIONAL_FAILURE_GRACE_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 const SAFE_REASON = Object.freeze({
   spawn: "child_spawn_failed",
   timeout: "child_timeout",
@@ -44,14 +60,38 @@ function normalizeOptions(options) {
     throw new TypeError("cwd is invalid");
   }
   if (options.onChild !== undefined && typeof options.onChild !== "function") throw new TypeError("onChild must be a function");
+  if (options.terminateOnSafeFailure !== undefined && typeof options.terminateOnSafeFailure !== "boolean") {
+    throw new TypeError("terminateOnSafeFailure must be a boolean");
+  }
+  const safeFailureMarkers = normalizeSafeFailureMarkers(options.safeFailureMarkers);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
   return {
     cwd: options.cwd,
     env: normalizeEnvironment(options.env),
     onChild: options.onChild,
+    safeFailureMarkers,
+    terminateOnSafeFailure: options.terminateOnSafeFailure === true,
     timeoutMs
   };
+}
+
+function normalizeSafeFailureMarkers(value) {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > MAX_SAFE_FAILURE_MARKERS) throw new TypeError("safeFailureMarkers must be a bounded array");
+  const codes = new Set();
+  return Object.freeze(value.map((entry) => {
+    const keys = Object.keys(entry ?? {}).sort().join(",");
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || (keys !== "code,marker" && keys !== "code,marker,terminate")
+      || typeof entry.marker !== "string" || entry.marker.length === 0 || entry.marker.includes("\u0000")
+      || Buffer.byteLength(entry.marker) > MAX_SAFE_FAILURE_MARKER_BYTES
+      || typeof entry.code !== "string" || !SAFE_FAILURE_CODE.test(entry.code)
+      || (entry.terminate !== undefined && typeof entry.terminate !== "boolean")
+      || codes.has(entry.code)) throw new TypeError("safe failure marker is invalid");
+    codes.add(entry.code);
+    return Object.freeze({ code: entry.code, marker: Buffer.from(entry.marker, "utf8"), terminate: entry.terminate !== false });
+  }));
 }
 
 function asBytes(chunk) {
@@ -75,12 +115,13 @@ function includesMarker(haystack, needle) {
   return false;
 }
 
-function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed }) {
+function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode }) {
   return Object.freeze({
     spawn_error: spawnError,
     timed_out: timedOut,
     skip_marker: skipMarker,
     callback_failed: callbackFailed,
+    safe_failure_code: safeFailureCode,
     settled: true
   });
 }
@@ -93,7 +134,8 @@ function attachInternalFlags(result, flags) {
     internal: { configurable: false, enumerable: false, writable: false, value: flags },
     spawnError: { configurable: false, enumerable: false, writable: false, value: flags.spawn_error },
     timedOut: { configurable: false, enumerable: false, writable: false, value: flags.timed_out },
-    skipMarker: { configurable: false, enumerable: false, writable: false, value: flags.skip_marker }
+    skipMarker: { configurable: false, enumerable: false, writable: false, value: flags.skip_marker },
+    safeFailureCode: { configurable: false, enumerable: false, writable: false, value: flags.safe_failure_code }
   });
   return Object.freeze(result);
 }
@@ -114,7 +156,7 @@ function durationMilliseconds(startedAt) {
  */
 export function runQualificationCommand(command, args, options) {
   assertCommand(command, args);
-  const { cwd, env, onChild, timeoutMs } = normalizeOptions(options);
+  const { cwd, env, onChild, safeFailureMarkers, terminateOnSafeFailure, timeoutMs } = normalizeOptions(options);
   const startedAt = process.hrtime.bigint();
   const stdoutHash = createHash("sha256");
   const stderrHash = createHash("sha256");
@@ -123,13 +165,19 @@ export function runQualificationCommand(command, args, options) {
   let stdoutMarkerTail = Buffer.alloc(0);
   let stderrMarkerTail = Buffer.alloc(0);
   let skipMarker = false;
+  let safeFailureCode = null;
+  let safeFailureTerminal = false;
+  let safeFailureStdoutTail = Buffer.alloc(0);
+  let safeFailureStderrTail = Buffer.alloc(0);
   let spawnError = false;
   let timedOut = false;
   let callbackFailed = false;
   let settled = false;
   let timeoutHandle;
   let killHandle;
+  let provisionalFailureHandle;
   let child;
+  let requestTermination = () => {};
 
   const observeMarker = (chunk, stream) => {
     if (skipMarker) return;
@@ -151,12 +199,48 @@ export function runQualificationCommand(command, args, options) {
     else stderrMarkerTail = nextTail;
   };
 
+  const observeSafeFailureMarker = (chunk, stream) => {
+    if (safeFailureTerminal || safeFailureMarkers.length === 0) return;
+    const bytes = asBytes(chunk);
+    const previous = stream === "stdout" ? safeFailureStdoutTail : safeFailureStderrTail;
+    const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
+    for (const entry of safeFailureMarkers) {
+      if (includesMarker(candidate, entry.marker)) {
+        safeFailureCode = entry.code;
+        if (entry.terminate) {
+          safeFailureTerminal = true;
+          safeFailureStdoutTail = Buffer.alloc(0);
+          safeFailureStderrTail = Buffer.alloc(0);
+          if (provisionalFailureHandle !== undefined) clearTimeout(provisionalFailureHandle);
+          if (terminateOnSafeFailure) setImmediate(() => requestTermination());
+          return;
+        }
+        if (terminateOnSafeFailure && provisionalFailureHandle === undefined) {
+          provisionalFailureHandle = setTimeout(() => {
+            provisionalFailureHandle = undefined;
+            if (settled || safeFailureTerminal || safeFailureCode === null) return;
+            safeFailureTerminal = true;
+            requestTermination();
+          }, PROVISIONAL_FAILURE_GRACE_MS);
+          provisionalFailureHandle.unref?.();
+        }
+        break;
+      }
+    }
+    const longest = Math.max(...safeFailureMarkers.map((entry) => entry.marker.byteLength));
+    const tailBytes = Math.max(0, longest - 1);
+    const nextTail = candidate.byteLength <= tailBytes ? Buffer.from(candidate) : Buffer.from(candidate.subarray(candidate.byteLength - tailBytes));
+    if (stream === "stdout") safeFailureStdoutTail = nextTail;
+    else safeFailureStderrTail = nextTail;
+  };
+
   return new Promise((resolve) => {
     const settle = (code, signal, reasonKind = null) => {
       if (settled) return;
       settled = true;
       if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
       if (killHandle !== undefined) clearTimeout(killHandle);
+      if (provisionalFailureHandle !== undefined) clearTimeout(provisionalFailureHandle);
 
       const exitCode = Number.isSafeInteger(code) && code >= 0 && code <= 255 ? code : null;
       const normalizedSignal = typeof signal === "string" && /^[A-Z][A-Z0-9]{0,15}$/u.test(signal) ? signal : null;
@@ -182,22 +266,46 @@ export function runQualificationCommand(command, args, options) {
         stderr_bytes: stderrBytes,
         reason: passed ? null : reason ?? SAFE_REASON.unknown
       };
-      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed })));
+      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode })));
     };
 
     const requestKill = (signal) => {
       try {
-        child?.kill(signal);
+        // A qualification command can start browsers and service processes
+        // which inherit its stdout/stderr pipes. Killing only the direct child
+        // leaves those descendants alive and prevents the ChildProcess
+        // `close` event from ever firing. A detached POSIX child is the leader
+        // of a private process group, so a negative pid terminates the complete
+        // command tree without risking an unrelated process.
+        if (SUPPORTS_PROCESS_GROUPS && Number.isSafeInteger(child?.pid) && child.pid > 0) {
+          process.kill(-child.pid, signal);
+        } else {
+          child?.kill(signal);
+        }
       } catch {
         // The close/error event remains authoritative. Never expose a kill
         // exception or a command-specific diagnostic to the report.
       }
     };
 
+    requestTermination = () => {
+      if (settled) return;
+      requestKill("SIGTERM");
+      if (killHandle !== undefined) clearTimeout(killHandle);
+      killHandle = setTimeout(() => {
+        if (!settled) requestKill("SIGKILL");
+      }, TERMINATION_GRACE_MS);
+      killHandle.unref?.();
+    };
+
     try {
       child = spawn(command, args, {
         cwd,
         env,
+        // On POSIX this creates the private process group used by requestKill.
+        // Windows has no equivalent negative-pid group signalling, so retain
+        // the normal ChildProcess fallback there.
+        detached: SUPPORTS_PROCESS_GROUPS,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -212,12 +320,14 @@ export function runQualificationCommand(command, args, options) {
       stdoutHash.update(bytes);
       stdoutBytes += bytes.byteLength;
       observeMarker(bytes, "stdout");
+      observeSafeFailureMarker(bytes, "stdout");
     });
     child.stderr?.on("data", (chunk) => {
       const bytes = asBytes(chunk);
       stderrHash.update(bytes);
       stderrBytes += bytes.byteLength;
       observeMarker(bytes, "stderr");
+      observeSafeFailureMarker(bytes, "stderr");
     });
     child.once("error", () => {
       spawnError = true;
@@ -228,24 +338,19 @@ export function runQualificationCommand(command, args, options) {
     timeoutHandle = setTimeout(() => {
       if (settled) return;
       timedOut = true;
-      requestKill("SIGTERM");
-      killHandle = setTimeout(() => {
-        if (!settled) requestKill("SIGKILL");
-      }, TERMINATION_GRACE_MS);
-      killHandle.unref?.();
+      requestTermination();
     }, timeoutMs);
     timeoutHandle.unref?.();
 
     if (onChild) {
       try {
-        onChild(child);
+        // The second argument is an intentionally narrow tree-termination
+        // capability for supervisors handling their own SIGINT/SIGTERM. It
+        // keeps the process-group implementation private to this runner.
+        onChild(child, requestTermination);
       } catch {
         callbackFailed = true;
-        requestKill("SIGTERM");
-        killHandle = setTimeout(() => {
-          if (!settled) requestKill("SIGKILL");
-        }, TERMINATION_GRACE_MS);
-        killHandle.unref?.();
+        requestTermination();
       }
     }
   });

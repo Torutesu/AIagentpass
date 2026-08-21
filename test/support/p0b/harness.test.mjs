@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import https from "node:https";
 import fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import { Pool } from "pg";
 
 import {
   P0BSkip,
   certificateSpkiPin,
+  closeP0BHarness,
   createVerifiedPostgresPoolOptions,
   createP0BTempDirectory,
   createTestCertificates,
+  p0bHostedBootstrapEnvironment,
   p0bEnvironment,
   readPostgresCaFile,
   redactP0BDiagnostic,
@@ -40,6 +43,22 @@ test("child environments remove inherited AgentPass secrets and Node injection k
   assert.equal(Object.hasOwn(env, "AGENTPASS_CLOUD_TOKEN"), false);
   assert.equal(Object.hasOwn(env, "NODE_OPTIONS"), false);
   assert.equal(Object.hasOwn(env, "NODE_EXTRA_CA_CERTS"), false);
+});
+
+test("P0-B Hosted bootstrap settings bind OAuth to the TLS Console and separate every secret purpose", () => {
+  const env = p0bHostedBootstrapEnvironment(31_337);
+  assert.equal(env.AGENTPASS_GITHUB_REDIRECT_URI, "https://localhost:31337/api/auth/bootstrap/github/callback");
+  assert.equal(env.AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL, "https://localhost:31337/onboarding");
+  assert.equal(Object.isFrozen(env), true);
+  const secrets = [
+    env.AGENTPASS_HOSTED_PKCE_KEY,
+    env.AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY,
+    env.AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY,
+    Buffer.alloc(32, 0x35).toString("base64url")
+  ];
+  assert.equal(new Set(secrets).size, secrets.length);
+  for (const secret of secrets) assert.match(secret, /^[A-Za-z0-9_-]{43}$/u);
+  assert.throws(() => p0bHostedBootstrapEnvironment(0), /port is invalid/);
 });
 
 test("certificate generation is temporary and creates a localhost CA chain", async (t) => {
@@ -106,6 +125,43 @@ test("missing external dependencies produce an explicit skip without waiting", a
 
 test("database preparation hook must be callable", async () => {
   await assert.rejects(startP0BHarness({ prepareDatabase: true }), /database preparation must be a function/);
+});
+
+test("P0-B cleanup force-kills a child that ignores SIGTERM and is idempotent", async () => {
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1_000)"], {
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.stdout.once("data", resolve);
+      child.stdout.resume();
+    });
+    await closeP0BHarness({ cloudProcess: child });
+    assert.equal(child.signalCode, "SIGKILL");
+    await closeP0BHarness({ cloudProcess: child });
+    assert.equal(child.signalCode, "SIGKILL");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL"); } catch {}
+    }
+  }
+});
+
+test("P0-B cleanup bounds and de-duplicates a stuck resource close", async () => {
+  let closeCalls = 0;
+  const stuckResource = {
+    close() {
+      closeCalls += 1;
+      return new Promise(() => {});
+    }
+  };
+  const startedAt = Date.now();
+  await closeP0BHarness({ cloudProxy: stuckResource });
+  await closeP0BHarness({ cloudProxy: stuckResource });
+  assert.equal(closeCalls, 1);
+  assert.ok(Date.now() - startedAt < 2_500);
 });
 
 function assertHttps({ port, ca, servername }, expectedStatus) {

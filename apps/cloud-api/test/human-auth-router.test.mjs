@@ -33,26 +33,29 @@ test("routes only the exact qualification Grant batch path to its dedicated API"
   }
 });
 
-test("routes exact public auth paths and translates only the session path", async () => {
+test("routes exact public auth paths and translates the session paths", async () => {
   const { router, calls } = fixture();
+  assert.equal(router.paths.resume, "/api/auth/session/resume");
   const base = { method: "POST", headers: { origin: "https://console.test" }, body: Buffer.from("{}") };
   await router.handle({ ...base, url: "/api/auth/session" });
+  await router.handle({ ...base, url: "/api/auth/session/resume" });
   await router.handle({ ...base, url: "/api/auth/webauthn/options" });
   await router.handle({ ...base, url: "/api/auth/webauthn/verify" });
   await router.handle({ ...base, url: "/api/auth/webauthn/registration/options" });
   await router.handle({ ...base, url: "/api/auth/webauthn/registration/verify" });
   await router.handle({ ...base, method: "GET", url: "/api/auth/management/credentials?limit=25" });
+  await router.handle({ ...base, method: "POST", url: "/api/auth/management/sessions/revoke-others" });
   await router.handle({ ...base, method: "GET", url: "/api/auth/organizations?limit=25&cursor=next" });
   await router.handle({ ...base, method: "GET", url: "/api/auth/organizations/11111111-1111-4111-8111-111111111111/members?limit=10" });
   await router.handle({ ...base, method: "POST", url: "/api/auth/organizations/11111111-1111-4111-8111-111111111111/invitations" });
   await router.handle({ ...base, method: "POST", url: "/api/auth/invitations/accept" });
-  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"], ["registration", "/api/auth/webauthn/registration/options"], ["registration", "/api/auth/webauthn/registration/verify"], ["management", "/api/auth/management/credentials?limit=25"], ["organization", "/api/auth/organizations?limit=25&cursor=next"], ["organization", "/api/auth/organizations/11111111-1111-4111-8111-111111111111/members?limit=10"], ["organization", "/api/auth/organizations/11111111-1111-4111-8111-111111111111/invitations"], ["organization", "/api/auth/invitations/accept"]]);
+  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["session", "/session/resume"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"], ["registration", "/api/auth/webauthn/registration/options"], ["registration", "/api/auth/webauthn/registration/verify"], ["management", "/api/auth/management/credentials?limit=25"], ["management", "/api/auth/management/sessions/revoke-others"], ["organization", "/api/auth/organizations?limit=25&cursor=next"], ["organization", "/api/auth/organizations/11111111-1111-4111-8111-111111111111/members?limit=10"], ["organization", "/api/auth/organizations/11111111-1111-4111-8111-111111111111/invitations"], ["organization", "/api/auth/invitations/accept"]]);
   assert.equal(calls.every(([, input]) => input.headers === base.headers && input.body === base.body), true);
 });
 
 test("rejects aliases, queries, and malformed input without delegation", async () => {
   const { router, calls } = fixture();
-  for (const url of ["/api/auth/session/", "/api/auth/session?x=1", "/api/auth/webauthn/options/", "/api/auth/webauthn/verify#x", "/other"]) {
+  for (const url of ["/api/auth/session/", "/api/auth/session?x=1", "/api/auth/session/resume/", "/api/auth/session/resume?x=1", "/api/auth/webauthn/options/", "/api/auth/webauthn/verify#x", "/api/auth/management/sessions/revoke-others/", "/api/auth/management/sessions/not-a-session/revoke", "/other"]) {
     const result = await router.handle({ method: "POST", url, headers: {}, body: "{}" });
     assert.equal(result.status, 404);
     assert.match(result.headers["Cache-Control"], /no-store/);

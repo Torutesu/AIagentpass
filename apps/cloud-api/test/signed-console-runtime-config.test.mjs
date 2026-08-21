@@ -118,6 +118,10 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
       AGENTPASS_CLOUD_PORT: "0",
       AGENTPASS_DATABASE_URL: DATABASE_URL,
+      AGENTPASS_MIGRATION_DATABASE_URL: "postgresql://migrator:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_SIGNER_DATABASE_URL: "postgresql://signer:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_MAINTENANCE_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
       AGENTPASS_WEBAUTHN_RP_ID: "example.test",
       AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,
@@ -128,7 +132,15 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
       AGENTPASS_IDENTITY_ASSERTION_ISSUER: IDENTIFIER_ISSUER,
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: IDENTIFIER_AUDIENCE,
       AGENTPASS_IDENTITY_ASSERTION_KID: IDENTIFIER_KID,
-      AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: identityPublicKeyPath
+      AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: identityPublicKeyPath,
+      AGENTPASS_GITHUB_CLIENT_ID: "github-client-test",
+      AGENTPASS_GITHUB_CLIENT_SECRET: "github-client-secret-test",
+      AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/api/auth/bootstrap/github/callback",
+      AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: "https://console.example.test/onboarding",
+      AGENTPASS_HOSTED_PKCE_KEY_ID: "hosted-pkce-v1",
+      AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x61).toString("base64url"),
+      AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x62).toString("base64url"),
+      AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x63).toString("base64url")
     }
   };
 }
@@ -179,6 +191,7 @@ function fakePostgresRuntime() {
     revokeCredential: noOp,
     listSafeSessions: async () => [],
     revokeManagedSession: noOp,
+    revokeOtherSessions: async () => [],
     findCredentialForSession: noOp,
     updateCredentialCounter: noOp
   };
@@ -195,10 +208,16 @@ function fakePostgresRuntime() {
     acceptInvitation: noOp
   };
   let closed = false;
+  const hostedIdentityBootstrapRepository = Object.fromEntries([
+    "startOAuthV2", "claimOAuthStateV2", "failOAuthState", "completeOAuthStateV2",
+    "getBootstrapStatus", "verifyBootstrapCsrf", "commitOrganizationV2",
+    "createChallenge", "claimChallengeV2", "completeWebAuthnRegistrationV3", "failChallengeV3"
+  ].map((name) => [name, async () => { throw new Error(`unexpected Hosted bootstrap call: ${name}`); }]));
   return {
     pool: { async query() { return { rows: [], rowCount: 0 }; } },
     humanRepository,
     organizationRepository,
+    hostedIdentityBootstrapRepository,
     capabilityAuthorityRepository: {
       async issueCapabilityMetadata() { return null; },
       async listRevokedCapabilityIds() { return []; }
@@ -207,8 +226,44 @@ function fakePostgresRuntime() {
     agentSessionAuthorityRepository: { async consumeAgentSessionGrant() { return null; } },
     qualificationGrantBatchRepository: { async claimQualificationGrantBatch() { return null; } },
     auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} },
+    platformPromotionIssuanceRepository: {
+      async reservePlatformPromotion() { return { state: "in_progress" }; },
+      async commitPlatformPromotion() { return { state: "committed" }; },
+      async replayPlatformPromotion() { return { state: "absent" }; },
+      async markPlatformPromotionUncertain() { return { state: "uncertain" }; },
+      async getCommittedPlatformPromotion() { return null; }
+    },
+    createPlatformAuthorizationRepository() {
+      return {
+        forAuthorization() {
+          return {
+            async reservePlatformPromotion() { return { state: "in_progress" }; },
+            async commitPlatformPromotion() { return { state: "committed" }; },
+            async markPlatformPromotionUncertain() { return { state: "uncertain" }; }
+          };
+        }
+      };
+    },
+    platformOperatorAssignmentRepository: { async findActivePlatformOperatorAssignment() { return null; } },
+    platformSessionBootstrapRepository: { async resolvePlatformSessionBootstrap() { return null; } },
+    platformSessionRepository: {
+      bearerBound: true,
+      acceptsSessionMaterialHash: true,
+      async revokeSelf() { return { revoked: true }; }
+    },
+    platformSessionWebAuthnRepository: {
+      async createPlatformSessionChallenge() {},
+      async findPlatformSessionChallenge() { return null; },
+      async claimPlatformSessionChallenge() {},
+      async failPlatformSessionChallenge() {},
+      async completePlatformSessionChallenge() {},
+      async findPlatformCredentialForSession() {},
+      async advancePlatformCredentialCounter() {},
+      async issuePlatformSession() {}
+    },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     createProviderOperationRepository: createProviderOperationRepositoryFactory(),
+    managedSignerOperationGate: { async track(operation) { return operation(); }, assertAccepting() {} },
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },
     refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {

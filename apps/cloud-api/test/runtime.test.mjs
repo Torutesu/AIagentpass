@@ -3,14 +3,48 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
-import { createCloudRuntime, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
+import { createCloudRuntime, createHostedPlatformOperatorAuthorizer, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
 import { createCloudStore } from "../src/store.mjs";
+import {
+  PROMOTION_EVIDENCE_V3_ALGORITHM,
+  PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
+  PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+  PROMOTION_EVIDENCE_V3_PURPOSE,
+  PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+  PROMOTION_EVIDENCE_V3_TYPE,
+  PROMOTION_EVIDENCE_V3_VERSION,
+  normalizePromotionEvidenceV3Statement,
+  promotionEvidenceV3PublicKeyFingerprint,
+  promotionEvidenceV3SigningData,
+  promotionEvidenceV3StatementHash
+} from "../src/promotion-evidence-v3-statement.mjs";
 import { createManagedSignerRepositoryFactory, createProviderOperationRepositoryFactory } from "./support/managed-signer-repository.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
+
+async function dispatchServer(server, { method = "GET", url, headers = {}, body = "" }) {
+  const request = Readable.from([Buffer.from(body)]);
+  request.method = method;
+  request.url = url;
+  request.headers = headers;
+  request.socket = { remoteAddress: "127.0.0.1" };
+  return new Promise((resolve, reject) => {
+    const response = {
+      headersSent: false,
+      statusCode: 200,
+      headers: {},
+      writeHead(status, values = {}) { this.statusCode = status; this.headers = { ...values }; this.headersSent = true; },
+      setHeader(name, value) { this.headers[name] = value; },
+      end(value) { this.body = value; resolve(this); },
+      destroy(error) { reject(error ?? new Error("response destroyed")); }
+    };
+    server.emit("request", request, response);
+  });
+}
 
 function files() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-cloud-runtime-"));
@@ -123,20 +157,81 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   await assert.rejects(createCloudRuntime({ env: withoutNotifications, agentSessionSignerProvider: signerProvider(value), qualificationManifestSignerProvider: qualificationSignerProvider(value) }), /requires complete PostgreSQL/);
 });
 
+test("hosted runtime rejects an externally injected platform operator authorizer", async (t) => {
+  const value = files();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  await assert.rejects(
+    createCloudRuntime({ env: hostedEnv(value), platformOperatorAuthorizer: async () => ({ allowed: true }) }),
+    /must be composed from PostgreSQL/
+  );
+});
+
+test("hosted runtime rejects externally injected platform session authority", async (t) => {
+  const value = files();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  for (const override of [
+    { platformSessionBootstrapAuthenticator: async () => ({}) },
+    { platformSessionAuthorityResolver: async () => ({}) },
+    { platformSessionWebAuthnVerify: async () => ({ verified: true }) },
+    { platformSession: { bootstrapAuthenticator: async () => ({}) } }
+  ]) {
+    await assert.rejects(
+      createCloudRuntime({ env: hostedEnv(value), ...override }),
+      /must be composed from PostgreSQL and the built-in WebAuthn verifier/
+    );
+  }
+});
+
+test("hosted platform operator authorization is composed only from its PostgreSQL repository", async () => {
+  assert.throws(() => createHostedPlatformOperatorAuthorizer({}), /authority is unavailable/);
+  const calls = [];
+  const authorizer = createHostedPlatformOperatorAuthorizer({
+    platformOperatorAssignmentRepository: {
+      async findActivePlatformOperatorAssignment(input) { calls.push(input); return null; }
+    }
+  });
+  const result = await authorizer({
+    principal: {
+      session_id: "11111111-1111-4111-8111-111111111111",
+      member_id: "22222222-2222-4222-8222-222222222222",
+      organization_id: "33333333-3333-4333-8333-333333333333",
+      role: "viewer",
+      version: 1,
+      created_at: "2025-01-01T00:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z"
+    },
+    operation: "platform.promotion.issue",
+    capability: "platform.promotion.issue"
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(calls.length, 1);
+});
+
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
   const env = hostedEnv(value);
   const calls = [];
+  let promotionInFlightCalls = 0;
   const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
   const hostedControlPlaneStore = new Proxy(controlPlaneStore, { get(target, property, receiver) { if (property === "pollDeviceRefresh") return async () => null; if (property === "markDeviceRefreshDelivered") return async () => {}; return Reflect.get(target, property, receiver); } });
-  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), createProviderOperationRepository: createProviderOperationRepositoryFactory(), async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  const hostedIdentityBootstrapRepository = Object.fromEntries([
+    "startOAuthV2", "claimOAuthStateV2", "failOAuthState", "completeOAuthStateV2",
+    "getBootstrapStatus", "verifyBootstrapCsrf", "commitOrganizationV2",
+    "createChallenge", "claimChallengeV2", "completeWebAuthnRegistrationV3", "failChallengeV3"
+  ].map((name) => [name, async () => { throw new Error(`unexpected Hosted bootstrap call: ${name}`); }]));
+  const postgresRuntime = { pool: {}, humanRepository: {}, hostedIdentityBootstrapRepository, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit(input) { return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} }, platformPromotionIssuanceRepository: { async reservePlatformPromotion() { return { state: "in_progress" }; }, async commitPlatformPromotion() {}, async replayPlatformPromotion() {}, async markPlatformPromotionUncertain() {}, async getCommittedPlatformPromotion() {} }, createPlatformAuthorizationRepository(lifecycle) { calls.push(["platform-authorization", lifecycle]); return Object.freeze({ forAuthorization() { return Object.freeze({ reservePlatformPromotion: async () => ({ state: "in_progress" }), commitPlatformPromotion: async () => ({ state: "uncertain" }), markPlatformPromotionUncertain: async () => ({ state: "uncertain" }) }); } }); }, platformOperatorAssignmentRepository: { async findActivePlatformOperatorAssignment() { return null; } }, platformSessionBootstrapRepository: { async resolvePlatformSessionBootstrap() { return null; } }, platformSessionRepository: { bearerBound: true, acceptsSessionMaterialHash: true, async revokeSelf() { return { revoked: true }; } }, platformSessionWebAuthnRepository: { async createPlatformSessionChallenge() {}, async findPlatformSessionChallenge() { return null; }, async claimPlatformSessionChallenge() {}, async failPlatformSessionChallenge() {}, async completePlatformSessionChallenge() {}, async findPlatformCredentialForSession() {}, async advancePlatformCredentialCounter() {}, async issuePlatformSession() {} }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), createProviderOperationRepository: createProviderOperationRepositoryFactory(), managedSignerOperationGate: { async track(operation) { return operation(); }, assertAccepting() {} }, trackInFlight: async (operation) => { promotionInFlightCalls += 1; return operation(); }, async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  let platformPromotionVerifier;
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   let signerHealthy = true;
   let qualificationSignerHealthy = true;
   let possessionSignerHealthy = true;
   let refreshSignerHealthy = true;
+  let capabilitySignerHealthy = true;
+  let controlBundleSignerHealthy = true;
+  let auditAnchorSignerHealthy = true;
+  let promotionSignerHealthy = true;
   const provider = signerProvider(value);
   const publicKeyMetadata = provider.publicKeyMetadata;
   provider.publicKeyMetadata = async (input) => {
@@ -162,53 +257,125 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!refreshSignerHealthy) throw new Error("simulated refresh provider outage");
     return refreshPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: purposeProvider(value.controlBundleKeys, 2), capabilitySignerProvider: purposeProvider(value.capabilityKeys, 1), auditAnchorSignerProvider: purposeProvider(value.auditAnchorKeys, 1), promotionEvidenceSignerProvider: purposeProvider(value.promotionEvidenceKeys, 3), async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const promotionProvider = purposeProvider(value.promotionEvidenceKeys, 3);
+  const promotionPublicKeyMetadata = promotionProvider.publicKeyMetadata;
+  promotionProvider.publicKeyMetadata = async (input) => {
+    if (!promotionSignerHealthy) throw new Error("simulated promotion provider outage");
+    return promotionPublicKeyMetadata(input);
+  };
+  const capabilityProvider = purposeProvider(value.capabilityKeys, 1);
+  const capabilityPublicKeyMetadata = capabilityProvider.publicKeyMetadata;
+  capabilityProvider.publicKeyMetadata = async (input) => {
+    if (!capabilitySignerHealthy) throw new Error("simulated capability provider outage");
+    return capabilityPublicKeyMetadata(input);
+  };
+  const controlBundleProvider = purposeProvider(value.controlBundleKeys, 2);
+  const controlBundlePublicKeyMetadata = controlBundleProvider.publicKeyMetadata;
+  controlBundleProvider.publicKeyMetadata = async (input) => {
+    if (!controlBundleSignerHealthy) throw new Error("simulated ControlBundle provider outage");
+    return controlBundlePublicKeyMetadata(input);
+  };
+  const auditAnchorProvider = purposeProvider(value.auditAnchorKeys, 1);
+  const auditAnchorPublicKeyMetadata = auditAnchorProvider.publicKeyMetadata;
+  auditAnchorProvider.publicKeyMetadata = async (input) => {
+    if (!auditAnchorSignerHealthy) throw new Error("simulated audit anchor provider outage");
+    return auditAnchorPublicKeyMetadata(input);
+  };
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: controlBundleProvider, capabilitySignerProvider: capabilityProvider, auditAnchorSignerProvider: auditAnchorProvider, promotionEvidenceSignerProvider: promotionProvider, async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { platformPromotionVerifier = input.platformPromotionVerifyEvidence; calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
+  assert.equal(typeof runtime.hostedBootstrapRuntime?.api?.handle, "function");
+  assert.equal(runtime.hostedBootstrapRuntime.config.origin, env.AGENTPASS_CONSOLE_ORIGIN);
+  assert.equal(runtime.hostedBootstrapRuntime.config.rpId, env.AGENTPASS_WEBAUTHN_RP_ID);
+  assert.equal(Object.hasOwn(runtime.hostedBootstrapRuntime.config, "csrfKey"), false);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function", ownerRecoveryPublisher]);
   assert.equal(calls[1], "kms");
-  assert.deepEqual(calls[2].slice(0, 4), ["human", "https://console.example.test", "example.test", CURSOR_SECRET]);
-  assert.equal(Buffer.from(calls[2][4]).toString("base64url"), env.AGENTPASS_HUMAN_AUTH_SECRET);
-  assert.equal(calls[2][5].issuer, "agentpass-console");
-  assert.equal(calls[2][5].audience, "agentpass-cloud-session");
-  assert.equal(calls[2][5].keyId, "console-2026-08");
-  assert.match(calls[2][5].publicKey, /BEGIN PUBLIC KEY/);
-  assert.equal(typeof calls[2][6].signAgentSessionGrant, "function");
-  assert.equal(typeof calls[2][7].signQualificationGrantBatchManifest, "function");
+  const humanCall = calls.find((entry) => Array.isArray(entry) && entry[0] === "human");
+  assert.deepEqual(humanCall.slice(0, 4), ["human", "https://console.example.test", "example.test", CURSOR_SECRET]);
+  assert.equal(Buffer.from(humanCall[4]).toString("base64url"), env.AGENTPASS_HUMAN_AUTH_SECRET);
+  assert.equal(humanCall[5].issuer, "agentpass-console");
+  assert.equal(humanCall[5].audience, "agentpass-cloud-session");
+  assert.equal(humanCall[5].keyId, "console-2026-08");
+  assert.match(humanCall[5].publicKey, /BEGIN PUBLIC KEY/);
+  assert.equal(typeof humanCall[6].signAgentSessionGrant, "function");
+  assert.equal(typeof humanCall[7].signQualificationGrantBatchManifest, "function");
   assert.equal(typeof runtime.auditAnchorSigner.signAuditAnchor, "function");
   assert.equal(runtime.auditAnchorSigner.key_id, env.AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID);
   assert.equal(typeof runtime.auditExportIssuanceService.issueAuditExport, "function");
   assert.equal(typeof runtime.auditExportIssuanceService.replayAuditExport, "function");
   assert.equal(typeof runtime.auditExportIssuanceService.retrieveAuditExport, "function");
-  assert.equal(typeof runtime.promotionEvidenceSigner.signPromotionEvidence, "function");
-  assert.equal(runtime.promotionEvidenceSigner.key_id, env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID);
+  assert.equal(runtime.platformPromotionIssuanceService, undefined);
+  assert.equal(runtime.platformOperatorAuthorizer, undefined);
+  assert.equal(typeof runtime.platformPromotionHttpApi.handle, "function");
+  assert.equal(typeof runtime.platformPromotionReadiness, "function");
+  assert.deepEqual(await runtime.platformPromotionReadiness(), { enabled: true, ok: true, code: "ready" });
+  promotionSignerHealthy = false;
+  assert.deepEqual(await runtime.platformPromotionReadiness(), { enabled: true, ok: false, code: "platform_promotion_unavailable" });
+  promotionSignerHealthy = true;
+  const authorizationBinding = calls.find((entry) => Array.isArray(entry) && entry[0] === "platform-authorization");
+  assert.deepEqual(authorizationBinding[1], { keyId: env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID, keyVersion: 1, lifecycleVersion: 1 });
+  const promotionResponse = await runtime.platformPromotionHttpApi.handle({
+    method: "POST",
+    url: "/api/platform/v1/promotions",
+    headers: {
+      origin: "https://console.example.test",
+      "content-type": "application/json",
+      cookie: `__Host-agentpass_platform_session=${Buffer.alloc(32, 0x11).toString("base64url")}`,
+      "agentpass-platform-csrf": Buffer.alloc(32, 0x22).toString("base64url"),
+      "agentpass-platform-proof-id": "55555555-5555-4555-8555-555555555555",
+      "agentpass-platform-jti": "77777777-7777-4777-8777-777777777777",
+      "idempotency-key": "runtime-platform-intent-1"
+    },
+    body: JSON.stringify({
+      operation: "platform.promotion.issue",
+      organization_id: "33333333-3333-4333-8333-333333333333",
+      promotion_id: "11111111-1111-4111-8111-111111111111",
+      deployment_id: "cloud-prod-2026-08",
+      environment: "production",
+      candidate_id: `release-pkg-sha256-v1-${"a".repeat(64)}`
+    })
+  });
+  assert.equal(promotionResponse.status, 409, JSON.stringify(promotionResponse.body));
+  assert.equal(promotionInFlightCalls, 1);
+  assert.equal(Object.hasOwn(runtime, "promotionEvidenceSigner"), false);
+  assert.equal(typeof platformPromotionVerifier, "function");
+  const promotionEvidence = createPromotionEvidenceFixture(value);
+  assert.equal(await platformPromotionVerifier(promotionEvidence.envelope), false, "promotion verification must reject missing authoritative context");
+  assert.equal(await platformPromotionVerifier(promotionEvidence.envelope, promotionEvidence.context), true);
   assert.equal(runtime.config.auditAnchorTimeoutMs, 5_000);
   assert.equal(runtime.config.promotionEvidenceTimeoutMs, 5_000);
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
   assert.equal(runtime.config.tokenRecordsPath, null);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
   assert.equal(JSON.stringify(runtime.config).includes(env.AGENTPASS_HUMAN_AUTH_SECRET), false);
+  const directReady = await dispatchServer(runtime.server, {
+    url: "/health/ready",
+    headers: { "agentpass-operational-token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET }
+  });
+  assert.equal(directReady.statusCode, 200);
+  const directReadyBody = JSON.parse(directReady.body);
+  assert.deepEqual(directReadyBody.checks.platform_promotion, { enabled: true, ok: true, code: "ready" }, JSON.stringify(directReadyBody));
+  const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
+  assert.deepEqual(hostedSignerCheckNames.slice().sort(), Object.keys(directReadyBody.checks).filter((key) => key.endsWith("_signer")).sort());
+  assert.equal(new Set(hostedSignerCheckNames.map((name) => directReadyBody.checks[name].purpose)).size, 8);
+  assert.equal(hostedSignerCheckNames.every((name) => directReadyBody.checks[name].ok === true), true);
+  assert.doesNotMatch(JSON.stringify(directReadyBody), /BEGIN (?:PUBLIC|PRIVATE) KEY|PRIVATE KEY|tenant_id|request_bytes/iu);
+  promotionSignerHealthy = false;
+  const directDegraded = await dispatchServer(runtime.server, {
+    url: "/health/ready",
+    headers: { "agentpass-operational-token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET }
+  });
+  assert.equal(directDegraded.statusCode, 503);
+  assert.equal(JSON.parse(directDegraded.body).code, "promotion_evidence_signer_unavailable");
+  assert.equal(JSON.parse(directDegraded.body).checks.promotion_evidence_signer.ok, false);
+  promotionSignerHealthy = true;
   const address = await runtime.listen();
   const probeHeaders = { "AgentPass-Operational-Token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET };
   const ready = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(ready.status, 200);
   const readyBody = await ready.json();
   assert.equal(readyBody.checks.agent_session_signer.ok, true);
-  assert.deepEqual(Object.keys(readyBody.checks).filter((key) => key.endsWith("_signer")).sort(), [
-    "agent_session_signer",
-    "audit_anchor_signer",
-    "capability_signer",
-    "control_bundle_signer",
-    "possession_receipt_signer",
-    "promotion_evidence_signer",
-    "qualification_manifest_signer",
-    "refresh_hint_signer"
-  ]);
-  for (const name of ["agent_session_signer", "audit_anchor_signer", "capability_signer", "control_bundle_signer", "possession_receipt_signer", "promotion_evidence_signer", "qualification_manifest_signer", "refresh_hint_signer"]) {
-    assert.equal(readyBody.checks[name].ok, true);
-    assert.equal(readyBody.checks[name].algorithm, "ed25519");
-    assert.match(readyBody.checks[name].public_key_fingerprint, /^[0-9a-f]{64}$/u);
-  }
+  assert.deepEqual(readyBody.checks.platform_promotion, { enabled: true, ok: true, code: "ready" });
   signerHealthy = false;
   const degraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(degraded.status, 503);
@@ -230,6 +397,26 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(possessionDegradedBody.code, "possession_receipt_signer_unavailable");
   assert.deepEqual(possessionDegradedBody.checks.possession_receipt_signer, { ok: false, purpose: "device-enrollment-possession-receipt", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
   possessionSignerHealthy = true;
+  capabilitySignerHealthy = false;
+  const capabilityDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(capabilityDegraded.status, 503);
+  assert.equal((await capabilityDegraded.json()).code, "capability_signer_unavailable");
+  capabilitySignerHealthy = true;
+  controlBundleSignerHealthy = false;
+  const controlBundleDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(controlBundleDegraded.status, 503);
+  assert.equal((await controlBundleDegraded.json()).code, "control_bundle_signer_unavailable");
+  controlBundleSignerHealthy = true;
+  auditAnchorSignerHealthy = false;
+  const auditAnchorDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(auditAnchorDegraded.status, 503);
+  assert.equal((await auditAnchorDegraded.json()).code, "audit_anchor_signer_unavailable");
+  auditAnchorSignerHealthy = true;
+  promotionSignerHealthy = false;
+  const promotionDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(promotionDegraded.status, 503);
+  assert.equal((await promotionDegraded.json()).code, "promotion_evidence_signer_unavailable");
+  promotionSignerHealthy = true;
   refreshSignerHealthy = false;
   const refreshDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(refreshDegraded.status, 503);
@@ -252,7 +439,7 @@ test("production human auth fails closed without PostgreSQL capability authority
     qualificationManifestSignerProvider: qualificationSignerProvider(value),
     possessionReceiptSignerProvider: possessionSignerProvider(value),
     refreshHintSignerProvider: refreshSignerProvider(value),
-    postgresFactory: async () => ({ pool: {}, humanRepository: {}, async close() { closed = true; } }),
+    postgresFactory: async () => ({ pool: {}, humanRepository: {}, managedSignerOperationGate: { async track(operation) { return operation(); }, assertAccepting() {} }, async close() { closed = true; } }),
     humanAuthFactory: () => { throw new Error("human auth must not be constructed"); }
   }), /capability authority is unavailable/);
   assert.equal(closed, true);
@@ -320,11 +507,23 @@ function hostedEnv(value) {
     AGENTPASS_CLOUD_DATA_DIR: undefined,
     AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined,
     AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: undefined,
-    AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_DATABASE_URL: "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_MIGRATION_DATABASE_URL: "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_SIGNER_DATABASE_URL: "postgresql://agentpass_signer:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_MAINTENANCE_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
     AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
     AGENTPASS_WEBAUTHN_RP_ID: "example.test",
     AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,
     AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x43).toString("base64url"),
+    AGENTPASS_GITHUB_CLIENT_ID: "agentpass-runtime-test",
+    AGENTPASS_GITHUB_CLIENT_SECRET: "github-runtime-test-secret",
+    AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/api/auth/bootstrap/github/callback",
+    AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: "https://console.example.test/onboarding",
+    AGENTPASS_HOSTED_PKCE_KEY_ID: "hosted-pkce-v1",
+    AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x71).toString("base64url"),
+    AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x72).toString("base64url"),
+    AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x73).toString("base64url"),
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
     AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"),
     AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console",
@@ -418,6 +617,73 @@ function purposeProvider(keys, version = 1) {
     version,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, keys.privateKey); }
+  };
+}
+
+function createPromotionEvidenceFixture(value) {
+  const now = Date.now() - 1_000;
+  const productPkgSha256 = "a".repeat(64);
+  const statement = normalizePromotionEvidenceV3Statement({
+    version: PROMOTION_EVIDENCE_V3_VERSION,
+    type: PROMOTION_EVIDENCE_V3_TYPE,
+    promotion_id: "11111111-1111-4111-8111-111111111111",
+    deployment_id: "agentpass-cloud",
+    environment: "production",
+    candidate_id: `release-pkg-sha256-v1-${productPkgSha256}`,
+    source_commit: "b".repeat(40),
+    source_tree: "c".repeat(40),
+    product_pkg_sha256: productPkgSha256,
+    image_digest: `sha256:${"d".repeat(64)}`,
+    sbom_sha256: "e".repeat(64),
+    qualification_report_digests: ["f".repeat(64)],
+    release_manifest_schema_version: 4,
+    release_manifest_sha256: "0".repeat(64),
+    platform_approval_id: "22222222-2222-4222-8222-222222222222",
+    platform_approval_digest: "1".repeat(64),
+    approval_state: "approved",
+    purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+    protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+    signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+    lifecycle_version: 1,
+    key_id: "promotion-evidence-2026-08",
+    key_version: 1,
+    issued_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 60_000).toISOString()
+  }, { now, maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS });
+  const signature = crypto.sign(null, promotionEvidenceV3SigningData(statement, { now, maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS }), value.promotionEvidenceKeys.privateKey).toString("base64url");
+  const signerKeyFingerprint = promotionEvidenceV3PublicKeyFingerprint(value.promotionEvidenceKeys.publicKey);
+  return {
+    envelope: {
+      version: PROMOTION_EVIDENCE_V3_VERSION,
+      type: PROMOTION_EVIDENCE_V3_TYPE,
+      statement,
+      statement_hash: promotionEvidenceV3StatementHash(statement),
+      signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      signer_key_fingerprint: signerKeyFingerprint,
+      signature
+    },
+    context: {
+      deployment_id: statement.deployment_id,
+      environment: statement.environment,
+      candidate_id: statement.candidate_id,
+      product_pkg_sha256: statement.product_pkg_sha256,
+      image_digest: statement.image_digest,
+      sbom_sha256: statement.sbom_sha256,
+      platform_approval_id: statement.platform_approval_id,
+      platform_approval_digest: statement.platform_approval_digest,
+      source_commit: statement.source_commit,
+      source_tree: statement.source_tree,
+      release_manifest_sha256: statement.release_manifest_sha256,
+      release_manifest_schema_version: statement.release_manifest_schema_version,
+      qualification_report_digests: statement.qualification_report_digests,
+      purpose: statement.purpose,
+      protocol_version: statement.protocol_version,
+      signing_version: statement.signing_version,
+      key_id: statement.key_id,
+      key_version: statement.key_version,
+      lifecycle_version: statement.lifecycle_version,
+      signer_key_fingerprint: signerKeyFingerprint
+    }
   };
 }
 

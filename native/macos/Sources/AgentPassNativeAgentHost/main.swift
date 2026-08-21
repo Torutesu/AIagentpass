@@ -7,8 +7,6 @@ enum AgentHostContract {
     static let machServiceName = "dev.agentpass.agent-session"
     static let probeSessionID = "00000000-0000-4000-8000-000000000000"
     static let activationDocumentFD: Int32 = 3
-    static let maximumActivationDocumentBytes = 16 * 1024
-    static let maximumProofBytes = AgentPassAgentSessionRequest.maximumProofBytes
     static let nonceBytes = 32
     static let xpcTimeout: DispatchTimeInterval = .seconds(5)
     static let statusPollInterval: DispatchTimeInterval = .seconds(1)
@@ -35,6 +33,99 @@ private struct ActivationOutput: Encodable {
     let error: String?
 }
 
+private func writeActivation(_ output: ActivationOutput) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = (try? encoder.encode(output)) ?? Data("{\"error\":\"encoding_failure\",\"ok\":false}\n".utf8)
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+}
+
+private func runHostLaunchPlan(projectPath: String) -> Never {
+    let handoff: NativeAgentLaunchAuthorityHandoff
+    do {
+        handoff = try readLaunchAuthorityHandoff()
+    } catch let error as NativeAgentLaunchAuthorityHandoffError {
+        emitActivation(
+            ActivationOutput(
+                ok: false,
+                operation: "host-launch",
+                status: "rejected",
+                error: "launch_plan_authority_" + error.stableCode
+            ),
+            status: 2
+        )
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "launch_plan_authority_rejected"),
+            status: 2
+        )
+    }
+
+    let plan: NativeAgentHostLaunchPlan
+    do {
+        plan = try NativeAgentHostLaunchPlan(projectPath: projectPath, authorityHandoff: handoff)
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "launch_plan_project_rejected"),
+            status: 2
+        )
+    }
+
+    do {
+        let serviceClient = AgentHostServiceClient(handoff: handoff)
+        let terminalController = ActivationSignalController()
+        terminalController.install()
+        defer { terminalController.shutdown() }
+        serviceClient.connection.invalidationHandler = {
+            terminalController.requestStop()
+        }
+        terminalController.setConnection(serviceClient.connection)
+        let connection = try NativeAgentHostConnectionBinding(
+            connectionID: "agent-host",
+            agentID: handoff.agentID
+        )
+        let runtime = try NativeAgentHostRuntime(
+            plan: plan,
+            connection: connection,
+            supervisor: NativeAgentHostChildSupervisor(),
+            adapter: AgentHostServiceLifecycleAdapter(client: serviceClient)
+        )
+        let coordinator = try runtime.start()
+        terminalController.markBootstrapKnown()
+        terminalController.setStopHandler {
+            _ = try? coordinator.requestTermination()
+        }
+        // Keep the Host process alive for the entire child/session lifetime.
+        // The authenticated child XPC client is connection-owned by the
+        // supervisor; returning from this function would invalidate it and
+        // silently strand the child without its signing broker.
+        writeActivation(ActivationOutput(ok: true, operation: "host-launch", status: "active", error: nil))
+        _ = try coordinator.waitForChild()
+        writeActivation(ActivationOutput(ok: true, operation: "host-launch", status: "closed", error: nil))
+        exit(0)
+    } catch let error as NativeAgentHostLifecycleError where error == .sessionCloseFailed {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "agent_session_close_failed"),
+            status: 1
+        )
+    } catch let error as NativeAgentHostLifecycleError where error == .signalFailed {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "host_child_termination_failed"),
+            status: 1
+        )
+    } catch let error as NativeAgentHostLifecycleAdapterError where error == .unavailable {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "rejected", error: "service_binding_contract_unavailable"),
+            status: 2
+        )
+    } catch {
+        emitActivation(
+            ActivationOutput(ok: false, operation: "host-launch", status: "error", error: "host_launch_rejected"),
+            status: 1
+        )
+    }
+}
+
 private final class ProbeResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ProbeOutput?
@@ -52,154 +143,41 @@ private final class ProbeResultBox: @unchecked Sendable {
     }
 }
 
-/// The only document accepted by `qualification-activate`.
-///
-/// The proof is deliberately a String rather than a decoded JSON object. Its
-/// UTF-8 bytes are handed to the XPC DTO unchanged; this host never verifies,
-/// normalizes, logs, or re-encodes authority-bearing proof material.
-struct AgentHostActivationDocument: Equatable, Sendable {
-    let schemaVersion: Int
-    let agentID: String
-    let agentKind: String
-    let requestedTTLSeconds: Int
-    let proof: String
-
-    static let expectedSchemaVersion = 1
-    static let expectedKeys: Set<String> = [
-        "schema_version", "agent_id", "agent_kind", "requested_ttl_seconds", "proof"
-    ]
-
-    enum DecodeError: Error, Equatable {
-        case malformed
-        case fields
-        case oversized
-
-        var stableCode: String {
-            switch self {
-            case .malformed: return "malformed"
-            case .fields: return "invalid_fields"
-            case .oversized: return "oversized"
-            }
+private func readLaunchAuthorityHandoff(
+    from descriptor: Int32 = AgentHostContract.activationDocumentFD
+) throws -> NativeAgentLaunchAuthorityHandoff {
+    var descriptorInfo = stat()
+    guard Darwin.fstat(descriptor, &descriptorInfo) == 0 else {
+        throw NativeAgentLaunchAuthorityHandoffError.malformed
+    }
+    let fileType = descriptorInfo.st_mode & S_IFMT
+    guard fileType == S_IFIFO || fileType == S_IFSOCK else {
+        // Never consume authority from a seekable regular file or another
+        // replayable descriptor type.
+        throw NativeAgentLaunchAuthorityHandoffError.malformed
+    }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4 * 1024)
+    defer {
+        _ = Darwin.close(descriptor)
+        data.resetBytes(in: data.startIndex..<data.endIndex)
+        _ = buffer.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+    }
+    while true {
+        let count = buffer.withUnsafeMutableBytes { bytes in
+            Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+        }
+        if count == 0 { break }
+        if count < 0 {
+            if errno == EINTR { continue }
+            throw NativeAgentLaunchAuthorityHandoffError.malformed
+        }
+        data.append(buffer, count: count)
+        if data.count > NativeAgentLaunchAuthorityHandoff.maximumDocumentBytes {
+            throw NativeAgentLaunchAuthorityHandoffError.oversized
         }
     }
-
-    private struct CodableDocument: Decodable {
-        let schemaVersion: Int
-        let agentID: String
-        let agentKind: String
-        let requestedTTLSeconds: Int
-        let proof: String
-
-        enum CodingKeys: String, CodingKey, CaseIterable {
-            case schemaVersion = "schema_version"
-            case agentID = "agent_id"
-            case agentKind = "agent_kind"
-            case requestedTTLSeconds = "requested_ttl_seconds"
-            case proof
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            guard Set(container.allKeys.map(\.stringValue)) == AgentHostActivationDocument.expectedKeys else {
-                throw DecodeError.fields
-            }
-            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-            agentID = try container.decode(String.self, forKey: .agentID)
-            agentKind = try container.decode(String.self, forKey: .agentKind)
-            requestedTTLSeconds = try container.decode(Int.self, forKey: .requestedTTLSeconds)
-            proof = try container.decode(String.self, forKey: .proof)
-        }
-    }
-
-    init(schemaVersion: Int, agentID: String, agentKind: String, requestedTTLSeconds: Int, proof: String) throws {
-        guard schemaVersion == Self.expectedSchemaVersion,
-              UUID(uuidString: agentID) != nil,
-              agentKind == AgentPassAgentAdapterKind.claudeCode.rawValue || agentKind == AgentPassAgentAdapterKind.cursor.rawValue,
-              (AgentPassAgentBootstrapRequest.minimumSessionTTLSeconds...AgentPassAgentBootstrapRequest.maximumSessionTTLSeconds).contains(requestedTTLSeconds),
-              !proof.isEmpty,
-              Data(proof.utf8).count >= AgentPassAgentSessionRequest.minimumProofBytes,
-              Data(proof.utf8).count <= AgentHostContract.maximumProofBytes,
-              proof.utf8.first == 123,
-              proof.utf8.last == 125,
-              (try? JSONSerialization.jsonObject(with: Data(proof.utf8), options: [.fragmentsAllowed])) is [String: Any] else {
-            throw DecodeError.fields
-        }
-        self.schemaVersion = schemaVersion
-        self.agentID = agentID
-        self.agentKind = agentKind
-        self.requestedTTLSeconds = requestedTTLSeconds
-        self.proof = proof
-    }
-
-    static func decode(_ data: Data) throws -> AgentHostActivationDocument {
-        guard !data.isEmpty, data.count <= AgentHostContract.maximumActivationDocumentBytes else {
-            throw DecodeError.oversized
-        }
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .useDefaultKeys
-        let decoded: CodableDocument
-        do {
-            decoded = try decoder.decode(CodableDocument.self, from: data)
-        } catch let error as DecodeError {
-            throw error
-        } catch {
-            throw DecodeError.malformed
-        }
-        let canonicalObject: [String: Any] = [
-            "schema_version": decoded.schemaVersion,
-            "agent_id": decoded.agentID,
-            "agent_kind": decoded.agentKind,
-            "requested_ttl_seconds": decoded.requestedTTLSeconds,
-            "proof": decoded.proof
-        ]
-        guard let canonicalData = try? JSONSerialization.data(
-            withJSONObject: canonicalObject,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        ), canonicalData == data else {
-            throw DecodeError.malformed
-        }
-        let proofData = Data(decoded.proof.utf8)
-        guard let proofObject = try? NativeStrictJSON.object(
-            from: proofData,
-            maxBytes: AgentHostContract.maximumProofBytes,
-            maxDepth: 32
-        ), let canonicalProof = try? NativeStrictJSON.data(proofObject), canonicalProof == proofData else {
-            throw DecodeError.fields
-        }
-        do {
-            return try AgentHostActivationDocument(
-                schemaVersion: decoded.schemaVersion,
-                agentID: decoded.agentID,
-                agentKind: decoded.agentKind,
-                requestedTTLSeconds: decoded.requestedTTLSeconds,
-                proof: decoded.proof
-            )
-        } catch let error as DecodeError {
-            throw error
-        } catch {
-            throw DecodeError.fields
-        }
-    }
-
-    static func read(from descriptor: Int32 = AgentHostContract.activationDocumentFD) throws -> AgentHostActivationDocument {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { bytes in
-                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
-            }
-            if count == 0 { break }
-            if count < 0 {
-                if errno == EINTR { continue }
-                throw DecodeError.malformed
-            }
-            data.append(buffer, count: count)
-            if data.count > AgentHostContract.maximumActivationDocumentBytes {
-                throw DecodeError.oversized
-            }
-        }
-        return try decode(data)
-    }
+    return try NativeAgentLaunchAuthorityHandoff.decode(data)
 }
 
 private func emitProbe(_ output: ProbeOutput, status: Int32) -> Never {
@@ -224,6 +202,113 @@ private func randomNonce() -> Data? {
         SecRandomCopyBytes(kSecRandomDefault, bytes.count, bytes.baseAddress!)
     }
     return result == errSecSuccess ? nonce : nil
+}
+
+/// The launch command owns one authenticated Service connection. All
+/// lifecycle hooks below use that same connection; no session identifier or
+/// binding material is accepted from argv, environment, or the child.
+private final class AgentHostServiceClient: @unchecked Sendable {
+    let connection: NSXPCConnection
+    let proxy: AgentPassAgentXPCProtocol
+    let handoff: NativeAgentLaunchAuthorityHandoff
+
+    init(handoff: NativeAgentLaunchAuthorityHandoff) {
+        self.handoff = handoff
+        let connection = NSXPCConnection(machServiceName: AgentHostContract.machServiceName, options: .privileged)
+        connection.remoteObjectInterface = AgentPassAgentXPCInterface.make()
+        connection.resume()
+        self.connection = connection
+        self.proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as! AgentPassAgentXPCProtocol
+    }
+
+    deinit { connection.invalidate() }
+
+    func close(sessionID: String, reason: AgentPassAgentSessionCloseReason = .clientShutdown) -> Bool {
+        guard let request = AgentPassAgentCloseSessionRequest(
+            sessionID: sessionID,
+            reason: reason.rawValue
+        ) else { return false }
+        guard case .response = waitForReply({ reply in
+            proxy.closeAgentSession(request, withReply: reply)
+        }) else { return false }
+        return true
+    }
+}
+
+private struct AgentHostServiceLifecycleAdapter: NativeAgentHostLifecycleAdapter {
+    let client: AgentHostServiceClient
+
+    func hooks(for plan: NativeAgentHostLaunchPlan) throws -> NativeAgentHostLifecycleCoordinatorHooks {
+        guard plan.authorityHandoff == client.handoff else {
+            throw NativeAgentHostLifecycleAdapterError.unavailable
+        }
+
+        return NativeAgentHostLifecycleCoordinatorHooks(
+            bootstrap: { connection, context in
+                guard connection.agentID == plan.authorityHandoff.agentID else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard let nonce = randomNonce(),
+                      let request = AgentPassAgentBootstrapRequest(
+                        agentID: connection.agentID,
+                        adapterKind: context.adapter.rawValue,
+                        requestedTTLSeconds: context.requestedTTLSeconds,
+                        bootstrapNonce: nonce
+                      ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let bootstrap) = waitForReply({ reply in
+                    client.proxy.bootstrapAgent(request, withReply: reply)
+                }),
+                let sessionRequest = AgentPassAgentSessionRequest(
+                    bootstrapID: bootstrap.bootstrapID,
+                    proof: plan.authorityHandoff.proof
+                ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let session) = waitForReply({ reply in
+                    client.proxy.startAgentSession(sessionRequest, withReply: reply)
+                }),
+                let binding = try? NativeAgentSessionBinding(
+                    agentID: connection.agentID,
+                    deviceID: session.deviceID,
+                    processBindingDigest: session.processBindingDigest,
+                    ancestryBindingDigest: session.ancestryBindingDigest,
+                    worktreeBindingDigest: session.worktreeBindingDigest,
+                    controlSequence: session.controlSequence,
+                    authorityGeneration: session.authorityGeneration,
+                    keyGeneration: session.keyGeneration
+                ),
+                let activation = try? NativeAgentHostQualifiedSessionActivation(
+                    sessionID: session.sessionID,
+                    binding: binding
+                ) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                let sessionID = session.sessionID
+                return NativeAgentHostLifecycleBootstrapReceipt(
+                    activation: activation,
+                    rollback: { _ = client.close(sessionID: sessionID) }
+                )
+            },
+            reobserveAuthority: { identity in
+                guard let request = AgentPassAgentSessionStatusRequest(sessionID: identity.sessionID) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                guard case .response(let status) = waitForReply({ reply in
+                    client.proxy.agentSessionStatus(request, withReply: reply)
+                }) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+                return status.status == "active" ? .authorized : .lost
+            },
+            close: { identity, _ in
+                guard client.close(sessionID: identity.sessionID) else {
+                    throw NativeAgentHostLifecycleAdapterError.unavailable
+                }
+            }
+        )
+    }
 }
 
 private enum XPCReplyResult<T> {
@@ -267,6 +352,7 @@ private final class ActivationSignalController: @unchecked Sendable {
     private var stopRequested = false
     private var bootstrapKnown = false
     private var connection: NSXPCConnection?
+    private var stopHandler: (@Sendable () -> Void)?
     private var termSource: DispatchSourceSignal?
     private var intSource: DispatchSourceSignal?
 
@@ -302,6 +388,14 @@ private final class ActivationSignalController: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setStopHandler(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        stopHandler = handler
+        let alreadyStopped = stopRequested
+        lock.unlock()
+        if alreadyStopped { handler() }
+    }
+
     var isStopRequested: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -313,8 +407,10 @@ private final class ActivationSignalController: @unchecked Sendable {
         stopRequested = true
         let shouldInvalidate = !bootstrapKnown
         let connection = self.connection
+        let stopHandler = self.stopHandler
         lock.unlock()
         if shouldInvalidate { connection?.invalidate() }
+        stopHandler?()
         wake.signal()
     }
 
@@ -345,10 +441,10 @@ private func closeSession(
 }
 
 private func runQualificationActivation() -> Never {
-    let document: AgentHostActivationDocument
+    let document: NativeAgentLaunchAuthorityHandoff
     do {
-        document = try AgentHostActivationDocument.read()
-    } catch let error as AgentHostActivationDocument.DecodeError {
+        document = try readLaunchAuthorityHandoff()
+    } catch let error as NativeAgentLaunchAuthorityHandoffError {
         emitActivation(
             ActivationOutput(ok: false, operation: "qualification-activate", status: "rejected", error: "activation_document_\(error.stableCode)"),
             status: 2
@@ -363,7 +459,7 @@ private func runQualificationActivation() -> Never {
     guard let nonce = randomNonce(),
           let bootstrapRequest = AgentPassAgentBootstrapRequest(
             agentID: document.agentID,
-            adapterKind: document.agentKind,
+            adapterKind: document.agentKind.rawValue,
             requestedTTLSeconds: document.requestedTTLSeconds,
             bootstrapNonce: nonce
           ) else {
@@ -409,7 +505,7 @@ private func runQualificationActivation() -> Never {
     guard !signalController.isStopRequested,
           let sessionRequest = AgentPassAgentSessionRequest(
             bootstrapID: bootstrap.bootstrapID,
-            proof: Data(document.proof.utf8)
+            proof: document.proof
           ) else {
         finishActivation(
             ActivationOutput(ok: false, operation: "qualification-activate", status: "interrupted", error: "activation_interrupted"),
@@ -549,13 +645,16 @@ private func runStatusProbe() -> Never {
 
 #if !AGENTPASS_HOST_TESTING
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.isEmpty || arguments == ["status"] || arguments == ["probe"] || arguments == ["qualification-activate"] else {
-    FileHandle.standardError.write(Data("Usage: agentpass-native-agent-host [status|probe|qualification-activate]\n".utf8))
+guard arguments.isEmpty || arguments == ["status"] || arguments == ["probe"] || arguments == ["qualification-activate"]
+    || (arguments.count == 2 && arguments[0] == "launch") else {
+    FileHandle.standardError.write(Data("Usage: agentpass-native-agent-host [status|probe|qualification-activate|launch PROJECT_PATH]\n".utf8))
     exit(2)
 }
 
 if arguments == ["qualification-activate"] {
     runQualificationActivation()
+} else if arguments.count == 2, arguments[0] == "launch" {
+    runHostLaunchPlan(projectPath: arguments[1])
 } else {
     runStatusProbe()
 }

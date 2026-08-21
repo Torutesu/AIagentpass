@@ -136,6 +136,7 @@ async function installRoutes(page: Page, role: BrowserRole, options: Readonly<{ 
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/auth/session/resume") return json(route, recoverySession(role));
     if (url.pathname === "/api/auth/session") return json(route, recoverySession(role));
 
     if (url.pathname.endsWith("/recovery-outbox/dead-letters") && request.method() === "GET") {

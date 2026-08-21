@@ -1,0 +1,41 @@
+{
+  "canonical_statement": "{\"agent_id\":\"33333333-3333-4333-8333-333333333333\",\"algorithm\":\"ed25519\",\"authority_generation\":7,\"capability_id\":\"55555555-5555-4555-8555-555555555555\",\"control_sequence\":12,\"device_id\":\"22222222-2222-4222-8222-222222222222\",\"expires_at\":\"2026-08-16T00:00:30.000Z\",\"issued_at\":\"2026-08-16T00:00:00.000Z\",\"issuer\":\"agentpass-cloud\",\"key_id\":\"git-commit-signing-v1\",\"key_purpose\":\"git.commit.sign\",\"max_signatures\":1,\"not_before\":\"2026-08-16T00:00:00.000Z\",\"one_use\":true,\"operation\":\"git.commit.sign\",\"organization_id\":\"11111111-1111-4111-8111-111111111111\",\"scope\":{\"branches\":{\"allow\":[\"feature/*\"],\"deny\":[\"main\"]},\"operations\":[\"git.commit.sign\"],\"remotes\":{\"allow\":[\"git@example.test:project.git\"],\"deny\":[]},\"repositories\":[\"/work/project\"]},\"sequence\":13,\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"type\":\"agentpass.agent-signing-capability\",\"version\":1}",
+  "statement_hash": "4841563067749d9c5b373dff231cbee57f39eaa4b2187ab157100e5c681afe04",
+  "signature_domain": "AgentPass-Agent-Signing-Capability-v1\u0000",
+  "signed_statement_bytes_base64": "QWdlbnRQYXNzLUFnZW50LVNpZ25pbmctQ2FwYWJpbGl0eS12MQB7ImFnZW50X2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwiYWxnb3JpdGhtIjoiZWQyNTUxOSIsImF1dGhvcml0eV9nZW5lcmF0aW9uIjo3LCJjYXBhYmlsaXR5X2lkIjoiNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1IiwiY29udHJvbF9zZXF1ZW5jZSI6MTIsImRldmljZV9pZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImV4cGlyZXNfYXQiOiIyMDI2LTA4LTE2VDAwOjAwOjMwLjAwMFoiLCJpc3N1ZWRfYXQiOiIyMDI2LTA4LTE2VDAwOjAwOjAwLjAwMFoiLCJpc3N1ZXIiOiJhZ2VudHBhc3MtY2xvdWQiLCJrZXlfaWQiOiJnaXQtY29tbWl0LXNpZ25pbmctdjEiLCJrZXlfcHVycG9zZSI6ImdpdC5jb21taXQuc2lnbiIsIm1heF9zaWduYXR1cmVzIjoxLCJub3RfYmVmb3JlIjoiMjAyNi0wOC0xNlQwMDowMDowMC4wMDBaIiwib25lX3VzZSI6dHJ1ZSwib3BlcmF0aW9uIjoiZ2l0LmNvbW1pdC5zaWduIiwib3JnYW5pemF0aW9uX2lkIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwic2NvcGUiOnsiYnJhbmNoZXMiOnsiYWxsb3ciOlsiZmVhdHVyZS8qIl0sImRlbnkiOlsibWFpbiJdfSwib3BlcmF0aW9ucyI6WyJnaXQuY29tbWl0LnNpZ24iXSwicmVtb3RlcyI6eyJhbGxvdyI6WyJnaXRAZXhhbXBsZS50ZXN0OnByb2plY3QuZ2l0Il0sImRlbnkiOltdfSwicmVwb3NpdG9yaWVzIjpbIi93b3JrL3Byb2plY3QiXX0sInNlcXVlbmNlIjoxMywic2Vzc2lvbl9pZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsInR5cGUiOiJhZ2VudHBhc3MuYWdlbnQtc2lnbmluZy1jYXBhYmlsaXR5IiwidmVyc2lvbiI6MX0=",
+  "envelope": {
+    "version": 1,
+    "type": "agentpass.agent-signing-capability",
+    "statement": {
+      "version": 1,
+      "type": "agentpass.agent-signing-capability",
+      "capability_id": "55555555-5555-4555-8555-555555555555",
+      "session_id": "44444444-4444-4444-8444-444444444444",
+      "organization_id": "11111111-1111-4111-8111-111111111111",
+      "device_id": "22222222-2222-4222-8222-222222222222",
+      "agent_id": "33333333-3333-4333-8333-333333333333",
+      "one_use": true,
+      "operation": "git.commit.sign",
+      "scope": {
+        "operations": ["git.commit.sign"],
+        "repositories": ["/work/project"],
+        "branches": {"allow": ["feature/*"], "deny": ["main"]},
+        "remotes": {"allow": ["git@example.test:project.git"], "deny": []}
+      },
+      "key_purpose": "git.commit.sign",
+      "key_id": "git-commit-signing-v1",
+      "algorithm": "ed25519",
+      "max_signatures": 1,
+      "issued_at": "2026-08-16T00:00:00.000Z",
+      "not_before": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2026-08-16T00:00:30.000Z",
+      "sequence": 13,
+      "control_sequence": 12,
+      "authority_generation": 7,
+      "issuer": "agentpass-cloud"
+    },
+    "statement_hash": "4841563067749d9c5b373dff231cbee57f39eaa4b2187ab157100e5c681afe04",
+    "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+  },
+  "schema_mismatch": "F1 review finding: a schema variant omitting statement.organization_id or statement.issued_at is incompatible with the Swift authority DTO. The checked-in schema is expected to retain both signed fields."
+}

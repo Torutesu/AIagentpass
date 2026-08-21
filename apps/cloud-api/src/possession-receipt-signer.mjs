@@ -25,6 +25,8 @@ const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
 const TEAM_ID = /^[A-Z0-9]{10}$/u;
 const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const CONTROL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const BUNDLE_PATH = /^\/v1\/organizations\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/bundles\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const STATEMENT_KEYS = Object.freeze([
   "version",
   "enrollment_id",
@@ -37,8 +39,11 @@ const STATEMENT_KEYS = Object.freeze([
   "device_key_fingerprint",
   "device_key_epoch",
   "challenge_nonce_digest",
+  "control",
   "issued_at"
 ]);
+const CONTROL_KEYS = Object.freeze(["format_epoch", "issuer", "key_id", "public_key", "bundle_path", "refresh_hint"]);
+const REFRESH_HINT_KEYS = Object.freeze(["key_id", "algorithm", "public_key"]);
 const METADATA_KEYS = Object.freeze(["key_id", "algorithm", "public_key"]);
 const MAX_STATEMENT_BYTES = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -81,6 +86,7 @@ export function normalizePossessionReceiptStatement(input) {
       device_key_fingerprint: exactPattern(input.device_key_fingerprint, FINGERPRINT),
       device_key_epoch: positiveInteger(input.device_key_epoch),
       challenge_nonce_digest: exactPattern(input.challenge_nonce_digest, SHA256),
+      control: normalizeControlTrustMetadata(input.control),
       issued_at: canonicalTimestamp(input.issued_at)
     };
     const encoded = canonicalJson(value);
@@ -325,6 +331,36 @@ function exactInteger(value, expected) {
 function positiveInteger(value) {
   if (!Number.isSafeInteger(value) || value < 1) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
   return value;
+}
+
+function normalizeControlTrustMetadata(input) {
+  if (!plainObject(input) || Object.keys(input).length !== CONTROL_KEYS.length || Object.keys(input).some((key) => !CONTROL_KEYS.includes(key))) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  if (input.format_epoch !== 2 || typeof input.issuer !== "string" || !CONTROL_ID.test(input.issuer)
+    || typeof input.key_id !== "string" || !CONTROL_ID.test(input.key_id)
+    || typeof input.bundle_path !== "string" || !BUNDLE_PATH.test(input.bundle_path)) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  const publicKey = canonicalEd25519PublicKey(input.public_key);
+  if (!plainObject(input.refresh_hint) || Object.keys(input.refresh_hint).length !== REFRESH_HINT_KEYS.length || Object.keys(input.refresh_hint).some((key) => !REFRESH_HINT_KEYS.includes(key))) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  if (typeof input.refresh_hint.key_id !== "string" || !CONTROL_ID.test(input.refresh_hint.key_id) || input.refresh_hint.algorithm !== "ed25519") fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  const refreshPublicKey = canonicalEd25519PublicKey(input.refresh_hint.public_key);
+  if (refreshPublicKey === publicKey) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  return Object.freeze({
+    format_epoch: 2,
+    issuer: input.issuer,
+    key_id: input.key_id,
+    public_key: publicKey,
+    bundle_path: input.bundle_path,
+    refresh_hint: Object.freeze({ key_id: input.refresh_hint.key_id, algorithm: "ed25519", public_key: refreshPublicKey })
+  });
+}
+
+function canonicalEd25519PublicKey(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 8192 || /PRIVATE\s+KEY/iu.test(value)) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  let key;
+  try { key = crypto.createPublicKey(value); } catch { fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT); }
+  if (key.type !== "public" || key.asymmetricKeyType !== "ed25519") fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  const canonical = key.export({ type: "spki", format: "pem" }).toString();
+  if (canonical !== value) fail(POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
+  return canonical;
 }
 
 function canonicalTimestamp(value) {

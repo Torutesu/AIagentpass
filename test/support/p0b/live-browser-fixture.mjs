@@ -11,6 +11,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SESSION_PATH = "/api/auth/session";
+const SESSION_CORRELATION_HEADER = "agentpass-p0b-session-correlation";
+const DEFAULT_STARTUP_TIMEOUT_MS = 90_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
 const USER_EMAILS = Object.freeze({
   owner: "p0b-owner@example.test",
   admin: "p0b-admin@example.test",
@@ -27,6 +30,84 @@ export class P0BLiveBrowserFixtureError extends Error {
 }
 
 /**
+ * Bound a lifecycle operation without abandoning a late result. When startup
+ * wins the deadline after allocating a harness, onLateSuccess gets the late
+ * value so the caller can close it and avoid orphaning its handles.
+ */
+export function runP0BLifecycle(operation, {
+  timeoutMs,
+  timeoutCode,
+  timeoutMessage = "P0-B live browser lifecycle timed out",
+  onLateSuccess,
+  onTimeout
+} = {}) {
+  if (typeof operation !== "function") throw new TypeError("P0-B lifecycle operation must be a function");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("P0-B lifecycle timeout is invalid");
+  if (typeof timeoutCode !== "string" || !/^[a-z][a-z0-9_]*$/u.test(timeoutCode)) throw new TypeError("P0-B lifecycle timeout code is invalid");
+  if (onLateSuccess !== undefined && typeof onLateSuccess !== "function") throw new TypeError("P0-B lifecycle late cleanup must be a function");
+  if (onTimeout !== undefined && typeof onTimeout !== "function") throw new TypeError("P0-B lifecycle timeout cleanup must be a function");
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (onTimeout) Promise.resolve().then(onTimeout).catch(() => {});
+      reject(new P0BLiveBrowserFixtureError(timeoutCode, timeoutMessage));
+    }, timeoutMs);
+
+    Promise.resolve()
+      .then(operation)
+      .then((value) => {
+        if (settled) {
+          if (onLateSuccess) Promise.resolve().then(() => onLateSuccess(value)).catch(() => {});
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+export function classifySessionBootstrap502(body, cloudProcessState, cloudReadinessState) {
+  if (cloudProcessState === "exited") return "cloud_exited";
+  if (cloudProcessState !== "running" || cloudReadinessState !== "ready") return "proxy_unavailable";
+  return body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && body.error
+    && typeof body.error === "object"
+    && !Array.isArray(body.error)
+    && body.error.code === "cloud_api_invalid_response"
+    ? "bff_invalid_response"
+    : "proxy_unavailable";
+}
+
+export function classifySessionBootstrap503(body) {
+  const code = body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && body.error
+    && typeof body.error === "object"
+    && !Array.isArray(body.error)
+    && typeof body.error.code === "string"
+    ? body.error.code
+    : "";
+  if (code === "human_session_unavailable") return "session_unavailable";
+  if (code === "human_auth_unavailable") return "human_auth_unavailable";
+  if (code === "rate_limiter_unavailable") return "rate_limiter_unavailable";
+  if (code === "cloud_api_unavailable") return "cloud_api_unavailable";
+  if (code === "identity_unavailable") return "identity_unavailable";
+  return "other";
+}
+
+/**
  * Start the existing P0-B process harness with a real human-auth tenant.
  *
  * The returned object intentionally contains only public test coordinates:
@@ -39,40 +120,49 @@ export async function startP0BLiveBrowserFixture({
   repoRoot = p0bRepositoryRoot(),
   consoleBuild = true,
   waitTimeoutMs = 20_000,
+  startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+  cleanupTimeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
   prepareDatabase
 } = {}) {
   if (prepareDatabase !== undefined && typeof prepareDatabase !== "function") {
     throw new TypeError("P0-B database preparation must be a function");
   }
+  if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1) throw new TypeError("P0-B startup timeout is invalid");
+  if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1) throw new TypeError("P0-B cleanup timeout is invalid");
 
   let seed;
   let databasePool;
   let harness;
   try {
-    harness = await startP0BHarness({
-      env,
-      repoRoot,
-      consoleBuild,
-      waitTimeoutMs,
-      prepareDatabase: async (context) => {
-        databasePool = context.pool;
-        seed = await seedP0BHumanBrowserDatabase(context);
-        if (prepareDatabase) {
-          try {
-            const safeContext = {
-              pool: context.pool,
-              organizationId: context.organizationId,
-              seed: publicSeed(seed)
-            };
-            await prepareDatabase(Object.freeze({
-              ...safeContext
-            }));
-          } catch {
-            throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database preparation failed");
+    harness = await runP0BLifecycle(() => startP0BHarness({
+        env,
+        repoRoot,
+        consoleBuild,
+        waitTimeoutMs,
+        prepareDatabase: async (context) => {
+          databasePool = context.pool;
+          seed = await seedP0BHumanBrowserDatabase(context);
+          if (prepareDatabase) {
+            try {
+              const safeContext = {
+                pool: context.pool,
+                organizationId: context.organizationId,
+                seed: publicSeed(seed)
+              };
+              await prepareDatabase(Object.freeze({
+                ...safeContext
+              }));
+            } catch {
+              throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database preparation failed");
+            }
           }
         }
-      }
-    });
+      }), {
+        timeoutMs: startupTimeoutMs,
+        timeoutCode: "startup_timeout",
+        timeoutMessage: "P0-B live browser fixture startup timed out",
+        onLateSuccess: (lateHarness) => lateHarness?.close?.()
+      });
   } catch (error) {
     if (error instanceof P0BSkip) throw error;
     if (error instanceof P0BLiveBrowserFixtureError) throw error;
@@ -80,12 +170,16 @@ export async function startP0BLiveBrowserFixture({
   }
 
   if (!seed) {
-    await harness.close().catch(() => {});
+    await runP0BLifecycle(() => harness.close(), {
+      timeoutMs: cleanupTimeoutMs,
+      timeoutCode: "cleanup_timeout",
+      timeoutMessage: "P0-B live browser fixture cleanup timed out"
+    }).catch(() => {});
     throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database was not prepared");
   }
 
   const pageState = new WeakMap();
-  let closed = false;
+  let closePromise;
   const safeSeed = publicSeed(seed);
 
   const fixture = {
@@ -128,33 +222,57 @@ export async function startP0BLiveBrowserFixture({
       const descriptor = roleDescriptor(safeSeed, role);
       const target = consolePath(path, harness.consoleUrl);
       await page.setExtraHTTPHeaders(identityHeaders(descriptor));
-      let releaseSummary;
-      const sessionReady = new Promise((resolve) => { releaseSummary = resolve; });
-      const summaryPattern = "**/api/console?resource=summary";
-      await page.route(summaryPattern, async (route) => {
-        await sessionReady;
-        await route.fallback();
-      });
-      const responsePromise = page.waitForResponse((response) => {
-        try {
-          const url = new URL(response.url());
-          return response.request().method() === "POST"
-            && url.origin === new URL(harness.consoleUrl).origin
-            && url.pathname === SESSION_PATH;
-        } catch {
-          return false;
-        }
-      });
+      let stage = "navigation";
       try {
-        await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
-        const response = await responsePromise;
-        const body = await response.json();
-        const session = validateBootstrap(body, descriptor, safeSeed.organizationId);
-        pageState.set(page, { role: descriptor, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
-        releaseSummary();
+        // Establish the real BFF/Cloud session on an inert same-origin page.
+        // This avoids racing the application's own hydration/bootstrap while
+        // retaining Chromium TLS validation, identity headers, Set-Cookie,
+        // and the exact production session endpoint.
+        await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded" });
+        stage = "response";
+        const response = await page.evaluate(async (sessionPath) => {
+          for (let attempt = 0; attempt < 8; attempt += 1) {
+            const result = await fetch(sessionPath, {
+              method: "POST",
+              headers: { accept: "application/json", "content-type": "application/json" },
+              body: "{}",
+              cache: "no-store",
+              credentials: "same-origin",
+              redirect: "error"
+            });
+            let body = null;
+            try { body = await result.json(); } catch {}
+            if (result.status !== 502 || attempt === 7) return { ok: result.ok, status: result.status, body };
+            // A 502 is emitted before Cloud can create a session. Retry only
+            // this transport-unavailable response; authorization and contract
+            // failures remain one-shot and fail closed.
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, 250 * (attempt + 1))));
+          }
+          throw new Error("unreachable bootstrap retry state");
+        }, SESSION_PATH);
+        stage = "http";
+        if (!response.ok) {
+          if (response.status === 502) stage = `http_502_${classifySessionBootstrap502(response.body, harness.cloudProcessState(), await harness.cloudReadinessState())}`;
+          else if (response.status === 503) stage = `http_503_${classifySessionBootstrap503(response.body)}`;
+          else if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 504].includes(response.status)) stage = `http_${response.status}`;
+          else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
+          else if (response.status >= 500 && response.status < 600) stage = "http_5xx";
+          else stage = "http_other";
+          throw new Error("session bootstrap was rejected");
+        }
+        stage = "contract";
+        const session = validateBootstrap(response.body, descriptor, safeSeed.organizationId);
+        pageState.set(page, { role: descriptor, sessionId: session.sessionId, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
+        stage = "target";
+        // Hydration resumes the cookie-bound session and intentionally rotates
+        // its selector/CSRF pair. Wait for that authoritative success before a
+        // fixture-owned WebAuthn ceremony; otherwise the registration request
+        // can race the rotation between authentication and challenge insert.
+        stage = "target_session";
+        const rotated = await awaitConsoleSessionRotation(page, target, descriptor, safeSeed.organizationId);
+        pageState.set(page, { role: descriptor, sessionId: rotated.sessionId, csrfToken: rotated.csrfToken, registered: pageState.get(page)?.registered === true });
       } catch {
-        releaseSummary();
-        throw new P0BLiveBrowserFixtureError("session_bootstrap_failed", "P0-B live browser session bootstrap failed");
+        throw new P0BLiveBrowserFixtureError(`session_bootstrap_${stage}_failed`, "P0-B live browser session bootstrap failed");
       }
       return descriptor;
     },
@@ -250,7 +368,10 @@ export async function startP0BLiveBrowserFixture({
         }, { organizationId: safeSeed.organizationId, csrfToken: state.csrfToken });
         if (result?.registered !== true) throw new Error("registration not confirmed");
       } catch (error) {
-        const marker = String(error?.message ?? "").match(/registration_(?:options|verify)_[1-5][0-9]{2}(?:_[a-z][a-z0-9_]{0,95})?/u)?.[0];
+        let marker = String(error?.message ?? "").match(/registration_(?:options|verify)_[1-5][0-9]{2}(?:_[a-z][a-z0-9_]{0,95})?/u)?.[0];
+        if (marker === "registration_verify_401_webauthn_registration_http_session_required") {
+          marker = `${marker}_${await classifyStoredSessionState(databasePool, state.sessionId)}`;
+        }
         throw new P0BLiveBrowserFixtureError(marker ?? "webauthn_registration_failed", "P0-B WebAuthn registration failed");
       }
       state.registered = true;
@@ -265,17 +386,38 @@ export async function startP0BLiveBrowserFixture({
       return fixture.registerWebAuthn(page);
     },
 
+    /** Reload the Console and adopt the exact session rotation it performs. */
+    async reloadAndAdoptSession(page) {
+      assertPage(page);
+      const state = pageState.get(page);
+      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      let rotated;
+      try {
+        rotated = await awaitConsoleSessionReload(page, state.role, safeSeed.organizationId);
+      } catch {
+        throw new P0BLiveBrowserFixtureError("session_reload_failed", "P0-B Console session reload failed");
+      }
+      pageState.set(page, { ...state, sessionId: rotated.sessionId, csrfToken: rotated.csrfToken });
+      return Object.freeze({ reloaded: true });
+    },
+
     /**
      * Run a real operation-bound recent-auth ceremony. The authorization is
      * supplied only to the callback, so it cannot appear in fixture metadata.
      */
     async withRecentAuth(page, operation, action) {
       assertPage(page);
-      const state = pageState.get(page);
-      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
-      if (!state.registered) throw new P0BLiveBrowserFixtureError("credential_required", "P0-B page has no registered WebAuthn credential");
+      const initialState = pageState.get(page);
+      if (!initialState) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      if (!initialState.registered) throw new P0BLiveBrowserFixtureError("credential_required", "P0-B page has no registered WebAuthn credential");
       if (typeof action !== "function") throw new TypeError("recent-auth action must be a function");
       if (!OPERATION.test(operation)) throw new TypeError("recent-auth operation is invalid");
+      // Console hydration may rotate the cookie/CSRF pair after the page was
+      // opened. Adopt one fresh, correlated rotation immediately before the
+      // ceremony so the browser transport and fixture state share a session
+      // generation. This does not weaken the real WebAuthn boundary.
+      await fixture.reloadAndAdoptSession(page);
+      const state = pageState.get(page);
       let authorizationId;
       try {
         authorizationId = await page.evaluate(async ({ organizationId, csrfToken, operation }) => {
@@ -354,20 +496,27 @@ export async function startP0BLiveBrowserFixture({
       return fixture.withRecentAuth(page, operation, action);
     },
 
-    async invalidateRecentAuth(role, failure) {
-      const descriptor = roleDescriptor(safeSeed, role);
+    async invalidateRecentAuth(page, failure) {
+      assertPage(page);
+      const state = pageState.get(page);
+      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      const descriptor = state.role;
       if (!new Set(["stale", "replayed", "cross_operation", "cross_tenant"]).has(failure)) throw new TypeError("recent-auth failure is invalid");
-      const session = await databasePool.query(`SELECT id FROM human_sessions
-        WHERE member_id=$1 AND organization_id=$2 AND revoked_at IS NULL
-        ORDER BY created_at DESC,id DESC LIMIT 1`, [descriptor.memberId, safeSeed.organizationId]);
-      const sessionId = session.rows?.[0]?.id;
+      const sessionId = await findExactActiveRecentAuthSession(databasePool, {
+        sessionId: state.sessionId,
+        memberId: descriptor.memberId,
+        organizationId: safeSeed.organizationId
+      });
       if (!sessionId) throw new P0BLiveBrowserFixtureError("session_required", "P0-B browser session is unavailable");
       if (failure === "stale") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else if (failure === "replayed") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_consumed_at=clock_timestamp() WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_consumed_at=clock_timestamp() WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else if (failure === "cross_operation") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_operation='device.revoke' WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_operation='device.revoke' WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else {
         const client = await databasePool.connect();
         try {
@@ -407,9 +556,14 @@ export async function startP0BLiveBrowserFixture({
     },
 
     async close() {
-      if (closed) return;
-      closed = true;
-      await harness.close();
+      if (!closePromise) {
+        closePromise = runP0BLifecycle(() => harness.close(), {
+          timeoutMs: cleanupTimeoutMs,
+          timeoutCode: "cleanup_timeout",
+          timeoutMessage: "P0-B live browser fixture cleanup timed out"
+        });
+      }
+      return closePromise;
     }
   };
 
@@ -490,6 +644,38 @@ export async function seedP0BHumanBrowserDatabase({ pool, organizationId, refres
   }
 }
 
+export async function awaitConsoleSessionRotation(page, target, descriptor, organizationId) {
+  return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
+    paths: new Set(["/api/auth/session/resume", SESSION_PATH]),
+    navigate: () => page.goto(target.toString(), { waitUntil: "domcontentloaded" })
+  });
+}
+
+export async function awaitConsoleSessionReload(page, descriptor, organizationId) {
+  return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
+    paths: new Set(["/api/auth/session/resume"]),
+    navigate: () => page.reload({ waitUntil: "domcontentloaded" })
+  });
+}
+
+async function awaitCorrelatedConsoleSession(page, descriptor, organizationId, { paths, navigate }) {
+  const correlation = crypto.randomUUID();
+  const identity = identityHeaders(descriptor);
+  await page.setExtraHTTPHeaders({ ...identity, [SESSION_CORRELATION_HEADER]: correlation });
+  try {
+    const applicationSession = page.waitForResponse((candidate) => {
+      if (!candidate.ok() || candidate.request().method() !== "POST") return false;
+      const requestHeaders = candidate.request().headers();
+      if (requestHeaders[SESSION_CORRELATION_HEADER] !== correlation) return false;
+      return paths.has(new URL(candidate.url()).pathname);
+    }, { timeout: 15_000 });
+    const [applicationSessionResponse] = await Promise.all([applicationSession, navigate()]);
+    return validateBootstrap(await applicationSessionResponse.json(), descriptor, organizationId);
+  } finally {
+    await page.setExtraHTTPHeaders(identity);
+  }
+}
+
 function publicSeed(seed) {
   return Object.freeze({
     organizationId: seed.organizationId,
@@ -522,7 +708,39 @@ function validateBootstrap(value, descriptor, organizationId) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !value.session || typeof value.csrf_token !== "string" || !TOKEN.test(value.csrf_token)) throw new Error("session response is invalid");
   const session = value.session;
   if (session.role !== descriptor.role || session.member_id !== descriptor.memberId || session.organization_id !== organizationId || !UUID.test(session.session_id)) throw new Error("session binding is invalid");
-  return Object.freeze({ csrfToken: value.csrf_token });
+  return Object.freeze({ sessionId: session.session_id.toLowerCase(), csrfToken: value.csrf_token });
+}
+
+export async function classifyStoredSessionState(pool, sessionId) {
+  if (!pool || typeof pool.query !== "function" || !UUID.test(sessionId ?? "")) return "unavailable";
+  try {
+    const result = await pool.query(`SELECT revoked_at IS NOT NULL AS revoked, revoke_reason,
+      expires_at <= clock_timestamp() AS absolute_expired,
+      idle_expires_at IS NOT NULL AND idle_expires_at <= clock_timestamp() AS idle_expired
+      FROM human_sessions WHERE id=$1 LIMIT 1`, [sessionId.toLowerCase()]);
+    const row = result.rows?.[0];
+    if (!row) return "missing";
+    if (row.revoked === true) {
+      if (["expired", "concurrent_session_limit", "session_rotation", "logout"].includes(row.revoke_reason)) return `revoked_${row.revoke_reason}`;
+      return "revoked_other";
+    }
+    if (row.absolute_expired === true) return "absolute_expired";
+    if (row.idle_expired === true) return "idle_expired";
+    if (row.revoked === false && row.absolute_expired === false && row.idle_expired === false) return "active";
+  } catch {}
+  return "unavailable";
+}
+
+export async function findExactActiveRecentAuthSession(pool, { sessionId, memberId, organizationId } = {}) {
+  if (!pool || typeof pool.query !== "function") throw new TypeError("P0-B database pool is invalid");
+  if (![sessionId, memberId, organizationId].every((value) => UUID.test(value ?? ""))) throw new TypeError("P0-B recent-auth session binding is invalid");
+  const result = await pool.query(
+    `SELECT id FROM human_sessions
+     WHERE id=$1 AND member_id=$2 AND organization_id=$3 AND revoked_at IS NULL`,
+    [sessionId.toLowerCase(), memberId.toLowerCase(), organizationId.toLowerCase()]
+  );
+  const id = result.rows?.[0]?.id;
+  return typeof id === "string" && UUID.test(id) ? id.toLowerCase() : null;
 }
 
 function consolePath(value, origin) {

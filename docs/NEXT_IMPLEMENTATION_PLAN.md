@@ -6,7 +6,7 @@
 
 Status: active  
 Baseline: `codex/agent-platform`
-Planning date: 2026-08-14
+Planning date: 2026-08-20
 
 ## 1. Target release
 
@@ -16,14 +16,24 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 41 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
+The current checkout contains the versioned Core/OpenAPI/JSON Schema catalog,
+78 forward-only PostgreSQL migrations, tenant-qualified hosted repositories,
+Human sessions and organization roles, WebAuthn registration/authentication
+and operation-bound recent authorization, Device API foundations, signed
+control bundles and ACK state, audit ingestion, emergency revocation,
+threshold-owner recovery, and a secret-free recovery-notification outbox with
+dead-letter management, durable uncertain-delivery quarantine, and bounded
+retention.
 
 At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
-All 41 migrations apply against local PostgreSQL. The current root-suite baseline passes
-2,045 tests (1,993 pass and 52 intentionally skipped), and the frozen catalog
-validates 128 entries after migration `0041` was cataloged. The
+The previous documented checkpoint recorded all 41 migrations applying against
+local PostgreSQL. The current root-suite baseline recorded 2,045 tests (1,993
+pass and 52 intentionally skipped), while the checkout's catalog currently
+contains 199 entries across 57 schemas, 64 OpenAPI operations, and 78
+migrations. This documentation-only update did not rerun the full migration,
+catalog, or root-suite qualification. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
 role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally and
 in the source-bound CI qualification.
@@ -66,6 +76,104 @@ production release: the staging W1.6 drill, complete Console operations, cloud
 IAM qualification for managed signers, physical Mac qualification,
 signed/notarized artifacts, deployment infrastructure, restore drills, and
 independent security review remain open.
+
+### 2.1 Device audit delivery status (2026-08-20)
+
+This section records the current state of the separate native Device-audit
+delivery slice. It must not be confused with the existing owner-recovery
+notification outbox. The status below is pinned to `HEAD=acacbf3`; the
+checkout also has unrelated uncommitted native changes, which were not edited
+or used as implementation evidence for this documentation update.
+
+| Boundary | Implemented in source | Local verification basis | External gate still unverified |
+| --- | --- | --- | --- |
+| Native event/batch contract | `NativeDeviceAuditUploadContracts.swift` validates a closed redacted event, canonical event hash, batch size (1–64), and a device-bound ingestion response. | `NativeDeviceAuditUploadContractTests.swift` and focused native transport tests are present in the checkout. | Cross-language fixture parity against the deployed API and signed release artifact is not proven. |
+| Native durable outbox | `NativeDeviceAuditOutbox.swift` writes one immutable `0400` event file, fsyncs file and directory state, deduplicates an event ID only when bytes match, bounds pending events at 4,096, and removes only response-confirmed accepted/duplicate IDs. | `NativeDeviceAuditOutboxTests.swift` covers restart persistence, exact bytes, event-ID equivocation, unknown acknowledgements, and selective acknowledgement. | Installed launchd/service ownership, crash/kill, permission/path substitution, disk-full, and post-unlink directory-fsync behavior on real Apple silicon and Intel/T2 are not qualified. |
+| Device upload coordinator | `NativeDeviceAuditUploadCoordinator.swift` submits at most eight exact batches per call; transport or response failure leaves the exact events pending. `ServiceEndpoint` wires it to the signed Device transport with a bounded supervised loop. | `NativeDeviceAuditUploadCoordinatorTests.swift`, projection tests, and focused HTTP tests cover response loss/transport failure, retry after recovery, stable reason projection, and bounded attempts. | Legacy `control_url` mode has no Device transport; online/offline restart behavior and production launchd supervision remain external gates. |
+| Cloud ingest | `server.mjs` rejects unknown top-level fields and calls `ingestDeviceAuditEvents`. The file store and PostgreSQL authority repository validate event hashes and tenant/device/agent binding, deduplicate exact evidence, record gaps, and return accepted/duplicate/gap/head state. PostgreSQL locks the device head during the transaction. | Existing Node/store, HTTP, repository, migration, and audit-pagination tests cover the local contract and repository behavior. | A deployed Cloud API plus real PostgreSQL role/RLS/concurrency, commit-response loss, migration-head/checksum, retention, backup/restore, and multi-instance qualification are not proven. |
+| Cloud audit worker/inbox | Not implemented as a separate device-audit inbox/worker. Current ingest writes directly to `device_audit_events` and advances `device_audit_heads` in the request transaction; `device_audit_gaps` records predecessor mismatches. | Local file-store and PostgreSQL repository paths exist. | The productization target of a durable inbox, asynchronous worker, and independently observable retry/dead-letter lifecycle remains a follow-up design/implementation gate. |
+
+The native slice spans `c75da86`, `acacbf3`, `2db752c`, `6c042fe`, and the
+current ServiceEndpoint integration changes. The focused tests listed above
+were rerun in this implementation pass. “Implemented” therefore means source
+is present and locally tested in this checkout, while it remains weaker than a
+deployed, launchd, or hardware qualification result.
+
+#### Contract references and current contract gap
+
+The current authoritative references are:
+
+- HTTP route and device-signature canonicalization:
+  [`contracts/openapi/device-v1.json`](../contracts/openapi/device-v1.json),
+  `POST /organizations/{organization_id}/audit/events`, operation
+  `appendDeviceAuditEvents`.
+- Read/list response schema (not the upload envelope):
+  [`contracts/schemas/device-audit-list-v1.schema.json`](../contracts/schemas/device-audit-list-v1.schema.json).
+- Catalog entries:
+  [`contracts/catalog-v1.json`](../contracts/catalog-v1.json),
+  `api.device.appendDeviceAuditEvents` and
+  `api.device.listDeviceAuditEvents`.
+- PostgreSQL persistence and head/gap invariants:
+  [`contracts/postgres/0001_control_plane.sql`](../contracts/postgres/0001_control_plane.sql),
+  [`contracts/postgres/0011_control_plane_hosted_cutover.sql`](../contracts/postgres/0011_control_plane_hosted_cutover.sql),
+  [`contracts/postgres/0010_device_audit_activity_keyset.sql`](../contracts/postgres/0010_device_audit_activity_keyset.sql),
+  and export sequencing in
+  [`contracts/postgres/0045_device_audit_export_sequence.sql`](../contracts/postgres/0045_device_audit_export_sequence.sql).
+
+The upload request (`batch_id`, `events`) and the `202` ingestion response
+(`accepted`, `duplicates`, `gaps`, `head`) are currently enforced by the
+native Swift contract and Cloud implementation, but the OpenAPI POST still
+uses a generic JSON response and there is no standalone JSON Schema for this
+upload/ingestion pair. Freeze those request/response schemas, add deterministic
+fixtures and catalog references, and make Node/Swift validation consume them
+before declaring the Device-audit contract complete.
+
+#### Operational resend, head, and failure recovery
+
+1. **Transport failure, timeout, `503`, rate limit, or malformed response:**
+   leave the outbox files untouched. Retry the same canonical event bytes from
+   the supervised scheduler with bounded backoff. Do not regenerate an event,
+   rewrite `previous_hash`, or treat a new batch ID as a new audit event.
+2. **Response lost after Cloud commit:** retry the exact events. Cloud must
+   return those event IDs as `duplicates` with identical evidence; only then
+   may the device acknowledge and delete those IDs. This is the intended
+   response-loss convergence path.
+3. **`accepted`/`duplicates` response validation:** first verify the signed
+   transport response, exact device ID, closed response shape, unique IDs, and
+   that every acknowledged ID is still pending. Unknown IDs, overlap, or
+   evidence conflict is a quarantine/escalation condition, not a delete or
+   blind retry condition.
+4. **Head and gap handling:** Cloud serializes one `(organization_id,
+   device_id)` head. PostgreSQL persists its sequence and the API response
+   reports `last_event_hash`, `last_event_id`, `chain_status`, and `gap_count`.
+   A predecessor mismatch is recorded in
+   `device_audit_gaps` and makes the chain status `gap`; duplicate ingestion
+   does not advance the head. The current native acknowledgement path can
+   drain IDs listed as accepted even when the response reports a gap, so a
+   reported gap must be investigated from Cloud head/gap evidence and must
+   not be represented as healthy continuity.
+5. **Local delete/fsync ambiguity:** if file unlink succeeds but directory
+   fsync fails, stop the upload loop and do not synthesize a replacement
+   event. Reconcile the affected event IDs against Cloud audit list/health and
+   head evidence; this filesystem fault path still requires real-device
+   qualification and has no automatic repair tool in the current slice.
+6. **Hash, tenant, device, agent, or dedup conflict:** preserve the pending
+   bytes, stop automatic resend, and quarantine the device upload for operator
+   investigation. Fixing the conflict requires a new authoritative event or
+   device state; editing a queued event in place is prohibited.
+7. **Recovery after service restart:** reopen the private outbox, verify its
+   owner/mode and every event's canonical bytes, then resume bounded flushes.
+   A worker restart must not clear the queue or reset the Cloud head. If the
+   outbox is over capacity or contains an unexpected file, fail closed and
+   preserve the evidence for manual recovery.
+
+The next implementation slice is therefore: wire the coordinator into the
+supervised native lifecycle; freeze the upload/ingestion JSON Schemas and
+OpenAPI response; add a Cloud-side observable recovery state for gaps and
+ambiguous uploads; then qualify response loss, process loss, head contention,
+filesystem faults, real PostgreSQL roles/RLS, and the exact signed release
+artifact. None of those external gates is satisfied by the focused local
+tests alone.
 
 ## 3. Delivery rules
 

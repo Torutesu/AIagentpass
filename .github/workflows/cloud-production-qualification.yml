@@ -1,0 +1,124 @@
+name: Cloud production qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character source commit deployed to production
+        required: true
+        type: string
+      image_digest:
+        description: Exact immutable image digest deployed to production
+        required: true
+        type: string
+      deployment_evidence_url:
+        description: HTTPS URL for the signed deployment evidence JSON
+        required: true
+        type: string
+      kms_report_url:
+        description: HTTPS URL for the independently signed production KMS report
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-production-qualification-${{ inputs.source_commit }}-${{ inputs.image_digest }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: ${{ github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    environment: production-cloud
+    timeout-minutes: 15
+    env:
+      EXPECTED_COMMIT: ${{ inputs.source_commit }}
+      EXPECTED_DIGEST: ${{ inputs.image_digest }}
+      DEPLOYMENT_EVIDENCE_URL: ${{ inputs.deployment_evidence_url }}
+      KMS_REPORT_URL: ${{ inputs.kms_report_url }}
+      DEPLOYMENT_KEY_FINGERPRINT: ${{ vars.AGENTPASS_CLOUD_DEPLOYMENT_KEY_FINGERPRINT }}
+      KMS_TRUSTED_KEY_ID: ${{ vars.AGENTPASS_KMS_TRUSTED_KEY_ID }}
+      DEPLOYMENT_PUBLIC_KEY_PEM: ${{ secrets.AGENTPASS_CLOUD_DEPLOYMENT_PUBLIC_KEY_PEM }}
+      KMS_PUBLIC_KEY_DER_B64: ${{ secrets.AGENTPASS_KMS_PUBLIC_KEY_DER_B64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind verifier checkout to the requested source commit
+        env:
+          EXPECTED_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source commit must be a full SHA" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_COMMIT" ]] || { echo "verifier checkout is not the requested source commit" >&2; exit 1; }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20.19.4
+          cache: npm
+      - name: Require immutable production inputs and pinned trust
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source commit must be a full SHA" >&2; exit 1; }
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "image digest must be immutable" >&2; exit 1; }
+          [[ "$DEPLOYMENT_EVIDENCE_URL" == https://* && "$KMS_REPORT_URL" == https://* ]] || { echo "evidence URLs must use HTTPS" >&2; exit 1; }
+          : "${DEPLOYMENT_KEY_FINGERPRINT:?deployment key fingerprint is required}"
+          : "${KMS_TRUSTED_KEY_ID:?KMS trusted key ID is required}"
+          : "${DEPLOYMENT_PUBLIC_KEY_PEM:?deployment public key is required}"
+          : "${KMS_PUBLIC_KEY_DER_B64:?KMS public key is required}"
+      - name: Download evidence over HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$DEPLOYMENT_EVIDENCE_URL" -o "$RUNNER_TEMP/cloud-deployment-evidence.json"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$KMS_REPORT_URL" -o "$RUNNER_TEMP/kms-qualification.json"
+          printf '%s\n' "$DEPLOYMENT_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/deployment-public.pem"
+          printf '%s' "$KMS_PUBLIC_KEY_DER_B64" | base64 --decode > "$RUNNER_TEMP/kms-public.der"
+      - name: Verify signed deployment and provider qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          node scripts/ops/verify-cloud-deployment.mjs \
+            "$RUNNER_TEMP/cloud-deployment-evidence.json" \
+            "$RUNNER_TEMP/deployment-public.pem" "$DEPLOYMENT_KEY_FINGERPRINT" > "$RUNNER_TEMP/deployment-result.json"
+          node scripts/ops/verify-cloud-promotion.mjs \
+            "$RUNNER_TEMP/cloud-deployment-evidence.json" \
+            "$RUNNER_TEMP/deployment-public.pem" "$DEPLOYMENT_KEY_FINGERPRINT" \
+            "$RUNNER_TEMP/kms-qualification.json" "$RUNNER_TEMP/kms-public.der" "$KMS_TRUSTED_KEY_ID" > "$RUNNER_TEMP/promotion-result.json"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
+            '.source_commit == $commit and .image_digest == $digest and .status == "verified"' \
+            "$RUNNER_TEMP/promotion-result.json" >/dev/null
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
+            '.source_commit == $commit and .image_digest == $digest and .status == "verified"' \
+            "$RUNNER_TEMP/deployment-result.json" >/dev/null
+      - name: Publish non-secret qualification summary
+        env:
+          PROMOTION_RESULT: ${{ runner.temp }}/promotion-result.json
+        run: jq -c '{status,source_commit,image_digest,provider,service,revision}' "$PROMOTION_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare immutable qualification artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/cloud-production-qualification-${EXPECTED_COMMIT}"
+          [[ ! -e "$artifact_dir" ]] || { echo "qualification artifact directory already exists" >&2; exit 1; }
+          install -d -m 0700 "$artifact_dir"
+          install -m 0600 "$RUNNER_TEMP/cloud-deployment-evidence.json" "$artifact_dir/deployment-evidence.json"
+          install -m 0600 "$RUNNER_TEMP/kms-qualification.json" "$artifact_dir/kms-qualification.json"
+          install -m 0600 "$RUNNER_TEMP/promotion-result.json" "$artifact_dir/promotion-result.json"
+          install -m 0600 "$RUNNER_TEMP/deployment-result.json" "$artifact_dir/deployment-result.json"
+          jq -n --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
+            '{schema_version:1,source_commit:$commit,image_digest:$digest,status:"verified"}' \
+            > "$artifact_dir/qualification-binding.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloud-production-qualification-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/cloud-production-qualification-${{ inputs.source_commit }}
+          if-no-files-found: error
+          retention-days: 14

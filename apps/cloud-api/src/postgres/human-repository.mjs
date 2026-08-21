@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -7,6 +9,8 @@ const SUBJECT = /^[^\u0000-\u001f\u007f]{1,512}$/u;
 const CREDENTIAL_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const DEFAULT_MANAGEMENT_PAGE_SIZE = 25;
 const MAX_MANAGEMENT_PAGE_SIZE = 100;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
+const IDEMPOTENCY_TTL = "24 hours";
 
 export function createPostgresHumanRepository({ client, onAuthorityReduction } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
@@ -36,6 +40,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     createCredentialWithRecentAuth,
     insertCredentialForSession: insertCredential,
     updateCredentialCounter,
+    quarantineCredentialClone,
     updateCredentialLabel,
     revokeCredential,
     listSafeSessions,
@@ -157,13 +162,12 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function findSessionByTokenHash(input) {
-    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
+    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
     return sessionRow(result.rows?.[0]);
   }
 
   async function updateSessionActivity(input) {
-    const activityAt = input.activity_at ?? input.activityAt ?? input.last_seen_at ?? input.lastSeenAt;
-    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND s.expires_at>$4 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$4) AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt, activityAt]);
+    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
     return sessionRow(result.rows?.[0]);
   }
 
@@ -293,12 +297,12 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function listCredentialsForSession(input) {
-    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
+    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
     return (result.rows ?? []).map((row) => ({ id: credentialId(row.id), type: "public-key", transports: credentialTransports(row.transports) }));
   }
 
   async function findCredentialForSession(input) {
-    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.backup_eligible,c.backup_state,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
+    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.backup_eligible,c.backup_state,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND c.clone_detected_at IS NULL AND c.sign_count_state<>'clone-detected' AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
     return row ? { ...row, id: Buffer.from(row.id).toString("base64url"), sign_count: storedCounter(row.sign_count), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state") } : null;
   }
@@ -313,7 +317,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       : "";
     if (paging.after) params.push(paging.after.createdAt, paging.after.id);
     params.push(paging.limit + 1);
-    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
+    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.clone_detected_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeCredentialRow);
   }
 
@@ -379,9 +383,11 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
 
     return inTransaction(async (transactionClient) => {
       await lockCredentialSet(transactionClient, memberId);
-      const active = await transactionClient.query("SELECT COUNT(*) AS active_count FROM webauthn_credentials WHERE member_id=$1 AND revoked_at IS NULL", [memberId]);
+      const active = await transactionClient.query("SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL AND clone_detected_at IS NULL) AS active_count,COUNT(*) AS total_count FROM webauthn_credentials WHERE member_id=$1", [memberId]);
       const activeCount = parseDatabaseCount(active.rows?.[0]?.active_count, "active credential count");
-      if (activeCount > 0) {
+      const totalCount = parseDatabaseCount(active.rows?.[0]?.total_count, "credential count");
+      if (activeCount > totalCount) throw new TypeError("credential counts are invalid");
+      if (totalCount > 0) {
         let authorizationId;
         let operation;
         let proofSessionId;
@@ -416,21 +422,66 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const expectedBackupEligible = hasBackupState ? strictBoolean(input?.expected_backup_eligible, "expected_backup_eligible") : null;
     const expectedBackupState = hasBackupState ? strictBoolean(input?.expected_backup_state, "expected_backup_state") : null;
     if (hasBackupState && ((backupState && !backupEligible) || (expectedBackupState && !expectedBackupEligible))) throw new TypeError("backup_state requires backup_eligible");
-    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,backup_eligible=COALESCE($6,c.backup_eligible),backup_state=COALESCE($7,c.backup_state),last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND ($8::boolean IS NULL OR c.backup_eligible=$8) AND ($9::boolean IS NULL OR c.backup_state=$9) AND c.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count), backupEligible, backupState, expectedBackupEligible, expectedBackupState]);
+    const nextCount = counter(input.sign_count);
+    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,sign_count_state=CASE WHEN $4=0 THEN 'zero-counter' ELSE 'monotonic' END,backup_eligible=COALESCE($6,c.backup_eligible),backup_state=COALESCE($7,c.backup_state),last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND ($8::boolean IS NULL OR c.backup_eligible=$8) AND ($9::boolean IS NULL OR c.backup_state=$9) AND c.revoked_at IS NULL AND c.clone_detected_at IS NULL AND c.sign_count_state<>'clone-detected' AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), nextCount, counter(input.expected_sign_count), backupEligible, backupState, expectedBackupEligible, expectedBackupState]);
     return result.rowCount === 1;
+  }
+
+  async function quarantineCredentialClone(input) {
+    const sessionId = uuid(input?.session_id ?? input?.sessionId);
+    const organizationId = uuid(input?.organization_id ?? input?.organizationId);
+    const credentialValue = input?.credential_id ?? input?.credentialId;
+    const expectedCount = counter(input?.expected_sign_count ?? input?.expectedSignCount);
+    const observedCount = counter(input?.observed_sign_count ?? input?.observedSignCount);
+    if ((expectedCount === 0 && observedCount === 0) || observedCount > expectedCount) throw new TypeError("clone counter evidence is invalid");
+    return inTransaction(async (transactionClient) => {
+      await lockOrganization(transactionClient, organizationId);
+      const session = await transactionClient.query(`SELECT s.member_id FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch`, [sessionId, organizationId]);
+      const memberId = session.rows?.[0]?.member_id === undefined ? null : uuid(String(session.rows[0].member_id));
+      if (memberId === null) return false;
+      await lockCredentialSet(transactionClient, memberId);
+      const result = await transactionClient.query(`UPDATE webauthn_credentials
+        SET sign_count_state='clone-detected',clone_detected_at=clock_timestamp(),version=version+1
+        WHERE id=$1 AND member_id=$2 AND revoked_at IS NULL AND clone_detected_at IS NULL
+          AND sign_count_state<>'clone-detected' AND sign_count>0 AND sign_count>=$3
+        RETURNING id,clone_detected_at`, [base64Bytes(credentialValue, 16, 1024), memberId, expectedCount]);
+      if (result.rowCount !== 1) return false;
+      const detectedAt = storedTimestamp(result.rows[0].clone_detected_at, "clone_detected_at");
+      await notifyAuthorityReduction(transactionClient, { organizationId, memberId, actorSessionId: sessionId, targetId: credentialId(result.rows[0].id), resource: "credential", reason: "webauthn_clone_detected", occurredAt: detectedAt });
+      return true;
+    });
   }
 
   async function updateCredentialLabel(input) {
     const scope = credentialScope(input);
     const label = credentialLabel(input?.label);
     const expectedVersion = positiveInteger(input?.expected_version ?? input?.expectedVersion);
+    const idempotencyKey = optionalIdempotencyKey(input?.idempotency_key ?? input?.idempotencyKey);
+    const requestHash = idempotencyKey === undefined ? undefined : humanCredentialMutationRequestHash("credential.rename", {
+      organization_id: scope.organizationId,
+      member_id: scope.memberId,
+      session_id: scope.sessionId,
+      credential_id: input?.credential_id ?? input?.credentialId,
+      label,
+      expected_version: expectedVersion
+    });
     try {
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
+        const idempotency = idempotencyKey === undefined ? undefined : await acquireHumanCredentialIdempotency(transactionClient, {
+          organizationId: scope.organizationId,
+          principalId: scope.sessionId,
+          idempotencyKey,
+          requestHash
+        });
+        if (idempotency?.replayed) return idempotency.response;
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET label=$4,version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$5 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$6 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, label, base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024), expectedVersion]);
         if (result.rowCount === 0 && await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
-        return result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        if (record && idempotencyKey !== undefined) await completeHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash, response: record, responseStatus: 200 });
+        if (!record && idempotencyKey !== undefined) await abandonHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash });
+        return record;
       });
     } catch (error) {
       throw normalizeLastCredentialError(error);
@@ -441,14 +492,31 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const scope = credentialScope(input);
     const expectedVersion = positiveInteger(input?.expected_version ?? input?.expectedVersion);
     const credentialId = base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024);
+    const idempotencyKey = optionalIdempotencyKey(input?.idempotency_key ?? input?.idempotencyKey);
     const revokedAt = input?.revoked_at ?? input?.revokedAt;
     if (typeof revokedAt !== "string" || !Number.isFinite(Date.parse(revokedAt))) throw new TypeError("revoked_at is invalid");
     const reasonValue = input?.revoke_reason ?? input?.revokeReason ?? input?.reason;
     const reason = reasonValue === undefined ? undefined : bounded(reasonValue, 128);
+    const requestHash = idempotencyKey === undefined ? undefined : humanCredentialMutationRequestHash("credential.revoke", {
+      organization_id: scope.organizationId,
+      member_id: scope.memberId,
+      session_id: scope.sessionId,
+      credential_id: input?.credential_id ?? input?.credentialId,
+      expected_version: expectedVersion,
+      revoked_at: revokedAt,
+      reason: reason ?? null
+    });
     try {
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
+        const idempotency = idempotencyKey === undefined ? undefined : await acquireHumanCredentialIdempotency(transactionClient, {
+          organizationId: scope.organizationId,
+          principalId: scope.sessionId,
+          idempotencyKey,
+          requestHash
+        });
+        if (idempotency?.replayed) return idempotency.response;
         const candidate = await transactionClient.query(`SELECT c.id FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion]);
         if (candidate.rowCount !== 1) {
           if (await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
@@ -461,6 +529,8 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET revoked_at=$7,revoke_reason=COALESCE($6,c.revoke_reason),version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion, reason ?? null, revokedAt]);
         const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
         if (record && input?.authority_reduction === true) await notifyAuthorityReduction(transactionClient, { ...scope, memberId: scope.memberId, actorSessionId: input?.actor_session_id ?? input?.actorSessionId ?? scope.sessionId, targetId: record.id, resource: "credential", reason, occurredAt: revokedAt });
+        if (record && idempotencyKey !== undefined) await completeHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash, response: record, responseStatus: 200 });
+        if (!record && idempotencyKey !== undefined) await abandonHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash });
         return record;
       });
     } catch (error) {
@@ -478,8 +548,25 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     return inTransaction(async (transactionClient) => {
       await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
-      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5) WHERE target.member_id=$2 AND target.organization_id=$3 AND target.id<>$1 AND target.revoked_at IS NULL AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
-      return (result.rows ?? []).map(safeSessionRow);
+      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5),version=target.version+1 WHERE target.member_id=$2 AND target.organization_id=$3 AND target.id<>$1 AND target.revoked_at IS NULL AND target.expires_at>clock_timestamp() AND (target.idle_expires_at IS NULL OR target.idle_expires_at>clock_timestamp()) AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.version,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
+      if (!result || !Array.isArray(result.rows) || !Number.isSafeInteger(result.rowCount) || result.rowCount !== result.rows.length) throw new TypeError("other-session revocation result is invalid");
+      const records = result.rows.map(safeSessionRow);
+      const seen = new Set();
+      for (const record of records) {
+        if (record.session_id === sessionId || record.member_id !== memberId || record.organization_id !== organizationId || record.status !== "revoked" || record.revoked_at === null || seen.has(record.session_id)) throw new TypeError("other-session revocation result is not authoritative");
+        seen.add(record.session_id);
+      }
+      // Each requested authority reduction uses the same transaction-bound
+      // propagation hook. If any publication/audit step fails,
+      // withTransaction rolls back the entire batch, including all session
+      // rows already updated above. A zero-target no-op does not require a
+      // propagation dependency, but a non-empty administrative reduction does.
+      if (input?.authority_reduction === true) {
+        for (const record of records) {
+          await notifyAuthorityReduction(transactionClient, { organizationId, memberId, actorSessionId: sessionId, targetId: record.session_id, resource: "session", reason, occurredAt: revokedAt });
+        }
+      }
+      return records;
     });
   }
 
@@ -555,10 +642,61 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const result = await transactionClient.query(`SELECT 1 FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.revoked_at IS NULL LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, base64Bytes(credentialValue, 16, 1024)]);
     return result.rowCount === 1;
   }
+
+  async function acquireHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash }) {
+    await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+        AND expires_at<=clock_timestamp()`, [organizationId, principalId, idempotencyKey]);
+    const inserted = await tx.query(`INSERT INTO idempotency_records
+      (organization_id,principal_id,idempotency_key,request_hash,response_status,response_json,expires_at)
+      VALUES ($1,$2,$3,$4,102,'{}'::jsonb,clock_timestamp()+$5::interval)
+      ON CONFLICT (organization_id,principal_id,idempotency_key) DO NOTHING`, [organizationId, principalId, idempotencyKey, requestHash, IDEMPOTENCY_TTL]);
+    const record = await tx.query(`SELECT request_hash,response_status,response_json
+      FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+      FOR UPDATE`, [organizationId, principalId, idempotencyKey]);
+    if ((record.rowCount ?? record.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+    const row = record.rows[0];
+    if (String(row.request_hash).toLowerCase() !== requestHash) throw idempotencyConflict();
+    if ((inserted.rowCount ?? inserted.rows?.length ?? 0) !== 1) return { replayed: true, response: replayCredentialResponse(row.response_json) };
+    return { replayed: false };
+  }
+
+  async function completeHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash, response, responseStatus }) {
+    const result = await tx.query(`UPDATE idempotency_records
+      SET response_status=$4,response_json=$5::jsonb
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$6`, [organizationId, principalId, idempotencyKey, responseStatus, JSON.stringify(response), requestHash]);
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+  }
+
+  async function abandonHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash }) {
+    const result = await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$4`, [organizationId, principalId, idempotencyKey, requestHash]);
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+  }
 }
 
 function validateSession(record) { uuid(record?.session_id); uuid(record?.member_id); uuid(record?.membership_id); uuid(record?.organization_id); if (!["owner", "admin", "auditor", "viewer"].includes(record.role)) throw new TypeError("session role is invalid"); bytes32(record.token_hash); bytes32(record.csrf_token_hash); }
-function sessionRow(row) { return row ? { ...row, session_id: row.session_id ?? row.id, token_hash: row.token_hash_hex ?? row.token_hash, csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash } : null; }
+function sessionRow(row) {
+  return row ? {
+    ...row,
+    session_id: row.session_id ?? row.id,
+    token_hash: row.token_hash_hex ?? row.token_hash,
+    csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash,
+    created_at: storedTimestamp(row.created_at, "created_at"),
+    expires_at: storedTimestamp(row.expires_at, "expires_at"),
+    last_seen_at: storedTimestamp(row.last_seen_at, "last_seen_at"),
+    idle_expires_at: nullableStoredTimestamp(row.idle_expires_at, "idle_expires_at"),
+    recent_auth_at: nullableStoredTimestamp(row.recent_auth_at, "recent_auth_at"),
+    revoked_at: nullableStoredTimestamp(row.revoked_at, "revoked_at")
+  } : null;
+}
+function storedTimestamp(value, name) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  throw new TypeError(`${name} is invalid`);
+}
+function nullableStoredTimestamp(value, name) { return value === null || value === undefined ? null : storedTimestamp(value, name); }
 function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw new TypeError("UUID is invalid"); return value.toLowerCase(); }
 function bounded(value, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("bounded text is invalid"); return value; }
 function identityProvider(value) { if (typeof value !== "string" || !PROVIDER.test(value)) throw new TypeError("identity provider is invalid"); return value; }
@@ -581,8 +719,8 @@ function upstreamMembershipRow(row) { return { provider: identityProvider(row.pr
 function membershipRole(value) { if (!["owner", "admin", "auditor", "viewer"].includes(value)) throw new TypeError("membership role is invalid"); return value; }
 function positiveInteger(value) { if (typeof value === "string" && /^\d+$/.test(value)) value=Number(value); if (!Number.isSafeInteger(value)||value<1) throw new TypeError("membership version is invalid"); return value; }
 function credentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), public_key: publicKeyBytes(row.public_key), sign_count: storedCounter(row.sign_count), transports: credentialTransports(row.transports), label: credentialLabel(row.label), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null }; }
-function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null, version: positiveInteger(row.version) }; }
-function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: row.created_at, expires_at: row.expires_at, last_seen_at: row.last_seen_at ?? null, idle_expires_at: row.idle_expires_at ?? null, recent_auth_at: row.recent_auth_at ?? null, revoked_at: row.revoked_at ?? null, revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
+function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: storedTimestamp(row.created_at, "created_at"), last_used_at: nullableStoredTimestamp(row.last_used_at, "last_used_at"), revoked_at: nullableStoredTimestamp(row.revoked_at ?? row.clone_detected_at, "revoked_at"), version: positiveInteger(row.version) }; }
+function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: storedTimestamp(row.created_at, "created_at"), expires_at: storedTimestamp(row.expires_at, "expires_at"), last_seen_at: nullableStoredTimestamp(row.last_seen_at, "last_seen_at"), idle_expires_at: nullableStoredTimestamp(row.idle_expires_at, "idle_expires_at"), recent_auth_at: nullableStoredTimestamp(row.recent_auth_at, "recent_auth_at"), revoked_at: nullableStoredTimestamp(row.revoked_at, "revoked_at"), revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
 function credentialScope(input) { return { sessionId: uuid(input?.session_id ?? input?.sessionId), memberId: uuid(input?.member_id ?? input?.memberId), organizationId: uuid(input?.organization_id ?? input?.organizationId) }; }
 function keysetPagination(input, defaultLimit, resource) {
   const rawLimit = input?.limit;
@@ -615,4 +753,27 @@ function normalizeLastCredentialError(error) { return error?.code === "23514" &&
 function upstreamIdentityConflict() { const error = new Error("upstream identity mapping conflict"); error.code = "ERR_UPSTREAM_IDENTITY_CONFLICT"; return error; }
 function credentialExists() { const error = new Error("credential already exists"); error.code = "credential_exists"; return error; }
 function recentAuthRequired() { const error = new Error("recent authentication is required"); error.code = "recent_auth_required"; return error; }
+function optionalIdempotencyKey(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw new TypeError("idempotency_key is invalid");
+  return value;
+}
+function humanCredentialMutationRequestHash(operation, identity) {
+  return createHash("sha256").update(stableCanonicalize({ version: 1, operation, identity }), "utf8").digest("hex");
+}
+function stableCanonicalize(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (Number.isSafeInteger(value) || typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalize).join(",")}]`;
+  if (!value || typeof value !== "object") throw new TypeError("canonical identity contains an invalid value");
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableCanonicalize(value[key])}`).join(",")}}`;
+}
+function replayCredentialResponse(value) {
+  const response = typeof value === "string" ? JSON.parse(value) : value;
+  if (!response || typeof response !== "object" || Array.isArray(response)) throw idempotencyUnavailable();
+  return response;
+}
+function idempotencyConflict() { const error = new Error("idempotency key was already used for a different request"); error.code = "ERR_IDEMPOTENCY_CONFLICT"; return error; }
+function idempotencyUnavailable() { const error = new Error("idempotency response could not be acquired"); error.code = "ERR_IDEMPOTENCY"; return error; }
 function parseDatabaseCount(value, label) { const count = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(count) || count < 0) throw new TypeError(`${label} is invalid`); return count; }

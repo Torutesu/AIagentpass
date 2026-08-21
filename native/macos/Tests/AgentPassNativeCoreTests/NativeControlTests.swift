@@ -137,6 +137,36 @@ private struct ControlFixture {
     #expect(verifiedCapability.sequence == 9)
 }
 
+@Test func nativeCapabilityRequiresEveryObservedRemoteBeforeAtomicConsume() throws {
+    let pem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAeKxHAljpDZC+IgnnVZlnDl+YYgZRWY9JjUMuWDCBrJE=\n-----END PUBLIC KEY-----\n"
+    let publicKey = try NativeControlBundleV2Trust(publicKeyPEM: pem).publicKey
+    let capability = Data(#"{"version":1,"capability_id":"44444444-4444-4444-8444-444444444444","nonce":"Naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","issuer":"agentpass-cloud","key_id":"control-v2","audience":{"agent_id":"33333333-3333-4333-8333-333333333333","device_id":"22222222-2222-4222-8222-222222222222"},"scope":{"operations":["git.commit.sign"],"repositories":["/work/project"],"branches":{"allow":["feature/*"],"deny":["main"]},"remotes":{"allow":["git@github.com:org/repo.git"]}},"not_before":"2026-08-12T00:00:00.000Z","expires_at":"2026-08-12T00:00:30.000Z","sequence":9,"signature":"q+v8SCoR0W/t3zSBy88adYEh6Kf2DbXHgA2iF43xG8JashVFeSbMm7hy8GsF9EJaMk/LNNzmkZQ0M3dWS/L+BQ=="}"#.utf8)
+    let verifier = try NativeCapabilityVerifier(
+        trust: NativeCapabilityTrust(publicKey: publicKey, issuer: "agentpass-cloud", keyID: "control-v2"))
+    let options = NativeCapabilityVerificationOptions(
+        nowMilliseconds: 1_786_492_801_000,
+        audience: NativeCapabilityAudience(
+            agentID: "33333333-3333-4333-8333-333333333333",
+            deviceID: "22222222-2222-4222-8222-222222222222"))
+
+    #expect(throws: NativeControlBundleV2Error.self) {
+        _ = try verifier.verifyAndConsume(
+            capability, options: options, operation: "git.commit.sign",
+            repository: "/work/project", branch: "feature/native",
+            remotes: ["git@github.com:org/repo.git", "git@evil.example:stolen/repo.git"])
+    }
+    _ = try verifier.verifyAndConsume(
+        capability, options: options, operation: "git.commit.sign",
+        repository: "/work/project", branch: "feature/native",
+        remotes: ["git@github.com:org/repo.git"])
+    #expect(throws: NativeControlBundleV2Error.self) {
+        _ = try verifier.verifyAndConsume(
+            capability, options: options, operation: "git.commit.sign",
+            repository: "/work/project", branch: "feature/native",
+            remotes: ["git@github.com:org/repo.git"])
+    }
+}
+
 @Test func nativeControlV2RejectsDuplicateFieldsAndPersistsCapabilityReplayAcrossRestart() throws {
     let duplicate = Data(#"{"format_epoch":2,"format_epoch":2}"#.utf8)
     #expect(throws: NativeControlBundleV2Error.self) { try NativeControlBundleV2Codec.parse(duplicate, nowMilliseconds: 1_786_492_800_000) }

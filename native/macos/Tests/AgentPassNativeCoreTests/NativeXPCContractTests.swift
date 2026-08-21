@@ -3,11 +3,38 @@ import Foundation
 import Testing
 
 @Test func nativeXPCContractHasFrozenFingerprintAndClosedInventory() {
-    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:e674b7eb5fa9b80313a57571f9a14ab28e2295c356bbb57592c8f61b3bb6165e")
+    #expect(AgentPassNativeXPCContract.contractVersion == 3)
+    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:62fc2dc6a1ba7731b031e06250a762239dd6cb7e01b009786b82e976068d831e")
     #expect(AgentPassNativeXPCContract.fingerprint == AgentPassNativeXPCContract.derivedFingerprint)
     #expect(AgentPassNativeXPCContract.managementProtocol.methods.count == 41)
     #expect(AgentPassNativeXPCContract.agentProtocol.methods.count == 5)
-    #expect(AgentPassNativeXPCContract.dtoInventories.count == 10)
+    #expect(AgentPassNativeXPCContract.hostProtocol.methods.count == 5)
+    #expect(AgentPassNativeXPCContract.protocolInventories.count == 4)
+    #expect(AgentPassNativeXPCContract.childGitProtocol.methods.count == 2)
+    #expect(AgentPassNativeXPCContract.dtoInventories.count == 24)
+}
+
+@Test func nativeXPCContractRejectsAnUninventoriedChildGitDTO() {
+    let incompleteDTOs = AgentPassNativeXPCContract.dtoInventories.filter {
+        $0.name != "AgentPassChildGitAttachRequest"
+    }
+
+    do {
+        try AgentPassNativeXPCContract.validateClosedInventory(
+            protocols: AgentPassNativeXPCContract.protocolInventories,
+            dtos: incompleteDTOs
+        )
+        Issue.record("missing Child Git DTO was accepted")
+    } catch let error as AgentPassNativeXPCContract.ValidationError {
+        guard case .missingDTO(let name, let selector) = error else {
+            Issue.record("unexpected validation error: \(error)")
+            return
+        }
+        #expect(name == "AgentPassChildGitAttachRequest")
+        #expect(selector == "attachChildGit:withReply:")
+    } catch {
+        Issue.record("unexpected error type: \(error)")
+    }
 }
 
 @Test func nativeXPCContractRuntimeSurfaceMatchesInventory() throws {

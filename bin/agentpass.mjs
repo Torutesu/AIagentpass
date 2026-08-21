@@ -21,12 +21,12 @@ import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs"
 import { createNativeDeviceEnrollmentRunner } from "../lib/native-device-enrollment-runner.mjs";
 import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { createDeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
 import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
-import { parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
-import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
+import { assertFixedResumeDescriptorOptions, parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
-import { parseEnrollmentInvitation, publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
+import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
 import { prepareSetupPreflight, publicSetupPreflightFailure, serializeSetupPreflightHandoff } from "../lib/setup-preflight.mjs";
 import { readInstalledReleaseReceipt, verifyInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
@@ -34,7 +34,10 @@ import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEdit
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
-import { revokeOperations } from "./revoke-command.mjs";
+import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
+import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
+import { createAgentLifecycleLaunchDescriptor, launchAgentLifecycleWithHandoff, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -61,7 +64,9 @@ Commands:
                     configure the native bridge and project MCP integration
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
-  status            show policy and revocation status
+  launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  close             reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  status            show legacy local policy and revocation status
   check             evaluate the current repository
   doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
                     diagnose production installation without changing state
@@ -197,20 +202,6 @@ function installProduction() {
   }
 }
 
-function readEnrollmentInvitationStdin() {
-  const chunks = []; let total = 0;
-  while (true) {
-    const chunk = Buffer.alloc(4096);
-    const count = fs.readSync(0, chunk, 0, chunk.length, null);
-    if (count === 0) break;
-    total += count;
-    if (total > 16 * 1024) throw new Error("Enrollment invitation exceeds 16 KiB");
-    chunks.push(chunk.subarray(0, count));
-  }
-  const parsed = parseControlBundleJson(Buffer.concat(chunks), { maxBytes: 16 * 1024, maxDepth: 8 });
-  return parseEnrollmentInvitation(parsed);
-}
-
 async function continueNativeSetup() {
   const flags = parseSetupContinueOptions(args.slice(1));
   const journal = loadSetupJournal();
@@ -222,13 +213,25 @@ async function continueNativeSetup() {
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const config = loadConfig();
   const state = journal.status().state;
-  const enrollmentMode = flags.browser || flags.enrollmentStdin;
-  if ((state === "service_keys_activated") !== enrollmentMode) {
-    throw new Error(state === "service_keys_activated"
-      ? "At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path"
-      : "Browser and stdin enrollment options are accepted only at service_keys_activated");
+  const enrollmentRequested = flags.browser || flags.enrollmentStdin;
+  let enrollmentResumeStore;
+  let enrollmentResumeRecord;
+  if (state === "service_keys_activated") {
+    enrollmentResumeStore = createDeviceOnboardingResumeStore(path.join(defaultConfigDir, "device-onboarding-resume.json"));
+    try { enrollmentResumeRecord = enrollmentResumeStore.read(); }
+    catch (error) { if (error?.code !== "NOT_INITIALIZED") throw error; }
+    if (enrollmentResumeRecord?.state === "failed") throw Object.assign(new Error("The durable device enrollment record is terminal and requires operator reconciliation"), { code: "DEVICE_ENROLLMENT_RESUME_FAILED" });
+    assertFixedResumeDescriptorOptions(flags, enrollmentResumeRecord?.recovery_descriptor);
+    if (!enrollmentRequested && !enrollmentResumeRecord?.recovery_descriptor) {
+      throw new Error("At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path");
+    }
+  } else if (enrollmentRequested) {
+    throw new Error("Browser and stdin enrollment options are accepted only at service_keys_activated");
   }
-  const enrollmentBaseUrl = flags.enrollmentUrl === undefined ? undefined : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
+  const enrollmentMode = state === "service_keys_activated" && (enrollmentRequested || Boolean(enrollmentResumeRecord?.recovery_descriptor));
+  const enrollmentBaseUrl = flags.enrollmentUrl === undefined
+    ? enrollmentResumeRecord?.recovery_descriptor?.api_base_url
+    : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
   const consoleBaseUrl = flags.consoleUrl === undefined ? undefined : normalizeConsoleBaseUrl(flags.consoleUrl);
   const teamId = config.native_broker?.team_id;
   if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
@@ -236,7 +239,7 @@ async function continueNativeSetup() {
   if (config.native_broker?.client !== application.client || config.native_broker?.manager !== application.manager || config.native_broker?.mach_service !== "dev.agentpass.native-service") throw new Error("Native bridge configuration does not match the verified AgentPass application");
   const enrollmentRunner = enrollmentMode ? createNativeDeviceEnrollmentRunner({ servicePath: application.service }) : undefined;
   let enrollmentInvitation;
-  if (flags.enrollmentStdin) enrollmentInvitation = readEnrollmentInvitationStdin();
+  if (flags.enrollmentStdin) enrollmentInvitation = await readSetupEnrollmentInvitationStdin({ enrollmentUrl: enrollmentBaseUrl });
   if (flags.browser) {
     const receipt = readInstalledReleaseReceipt();
     const preflight = await prepareSetupPreflight({
@@ -302,7 +305,7 @@ async function continueNativeSetup() {
   if (journal.status().state === "device_enrolled") handlers.connect_editor = createEditorConnectedHandler({ onboarding });
   if (journal.status().state === "editor_connected") handlers.verify_test_commit = createTestCommitVerifiedHandler({ verifierResult: verifyCurrentCommit() });
   if (journal.status().state === "test_commit_verified") handlers.complete_setup = createCompleteSetupHandler({ priorVerificationProof: verifyCurrentCommit() });
-  if (enrollmentInvitation) {
+  if (enrollmentInvitation || enrollmentResumeRecord?.recovery_descriptor) {
     nativeHandlers();
     handlers.enroll_device = createDeviceEnrollmentSetupHandler({
       runner: enrollmentRunner,
@@ -315,11 +318,19 @@ async function continueNativeSetup() {
         if (register.status !== 0) throw Object.assign(new Error("Native service registration failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
         const inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
         if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Native service requires approval after control provisioning"), { code: "SERVICE_APPROVAL_REQUIRED" });
-        await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
-        return { status: "enabled", control_refreshed: true };
+        let response;
+        try {
+          const brokerResponse = await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
+          response = JSON.parse(Buffer.from(brokerResponse.stdout_base64, "base64").toString("utf8"));
+        } catch {
+          throw Object.assign(new Error("Native control refresh response is unavailable"), { code: "SERVICE_RESTART_FAILED" });
+        }
+        try { return normalizeNativeControlRefreshResponse(response); }
+        catch { throw Object.assign(new Error("Native control refresh response is invalid"), { code: "SERVICE_RESTART_FAILED" }); }
       },
       invitation: enrollmentInvitation,
       baseUrl: enrollmentBaseUrl,
+      resumeStore: enrollmentResumeStore,
       loadConfig,
       saveConfig
     });
@@ -1319,8 +1330,68 @@ function xmlEscape(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
-try {
-  if (command === "install") installProduction();
+async function launchAgent() {
+  // Normalize the public launch vector before reaching the lifecycle boundary.
+  // The lifecycle function can only use the fixed signed Host and an already
+  // inherited FD3 handoff; it cannot synthesize authority from CLI state.
+  const normalized = parseAgentLaunchArgs([command, ...args]);
+  let descriptor;
+  try { descriptor = createAgentLifecycleLaunchDescriptor(normalized); } catch { descriptor = null; }
+  const result = await launchAgentLifecycleWithHandoff(descriptor, { platform: process.platform });
+  console.log(JSON.stringify(result));
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+function launchContractFailure(error) {
+  if (!(error instanceof AgentLaunchContractError)) return false;
+  // Keep the public unavailable response stable while refusing the invalid
+  // vector. Contract details never cross this boundary, so selectors and
+  // their values cannot become part of CLI output or process diagnostics.
+  void error;
+  console.log(JSON.stringify(unavailableAgentLifecycle("launch")));
+  process.exitCode = 1;
+  return true;
+}
+
+const NATIVE_CONTROL_REFRESH_RESPONSE_KEYS = new Set([
+  "status", "control_refreshed", "control_ack", "refresh_generation", "refresh_sequence", "control_statement_hash"
+]);
+const NATIVE_CONTROL_ACK_KEYS = new Set(["acknowledgement", "server_accepted", "observed_generation", "refresh_state"]);
+const HASH = /^[0-9a-f]{64}$/u;
+
+/**
+ * Decode the closed management response before it reaches onboarding. The
+ * native service is trusted only for transport; this boundary re-validates
+ * the public schema, canonical ACK, binding, and applied result.
+ */
+export function normalizeNativeControlRefreshResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.size || Object.keys(value).some((key) => !NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.has(key))) throw new Error("Native control refresh response is not a closed public schema");
+  if (value.status !== "enabled" || value.control_refreshed !== true || !value.control_ack || typeof value.control_ack !== "object" || Array.isArray(value.control_ack)) throw new Error("Native control refresh response is not enabled");
+  const ackEvidence = value.control_ack;
+  if (Object.keys(ackEvidence).length !== NATIVE_CONTROL_ACK_KEYS.size || Object.keys(ackEvidence).some((key) => !NATIVE_CONTROL_ACK_KEYS.has(key))) throw new Error("Native control ACK evidence is not a closed public schema");
+  if (ackEvidence.server_accepted !== true || ackEvidence.refresh_state !== "applied" || !Number.isSafeInteger(ackEvidence.observed_generation) || ackEvidence.observed_generation < 1) throw new Error("Native control ACK was not accepted as applied");
+  let acknowledgement;
+  try { acknowledgement = normalizeOnboardingControlAcknowledgement(ackEvidence.acknowledgement); }
+  catch { throw new Error("Native control ACK acknowledgement is invalid"); }
+  if (acknowledgement.result !== "applied" || !Number.isSafeInteger(value.refresh_generation) || value.refresh_generation < 1 || value.refresh_generation !== ackEvidence.observed_generation || !Number.isSafeInteger(value.refresh_sequence) || value.refresh_sequence < 1 || value.refresh_sequence !== acknowledgement.sequence || typeof value.control_statement_hash !== "string" || !HASH.test(value.control_statement_hash) || value.control_statement_hash !== acknowledgement.statement_hash) throw new Error("Native control ACK evidence binding is invalid");
+  return Object.freeze({
+    status: "enabled",
+    control_refreshed: true,
+    control_ack: Object.freeze({ acknowledgement, server_accepted: true, observed_generation: ackEvidence.observed_generation, refresh_state: "applied" }),
+    refresh_generation: value.refresh_generation,
+    refresh_sequence: value.refresh_sequence,
+    control_statement_hash: value.control_statement_hash
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
+  if (command === undefined || command === "--help" || command === "-h") usage();
+  else if (command === "launch") await launchAgent();
+  else if (command === "close") {
+    console.log(JSON.stringify(unavailableAgentLifecycle(command)));
+    process.exitCode = 1;
+  }
+  else if (command === "install") installProduction();
   else if (command === "setup") await setupNativeBridge();
   else if (command === "uninstall") await uninstallProduction();
   else if (command === "init") init();
@@ -1345,8 +1416,13 @@ try {
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);
   else if (command === "audit") await auditCommand();
-  else usage();
+  else {
+    console.error("agentpass: unknown command");
+    process.exitCode = 2;
+  }
 } catch (error) {
-  console.error(`agentpass: ${error.message}`);
-  process.exitCode = 1;
+  if (!launchContractFailure(error)) {
+    console.error(`agentpass: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

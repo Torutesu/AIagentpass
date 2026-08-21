@@ -175,3 +175,14 @@ test("registration HTTP maps step-up failures to stable authentication responses
   assert.equal(unavailableResult.status, 503);
   assert.equal(unavailableResult.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
 });
+
+test("registration HTTP exposes ceremony storage outages only as a stable 503", async () => {
+  const unavailable = fixture({ verifyError: new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE, "database diagnostics") });
+  const result = await unavailable.api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: browserCredential() }));
+  assert.equal(result.status, 503);
+  assert.deepEqual(result.body.error, {
+    code: WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE,
+    message: "The WebAuthn credential could not be stored",
+  });
+  assert.equal(JSON.stringify(result.body).includes("database diagnostics"), false);
+});

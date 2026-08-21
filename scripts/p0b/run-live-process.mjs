@@ -26,8 +26,246 @@ const DEFAULT_FIXTURE_TIMEOUT_MS = 45_000;
 const MAX_ENV_FILE_BYTES = 16 * 1024;
 const DEFAULT_REPORT_OUTPUT = path.join(REPOSITORY_ROOT, ".agentpass", "qualification", "p0b.json");
 const BUILD_TIMEOUT_MS = 180_000;
-const BROWSER_TIMEOUT_MS = 600_000;
+// The live browser matrix intentionally provisions an isolated PostgreSQL,
+// Cloud, and Console stack per authority scenario. Keep the outer supervisor
+// above the complete matrix budget; each scenario retains its own tighter
+// deadline so a single stuck interaction still fails locally.
+const BROWSER_TIMEOUT_MS = 1_920_000;
 const PROCESS_TIMEOUT_MS = 180_000;
+// Only these static TAP fragments may cross the child-output boundary. The
+// command runner retains the fixed code, never the matched line or adjacent
+// diagnostics, so assertions, URLs, credentials, SQL, and tenant data remain
+// unavailable to the orchestrator and CI log.
+const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
+  [null, "P0B_SAFE_WAKE_COALESCED_FAILED", "wake_ledger_coalesced"],
+  [null, "P0B_SAFE_WAKE_NO_PENDING_FAILED", "wake_ledger_no_pending"],
+  [null, "P0B_SAFE_WAKE_ACCEPTED_FAILED", "wake_ledger_accepted"],
+  [null, "P0B_SAFE_WAKE_ACCEPTED_GOT_COALESCED_FAILED", "wake_ledger_accepted_got_coalesced"],
+  [null, "P0B_SAFE_WAKE_ACCEPTED_GOT_NO_PENDING_FAILED", "wake_ledger_accepted_got_no_pending"],
+  [null, "P0B_SAFE_WAKE_ACCEPTED_STATUS_MISMATCH_FAILED", "wake_ledger_accepted_status_mismatch"],
+  [null, "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED", "wake_ledger_accepted_ui_status"],
+  [null, "P0B_SAFE_KEYBOARD_FOCUS_FAILED", "keyboard_focus"],
+  [null, "P0B_SAFE_KEYBOARD_PRESS_FAILED", "keyboard_press"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_FAILED", "keyboard_outcome"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_ALERT_FAILED", "keyboard_outcome_alert"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_TIMEOUT_FAILED", "keyboard_outcome_timeout"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_INVALID_FAILED", "keyboard_outcome_invalid"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_TRANSPORT_FAILED", "keyboard_outcome_transport"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_NO_REQUEST_FAILED", "keyboard_outcome_no_request"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_RESPONSE_TIMEOUT_FAILED", "keyboard_outcome_response_timeout"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_400_FAILED", "keyboard_outcome_http_400"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_401_FAILED", "keyboard_outcome_http_401"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_403_FAILED", "keyboard_outcome_http_403"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_409_FAILED", "keyboard_outcome_http_409"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_422_FAILED", "keyboard_outcome_http_422"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_429_FAILED", "keyboard_outcome_http_429"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_500_FAILED", "keyboard_outcome_http_500"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_502_FAILED", "keyboard_outcome_http_502"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_503_FAILED", "keyboard_outcome_http_503"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_504_FAILED", "keyboard_outcome_http_504"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_4XX_FAILED", "keyboard_outcome_http_4xx"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_5XX_FAILED", "keyboard_outcome_http_5xx"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_OTHER_FAILED", "keyboard_outcome_http_other"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED", "keyboard_outcome_2xx_response_contract"],
+  [null, "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED", "keyboard_outcome_2xx_ui_parse"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED", "keyboard_auth_options_no_request"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED", "keyboard_auth_webauthn_unavailable"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED", "keyboard_auth_session_transport"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_RESPONSE_MISSING_FAILED", "keyboard_auth_session_response_missing"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_4XX_FAILED", "keyboard_auth_session_http_4xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_5XX_FAILED", "keyboard_auth_session_http_5xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_OTHER_FAILED", "keyboard_auth_session_http_other"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_SUCCEEDED_NO_OPTIONS_FAILED", "keyboard_auth_session_succeeded_no_options"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED", "keyboard_auth_options_transport"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_RESPONSE_MISSING_FAILED", "keyboard_auth_options_response_missing"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_4XX_FAILED", "keyboard_auth_options_http_4xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_5XX_FAILED", "keyboard_auth_options_http_5xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_OTHER_FAILED", "keyboard_auth_options_http_other"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED", "keyboard_auth_verify_no_request"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED", "keyboard_auth_verify_transport"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_RESPONSE_MISSING_FAILED", "keyboard_auth_verify_response_missing"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_400_FAILED", "keyboard_auth_verify_http_400"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_FAILED", "keyboard_auth_verify_http_401"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_CREDENTIAL_NOT_ALLOWED_FAILED", "keyboard_auth_verify_credential_not_allowed"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_WEBAUTHN_VERIFICATION_FAILED_FAILED", "keyboard_auth_verify_webauthn_verification_failed"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_SESSION_REQUIRED_FAILED", "keyboard_auth_verify_session_required"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_403_FAILED", "keyboard_auth_verify_http_403"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_409_FAILED", "keyboard_auth_verify_http_409"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_422_FAILED", "keyboard_auth_verify_http_422"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_428_FAILED", "keyboard_auth_verify_http_428"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_429_FAILED", "keyboard_auth_verify_http_429"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_4XX_FAILED", "keyboard_auth_verify_http_4xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_5XX_FAILED", "keyboard_auth_verify_http_5xx"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_OTHER_FAILED", "keyboard_auth_verify_http_other"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED", "keyboard_auth_verified_no_refresh"],
+  [null, "P0B_SAFE_SCENARIO_NOT_FOUND", "scenario_not_found"],
+  [null, "P0B_SAFE_STATE_MISSING_SYNCED", "state_missing_synced"],
+  [null, "P0B_SAFE_STATE_MISSING_PENDING", "state_missing_pending"],
+  [null, "P0B_SAFE_STATE_MISSING_BLOCKED", "state_missing_blocked"],
+  [null, "P0B_SAFE_STATE_MISSING_STALE", "state_missing_stale"],
+  [null, "P0B_SAFE_STATE_MISSING_OFFLINE", "state_missing_offline"],
+  [null, "P0B_SAFE_STATE_MISSING_REVOKED", "state_missing_revoked"],
+  [null, "P0B_SAFE_OWNER_OPEN_CONTEXT_FAILED", "owner_open_context"],
+  [null, "P0B_SAFE_OWNER_OPEN_AUTHENTICATOR_FAILED", "owner_open_authenticator"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_FAILED", "owner_open_bootstrap"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_FAILED", "owner_open_registration"],
+  [null, "P0B_SAFE_OWNER_OPEN_RELOAD_FAILED", "owner_open_reload"],
+  [null, "P0B_SAFE_OWNER_OPEN_READINESS_FAILED", "owner_open_readiness"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_NAVIGATION_FAILED", "owner_open_bootstrap_navigation"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_RESPONSE_FAILED", "owner_open_bootstrap_response"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_400_FAILED", "owner_open_bootstrap_http_400"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_401_FAILED", "owner_open_bootstrap_http_401"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_403_FAILED", "owner_open_bootstrap_http_403"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_404_FAILED", "owner_open_bootstrap_http_404"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_405_FAILED", "owner_open_bootstrap_http_405"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_409_FAILED", "owner_open_bootstrap_http_409"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_415_FAILED", "owner_open_bootstrap_http_415"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_422_FAILED", "owner_open_bootstrap_http_422"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_429_FAILED", "owner_open_bootstrap_http_429"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_500_FAILED", "owner_open_bootstrap_http_500"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED", "owner_open_bootstrap_http_502_bff_invalid_response"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED", "owner_open_bootstrap_http_502_proxy_unavailable"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_502_CLOUD_EXITED_FAILED", "owner_open_bootstrap_http_502_cloud_exited"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_504_FAILED", "owner_open_bootstrap_http_504"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_4XX_FAILED", "owner_open_bootstrap_http_4xx"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_5XX_FAILED", "owner_open_bootstrap_http_5xx"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_OTHER_FAILED", "owner_open_bootstrap_http_other"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_CONTRACT_FAILED", "owner_open_bootstrap_contract"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_400_FAILED", "owner_registration_options_400"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_401_FAILED", "owner_registration_options_401"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_403_FAILED", "owner_registration_options_403"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_409_FAILED", "owner_registration_options_409"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_413_FAILED", "owner_registration_options_413"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_422_FAILED", "owner_registration_options_422"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_428_FAILED", "owner_registration_options_428"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_500_FAILED", "owner_registration_options_500"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_503_FAILED", "owner_registration_options_503"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_503_CONTROL_UNAVAILABLE_FAILED", "owner_reg_options_control_unavailable"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_503_SESSION_UNAVAILABLE_FAILED", "owner_reg_options_session_unavailable"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_503_SERVICE_UNAVAILABLE_FAILED", "owner_reg_options_service_unavailable"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_400_FAILED", "owner_registration_verify_400"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_FAILED", "owner_registration_verify_401"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REQUIRED_FAILED", "owner_reg_verify_session_required"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_MISSING_FAILED", "owner_reg_session_missing"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_FAILED", "owner_reg_session_revoked"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_EXPIRED_FAILED", "owner_reg_session_revoked_expired"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_CONCURRENT_FAILED", "owner_reg_session_revoked_concurrent"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_ROTATED_FAILED", "owner_reg_session_revoked_rotated"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_LOGOUT_FAILED", "owner_reg_session_revoked_logout"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REVOKED_OTHER_FAILED", "owner_reg_session_revoked_other"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_ABSOLUTE_EXPIRED_FAILED", "owner_reg_session_absolute_expired"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_IDLE_EXPIRED_FAILED", "owner_reg_session_idle_expired"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_ACTIVE_FAILED", "owner_reg_session_active"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_UNAVAILABLE_FAILED", "owner_reg_session_state_unavailable"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_COOKIE_MISSING_FAILED", "owner_reg_verify_cookie_missing"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_403_FAILED", "owner_registration_verify_403"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_409_FAILED", "owner_registration_verify_409"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_413_FAILED", "owner_registration_verify_413"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_422_FAILED", "owner_registration_verify_422"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_428_FAILED", "owner_registration_verify_428"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_500_FAILED", "owner_registration_verify_500"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_503_FAILED", "owner_registration_verify_503"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_500_FAILED", "admin_open_bootstrap_http_500"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED", "admin_open_bootstrap_navigation"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED", "admin_open_bootstrap_response"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_400_FAILED", "admin_open_bootstrap_http_400"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_401_FAILED", "admin_open_bootstrap_http_401"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_403_FAILED", "admin_open_bootstrap_http_403"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_404_FAILED", "admin_open_bootstrap_http_404"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_405_FAILED", "admin_open_bootstrap_http_405"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_409_FAILED", "admin_open_bootstrap_http_409"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_415_FAILED", "admin_open_bootstrap_http_415"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_422_FAILED", "admin_open_bootstrap_http_422"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_429_FAILED", "admin_open_bootstrap_http_429"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_OTHER_FAILED", "admin_open_bootstrap_http_other"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED", "admin_open_bootstrap_http_502_bff_invalid_response"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED", "admin_open_bootstrap_http_502_proxy_unavailable"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_CLOUD_EXITED_FAILED", "admin_open_bootstrap_http_502_cloud_exited"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_SESSION_UNAVAILABLE_FAILED", "bootstrap_http_503_session_unavailable"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_HUMAN_AUTH_UNAVAILABLE_FAILED", "bootstrap_http_503_human_auth_unavailable"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_RATE_LIMITER_UNAVAILABLE_FAILED", "bootstrap_http_503_rate_limiter_unavailable"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_CLOUD_API_UNAVAILABLE_FAILED", "bootstrap_http_503_cloud_api_unavailable"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_IDENTITY_UNAVAILABLE_FAILED", "bootstrap_http_503_identity_unavailable"],
+  [null, "P0B_SAFE_BOOTSTRAP_HTTP_503_OTHER_FAILED", "bootstrap_http_503_other"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_504_FAILED", "admin_open_bootstrap_http_504"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_4XX_FAILED", "admin_open_bootstrap_http_4xx"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_5XX_FAILED", "admin_open_bootstrap_http_5xx"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_CONTRACT_FAILED", "admin_open_bootstrap_contract"],
+  [null, "P0B_SAFE_ADMIN_OPEN_REGISTRATION_FAILED", "admin_open_registration"],
+  [null, "P0B_SAFE_ADMIN_OPEN_RELOAD_FAILED", "admin_open_reload"],
+  [null, "P0B_SAFE_ADMIN_OPEN_READINESS_FAILED", "admin_open_readiness"],
+  [null, "P0B_SAFE_ADMIN_WAKE_CLICK_FAILED", "admin_wake_click"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_OPTIONS_TRANSPORT_FAILED", "admin_wake_auth_options_transport"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_OPTIONS_HTTP_4XX_FAILED", "admin_wake_auth_options_http_4xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_OPTIONS_HTTP_5XX_FAILED", "admin_wake_auth_options_http_5xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_OPTIONS_HTTP_OTHER_FAILED", "admin_wake_auth_options_http_other"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_TRANSPORT_FAILED", "admin_wake_auth_verify_transport"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_400_FAILED", "admin_wake_auth_verify_http_400"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_401_FAILED", "admin_wake_auth_verify_http_401"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_401_CREDENTIAL_NOT_ALLOWED_FAILED", "admin_wake_auth_verify_credential_not_allowed"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_401_WEBAUTHN_VERIFICATION_FAILED_FAILED", "admin_wake_auth_verify_webauthn_verification_failed"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_401_SESSION_REQUIRED_FAILED", "admin_wake_auth_verify_session_required"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_403_FAILED", "admin_wake_auth_verify_http_403"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_409_FAILED", "admin_wake_auth_verify_http_409"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_422_FAILED", "admin_wake_auth_verify_http_422"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_428_FAILED", "admin_wake_auth_verify_http_428"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_429_FAILED", "admin_wake_auth_verify_http_429"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_4XX_FAILED", "admin_wake_auth_verify_http_4xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_5XX_FAILED", "admin_wake_auth_verify_http_5xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_OTHER_FAILED", "admin_wake_auth_verify_http_other"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_TRANSPORT_FAILED", "admin_wake_refresh_transport"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_RESPONSE_TIMEOUT_FAILED", "admin_wake_refresh_response_timeout"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_4XX_FAILED", "admin_wake_refresh_http_4xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_5XX_FAILED", "admin_wake_refresh_http_5xx"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_OTHER_FAILED", "admin_wake_refresh_http_other"],
+  [null, "P0B_SAFE_ADMIN_WAKE_REFRESH_2XX_RESPONSE_CONTRACT_FAILED", "admin_wake_refresh_2xx_response_contract"],
+  [null, "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED", "admin_wake_ui_alert"],
+  [null, "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED", "admin_wake_ui_timeout"],
+  [null, "P0B_SAFE_ADMIN_WAKE_UI_COPY_MISMATCH_FAILED", "admin_wake_ui_copy_mismatch"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED", "lifecycle_fixture_startup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED", "lifecycle_fixture_start"],
+  [null, "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED", "lifecycle_database_prepare"],
+  [null, "P0B_SAFE_LIFECYCLE_EXTERNAL_DEPENDENCY_FAILED", "lifecycle_external_dependency"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED", "lifecycle_browser_startup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED", "lifecycle_browser_start"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED", "lifecycle_fixture_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED", "lifecycle_context_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED", "lifecycle_context_cleanup"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_TIMEOUT_FAILED", "lifecycle_browser_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_FAILED", "lifecycle_browser_cleanup"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_CONTEXT_FAILED", "auditor_open_context"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_AUTHENTICATOR_FAILED", "auditor_open_authenticator"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_BOOTSTRAP_FAILED", "auditor_open_bootstrap"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_REGISTRATION_FAILED", "auditor_open_registration"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_RELOAD_FAILED", "auditor_open_reload"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_READINESS_FAILED", "auditor_open_readiness"],
+  [null, "P0B_SAFE_AUDITOR_WAKE_CONTROL_FAILED", "auditor_wake_control"],
+  [null, "P0B_SAFE_VIEWER_OPEN_FAILED", "viewer_open"],
+  [null, "P0B_SAFE_VIEWER_WAKE_CONTROL_FAILED", "viewer_wake_control"],
+  [null, "P0B_SAFE_STALE_AUTH_TARGET_FAILED", "stale_auth_target"],
+  [null, "P0B_SAFE_STALE_AUTH_CEREMONY_FAILED", "stale_auth_ceremony"],
+  [null, "P0B_SAFE_STALE_AUTH_CEREMONY_OPTIONS_FAILED", "stale_auth_ceremony_options"],
+  [null, "P0B_SAFE_STALE_AUTH_CEREMONY_VERIFY_FAILED", "stale_auth_ceremony_verify"],
+  [null, "P0B_SAFE_STALE_AUTH_CEREMONY_RESPONSE_FAILED", "stale_auth_ceremony_response"],
+  [null, "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED", "stale_auth_invalidation"],
+  [null, "P0B_SAFE_STALE_AUTH_FETCH_FAILED", "stale_auth_fetch"],
+  [null, "P0B_SAFE_STALE_AUTH_RESPONSE_FAILED", "stale_auth_response"],
+  [null, "P0B_SAFE_STALE_AUTH_HTTP_2XX_FAILED", "stale_auth_http_2xx"],
+  [null, "P0B_SAFE_STALE_AUTH_HTTP_4XX_FAILED", "stale_auth_http_4xx"],
+  [null, "P0B_SAFE_STALE_AUTH_HTTP_5XX_FAILED", "stale_auth_http_5xx"],
+  [null, "P0B_SAFE_STALE_AUTH_HTTP_OTHER_FAILED", "stale_auth_http_other"],
+  [7, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial", false],
+  [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial", false],
+  [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial", false],
+  [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial", false],
+  [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial", false],
+  [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke", false],
+  [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke", false]
+].map(([index, name, code, terminate = true]) => Object.freeze({
+  marker: index === null ? name : `not ok ${index} - ${name}`,
+  code,
+  terminate
+})));
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
   "AGENTPASS_TEST_POSTGRES_ADMIN_URL",
@@ -37,6 +275,8 @@ const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_TLS_IMAGE",
   "P0B_POSTGRES_TLS_CONTAINER_ID"
 ]);
+const LIVE_BROWSER_SCENARIO_MAX_LENGTH = 128;
+const LIVE_BROWSER_SCENARIO_PATTERN = /^[^\u0000-\u001f\u007f]{1,128}$/u;
 const ENV_KEY = /^[A-Z][A-Z0-9_]*$/u;
 const CONTAINER_ID = /^[a-f0-9]{12,64}$/u;
 
@@ -144,18 +384,37 @@ export function parseProtectedEnvironment(contents) {
 
 export function buildTestEnvironment(base, fixtureEnvironment) {
   if (!base || typeof base !== "object") throw new TypeError("base environment is required");
+  const scenario = optionalLiveBrowserScenario(base.P0B_LIVE_BROWSER_SCENARIO);
   return Object.freeze({
     ...qualificationBaseEnvironment(base),
     ...fixtureEnvironment,
     // A caller's stale disable flag must not turn this live qualification into
     // a successful-looking skipped test.
-    P0B_DISABLE_EXTERNAL: "false"
+    P0B_DISABLE_EXTERNAL: "false",
+    ...(scenario === undefined ? {} : { P0B_LIVE_BROWSER_SCENARIO: scenario })
   });
+}
+
+function optionalLiveBrowserScenario(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new OrchestrationError("invalid_browser_scenario", "browser scenario filter is invalid");
+  const scenario = value.trim();
+  if (!LIVE_BROWSER_SCENARIO_PATTERN.test(scenario) || scenario.length > LIVE_BROWSER_SCENARIO_MAX_LENGTH) {
+    throw new OrchestrationError("invalid_browser_scenario", "browser scenario filter is invalid");
+  }
+  return scenario;
 }
 
 export function stableReason(error) {
   const code = typeof error?.code === "string" ? error.code : "error";
   return /^[a-z][a-z0-9_]*$/u.test(code) ? code : "error";
+}
+
+export function liveBrowserFailureReason(result) {
+  const reason = stableReason({ code: result?.reason });
+  const diagnostic = result?.internal?.safe_failure_code;
+  if (result?.internal?.timed_out === true || typeof diagnostic !== "string") return reason;
+  return `child_exit_nonzero_${diagnostic}`;
 }
 
 export function usage() {
@@ -203,6 +462,7 @@ export async function main(argv = process.argv.slice(2)) {
   let failure;
   let interrupted = false;
   let activeChild;
+  let terminateActiveChild;
   let publicManifest;
   let fixtureEnvironment;
   let postgresEvidence;
@@ -211,7 +471,7 @@ export async function main(argv = process.argv.slice(2)) {
   const commands = [];
   const onSignal = (signal) => {
     interrupted = true;
-    if (activeChild && !activeChild.killed) activeChild.kill("SIGTERM");
+    if (activeChild && !activeChild.killed) terminateActiveChild?.();
     // Keep the handler installed until the finally block so the fixture is
     // stopped before the process returns control to the shell.
     void signal;
@@ -263,10 +523,11 @@ export async function main(argv = process.argv.slice(2)) {
         cwd: CONSOLE_ROOT,
         env: qualificationBaseEnvironment(process.env),
         timeoutMs: BUILD_TIMEOUT_MS,
-        onChild: (child) => { activeChild = child; }
+        onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
       });
       commands.push(commandEvidence("console-build", ["npm", "run", "build"], "apps/web-console", result));
       activeChild = undefined;
+      terminateActiveChild = undefined;
       if (result.status !== "passed") {
         failure = { stage: "console-build", error: new OrchestrationError(result.reason) };
       }
@@ -289,12 +550,20 @@ export async function main(argv = process.argv.slice(2)) {
           cwd: REPOSITORY_ROOT,
           env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
           timeoutMs: BROWSER_TIMEOUT_MS,
-          onChild: (child) => { activeChild = child; }
+          safeFailureMarkers: LIVE_BROWSER_SAFE_FAILURE_MARKERS,
+          terminateOnSafeFailure: true,
+          onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
         commands.push(commandEvidence("browser-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
+        terminateActiveChild = undefined;
         if (result.status !== "passed") {
-          failure = { stage: "live-browser", error: new OrchestrationError(result.reason) };
+          // A provisional TAP marker is useful only while the child is still
+          // alive long enough to emit a more specific marker. If the command
+          // itself reaches its hard deadline, preserve that timeout instead of
+          // misreporting it as a normal nonzero admin/revoke failure.
+          const reason = liveBrowserFailureReason(result);
+          failure = { stage: "live-browser", error: new OrchestrationError(reason) };
         } else if (interrupted) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
@@ -311,10 +580,11 @@ export async function main(argv = process.argv.slice(2)) {
           cwd: REPOSITORY_ROOT,
           env: buildTestEnvironment(process.env, fixtureEnvironment),
           timeoutMs: PROCESS_TIMEOUT_MS,
-          onChild: (child) => { activeChild = child; }
+          onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
         commands.push(commandEvidence("process-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
+        terminateActiveChild = undefined;
         if (result.status !== "passed") {
           failure = { stage: "live-test", error: new OrchestrationError(result.reason) };
         } else if (interrupted) {

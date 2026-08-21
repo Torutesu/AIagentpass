@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BROWSER_CLI_HANDOFF_ERRORS,
+  BROWSER_CLI_HANDOFF_EVENTS,
+  BROWSER_CLI_HANDOFF_LIMITS,
   BrowserCliHandoffClientError,
   buildBrowserCliHandoffEnvelope,
+  createBrowserCliHandoffDelivery,
   fetchBrowserCliHandoffPreflight,
   parseBrowserCliHandoffLaunchFragment,
   parseBrowserCliHandoffPreflight,
   postBrowserCliHandoff,
   publicEnrollmentPreflight,
+  transitionBrowserCliHandoffState,
 } from "../lib/browser-cli-handoff.mjs";
 
 const correlationId = "A".repeat(43);
@@ -89,10 +93,41 @@ test("GETs preflight with no-store and validates the response before exposing pu
   await assert.rejects(fetchBrowserCliHandoffPreflight({ handoff, fetchImpl: async () => { throw new Error("CORS"); } }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE);
 });
 
+test("binds every request to the parsed loopback descriptor and bounds stalled requests", async () => {
+  const substituted = { ...handoff, url: "http://127.0.0.1:49153/v1/browser-cli-handoffs/" + correlationId };
+  await assert.rejects(
+    fetchBrowserCliHandoffPreflight({ handoff: substituted, fetchImpl: async () => response(preflight()) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_FRAGMENT
+  );
+  await assert.rejects(
+    postBrowserCliHandoff({ handoff, correlation_id: "E".repeat(43), nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: true }) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED
+  );
+
+  assert.equal(BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs, 10_000);
+  let preflightSignal;
+  await assert.rejects(
+    fetchBrowserCliHandoffPreflight({
+      handoff,
+      timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.minTimeoutMs,
+      fetchImpl: async (_input, init) => {
+        preflightSignal = init.signal;
+        return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("timed out", "AbortError")), { once: true }));
+      },
+    }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.PREFLIGHT_UNAVAILABLE
+  );
+  assert.equal(preflightSignal.aborted, true);
+  await assert.rejects(
+    postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.minTimeoutMs, fetchImpl: async (_input, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("timed out", "AbortError")), { once: true })) }),
+    (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED
+  );
+});
+
 test("POSTs exactly the bound envelope and accepts only the exact ACK", async () => {
   let request;
   const envelope = buildBrowserCliHandoffEnvelope({ correlation_id: correlationId, nonce, invitation });
-  assert.deepEqual(Object.keys(envelope), ["version", "correlation_id", "nonce", "invitation"]);
+  assert.deepEqual(Object.keys(envelope), ["version", "type", "correlation_id", "nonce", "invitation"]);
   await postBrowserCliHandoff({
     handoff,
     correlation_id: correlationId,
@@ -107,8 +142,35 @@ test("POSTs exactly the bound envelope and accepts only the exact ACK", async ()
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.cache, "no-store");
   assert.equal(request.init.credentials, "omit");
-  assert.deepEqual(JSON.parse(request.init.body), { version: 1, correlation_id: correlationId, nonce, invitation });
+  assert.deepEqual(JSON.parse(request.init.body), { version: 1, type: "agentpass.browser-onboarding.invitation", correlation_id: correlationId, nonce, invitation });
   await assert.rejects(postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: false }) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK);
   await assert.rejects(postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: true, credential: "must-not-be-accepted" }) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK);
   assert.throws(() => buildBrowserCliHandoffEnvelope({ correlation_id: correlationId, nonce, invitation, extra: "reject" }), BrowserCliHandoffClientError);
+});
+
+test("derives connected, delivered, and failed only from bounded handoff outcomes", () => {
+  assert.equal(transitionBrowserCliHandoffState("none", BROWSER_CLI_HANDOFF_EVENTS.LAUNCH), "loading");
+  assert.equal(transitionBrowserCliHandoffState("loading", BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_SUCCEEDED), "connected");
+  assert.equal(transitionBrowserCliHandoffState("connected", BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED), "delivered");
+  assert.equal(transitionBrowserCliHandoffState("loading", BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_FAILED), "failed");
+  assert.equal(transitionBrowserCliHandoffState("connected", BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED), "failed");
+  assert.throws(() => transitionBrowserCliHandoffState("none", BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_SUCCEEDED), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_STATE);
+  assert.throws(() => transitionBrowserCliHandoffState("delivered", BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_STATE);
+});
+
+test("consumes the loopback delivery attempt once, including after an invalid ACK", async () => {
+  let calls = 0;
+  const delivery = createBrowserCliHandoffDelivery({
+    handoff,
+    preflight: preflight(),
+    fetchImpl: async () => {
+      calls += 1;
+      return response({ version: 1, ok: true, consumed: false });
+    },
+  });
+  assert.deepEqual(Object.keys(delivery), ["deliver"]);
+  await assert.rejects(delivery.deliver(invitation), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK);
+  await assert.rejects(delivery.deliver(invitation), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_ALREADY_ATTEMPTED);
+  assert.equal(calls, 1);
+  assert.throws(() => createBrowserCliHandoffDelivery({ handoff, preflight: preflight({ nonce: "short" }) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED);
 });

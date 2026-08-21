@@ -18,11 +18,11 @@ export const HUMAN_MANAGEMENT_CURSOR_ERROR_CODES = Object.freeze({
  * immutable keyset position.
  */
 export function createPostgresHumanManagementRepository({ repository, cursorCodec, now = () => Date.now() } = {}) {
-  if (!repository || typeof repository.listCredentialMetadataForSession !== "function" || typeof repository.updateCredentialLabel !== "function" || typeof repository.revokeCredential !== "function" || typeof repository.listSafeSessions !== "function" || typeof repository.revokeManagedSession !== "function") throw new TypeError("PostgreSQL human repository is invalid");
+  if (!repository || typeof repository.listCredentialMetadataForSession !== "function" || typeof repository.updateCredentialLabel !== "function" || typeof repository.revokeCredential !== "function" || typeof repository.listSafeSessions !== "function" || typeof repository.revokeManagedSession !== "function" || typeof repository.revokeOtherSessions !== "function") throw new TypeError("PostgreSQL human repository is invalid");
   if (cursorCodec !== undefined && (!cursorCodec || typeof cursorCodec.encode !== "function" || typeof cursorCodec.decode !== "function")) throw new TypeError("cursorCodec must expose encode() and decode()");
   if (typeof now !== "function") throw new TypeError("now must be a function");
 
-  return Object.freeze({ listCredentials, renameCredential, revokeCredential, listSessions, revokeSession });
+  return Object.freeze({ listCredentials, renameCredential, revokeCredential, listSessions, revokeSession, revokeOtherSessions });
 
   async function listCredentials(input = {}) {
     const pageInput = pagination(input);
@@ -58,6 +58,18 @@ export function createPostgresHumanManagementRepository({ repository, cursorCode
       revoked_at: timestamp(),
       authority_reduction: true
     });
+  }
+
+  async function revokeOtherSessions(input) {
+    const result = await repository.revokeOtherSessions({
+      ...input,
+      actor_session_id: input.session_id,
+      revoked_at: timestamp(),
+      authority_reduction: true,
+      reason: "human_management"
+    });
+    if (!Array.isArray(result)) throw new TypeError("other-session revocation result is invalid");
+    return result;
   }
 
   function timestamp() { return new Date(clock()).toISOString(); }

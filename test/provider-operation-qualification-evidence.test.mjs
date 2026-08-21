@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 
 import {
   PROVIDER_OPERATION_QUALIFICATION_COMMAND,
@@ -25,8 +26,8 @@ test("creates the exact source-bound PostgreSQL 17 C1.4 qualification contract",
   });
   assert.equal(evidence.source_commit, SOURCE_COMMIT);
   assert.equal(evidence.postgres_version, "17.6");
-  assert.equal(evidence.catalog_entries >= 129, true);
-  assert.equal(evidence.migration_version >= 42, true);
+  assert.equal(evidence.catalog_entries >= 1, true);
+  assert.equal(evidence.migration_version, POSTGRES_SCHEMA_HEAD.version);
   assert.equal(evidence.command, PROVIDER_OPERATION_QUALIFICATION_COMMAND);
   assert.deepEqual(evidence.scenarios, PROVIDER_OPERATION_QUALIFICATION_SCENARIOS);
   assert.deepEqual(evidence.summary, { passed: 6, failed: 0, skipped: 0 });

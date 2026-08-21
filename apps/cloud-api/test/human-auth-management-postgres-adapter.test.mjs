@@ -55,6 +55,7 @@ function makeRepository(overrides = {}) {
     revokeCredential: [],
     listSafeSessions: [],
     revokeManagedSession: [],
+    revokeOtherSessions: [],
   };
   const base = {
     async listCredentialMetadataForSession(input) {
@@ -81,6 +82,10 @@ function makeRepository(overrides = {}) {
         version: input.expected_version + 1,
       });
     },
+    async revokeOtherSessions(input) {
+      calls.revokeOtherSessions.push(input);
+      return Object.hasOwn(overrides, "revokeOtherSessions") ? overrides.revokeOtherSessions : [session({ session_id: ids.targetSession, revoked_at: input.revoked_at, version: 2 })];
+    },
   };
   return { repository: base, calls };
 }
@@ -92,6 +97,7 @@ test("requires the complete PostgreSQL management repository and a clock functio
     "revokeCredential",
     "listSafeSessions",
     "revokeManagedSession",
+    "revokeOtherSessions",
   ];
   for (const missing of methods) {
     const { repository } = repositoryFixtureWithout(missing);
@@ -209,6 +215,33 @@ test("passes rename through and stamps credential and session revocations from o
     revoked_at: "2026-08-12T12:00:00.000Z",
   });
   assert.equal(clockCalls, 2);
+});
+
+test("passes other-session revocation through once with actor binding and authority reduction", async () => {
+  let clockCalls = 0;
+  const { repository, calls } = makeRepository({ revokeOtherSessions: [] });
+  const management = createPostgresHumanManagementRepository({ repository, now: () => { clockCalls += 1; return NOW; } });
+  const result = await management.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, reason: "ignored-by-adapter" });
+  assert.deepEqual(result, []);
+  assert.deepEqual(calls.revokeOtherSessions, [{
+    session_id: ids.session,
+    member_id: ids.member,
+    organization_id: ids.organization,
+    reason: "human_management",
+    actor_session_id: ids.session,
+    revoked_at: "2026-08-12T12:00:00.000Z",
+    authority_reduction: true
+  }]);
+  assert.equal(clockCalls, 1);
+});
+
+test("rejects a malformed other-session repository result before the HTTP boundary can use it", async () => {
+  const { repository } = makeRepository({ revokeOtherSessions: null });
+  const management = createPostgresHumanManagementRepository({ repository, now: () => NOW });
+  await assert.rejects(
+    () => management.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization }),
+    /other-session revocation result is invalid/
+  );
 });
 
 test("fails closed for invalid clocks and malformed repository list results", async () => {

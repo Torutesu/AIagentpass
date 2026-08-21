@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -72,8 +73,19 @@ function session(overrides = {}) {
   };
 }
 
+function revokedOtherSession(sessionId, overrides = {}) {
+  return session({
+    id: sessionId,
+    session_id: sessionId,
+    status: "revoked",
+    revoked_at: "2026-08-12T01:00:00.000Z",
+    version: 2,
+    ...overrides
+  });
+}
+
 function repository(overrides = {}) {
-  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [] };
+  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [], revokeOtherSessions: [] };
   const repo = {
     async listCredentials(input) {
       calls.listCredentials.push(input);
@@ -97,6 +109,11 @@ function repository(overrides = {}) {
       calls.revokeSession.push(input);
       if (overrides.revokeSession instanceof Error) throw overrides.revokeSession;
       return overrides.revokeSession ?? session({ session_id: input.target_session_id, id: input.target_session_id, status: "revoked", revoked_at: "2026-08-12T01:00:00.000Z", version: input.expected_version + 1 });
+    },
+    async revokeOtherSessions(input) {
+      calls.revokeOtherSessions.push(input);
+      if (overrides.revokeOtherSessions instanceof Error) throw overrides.revokeOtherSessions;
+      return Object.hasOwn(overrides, "revokeOtherSessions") ? overrides.revokeOtherSessions : [revokedOtherSession(OTHER_SESSION_ID)];
     }
   };
   return { repo, calls };
@@ -125,7 +142,8 @@ function fixture({ repositoryOverrides = {}, sessionOverrides = {}, authError = 
         member_id: input.principal.member_id,
         organization_id: input.organization_id,
         operation: input.operation,
-        authenticated_at: NOW
+        authenticated_at: NOW,
+        ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
       };
     }
   };
@@ -147,6 +165,11 @@ function request(path, { method = "GET", body = undefined, headers = {} } = {}) 
     },
     ...(body === undefined ? {} : { body })
   };
+}
+
+function credentialContext(expectedVersion) {
+  const canonical = `{"credential_id":${JSON.stringify(CREDENTIAL_ID)},"expected_version":${expectedVersion},"operation":${JSON.stringify("human.management.credential.revoke")},"version":1}`;
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 function assertNoStore(result) {
@@ -261,7 +284,8 @@ test("renames a credential with an atomic expected version and rejects caller-su
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), {
     method: "PATCH",
-    body: { label: "Work Mac", expected_version: 7 }
+    body: { label: "Work Mac" },
+    headers: { "if-match": '"7"', "idempotency-key": "rename-key-01" }
   }));
   assert.equal(result.status, 200);
   assert.deepEqual(calls.renameCredential[0], {
@@ -270,14 +294,16 @@ test("renames a credential with an atomic expected version and rejects caller-su
     organization_id: ORGANIZATION_ID,
     credential_id: CREDENTIAL_ID,
     label: "Work Mac",
-    expected_version: 7
+    expected_version: 7,
+    idempotency_key: "rename-key-01"
   });
   assert.equal(result.body.credential.label, "Work Mac");
   assert.equal(result.body.credential.version, 8);
 
   const rejected = await api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), {
     method: "PATCH",
-    body: { label: "Work Mac", expected_version: 7, member_id: "attacker" }
+    body: { label: "Work Mac", member_id: "attacker" },
+    headers: { "if-match": '"7"', "idempotency-key": "rename-key-02" }
   }));
   assert.equal(rejected.status, 400);
   assert.equal(calls.renameCredential.length, 1);
@@ -291,9 +317,11 @@ test("accepts a Fetch Request body without changing the management contract", as
       Origin: ORIGIN,
       Cookie: COOKIE,
       "agentpass-csrf": CSRF,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": "fetch-key-01",
+      "If-Match": '"1"'
     },
-    body: JSON.stringify({ label: "Fetch Mac", expected_version: 1 })
+    body: JSON.stringify({ label: "Fetch Mac" })
   });
   const result = await api.handle(fetchRequest);
   assert.equal(result.status, 200);
@@ -304,7 +332,7 @@ test("maps optimistic conflicts and sole-active-credential protection to stable 
   const conflict = new Error("actual version=99 and database password");
   conflict.code = "version_conflict";
   const conflictFixture = fixture({ repositoryOverrides: { renameCredential: conflict } });
-  const conflictResult = await conflictFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), { method: "PATCH", body: { label: "x", expected_version: 1 } }));
+  const conflictResult = await conflictFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), { method: "PATCH", body: { label: "x" }, headers: { "if-match": '"1"', "idempotency-key": "conflict-key-01" } }));
   assert.equal(conflictResult.status, 409);
   assert.equal(conflictResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT);
   assert.equal(JSON.stringify(conflictResult.body).includes("database password"), false);
@@ -312,7 +340,7 @@ test("maps optimistic conflicts and sole-active-credential protection to stable 
   const sole = new Error("sole credential");
   sole.code = "sole_active_credential";
   const soleFixture = fixture({ repositoryOverrides: { revokeCredential: sole } });
-  const soleResult = await soleFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const soleResult = await soleFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: { "if-match": '"1"', "idempotency-key": "sole-key-01", "agentpass-recent-auth-context": credentialContext(1) } }));
   assert.equal(soleResult.status, 409);
   assert.equal(soleResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL);
   assert.equal(soleFixture.calls.revokeCredential[0].protect_last_active, true);
@@ -338,13 +366,177 @@ test("revoking the current session clears only the current session cookie", asyn
   assert.equal(other.calls.recentAuth.length, 0);
 });
 
+test("revokes zero or more other sessions with an exact envelope, current exclusion, and one repository call", async () => {
+  const empty = fixture({ repositoryOverrides: { revokeOtherSessions: [] } });
+  const emptyResult = await empty.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(emptyResult.status, 200);
+  assert.deepEqual(emptyResult.body, { revoked_sessions: [], revoked_count: 0, truncated: false });
+  assert.equal(empty.calls.revokeOtherSessions.length, 1);
+  assert.deepEqual(empty.calls.revokeOtherSessions[0], {
+    session_id: CURRENT_SESSION_ID,
+    member_id: MEMBER_ID,
+    organization_id: ORGANIZATION_ID,
+    reason: "human_management"
+  });
+  assert.equal(empty.calls.recentAuth.length, 1);
+  assert.equal(empty.calls.recentAuth[0].operation, "human.management.sessions.revoke_others");
+
+  const other = fixture({ repositoryOverrides: {
+    revokeOtherSessions: [
+      revokedOtherSession(OTHER_SESSION_ID),
+      revokedOtherSession("66666666-6666-4666-8666-666666666666", { role: "admin" })
+    ]
+  } });
+  const result = await other.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, {
+    revoked_sessions: [
+      {
+        session_id: OTHER_SESSION_ID,
+        version: 2,
+        member_id: MEMBER_ID,
+        organization_id: ORGANIZATION_ID,
+        role: "owner",
+        status: "revoked",
+        is_current: false,
+        created_at: CREATED,
+        expires_at: EXPIRES,
+        last_seen_at: CREATED,
+        recent_auth_at: null,
+        revoked_at: "2026-08-12T01:00:00.000Z"
+      },
+      {
+        session_id: "66666666-6666-4666-8666-666666666666",
+        version: 2,
+        member_id: MEMBER_ID,
+        organization_id: ORGANIZATION_ID,
+        role: "admin",
+        status: "revoked",
+        is_current: false,
+        created_at: CREATED,
+        expires_at: EXPIRES,
+        last_seen_at: CREATED,
+        recent_auth_at: null,
+        revoked_at: "2026-08-12T01:00:00.000Z"
+      }
+    ],
+    revoked_count: 2,
+    truncated: false
+  });
+  assert.equal(result.body.revoked_sessions.some(({ session_id }) => session_id === CURRENT_SESSION_ID), false);
+  assert.equal(other.calls.revokeOtherSessions.length, 1);
+  assert.equal(Object.hasOwn(result.headers, "Set-Cookie"), false);
+
+  const many = fixture({ repositoryOverrides: {
+    revokeOtherSessions: Array.from({ length: 101 }, (_, index) => revokedOtherSession(`70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`))
+  } });
+  const bounded = await many.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(bounded.status, 200);
+  assert.equal(bounded.body.revoked_sessions.length, 100);
+  assert.equal(bounded.body.revoked_count, 101);
+  assert.equal(bounded.body.truncated, true);
+  assert.equal(many.calls.revokeOtherSessions.length, 1);
+});
+
+test("fails closed for a malformed other-session adapter result and never retries", async () => {
+  for (const malformed of [null, {}, [session()], [revokedOtherSession(OTHER_SESSION_ID, { revoked_at: null })], [revokedOtherSession(CURRENT_SESSION_ID)]]) {
+    const fixtureValue = fixture({ repositoryOverrides: { revokeOtherSessions: malformed } });
+    const result = await fixtureValue.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+    assert.equal(fixtureValue.calls.revokeOtherSessions.length, 1);
+  }
+});
+
+test("requires CSRF, operation-bound recent auth, exact empty body, and no mutation query", async () => {
+  const missingCsrf = fixture();
+  const csrfRequest = request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} });
+  delete csrfRequest.headers["agentpass-csrf"];
+  const csrfResult = await missingCsrf.api.handle(csrfRequest);
+  assert.equal(csrfResult.status, 403);
+  assert.equal(csrfResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.CSRF_FAILED);
+  assert.equal(missingCsrf.calls.revokeOtherSessions.length, 0);
+
+  const missingRecentAuth = fixture();
+  const recentRequest = request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} });
+  delete recentRequest.headers["agentpass-recent-auth"];
+  const recentResult = await missingRecentAuth.api.handle(recentRequest);
+  assert.equal(recentResult.status, 401);
+  assert.equal(recentResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+  assert.equal(missingRecentAuth.calls.revokeOtherSessions.length, 0);
+
+  const wrongOperation = fixture({ recentAuthResult: (input) => ({
+    verified: true,
+    consumed: true,
+    challenge_id: RECENT_AUTHORIZATION_ID,
+    member_id: input.principal.member_id,
+    organization_id: input.organization_id,
+    operation: "human.management.session.revoke",
+    authenticated_at: NOW
+  }) });
+  const wrongResult = await wrongOperation.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(wrongResult.status, 401);
+  assert.equal(wrongResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
+  assert.equal(wrongOperation.calls.revokeOtherSessions.length, 0);
+
+  for (const [body, suffix] of [[{ unexpected: true }, "body"], [[], "array"], [null, "null"]]) {
+    const malformed = fixture();
+    const result = await malformed.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body }));
+    assert.equal(result.status, 400, suffix);
+    assert.equal(result.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INVALID_REQUEST, suffix);
+    assert.equal(malformed.calls.revokeOtherSessions.length, 0);
+  }
+
+  const queried = fixture();
+  const queryResult = await queried.api.handle(request(`${HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions}?unexpected=1`, { method: "POST", body: {} }));
+  assert.equal(queryResult.status, 400);
+  assert.equal(queryResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INVALID_REQUEST);
+  assert.equal(queried.calls.revokeOtherSessions.length, 0);
+});
+
+test("fails closed when a session revoke response is not the exact revoked target", async () => {
+  const wrongTarget = fixture({
+    repositoryOverrides: {
+      revokeSession: session({
+        session_id: OTHER_SESSION_ID,
+        id: OTHER_SESSION_ID,
+        status: "revoked",
+        revoked_at: "2026-08-12T01:00:00.000Z",
+        version: 2
+      })
+    }
+  });
+  const wrongTargetResult = await wrongTarget.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID), {
+    method: "POST",
+    body: { expected_version: 1 }
+  }));
+  assert.equal(wrongTargetResult.status, 503);
+  assert.equal(wrongTargetResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+  assert.equal(Object.hasOwn(wrongTargetResult.headers, "Set-Cookie"), false);
+
+  const stillActive = fixture({
+    repositoryOverrides: {
+      revokeSession: session({ status: "active", revoked_at: null })
+    }
+  });
+  const stillActiveResult = await stillActive.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID), {
+    method: "POST",
+    body: { expected_version: 1 }
+  }));
+  assert.equal(stillActiveResult.status, 503);
+  assert.equal(stillActiveResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+  assert.equal(Object.hasOwn(stillActiveResult.headers, "Set-Cookie"), false);
+});
+
 test("requires exact single-use recent auth for credential and current-session revocation", async () => {
   for (const path of [
     HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID),
     HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID)
   ]) {
     const missing = fixture();
-    const missingRequest = request(path, { method: "POST", body: { expected_version: 1 } });
+    const credentialPath = path === HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID);
+    const mutationHeaders = credentialPath ? { "if-match": '"1"', "idempotency-key": "recent-key-01", "agentpass-recent-auth-context": credentialContext(1) } : {};
+    const missingRequest = request(path, { method: "POST", body: credentialPath ? {} : { expected_version: 1 }, headers: mutationHeaders });
     delete missingRequest.headers["agentpass-recent-auth"];
     const missingResult = await missing.api.handle(missingRequest);
     assert.equal(missingResult.status, 401);
@@ -360,7 +552,7 @@ test("requires exact single-use recent auth for credential and current-session r
       operation: "wrong.operation",
       authenticated_at: NOW
     }) });
-    const wrongResult = await wrong.api.handle(request(path, { method: "POST", body: { expected_version: 1 } }));
+    const wrongResult = await wrong.api.handle(request(path, { method: "POST", body: credentialPath ? {} : { expected_version: 1 }, headers: mutationHeaders }));
     assert.equal(wrongResult.status, 401);
     assert.equal(wrongResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
     assert.equal(wrong.calls.revokeCredential.length + wrong.calls.revokeSession.length, 0);
@@ -375,7 +567,8 @@ test("requires exact single-use recent auth for credential and current-session r
       member_id: input.principal.member_id,
       organization_id: input.organization_id,
       operation: input.operation,
-      authenticated_at: NOW
+      authenticated_at: NOW,
+      ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
     };
     consumed = true;
     return {
@@ -385,12 +578,14 @@ test("requires exact single-use recent auth for credential and current-session r
       member_id: input.principal.member_id,
       organization_id: input.organization_id,
       operation: input.operation,
-      authenticated_at: NOW
+      authenticated_at: NOW,
+      ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
     };
   } });
-  const first = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const replayHeaders = { "if-match": '"1"', "idempotency-key": "replay-key-01", "agentpass-recent-auth-context": credentialContext(1) };
+  const first = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: replayHeaders }));
   assert.equal(first.status, 200);
-  const second = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const second = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: replayHeaders }));
   assert.equal(second.status, 401);
   assert.equal(second.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
   assert.equal(replay.calls.revokeCredential.length, 1);

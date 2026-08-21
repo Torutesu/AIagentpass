@@ -22,6 +22,7 @@ const signerFingerprint = `SHA256:${"d".repeat(43)}`;
 function receipt(overrides = {}) {
   const manifest = {
     schema_version: 4,
+    version: "0.18.0",
     candidate_id: deriveReleaseCandidateId(artifactSha256),
     source: { commit: "c".repeat(40) }
   };
@@ -43,8 +44,9 @@ function stateRoot() {
 
 test("constructs the exact public receipt and rejects candidate substitution", () => {
   const value = receipt();
-  assert.deepEqual(Object.keys(value).sort(), ["artifact_sha256", "candidate_id", "kind", "manifest_sha256", "release_signer_fingerprint", "source_commit", "team_id", "version"]);
-  assert.equal(value.version, 1);
+  assert.deepEqual(Object.keys(value).sort(), ["artifact_sha256", "candidate_id", "kind", "manifest_sha256", "release_signer_fingerprint", "release_version", "source_commit", "team_id", "version"]);
+  assert.equal(value.version, 2);
+  assert.equal(value.release_version, "0.18.0");
   assert.equal(value.kind, "agentpass.installed-release-receipt");
   assert.throws(() => receipt({ artifactSha256: "b".repeat(64) }), { code: INSTALLED_RELEASE_RECEIPT_CODES.INVALID });
 });
@@ -54,7 +56,7 @@ test("writes, reads, and upgrades a root-owned canonical receipt atomically", ()
   try {
     const first = receipt();
     const second = receipt({
-      manifest: { schema_version: 4, candidate_id: first.candidate_id, source: { commit: "e".repeat(40) } },
+      manifest: { schema_version: 4, version: "0.18.1", candidate_id: first.candidate_id, source: { commit: "e".repeat(40) } },
       manifestBytes: Buffer.from("second manifest\n", "utf8")
     });
     const firstWrite = writeInstalledReleaseReceipt(first, { root, owner });
@@ -105,7 +107,7 @@ test("preserves the prior receipt when the atomic rename fails", () => {
   const root = stateRoot();
   try {
     const first = receipt();
-    const second = receipt({ manifest: { schema_version: 4, candidate_id: first.candidate_id, source: { commit: "e".repeat(40) } }, manifestBytes: Buffer.from("second\n") });
+    const second = receipt({ manifest: { schema_version: 4, version: "0.18.1", candidate_id: first.candidate_id, source: { commit: "e".repeat(40) } }, manifestBytes: Buffer.from("second\n") });
     writeInstalledReleaseReceipt(first, { root, owner });
     const failingFs = { ...fs, renameSync() { throw new Error("simulated rename failure"); } };
     assert.throws(() => writeInstalledReleaseReceipt(second, { root, owner, fs: failingFs }), { code: INSTALLED_RELEASE_RECEIPT_CODES.WRITE_FAILED });

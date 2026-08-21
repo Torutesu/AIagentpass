@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
+const authorityPath = new URL("../app/session-authority.ts", import.meta.url);
 
 async function componentSource() {
   return readFile(componentPath, "utf8");
@@ -18,20 +19,39 @@ function functionBody(source, name, nextName) {
 
 test("all Console reads and mutations wait for one shared session bootstrap", async () => {
   const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
   const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
-  const bootstrapPathUses = source.match(/\/api\/auth\/session/g) ?? [];
+  const bootstrapPathUses = source.match(/const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session";/g) ?? [];
   const directConsoleFetches = source.match(/\bfetch\s*\(\s*[`"]\/api\/console/g) ?? [];
   const wrappedConsoleFetches = source.match(/\bfetchConsole\s*\(\s*[`"]\/api\/console/g) ?? [];
 
   assert.equal(bootstrapPathUses.length, 1, "the component should have one bootstrap endpoint declaration");
   assert.equal(directConsoleFetches.length, 0, "Console calls must not bypass fetchConsole");
   assert.ok(wrappedConsoleFetches.length >= 7, "all production Console paths should use fetchConsole");
-  assert.match(source, /const consoleSessionContext = createConsoleSessionContext\(\)/);
-  assert.match(source, /if \(result\) return Promise\.resolve\(result\)/);
-  assert.match(source, /if \(!pending\)/);
-  assert.match(source, /const current = bootstrapConsoleSession\(signal\)/);
+  assert.match(source, /const consoleSessionContext = createSessionAuthority<ConsoleSession>\(bootstrapConsoleSession\)/);
+  assert.match(source, /createOrganizationClient\(\{ sessionProvider: consoleSessionContext \}\)/);
+  assert.match(source, /createSecurityClient\(\{ sessionProvider: consoleSessionContext \}\)/);
+  assert.match(authority, /if \(value !== undefined\) return Promise\.resolve\(value\)/);
+  assert.match(authority, /if \(pending === undefined\)/);
   assert.ok(wrapper.indexOf("await consoleSessionContext.get(init.signal ?? undefined)") < wrapper.indexOf("await fetch(path"), "bootstrap must finish before the Console request");
-  assert.match(source, /withAbort\(pending, signal\)/);
+  assert.match(authority, /return waitFor\(pending, signal\)/);
+});
+
+test("resumes the same-origin session before SIWC and falls back only for Cloud human_session_session_required", async () => {
+  const source = await componentSource();
+  const bootstrap = functionBody(source, "bootstrapConsoleSession", "allocateEnrollmentStoreId");
+  const request = functionBody(source, "requestConsoleSession", "isSessionResumeRequired");
+
+  assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
+  assert.match(bootstrap, /requestConsoleSession\(SESSION_RESUME_PATH, signal\)/);
+  assert.match(bootstrap, /isSessionResumeRequired\(resumed\.response, resumed\.payload\)/);
+  assert.ok(bootstrap.indexOf("requestConsoleSession(SESSION_RESUME_PATH, signal)") < bootstrap.indexOf("requestConsoleSession(SESSION_BOOTSTRAP_PATH, signal)"));
+  assert.match(bootstrap, /if \(!bootstrapped\.response\.ok\)/);
+  assert.match(source, /response\.status === 401/);
+  assert.match(source, /payload\.error\.code === "human_session_session_required"/);
+  assert.match(request, /credentials: "same-origin"/);
+  assert.match(request, /cache: "no-store"/);
+  assert.match(request, /redirect: "error"/);
 });
 
 test("every Console mutation carries the exact in-memory CSRF token and same-origin credentials", async () => {
@@ -50,11 +70,12 @@ test("every Console mutation carries the exact in-memory CSRF token and same-ori
 
 test("session material stays out of React state, browser storage, and logs", async () => {
   const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
   assert.doesNotMatch(source, /useState\([^\n]*(?:csrf|csrf_token|organizationId|authorization|challenge|assertion)/i);
-  assert.match(source, /let result: ConsoleSession \| undefined/);
-  assert.match(source, /let pending: Promise<ConsoleSession> \| undefined/);
-  assert.match(source, /return Object\.freeze\(\{ get, clear(?:, replace)? \}\)/);
+  assert.match(authority, /let value: T \| undefined/);
+  assert.match(authority, /let pending: Promise<T> \| undefined/);
+  assert.match(authority, /return Object\.freeze\(\{ get, clear \}\)/);
   assert.match(source, /const \[preflight, setPreflight\] = useState<PublicEnrollmentPreflight \| null>\(null\)/);
   assert.doesNotMatch(source, /enrollmentStores|writeEnrollmentStore|readEnrollmentStore|allocateEnrollmentStoreId/);
   assert.doesNotMatch(source, /navigator\.clipboard|ClipboardItem|secret-output|enrollmentJson|enrollmentVisible|setEnrollmentVisible/);
@@ -80,13 +101,13 @@ test("enrollment credentials use only the validated live handoff and are discard
 
 test("abort and unauthorized responses clear safely and permit a later retry", async () => {
   const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
   const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
-  const context = functionBody(source, "createConsoleSessionContext", "isMutationMethod");
 
   assert.match(source, /function throwIfAborted\(signal\?: AbortSignal\)/);
-  assert.match(source, /function withAbort<T>\(promise: Promise<T>, signal\?: AbortSignal\)/);
-  assert.match(source, /const current = bootstrapConsoleSession\(signal\)/);
-  assert.match(source, /signal\.addEventListener\("abort", onAbort, \{ once: true \}\)/);
+  assert.match(authority, /function waitFor<T>\(promise: Promise<T>, signal\?: AbortSignal\)/);
+  assert.match(authority, /const current = Promise\.resolve\(\)\.then\(loader\)/);
+  assert.match(authority, /signal\.addEventListener\("abort", onAbort, \{ once: true \}\)/);
   assert.match(source, /signal\?\.aborted \|\| isAbortError\(error\)/);
   assert.match(wrapper, /if \(init\.signal\?\.aborted \|\| isAbortError\(error\)\) throw abortError\(\)/);
   assert.match(wrapper, /response\.status === 401 \|\| response\.status === 403/);
@@ -94,9 +115,9 @@ test("abort and unauthorized responses clear safely and permit a later retry", a
   assert.match(source, /function clearConsoleSessionOnUnauthorized\(error: unknown\)/);
   assert.match(source, /error instanceof WebAuthnClientError && \(error\.status === 401 \|\| error\.status === 403\)/);
   assert.match(source, /clearConsoleSessionOnUnauthorized\(error\);/);
-  assert.match(context, /if \(pending !== shared\) return value/);
-  assert.match(context, /pending = undefined/);
-  assert.match(context, /if \(!session \|\| result === session\) result = undefined/);
+  assert.match(authority, /if \(pending === shared\) pending = undefined/);
+  assert.match(authority, /if \(expected !== undefined && value !== expected\) return/);
+  assert.match(authority, /generation \+= 1/);
   assert.match(source, /const controller = new AbortController\(\)/);
   assert.match(source, /return \(\) => controller\.abort\(\)/);
 });
@@ -116,7 +137,7 @@ test("expired sessions replace every operational surface with a reauthentication
   assert.match(source, /summaryEpoch\.current \+= 1/);
   assert.match(source, /capabilityEpoch\.current \+= 1/);
   assert.match(source, /adminAuditEpoch\.current \+= 1/);
-  assert.match(source, /<SecuritySurface onSessionEnded=\{expireSession\} \/>/);
+  assert.match(source, /<SecurityPanel securityClient=\{securityClient\} onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
 });
 
 test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {
@@ -128,7 +149,7 @@ test("global sign-out uses the same-origin DELETE contract and clears operationa
   assert.match(logout, /credentials: "same-origin"/);
   assert.match(logout, /payload\.session !== null/);
   assert.match(logout, /consoleSessionContext\.clear\(session\)/);
-  assert.match(source, /setSessionState\("signed-out"\)/);
+  assert.match(source, /endSession\("signed-out"\)/);
   assert.match(source, /signOutPending \? "終了中…" : "サインアウト"/);
 });
 

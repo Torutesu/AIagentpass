@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -27,14 +28,13 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
       client: migrationClient,
       applicationVersion: "signed-session-bootstrap-integration"
     }).run();
-    assert.equal(migration.currentVersion , 47);
   } finally {
     migrationClient.release();
   }
 
   const migrationState = await pool.query("SELECT count(*)::int AS count, max(version)::int AS version FROM schema_migrations");
-  assert.equal(migrationState.rows[0].count, 46);
-  assert.equal(migrationState.rows[0].version, 46);
+  assert.equal(migrationState.rows[0].count, POSTGRES_SCHEMA_HEAD.version);
+  assert.equal(migrationState.rows[0].version, POSTGRES_SCHEMA_HEAD.version);
 
   const ids = {
     organization: crypto.randomUUID(),

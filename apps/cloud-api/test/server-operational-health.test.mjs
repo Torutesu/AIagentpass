@@ -125,7 +125,7 @@ test("readiness exposes only fixed aggregate managed signer provider-operation s
     code: "managed_signer_provider_operations_uncertain_present",
     checks: {
       database: { ok: true, probe: "ok" },
-      schema: { ok: true, expected_version: 46, applied_version: 46, migration_count: 46, pending_count: 0, checksum_status: "verified", drift: false },
+      schema: { ok: true, expected_version: 51, applied_version: 51, migration_count: 51, pending_count: 0, checksum_status: "verified", drift: false },
       pool: { ok: true, max_connections: 10, total_connections: 1, idle_connections: 1, waiting_connections: 0, utilization_percent: 10, saturated: false },
       drain: { state: "running", accepting: true, in_flight: 0 },
       managed_signer_provider_operations: { ok: false, code: "uncertain_present", worker_state: "running", pending_count: 0, started_count: 0, accepted_count: 0, uncertain_count: 1, stale_started_count: 0, oldest_nonterminal_age_ms: 500, last_success_age_ms: 100, operation_id: "must-not-leak", receipt_id: "must-not-leak" }

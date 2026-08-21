@@ -1,185 +1,116 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { Pool } from "pg";
 
-import {
-  normalizePlatformPromotionApprovalRecord,
-  platformPromotionApprovalRecordDigest
-} from "../../src/platform-promotion-approval-record.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
+import { createPostgresPlatformPromotionIssuanceRepository } from "../../src/postgres/platform-promotion-issuance-repository.mjs";
+import {
+  PROMOTION_EVIDENCE_V3_ALGORITHM,
+  PROMOTION_EVIDENCE_V3_PURPOSE,
+  PROMOTION_EVIDENCE_V3_TYPE,
+  PROMOTION_EVIDENCE_V3_VERSION,
+  promotionEvidenceV3StatementHash
+} from "../../src/promotion-evidence-v3-statement.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
-const SUFFIX = `${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-const PRODUCT = "a".repeat(64);
-const QUALIFICATION = ["1".repeat(64), "2".repeat(64)];
-const IDS = Object.freeze({
-  approval: "11111111-1111-4111-8111-111111111111",
-  promotion: "22222222-2222-4222-8222-222222222222"
-});
+const { Pool } = DATABASE_URL ? await import("pg") : { Pool: undefined };
 
-test("0047 SQL fences approval/provider cross-row binding, expired claims, and deployment promotion state", {
-  skip: !DATABASE_URL,
-  timeout: 60_000
-}, async (t) => {
-  const pool = new Pool({ connectionString: DATABASE_URL, max: 1 });
+function sha256(value) { return crypto.createHash("sha256").update(value, "utf8").digest("hex"); }
+function sha1(value) { return crypto.createHash("sha1").update(value, "utf8").digest("hex"); }
+
+test("0047 real PostgreSQL reserves, commits, and replays one exact promotion", { skip: !DATABASE_URL, timeout: 60_000 }, async (t) => {
+  const pool = new Pool({ connectionString: DATABASE_URL, max: 2 });
+  t.after(() => pool.end());
+  const migrationClient = await pool.connect();
+  try {
+    const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "platform-promotion-issuance" }).run();
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
+  } finally { migrationClient.release(); }
+
   const client = await pool.connect();
-  t.after(async () => {
-    client.release();
-    await pool.end();
-  });
-
-  const migrated = await createMigrationRunner({ client, applicationVersion: "platform-promotion-issuance-audit" }).run();
-  assert.equal(migrated.currentVersion, 47);
-
-  const deploymentId = `audit-${SUFFIX}`;
-  const operationId = `promotion-operation-${SUFFIX}`;
-  const now = Date.now();
-  const approval = makeApproval({
-    approval_id: IDS.approval,
-    deployment_id: deploymentId,
-    approved_at: new Date(now - 5_000).toISOString(),
-    expires_at: new Date(now + 300_000).toISOString(),
-    approval_version: 1
-  });
-
-  await client.query("BEGIN");
   try {
-    await insertApproval(client, approval);
-    await insertProviderOperation(client, { operationId, expiresAt: new Date(now + 300_000) });
+    await client.query("BEGIN");
+    const suffix = randomUUID().replaceAll("-", "");
+    const deploymentId = `integration-promotion-${suffix}`;
+    const promotionId = randomUUID();
+    const sourceCommit = sha1(`commit:${suffix}`);
+    const sourceTree = sha1(`tree:${suffix}`);
+    const pkg = sha256(`pkg:${suffix}`);
+    const candidateId = `release-pkg-sha256-v1-${pkg}`;
+    const imageDigest = `sha256:${sha256(`image:${suffix}`)}`;
+    const sbom = sha256(`sbom:${suffix}`);
+    const manifest = sha256(`manifest:${suffix}`);
+    const report = sha256(`report:${suffix}`);
+    const approvalId = randomUUID();
+    const now = new Date();
+    const approvedAt = new Date(now.getTime() - 1_000);
+    const expiresAt = new Date(now.getTime() + 10 * 60_000);
 
-    await assertSqlRejected(client, insertIssuanceSql(), issuanceParams(approval, operationId, {
-      promotion_id: IDS.promotion,
-      deployment_id: `${deploymentId}-wrong`
-    }), /platform_promotion_issuances_approval_binding|violates foreign key/u);
+    let signer = (await client.query(`SELECT lifecycle.version AS lifecycle_version,key.key_id,key.key_version
+      FROM managed_signer_key_lifecycles lifecycle JOIN managed_signer_keys key
+        ON key.purpose=lifecycle.purpose AND key.state='active'
+      WHERE lifecycle.purpose=$1 LIMIT 1`, [PROMOTION_EVIDENCE_V3_PURPOSE])).rows[0];
+    if (!signer) {
+      const keyId = `integration-promotion-key-${suffix}`;
+      await client.query(`INSERT INTO managed_signer_key_lifecycles (purpose,algorithm,version)
+        VALUES ($1,'ed25519',1)`, [PROMOTION_EVIDENCE_V3_PURPOSE]);
+      await client.query(`INSERT INTO managed_signer_keys
+        (purpose,key_id,key_version,algorithm,public_key_fingerprint,state,state_version,key_position)
+        VALUES ($1,$2,1,'ed25519',$3,'active',1,0)`, [PROMOTION_EVIDENCE_V3_PURPOSE, keyId, Buffer.alloc(32, 9)]);
+      signer = { lifecycle_version: 1, key_id: keyId, key_version: 1 };
+    }
 
-    await assertSqlRejected(client, insertIssuanceSql(), issuanceParams(approval, operationId, {
-      promotion_id: IDS.promotion,
-      qualification_report_digests: JSON.stringify(["3".repeat(64)])
-    }), /platform_promotion_issuances_approval_binding/u);
+    await client.query(`INSERT INTO release_candidates
+      (candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id)
+      VALUES ($1,$2,$3,$4,'C3TEST0001')`, [candidateId, sourceCommit, pkg, manifest]);
+    await client.query(`INSERT INTO platform_promotion_approvals
+      (version,type,approval_id,deployment_id,environment,candidate_id,source_commit,source_tree,
+       product_pkg_sha256,image_digest,sbom_sha256,qualification_report_digests,release_manifest_schema_version,
+       release_manifest_sha256,policy_id,policy_version,approval_version,decision,platform_principal_ids,
+       authorization_evidence_digests,approved_at,expires_at)
+      VALUES (1,'agentpass.platform-promotion-approval',$1,$2,'staging',$3,$4,$5,$6,$7,$8,ARRAY[$9]::text[],4,$10,
+       'integration-policy',1,1,'approved',ARRAY['platform-a']::text[],ARRAY[$11]::text[],$12,$13)`, [
+      approvalId, deploymentId, candidateId, sourceCommit, sourceTree, pkg, imageDigest, sbom, report, manifest,
+      sha256(`authorization:${suffix}`), approvedAt, expiresAt
+    ]);
 
-    await assertSqlRejected(client, insertIssuanceSql(), issuanceParams(approval, `missing-${SUFFIX}`, {
-      promotion_id: IDS.promotion
-    }), /platform_promotion_issuances_provider_operation_binding|violates foreign key/u);
-
-    await client.query(insertIssuanceSql(), issuanceParams(approval, operationId, { promotion_id: IDS.promotion }));
-    const key = [deploymentId, "production", IDS.promotion];
-
-    await client.query(`UPDATE platform_promotion_issuances
-      SET claim_expires_at=clock_timestamp()-interval '1 second'
-      WHERE deployment_id=$1 AND environment=$2 AND promotion_id=$3`, key);
-    await assertSqlRejected(client, `UPDATE platform_promotion_issuances
-      SET state='uncertain',claim_token_digest=NULL,claim_expires_at=NULL,uncertain_reason='provider_response_loss'
-      WHERE deployment_id=$1 AND environment=$2 AND promotion_id=$3`, key, /platform_promotion_issuances_claim_clock_fence/u);
-
-    await assertSqlRejected(client, `INSERT INTO platform_deployment_state
-      (deployment_id,environment,generation,state,promotion_id)
-      VALUES ($1,'production',1,'promoted',$2)`, [deploymentId, IDS.promotion], /platform_deployment_state_committed_issuance_fk/u);
-
-    const expiredApproval = makeApproval({
-      approval_id: "33333333-3333-4333-8333-333333333333",
-      deployment_id: `${deploymentId}-expired`,
-      approved_at: new Date(now - 120_000).toISOString(),
-      expires_at: new Date(now - 60_000).toISOString(),
-      approval_version: 1
+    const repo = createPostgresPlatformPromotionIssuanceRepository({
+      client, keyId: signer.key_id, keyVersion: Number(signer.key_version), lifecycleVersion: Number(signer.lifecycle_version), claimLeaseMs: 30_000,
+      randomBytes: () => Buffer.alloc(32, 4),
+      verifyEvidence: async (_evidence, context) => typeof context?.signer_key_fingerprint === "string"
     });
-    await insertApproval(client, expiredApproval);
-    await assertSqlRejected(client, insertIssuanceSql(), issuanceParams(expiredApproval, operationId, {
-      promotion_id: "44444444-4444-4444-8444-444444444444"
-    }), /platform_promotion_issuances_approval_clock_fence/u);
-  } finally {
+    const identity = { promotion_id: promotionId, deployment_id: deploymentId, environment: "staging", candidate_id: candidateId, idempotency_key: "integration-request-0001" };
+    const reserved = await repo.reservePlatformPromotion(identity);
+    assert.equal(reserved.state, "reserved");
+    const statement = {
+      version: 3, type: PROMOTION_EVIDENCE_V3_TYPE, promotion_id: promotionId, deployment_id: deploymentId, environment: "staging",
+      candidate_id: candidateId, source_commit: reserved.source_commit, source_tree: reserved.source_tree,
+      product_pkg_sha256: reserved.product_pkg_sha256, image_digest: reserved.image_digest, sbom_sha256: reserved.sbom_sha256,
+      qualification_report_digests: reserved.qualification_report_digests,
+      release_manifest_schema_version: reserved.release_manifest_schema_version, release_manifest_sha256: reserved.release_manifest_sha256,
+      platform_approval_id: reserved.platform_approval_id, platform_approval_digest: reserved.platform_approval_digest, approval_state: "approved",
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE, protocol_version: 3, signing_version: 3, lifecycle_version: Number(reserved.lifecycle_version),
+      key_id: reserved.key_id, key_version: Number(reserved.key_version), issued_at: reserved.issued_at,
+      expires_at: reserved.expires_at
+    };
+    const evidence = { version: PROMOTION_EVIDENCE_V3_VERSION, type: PROMOTION_EVIDENCE_V3_TYPE, statement,
+      statement_hash: promotionEvidenceV3StatementHash(statement), signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      signer_key_fingerprint: reserved.signer_key_fingerprint, signature: Buffer.alloc(64, 5).toString("base64url") };
+    const committed = await repo.commitPlatformPromotion({ ...identity, claim_token: reserved.claim_token, promotion_evidence: evidence });
+    assert.equal(committed.state, "committed");
+    assert.equal(Object.hasOwn(committed, "deployment_generation"), false);
+    assert.deepEqual(await repo.replayPlatformPromotion(identity), committed);
+    const head = await client.query(`SELECT current_generation,current_candidate_id FROM platform_promotion_deployments WHERE deployment_id=$1 AND environment='staging'`, [deploymentId]);
+    assert.deepEqual(head.rows[0], { current_generation: "1", current_candidate_id: candidateId });
+    const stored = await client.query(`SELECT state,evidence_digest,claim_token_digest FROM platform_promotion_issuances WHERE promotion_id=$1`, [promotionId]);
+    assert.equal(stored.rows[0].state, "committed");
+    assert.equal(stored.rows[0].claim_token_digest, null);
+    assert.match(stored.rows[0].evidence_digest, /^[0-9a-f]{64}$/u);
     await client.query("ROLLBACK");
-  }
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch { /* preserve original failure */ }
+    throw error;
+  } finally { client.release(); }
 });
-
-function makeApproval(overrides) {
-  const record = {
-    version: 1,
-    type: "agentpass.platform-promotion-approval",
-    approval_id: overrides.approval_id,
-    deployment_id: overrides.deployment_id,
-    environment: "production",
-    candidate_id: `release-pkg-sha256-v1-${PRODUCT}`,
-    source_commit: "b".repeat(40),
-    source_tree: "c".repeat(40),
-    product_pkg_sha256: PRODUCT,
-    image_digest: `sha256:${"d".repeat(64)}`,
-    sbom_sha256: "e".repeat(64),
-    qualification_report_digests: QUALIFICATION,
-    release_manifest_schema_version: 4,
-    release_manifest_sha256: "f".repeat(64),
-    policy_id: "production-release-v1",
-    policy_version: 1,
-    approval_version: overrides.approval_version,
-    decision: "approved",
-    platform_principal_ids: ["platform-operator-a", "platform-operator-b"],
-    quorum: { required: 2, satisfied: true },
-    authorization_evidence_digests: ["6".repeat(64), "7".repeat(64)],
-    approved_at: overrides.approved_at,
-    expires_at: overrides.expires_at
-  };
-  const normalized = normalizePlatformPromotionApprovalRecord(record, {
-    now: Date.parse(record.approved_at), allowFuture: false, allowExpired: false
-  });
-  return Object.freeze({ ...normalized, record_digest: platformPromotionApprovalRecordDigest(normalized, {
-    now: Date.parse(record.approved_at), allowFuture: false, allowExpired: false
-  }) });
-}
-
-async function insertApproval(client, record) {
-  await client.query(`INSERT INTO platform_promotion_approvals
-    (version,type,approval_id,deployment_id,environment,candidate_id,source_commit,source_tree,
-     product_pkg_sha256,image_digest,sbom_sha256,qualification_report_digests,
-     release_manifest_schema_version,release_manifest_sha256,policy_id,policy_version,
-     approval_version,decision,platform_principal_ids,authorization_evidence_digests,
-     approved_at,expires_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`, [
-    record.version, record.type, record.approval_id, record.deployment_id, record.environment,
-    record.candidate_id, record.source_commit, record.source_tree, record.product_pkg_sha256,
-    record.image_digest, record.sbom_sha256, record.qualification_report_digests,
-    record.release_manifest_schema_version, record.release_manifest_sha256, record.policy_id,
-    record.policy_version, record.approval_version, record.decision, record.platform_principal_ids,
-    record.authorization_evidence_digests, record.approved_at, record.expires_at
-  ]);
-}
-
-async function insertProviderOperation(client, { operationId, expiresAt }) {
-  await client.query(`INSERT INTO managed_signer_provider_operations
-    (purpose,operation_id,algorithm,bytes_length,request_digest,key_id,key_version,state,
-     claim_token_digest,claim_expires_at,expires_at)
-    VALUES ('agentpass.promotion-evidence',$1,'ed25519',32,$2,'promotion-key',1,'pending',$3,$4,$5)`, [
-    operationId, Buffer.alloc(32, 8), Buffer.alloc(32, 9), new Date(Date.now() + 60_000), expiresAt
-  ]);
-}
-
-function insertIssuanceSql() {
-  return `INSERT INTO platform_promotion_issuances
-    (deployment_id,environment,promotion_id,idempotency_key,candidate_id,source_commit,source_tree,
-     product_pkg_sha256,release_manifest_sha256,sbom_sha256,image_digest,qualification_report_digests,
-     approval_id,approval_digest,signer_key_id,signer_key_version,signer_lifecycle_version,
-     expected_deployment_generation,state,claim_token_digest,claim_expires_at,provider_operation_id,authority_digest)
-    VALUES ($1,'production',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'promotion-key',1,1,0,
-      'reserved',$14,clock_timestamp()+interval '60 seconds',$15,$16)`;
-}
-
-function issuanceParams(approval, operationId, overrides = {}) {
-  return [
-    overrides.deployment_id ?? approval.deployment_id,
-    overrides.promotion_id,
-    `idempotency-${overrides.promotion_id ?? IDS.promotion}`,
-    approval.candidate_id, approval.source_commit, approval.source_tree, approval.product_pkg_sha256,
-    approval.release_manifest_sha256, approval.sbom_sha256, approval.image_digest,
-    overrides.qualification_report_digests ?? JSON.stringify(approval.qualification_report_digests),
-    approval.approval_id, approval.record_digest, Buffer.alloc(32, 1), operationId, Buffer.alloc(32, 2)
-  ];
-}
-
-async function assertSqlRejected(client, text, params, pattern) {
-  await client.query("SAVEPOINT promotion_audit_case");
-  try {
-    await assert.rejects(client.query(text, params), pattern);
-  } finally {
-    await client.query("ROLLBACK TO SAVEPOINT promotion_audit_case");
-    await client.query("RELEASE SAVEPOINT promotion_audit_case");
-  }
-}

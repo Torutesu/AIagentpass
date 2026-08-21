@@ -5,6 +5,36 @@ import Darwin
 import Foundation
 import Security
 
+private struct NativeFixedProcessObservationSource: NativeProcessObservationSource {
+    let observation: NativeProcessObservation
+
+    func observe() throws -> NativeProcessObservation {
+        observation
+    }
+}
+
+private func nativeDigestData(_ value: String) -> Data? {
+    guard value.utf8.count == 64 else { return nil }
+    var result = Data(capacity: 32)
+    var high: UInt8?
+    for byte in value.utf8 {
+        let nibble: UInt8?
+        switch byte {
+        case 48...57: nibble = byte - 48
+        case 97...102: nibble = byte - 87
+        case 65...70: nibble = byte - 55
+        default: nibble = nil
+        }
+        guard let nibble else { return nil }
+        if let high {
+            result.append((high << 4) | nibble)
+        } else {
+            high = nibble
+        }
+    }
+    return high == nil && result.count == 32 ? result : nil
+}
+
 private func loadProtectedFile(path: String, label: String) throws -> Data {
     let original = URL(fileURLWithPath: path).standardizedFileURL
     guard original.path.hasPrefix("/"), original.resolvingSymlinksInPath().path == original.path else {
@@ -266,9 +296,70 @@ private struct ServiceRefreshHintKey: Decodable {
     }
 }
 
+/// Returns only the fixed Child-helper requirement provisioned by the signed
+/// product configuration. The Host and management requirements are separate
+/// principals and are never valid fallbacks for this listener.
+internal func deriveDedicatedChildCodeSigningRequirement(
+    configuredChildRequirement: String?,
+    hostCodeSigningRequirement: String,
+    managementCodeSigningRequirement: String
+) throws -> String {
+    guard let configuredChildRequirement else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration is missing the dedicated Child helper code-signing requirement"
+        )
+    }
+    let requirement = configuredChildRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    let hostRequirement = hostCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    let managementRequirement = managementCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !requirement.isEmpty,
+          requirement == configuredChildRequirement,
+          !hostRequirement.isEmpty,
+          !managementRequirement.isEmpty,
+          requirement != hostRequirement,
+          requirement != managementRequirement else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.contains("anchor apple generic") else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.components(separatedBy: "identifier \"").count == 2 else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    // Keep the fixed principal literal in the requirement parser. This avoids
+    // interpolating attacker-controlled or configuration-derived text into the
+    // Security requirement boundary.
+    guard requirement.contains("identifier \"dev.agentpass.git-sign-xpc\"") else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    guard requirement.range(of: #"\bor\b"#, options: .regularExpression) == nil else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must contain one unambiguous dedicated Child helper code-signing requirement"
+        )
+    }
+    var parsedRequirement: SecRequirement?
+    guard SecRequirementCreateWithString(requirement as CFString, [], &parsedRequirement) == errSecSuccess,
+          parsedRequirement != nil else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration contains an invalid dedicated Child helper code-signing requirement"
+        )
+    }
+    return requirement
+}
+
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let agentMachServiceName: String
+    let hostMachServiceName: String
+    let childMachServiceName: String
     let keyTag: String
     let keychainAccessGroup: String?
     let keyLifecycleDirectory: String?
@@ -324,6 +415,9 @@ private struct ServiceConfiguration: Decodable {
     let agentPerWorktreeSessionLimit: Int?
     let agentBootstrapAttemptLimit: Int?
     let agentWorktreeObservationPolicyVersion: Int?
+    let agentCapabilityPublicKey: String?
+    let agentCapabilityKeyID: String?
+    let hostChildCodeDirectoryHash: String?
     let qualificationMode: String?
     let qualificationMachServiceName: String?
     let qualificationCandidateSHA256: String?
@@ -338,11 +432,14 @@ private struct ServiceConfiguration: Decodable {
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
     let agentClientCodeSigningRequirement: String
+    let childCodeSigningRequirement: String?
     let allowedClientUID: UInt32
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case machServiceName = "mach_service_name"
         case agentMachServiceName = "agent_mach_service_name"
+        case hostMachServiceName = "host_mach_service_name"
+        case childMachServiceName = "child_mach_service_name"
         case keyTag = "key_tag"
         case keychainAccessGroup = "keychain_access_group"
         case keyLifecycleDirectory = "key_lifecycle_directory"
@@ -398,6 +495,9 @@ private struct ServiceConfiguration: Decodable {
         case agentPerWorktreeSessionLimit = "agent_per_worktree_session_limit"
         case agentBootstrapAttemptLimit = "agent_bootstrap_attempt_limit"
         case agentWorktreeObservationPolicyVersion = "agent_worktree_observation_policy_version"
+        case agentCapabilityPublicKey = "agent_capability_public_key"
+        case agentCapabilityKeyID = "agent_capability_key_id"
+        case hostChildCodeDirectoryHash = "host_child_code_directory_hash"
         case qualificationMode = "qualification_mode"
         case qualificationMachServiceName = "qualification_mach_service_name"
         case qualificationCandidateSHA256 = "qualification_candidate_sha256"
@@ -412,6 +512,7 @@ private struct ServiceConfiguration: Decodable {
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
         case agentClientCodeSigningRequirement = "agent_client_code_signing_requirement"
+        case childCodeSigningRequirement = "child_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
     }
 
@@ -424,14 +525,28 @@ private struct ServiceConfiguration: Decodable {
         let value = try JSONDecoder().decode(Self.self, from: data)
         guard !value.machServiceName.isEmpty,
               !value.agentMachServiceName.isEmpty,
+              !value.hostMachServiceName.isEmpty,
+              !value.childMachServiceName.isEmpty,
               value.machServiceName == "dev.agentpass.native-service",
               value.agentMachServiceName == "dev.agentpass.agent-session",
+              value.hostMachServiceName == "dev.agentpass.agent-host",
+              value.childMachServiceName == "dev.agentpass.child-git",
               value.machServiceName != value.agentMachServiceName,
+              value.hostMachServiceName != value.machServiceName,
+              value.hostMachServiceName != value.agentMachServiceName,
+              value.childMachServiceName != value.machServiceName,
+              value.childMachServiceName != value.agentMachServiceName,
+              value.childMachServiceName != value.hostMachServiceName,
               !value.keyTag.isEmpty, !value.auditKeyTag.isEmpty, value.policyPath.hasPrefix("/"), value.auditLogPath.hasPrefix("/"), value.auditCheckpointPath.hasPrefix("/"),
               !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !value.agentClientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.clientCodeSigningRequirement != value.agentClientCodeSigningRequirement else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
+        }
+        if let childHash = value.hostChildCodeDirectoryHash {
+            guard childHash.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
+                throw AgentPassNativeError.invalidConfiguration("Host child code-directory hash is invalid")
+            }
         }
         guard let serviceAccessGroup = value.keychainAccessGroup,
               value.clientCodeSigningRequirement == (try? NativeClientCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
@@ -440,6 +555,11 @@ private struct ServiceConfiguration: Decodable {
         guard value.agentClientCodeSigningRequirement == (try? NativeAgentCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
             throw AgentPassNativeError.invalidConfiguration("Native Agent host code-signing requirement must bind its fixed Team ID, Developer ID identity, and dedicated entitlement")
         }
+        _ = try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: value.childCodeSigningRequirement,
+            hostCodeSigningRequirement: value.agentClientCodeSigningRequirement,
+            managementCodeSigningRequirement: value.clientCodeSigningRequirement
+        )
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
             guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
                   value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag : value.controlStatePath != nil else {
@@ -500,7 +620,9 @@ private struct ServiceConfiguration: Decodable {
             value.agentPerAgentSessionLimit,
             value.agentPerWorktreeSessionLimit,
             value.agentBootstrapAttemptLimit,
-            value.agentWorktreeObservationPolicyVersion
+            value.agentWorktreeObservationPolicyVersion,
+            value.agentCapabilityPublicKey,
+            value.agentCapabilityKeyID
         ]
         let agentRuntimeCount = agentRuntimeValues.compactMap { $0 }.count
         if agentRuntimeCount != 0 {
@@ -668,6 +790,8 @@ private struct ServiceConfiguration: Decodable {
             agentPerWorktreeSessionLimit != nil,
             agentBootstrapAttemptLimit != nil,
             agentWorktreeObservationPolicyVersion != nil,
+            agentCapabilityPublicKey != nil,
+            agentCapabilityKeyID != nil,
         ].contains(true)
         var origin: URL?
         if configured, let apiBaseText = controlV2APIBaseURL,
@@ -688,7 +812,9 @@ private struct ServiceConfiguration: Decodable {
             perAgentSessionLimit: configured ? agentPerAgentSessionLimit : nil,
             perWorktreeSessionLimit: configured ? agentPerWorktreeSessionLimit : nil,
             bootstrapAttemptLimit: configured ? agentBootstrapAttemptLimit : nil,
-            worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil
+            worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil,
+            capabilityPublicKeyPEM: configured ? agentCapabilityPublicKey : nil,
+            capabilityKeyID: configured ? agentCapabilityKeyID : nil
         )
     }
 
@@ -759,6 +885,330 @@ private final class ServiceDataReply: @unchecked Sendable {
     private let body: (NSData?, NSError?) -> Void
     init(_ body: @escaping (NSData?, NSError?) -> Void) { self.body = body }
     func call(_ data: NSData?, _ error: NSError?) { body(data, error) }
+}
+
+/// Projects the local audit record into the closed, redacted Device audit
+/// contract.  A local audit record is deliberately allowed to be richer than
+/// its Cloud projection; missing trusted fields therefore mean local-only
+/// evidence, never guessed Cloud data.
+internal enum NativeServiceDeviceAuditProjection {
+    private static let stableReasons: Set<String> = [
+        "allowed", "branch_denied", "branch_not_allowed", "capability_expired",
+        "capability_missing", "operation_not_allowed", "policy_changed",
+        "remote_control_stale", "remote_denied", "remote_not_allowed",
+        "repository_not_allowed", "revoked", "session_required", "signer_failed",
+        "tag_denied", "tag_not_allowed"
+    ]
+
+    static func stableReason(decision: String, rawReason: String?) -> String {
+        guard decision != "allow" else { return "allowed" }
+        let raw = rawReason?.lowercased() ?? ""
+        if stableReasons.contains(raw) { return raw }
+        let matches: [(String, String)] = [
+            ("branch_denied", "branch_denied"),
+            ("branch denied", "branch_denied"),
+            ("branch_not_allowed", "branch_not_allowed"),
+            ("branch not allowed", "branch_not_allowed"),
+            ("capability_expired", "capability_expired"),
+            ("capability_missing", "capability_missing"),
+            ("short-lived cloud capability", "capability_missing"),
+            ("operation_not_allowed", "operation_not_allowed"),
+            ("unsupported native broker operation", "operation_not_allowed"),
+            ("policy_changed", "policy_changed"),
+            ("trusted git context changed", "policy_changed"),
+            ("control_refresh_pending", "remote_control_stale"),
+            ("remote_control_stale", "remote_control_stale"),
+            ("remote_denied", "remote_denied"),
+            ("remote_not_allowed", "remote_not_allowed"),
+            ("repository_not_allowed", "repository_not_allowed"),
+            ("repository path", "repository_not_allowed"),
+            ("revoked", "revoked"),
+            ("session_required", "session_required"),
+            ("session is required", "session_required"),
+            ("tag_denied", "tag_denied"),
+            ("tag_not_allowed", "tag_not_allowed")
+        ]
+        if let match = matches.first(where: { raw.contains($0.0) }) { return match.1 }
+        return decision == "error" ? "signer_failed" : "policy_changed"
+    }
+
+    static func project(
+        local: NativeAuditEvent,
+        eventID: String,
+        policySequence: Int64?,
+        capabilitySequence: Int64?,
+        deviceTimestamp: String,
+        previousHash: String
+    ) -> NativeDeviceAuditEvent? {
+        guard local.operation == "git.commit.sign",
+              let requestID = local.requestID,
+              let agentID = local.agentID,
+              let repository = local.repository,
+              let branch = local.branch,
+              let remote = local.remote,
+              let payloadDigest = local.payloadSHA256,
+              let policySequence,
+              let capabilitySequence else { return nil }
+        return try? NativeDeviceAuditEvent(
+            eventID: eventID,
+            requestID: requestID,
+            agentID: agentID,
+            decision: local.decision,
+            reason: stableReason(decision: local.decision, rawReason: local.reason),
+            policySequence: policySequence,
+            capabilitySequence: capabilitySequence,
+            repository: repository,
+            branch: branch,
+            remote: remote,
+            payloadDigest: payloadDigest,
+            deviceTimestamp: deviceTimestamp,
+            previousHash: previousHash
+        )
+    }
+}
+
+internal struct NativeDeviceAuditUploadHealth: Codable, Equatable, Sendable {
+    let version: Int
+    let state: String
+    let consecutiveFailures: Int
+    let lastError: String?
+    let lastAttemptAt: Date?
+    let lastSuccessAt: Date?
+
+    static let operational = "operational"
+    static let degraded = "degraded"
+
+    static var initial: NativeDeviceAuditUploadHealth {
+        NativeDeviceAuditUploadHealth(
+            version: 1,
+            state: operational,
+            consecutiveFailures: 0,
+            lastError: nil,
+            lastAttemptAt: nil,
+            lastSuccessAt: nil
+        )
+    }
+}
+
+/// Small, local-only state file for the upload supervisor.  A degraded state
+/// is informational and never gates retries: it survives restart so operators
+/// can see the outage, while the supervisor continues attempting recovery.
+internal final class NativeDeviceAuditUploadHealthStore: @unchecked Sendable {
+    private static let maximumBytes = 64 * 1024
+    private let path: String
+    private let now: @Sendable () -> Date
+    private let lock = NSLock()
+    private var value: NativeDeviceAuditUploadHealth
+
+    init(path: String, now: @escaping @Sendable () -> Date = { Date() }) throws {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard standardized.hasPrefix("/") else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload health path must be absolute")
+        }
+        self.path = standardized
+        self.now = now
+        var existingInfo = stat()
+        if lstat(standardized, &existingInfo) == 0 {
+            guard (existingInfo.st_mode & S_IFMT) == S_IFREG,
+                  existingInfo.st_uid == geteuid(),
+                  existingInfo.st_mode & 0o077 == 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state must be a private service-owned regular file")
+            }
+            let data = try Data(contentsOf: URL(fileURLWithPath: standardized), options: [.mappedIfSafe])
+            guard data.count <= Self.maximumBytes else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
+            }
+            do {
+                self.value = try JSONDecoder().decode(NativeDeviceAuditUploadHealth.self, from: data)
+            } catch {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is invalid")
+            }
+            guard self.value.version == 1,
+                  [NativeDeviceAuditUploadHealth.operational, NativeDeviceAuditUploadHealth.degraded].contains(self.value.state),
+                  self.value.consecutiveFailures >= 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is invalid")
+            }
+        } else if errno == ENOENT {
+            self.value = .initial
+            try persist(self.value)
+        } else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    func snapshot() -> NativeDeviceAuditUploadHealth {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func recordAttempt() throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: current.state,
+                consecutiveFailures: current.consecutiveFailures,
+                lastError: current.lastError,
+                lastAttemptAt: now(),
+                lastSuccessAt: current.lastSuccessAt
+            )
+        }
+    }
+
+    func recordFailure(_ error: Error) throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: NativeDeviceAuditUploadHealth.degraded,
+                consecutiveFailures: current.consecutiveFailures + 1,
+                lastError: error.localizedDescription,
+                lastAttemptAt: now(),
+                lastSuccessAt: current.lastSuccessAt
+            )
+        }
+    }
+
+    func recordSuccess() throws {
+        try update { current in
+            NativeDeviceAuditUploadHealth(
+                version: current.version,
+                state: NativeDeviceAuditUploadHealth.operational,
+                consecutiveFailures: 0,
+                lastError: nil,
+                lastAttemptAt: now(),
+                lastSuccessAt: now()
+            )
+        }
+    }
+
+    private func update(_ makeValue: (NativeDeviceAuditUploadHealth) -> NativeDeviceAuditUploadHealth) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let next = makeValue(value)
+        try persist(next)
+        value = next
+    }
+
+    private func persist(_ value: NativeDeviceAuditUploadHealth) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(value)
+        guard data.count <= Self.maximumBytes else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is too large")
+        }
+        let destination = URL(fileURLWithPath: path)
+        let parent = destination.deletingLastPathComponent().path
+        let temporary = destination.appendingPathExtension("tmp-\(UUID().uuidString)").path
+        let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var openDescriptor: Int32? = descriptor
+        defer {
+            if let openDescriptor { close(openDescriptor) }
+            if FileManager.default.fileExists(atPath: temporary) { unlink(temporary) }
+        }
+        var offset = 0
+        try data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { throw AgentPassNativeError.invalidConfiguration("Device audit upload health state is empty") }
+            while offset < data.count {
+                let written = Darwin.write(descriptor, base.advanced(by: offset), data.count - offset)
+                guard written > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                offset += written
+            }
+        }
+        guard fchmod(descriptor, mode_t(0o600)) == 0,
+              fsync(descriptor) == 0,
+              close(descriptor) == 0 else {
+            openDescriptor = nil
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        openDescriptor = nil
+        guard rename(temporary, path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let parentDescriptor = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parentDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(parentDescriptor) }
+        guard fsync(parentDescriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+}
+
+internal enum NativeDeviceAuditUploadPolicy {
+    static func requiresDurableEnqueue(for event: NativeAuditEvent) -> Bool {
+        event.operation == "git.commit.sign" && event.decision == "allow" && event.requestID != nil
+    }
+}
+
+internal enum NativeDeviceAuditUploadAdmission {
+    static func validate(required: Bool, outboxAvailable: Bool) throws {
+        guard !required || outboxAvailable else {
+            throw AgentPassNativeError.invalidConfiguration("Required Device audit durability is unavailable")
+        }
+    }
+
+    static func attempt(
+        required: Bool,
+        health: NativeDeviceAuditUploadHealthStore?,
+        operation: () throws -> Void
+    ) throws {
+        do {
+            try operation()
+        } catch {
+            try? health?.recordFailure(error)
+            if required { throw error }
+        }
+    }
+}
+
+/// The supervisor deliberately treats both transport and local filesystem
+/// failures as retryable.  It never stops because health persistence or one
+/// upload attempt failed; the next iteration is the recovery mechanism.
+internal final class NativeDeviceAuditUploadRetrySupervisor: @unchecked Sendable {
+    private let coordinator: NativeDeviceAuditUploadCoordinator
+    private let health: NativeDeviceAuditUploadHealthStore
+    private let intervalNanoseconds: UInt64
+
+    init(
+        coordinator: NativeDeviceAuditUploadCoordinator,
+        health: NativeDeviceAuditUploadHealthStore,
+        intervalNanoseconds: UInt64 = 30_000_000_000
+    ) {
+        self.coordinator = coordinator
+        self.health = health
+        self.intervalNanoseconds = intervalNanoseconds
+    }
+
+    @discardableResult
+    func runOnce() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        try? health.recordAttempt()
+        do {
+            _ = try await coordinator.flush()
+            guard !Task.isCancelled else { return false }
+            try? health.recordSuccess()
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard !Task.isCancelled else { return false }
+            try? health.recordFailure(error)
+            return false
+        }
+    }
+
+    func start() -> Task<Void, Never> {
+        Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                _ = await self.runOnce()
+                guard !Task.isCancelled else { return }
+                do {
+                    try await Task.sleep(nanoseconds: self.intervalNanoseconds)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
 }
 
 private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, NativeAgentSessionAuditAppending, @unchecked Sendable {
@@ -832,6 +1282,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
     private let controlV2Manager: NativeControlBundleV2Manager?
+    private let controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)?
     private let signingTransactions: NativeSigningTransactionStore
     private let keyLifecycle: NativeKeyLifecycleStore?
     private let keyCoordinator: NativeKeyLifecycleCoordinator?
@@ -840,6 +1291,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var controlFetcher: NativeControlFetcher?
     private var deviceSyncRunner: NativeDeviceSyncRunner?
     private var deviceSyncPublicKeyPEM: String?
+    private var deviceAuditOutbox: NativeDeviceAuditOutbox?
+    private var deviceAuditUploadHealthStore: NativeDeviceAuditUploadHealthStore?
+    private var deviceAuditUploadSupervisor: NativeDeviceAuditUploadRetrySupervisor?
+    private var deviceAuditUploadTask: Task<Void, Never>?
     private var deviceSyncRequiresInitialConvergence = false
     private var lastControlFetchAuditReason: String?
     private var lastControlFetchAuditAt: Date?
@@ -856,7 +1311,41 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private var auditPruneLastError: String?
     private var auditPruneLastUpdatedAt: String?
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?) {
+    deinit {
+        deviceAuditUploadTask?.cancel()
+    }
+
+    private static func capabilitySequence(from requestData: Data) -> Int64? {
+        guard let request = try? NativeStrictJSON.object(from: requestData, maxBytes: 12 * 1024 * 1024, maxDepth: 16),
+              let capability = request["capability"] as? [String: Any],
+              let capabilityData = try? NativeStrictJSON.data(capability),
+              let parsed = try? NativeCapabilityCodec.parse(capabilityData) else {
+            return nil
+        }
+        return parsed.sequence
+    }
+
+    private func currentPolicySequence() -> Int64? {
+        controlV2Manager?.status().sequence ?? controlManager?.status().sequence
+    }
+
+    private static func deviceAuditEventID(recordHash: String) -> String? {
+        guard recordHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return nil }
+        // The local audit record hash survives segment rotation, unlike the
+        // active-segment entry count. Derive a deterministic UUID-shaped ID
+        // from its first 128 bits so retries cannot reuse an event ID for new
+        // evidence after a rotation.
+        let hex = Array(recordHash.prefix(32))
+        guard hex.count == 32 else { return nil }
+        let groups = [
+            String(hex[0..<8]), String(hex[8..<12]),
+            "4" + String(hex[13..<16]), "8" + String(hex[17..<20]),
+            String(hex[20..<32])
+        ]
+        return groups.joined(separator: "-")
+    }
+
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?, controlRefreshEvidenceStore: (any NativeControlRefreshEvidenceStoring)? = nil) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
@@ -880,6 +1369,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         self.sessionManager = sessionManager
         self.controlManager = controlManager
         self.controlV2Manager = controlV2Manager
+        self.controlRefreshEvidenceStore = controlRefreshEvidenceStore
         self.signingTransactions = signingTransactions
         self.keyLifecycle = keyLifecycle
         self.keyCoordinator = keyCoordinator
@@ -913,6 +1403,25 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         self.deviceSyncPublicKeyPEM = devicePublicKeyPEM
         deviceSyncRequiresInitialConvergence = initialState != .idle
         runner.start()
+    }
+
+    func installDeviceAuditUploadCoordinator(
+        _ coordinator: NativeDeviceAuditUploadCoordinator,
+        outbox: NativeDeviceAuditOutbox,
+        health: NativeDeviceAuditUploadHealthStore
+    ) throws {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard deviceAuditUploadSupervisor == nil,
+              deviceAuditOutbox == nil else {
+            throw AgentPassNativeError.invalidConfiguration("Device audit upload is already configured")
+        }
+        _ = try outbox.nextPreviousHash()
+        let supervisor = NativeDeviceAuditUploadRetrySupervisor(coordinator: coordinator, health: health)
+        deviceAuditOutbox = outbox
+        deviceAuditUploadHealthStore = health
+        deviceAuditUploadSupervisor = supervisor
+        deviceAuditUploadTask = supervisor.start()
     }
 
     func deviceSyncActivation() -> NativeDeviceSyncBundleActivation {
@@ -969,19 +1478,23 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         catch { reply(nil, error as NSError); return }
         do { try rotateAuditIfReady(); _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
+        let capabilitySequence = Self.capabilitySequence(from: request as Data)
         do {
             if let prior = try signingTransactions.lookup(requestData: request as Data) {
                 switch prior.phase {
-                case .complete:
+                case .completed:
                     reply(prior.signature! as NSString, nil)
-                case .signed:
-                    try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash))
+                case .signedVerified:
+                    try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash), deviceAuditCapabilitySequence: capabilitySequence)
                     let completed = try signingTransactions.complete(requestID: prior.requestID)
                     reply(completed.signature! as NSString, nil)
                 case .intent:
                     _ = try signingTransactions.markOutcomeUnknown(requestID: prior.requestID)
                     throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
-                case .outcomeUnknown:
+                case .uncertain:
+                    throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
+                case .admitted, .providerStarted:
+                    _ = try signingTransactions.markOutcomeUnknown(requestID: prior.requestID)
                     throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
                 }
                 return
@@ -991,7 +1504,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         do {
             authorized = try authorizer.authorize(requestData: request as Data)
         } catch let authorizationError {
-            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription), deviceAuditCapabilitySequence: capabilitySequence) }
             catch let auditError {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
@@ -1001,24 +1514,27 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             reply(nil, authorizationError as NSError)
             return
         }
+        var payloadHash: String?
         do {
-            let payloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
-            _ = try signingTransactions.begin(requestData: request as Data, authorized: authorized, payloadHash: payloadHash)
+            let computedPayloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
+            payloadHash = computedPayloadHash
+            _ = try signingTransactions.begin(requestData: request as Data, authorized: authorized, payloadHash: computedPayloadHash)
             // Durable authorization intent is appended before the hardware key
             // is touched. A missing terminal result is therefore observable as
             // an unresolved outcome rather than silent key use.
-            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: computedPayloadHash), deviceAuditCapabilitySequence: capabilitySequence)
             try authorizer.revalidate(authorized)
+            _ = try signingTransactions.markProviderStarted(requestID: authorized.requestID)
             let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
             _ = try signingTransactions.recordSigned(requestID: authorized.requestID, signature: signature)
-            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: computedPayloadHash), deviceAuditCapabilitySequence: capabilitySequence)
             let completed = try signingTransactions.complete(requestID: authorized.requestID)
             reply(completed.signature! as NSString, nil)
         } catch let signingError {
             // Once a signature is durably recorded, never append a contradictory
             // terminal error and never touch the key again. The exact retry path
             // above only repairs the missing final audit record.
-            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .signed {
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .signedVerified {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
                 reply(nil, signingError as NSError)
@@ -1027,10 +1543,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             // An intent without a durably recorded signature is deliberately
             // treated as ambiguous. This sacrifices availability after a crash
             // boundary rather than risking duplicate hardware-key use.
-            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent {
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent || transaction.phase == .providerStarted {
                 _ = try? signingTransactions.markOutcomeUnknown(requestID: authorized.requestID)
             }
-            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash), deviceAuditCapabilitySequence: capabilitySequence) }
             catch let auditError {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
@@ -2451,9 +2967,12 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
                     return
                 }
                 do {
-                    var object = try self.currentControlStatusObject()
-                    object.merge(self.refreshStatusObject(), uniquingKeysWith: { _, replacement in replacement })
-                    object["refreshed"] = true
+                    guard let evidenceStore = self.controlRefreshEvidenceStore,
+                          let evidence = try evidenceStore.load(),
+                          evidence.isAcceptedApplied else {
+                        throw AgentPassNativeError.invalidConfiguration("control_refresh_evidence_unavailable")
+                    }
+                    let object = try evidence.publicResponseObject()
                     reply.call(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
                 } catch { reply.call(nil, error as NSError) }
             }
@@ -2857,16 +3376,28 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     }
 
     @discardableResult
-    private func appendAudit(_ event: NativeAuditEvent, timestamp: Date = Date()) throws -> NativeAuditStatus {
+    private func appendAudit(
+        _ event: NativeAuditEvent,
+        timestamp: Date = Date(),
+        deviceAuditCapabilitySequence: Int64? = nil
+    ) throws -> NativeAuditStatus {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
-        return try appendAuditLocked(event, timestamp: timestamp)
+        return try appendAuditLocked(
+            event,
+            timestamp: timestamp,
+            deviceAuditCapabilitySequence: deviceAuditCapabilitySequence
+        )
     }
 
     /// Caller must hold `authorizationLock`. Keeping reconciliation lookup and
     /// append under this same service-wide mutation gate makes verified absence
     /// and the subsequent durable append one serialized decision.
-    private func appendAuditLocked(_ event: NativeAuditEvent, timestamp: Date) throws -> NativeAuditStatus {
+    private func appendAuditLocked(
+        _ event: NativeAuditEvent,
+        timestamp: Date,
+        deviceAuditCapabilitySequence: Int64? = nil
+    ) throws -> NativeAuditStatus {
         if let pendingRecovery, pendingRecovery.expiresAt <= timestamp { self.pendingRecovery = nil }
         guard pendingRecovery?.freezesMutations != true else {
             throw AgentPassNativeError.invalidConfiguration("Audit evidence is frozen while offline recovery is pending")
@@ -2879,6 +3410,41 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         // An automatic audit rotation creates a checkpoint. Keep checkpoint and receipt segments
         // bounded as part of the same service-level append path.
         try rotateEvidenceIfReady()
+        if let outbox = deviceAuditOutbox {
+            let requiresDurableEnqueue = NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: event)
+            try NativeDeviceAuditUploadAdmission.validate(required: requiresDurableEnqueue, outboxAvailable: true)
+            // A failed enqueue is durable health evidence, not a reason to
+            // disable the queue. Signing records must be persisted before
+            // hardware signing; all other projections remain best-effort.
+            try NativeDeviceAuditUploadAdmission.attempt(
+                required: requiresDurableEnqueue,
+                health: deviceAuditUploadHealthStore
+            ) {
+                guard let eventID = Self.deviceAuditEventID(recordHash: status.headHash) else {
+                    throw AgentPassNativeError.invalidSignature("Native device audit record hash cannot derive an event ID")
+                }
+                let previousHash = try outbox.nextPreviousHash()
+                guard let redacted = NativeServiceDeviceAuditProjection.project(
+                    local: event,
+                    eventID: eventID,
+                    policySequence: currentPolicySequence(),
+                    capabilitySequence: deviceAuditCapabilitySequence,
+                    deviceTimestamp: serviceTimestamp(timestamp),
+                    previousHash: previousHash
+                ) else {
+                    if requiresDurableEnqueue {
+                        throw AgentPassNativeError.invalidConfiguration("Required Device audit projection is unavailable")
+                    }
+                    return
+                }
+                _ = try outbox.enqueue(redacted)
+            }
+        } else {
+            try NativeDeviceAuditUploadAdmission.validate(
+                required: NativeDeviceAuditUploadPolicy.requiresDurableEnqueue(for: event),
+                outboxAvailable: false
+            )
+        }
         return status
     }
 
@@ -3060,6 +3626,32 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
     }
 }
 
+/// This helper is intentionally injectable so a token mismatch test can prove
+/// both terminal closure and denial-before-operation without constructing a
+/// live Mach service connection.
+internal func authorizeAgentSessionConnectionToken(
+    expected: NativeConnectionContext,
+    current: () throws -> NativeConnectionContext,
+    terminalClose: () -> Void
+) throws {
+    do {
+        guard try current() == expected else {
+            throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+        }
+    } catch {
+        terminalClose()
+        throw error
+    }
+}
+
+private final class AgentSessionConnectionBox: @unchecked Sendable {
+    let connection: NSXPCConnection
+
+    init(_ connection: NSXPCConnection) {
+        self.connection = connection
+    }
+}
+
 /// Service-wide production dependencies for the process-bound Agent runtime.
 /// Construction is all-or-none; an absent value means every Agent authority
 /// method remains fail-closed while the separate Mach service stays observable.
@@ -3149,6 +3741,62 @@ private struct AgentConnectionSessionBindingObserver: NativeAgentSessionBindingO
             authorityGeneration: state.authorityGeneration,
             keyGeneration: state.keyGeneration
         )
+    }
+
+    func observeSigningAuthority(
+        request: NativeSigningTransactionRequest,
+        agentID: String,
+        keyLifecycleIdentity: String
+    ) throws -> NativeSigningTransactionAuthority {
+        let binding = try observeSessionBinding(agentID: agentID)
+        let worktree = try worktreeObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        ).binding
+        guard binding.worktreeBindingDigest == worktree.digest else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        return try NativeSigningTransactionAuthority(
+            request: request,
+            binding: binding,
+            worktree: worktree,
+            keyLifecycleIdentity: keyLifecycleIdentity
+        )
+    }
+
+    func consumeSigningCapability(
+        request: AgentPassAgentSignRequest,
+        agentID: String,
+        verifier: NativeCapabilityVerifier,
+        nowMilliseconds: Int64
+    ) throws {
+        let binding = try observeSessionBinding(agentID: agentID)
+        let worktree = try worktreeObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        ).binding
+        guard binding.worktreeBindingDigest == worktree.digest,
+              case .branch(let branch) = worktree.head,
+              !worktree.remotes.isEmpty else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        let capability = try verifier.verifyAndConsume(
+            request.capability,
+            options: NativeCapabilityVerificationOptions(
+                nowMilliseconds: nowMilliseconds,
+                audience: NativeCapabilityAudience(
+                    agentID: binding.agentID,
+                    deviceID: binding.deviceID
+                )
+            ),
+            operation: NativeSigningTransactionRequest.operation,
+            repository: worktree.repositoryPath,
+            branch: branch,
+            remotes: worktree.remotes.map(\.url)
+        )
+        guard capability.capabilityID == request.capabilityID.lowercased() else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
     }
 
     private static func digest(_ value: String) -> Data? {
@@ -3390,7 +4038,12 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let consumeRecoveryStore: NativeAgentSessionConsumeRecoveryStore
     let activationRecoveryStore: NativeAgentSessionConsumeRecoveryV4Store
     let signingIntentStore: NativeAgentSigningIntentStore
+    let signingTransactions: NativeSigningTransactionStore
     let gitCommitSigner: NativeAgentGitCommitSigner
+    let capabilityVerifier: NativeCapabilityVerifier
+    let cloudSigningCapabilityVerifier: NativeAgentSigningCapabilityVerifier
+    let dedicatedSigningCapabilityIssuer: NativeAgentDedicatedSigningCapabilityRuntimeIssuer
+    let dedicatedCapabilitySequenceAuthorities: NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
@@ -3399,11 +4052,48 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         authorityState: AgentRuntimeAuthorityState,
         deviceSigner: SecureEnclaveKeyStore,
         gitSigner: SecureEnclaveKeyStore,
+        capabilityVerifier: NativeCapabilityVerifier,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     ) throws {
         try Self.validatePrivateDirectory(authority.signingIntentDirectory)
         self.authority = authority
         self.authorityState = authorityState
+        self.capabilityVerifier = capabilityVerifier
+        let trustedPublicKey = try NativeCapabilityTrust(
+            publicKeyPEM: authority.capabilityPublicKeyPEM
+        ).publicKey
+        self.cloudSigningCapabilityVerifier = try NativeAgentSigningCapabilityVerifier(
+            trustedPublicKey: trustedPublicKey,
+            expectedIssuer: NativeAgentSigningCapabilityCodec.issuer,
+            expectedKeyPurpose: NativeAgentSigningCapabilityCodec.operation,
+            expectedKeyID: authority.capabilityKeyID,
+            expectedDomain: NativeAgentSigningCapabilityCodec.signatureDomain
+        )
+        let capabilityVerifier = self.cloudSigningCapabilityVerifier
+        let sequenceAuthorities = NativeAgentDedicatedSigningCapabilitySequenceAuthorityRegistry(
+            persistenceDirectory: authority.signingIntentDirectory
+        )
+        self.dedicatedCapabilitySequenceAuthorities = sequenceAuthorities
+        self.dedicatedSigningCapabilityIssuer = NativeAgentDedicatedSigningCapabilityRuntimeIssuer(
+            makeConsumer: { sessionID in
+                try NativeAgentSigningCapabilityHTTPConsumer(
+                    baseURL: authority.deviceAPIOrigin,
+                    organizationID: authority.organizationID,
+                    deviceID: authority.deviceID,
+                    sessionID: sessionID,
+                    transport: NativeAgentURLSessionHTTPTransport(),
+                    signer: deviceSigner
+                )
+            },
+            verifier: capabilityVerifier,
+            sequenceAuthority: { context in
+                let binding = try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+                    coordinatorSessionID: context.sessionID,
+                    agentID: context.agentID
+                )
+                return try sequenceAuthorities.authority(for: binding)
+            }
+        )
         self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
             baseURL: authority.deviceAPIOrigin,
@@ -3413,6 +4103,9 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         )
         signingIntentStore = try NativeAgentSigningIntentStore(
             path: authority.signingIntentDirectory + "/signing-intents.v1.json"
+        )
+        signingTransactions = try NativeSigningTransactionStore(
+            path: authority.signingIntentDirectory + "/signing-transactions.v2.json"
         )
         consumeRecoveryStore = try NativeAgentSessionConsumeRecoveryStore(
             path: authority.signingIntentDirectory + "/session-consume-recovery.v1.json"
@@ -3461,6 +4154,8 @@ private final class AgentXPCReplyBox<Response>: @unchecked Sendable {
 private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
+    private let connection: NSXPCConnection
+    private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let runtime: AgentRuntimeDependencies?
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
@@ -3468,20 +4163,32 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let clocks = NativeAgentSystemClocks()
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
     private let coordinator: NativeAgentSessionCoordinator?
+    private let signingBindingObserver: AgentConnectionSessionBindingObserver?
+    private let sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry?
+    private let terminalCloseLock = NSLock()
+    private var hasTerminallyClosed = false
+    private var activeSessionBinding: NativeAgentSessionBinding?
 
     init(
+        connection: NSXPCConnection,
         connectionGuard: NativeAgentConnectionGuard,
         observer: NativeDarwinProcessObservationSource,
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource,
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
-        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming,
+        sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry?
     ) {
+        self.connection = connection
         self.connectionGuard = connectionGuard
         self.observer = observer
+        self.auditTokenSource = auditTokenSource
         self.runtime = runtime
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
+        self.sessionAssociationRegistry = sessionAssociationRegistry
+        let connectionBox = AgentSessionConnectionBox(connection)
         if let runtime {
             let bindingObserver = AgentConnectionSessionBindingObserver(
                 connectionGuard: connectionGuard,
@@ -3490,14 +4197,33 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 authority: runtime.authorityState,
                 deviceID: runtime.authority.deviceID
             )
+            signingBindingObserver = bindingObserver
             coordinator = try? NativeAgentSessionCoordinator(
                 connectionTokenIdentity: connectionGuard.context.tokenIdentity,
                 connectionRevalidator: {
-                    let observation = try observer.observe(
-                        pid: connectionGuard.context.pid,
-                        expectedUserID: connectionGuard.context.effectiveUserID
-                    )
-                    try connectionGuard.revalidate(observation: observation)
+                    do {
+                        let observation = try observer.observe(
+                            pid: connectionGuard.context.pid,
+                            expectedUserID: connectionGuard.context.effectiveUserID
+                        )
+                        try connectionGuard.revalidate(observation: observation)
+                        let currentToken = try auditTokenSource.completeAuditToken(for: connectionBox.connection)
+                        guard currentToken.pid == connectionGuard.context.pid,
+                              currentToken.effectiveUserID == connectionGuard.context.effectiveUserID else {
+                            throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+                        }
+                        let currentContext = try currentToken.context(matching: observation)
+                        try authorizeAgentSessionConnectionToken(
+                            expected: connectionGuard.context,
+                            current: { currentContext },
+                            terminalClose: {
+                                connectionBox.connection.invalidate()
+                            }
+                        )
+                    } catch {
+                        connectionBox.connection.invalidate()
+                        throw error
+                    }
                 },
                 bootstrapStore: bootstrapStore,
                 bindingObserver: bindingObserver,
@@ -3512,16 +4238,52 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 authority: runtime.authority
             )
         } else {
+            signingBindingObserver = nil
             coordinator = nil
         }
     }
 
     private func authorizeConnection() throws {
-        let observation = try observer.observe(
-            pid: connectionGuard.context.pid,
-            expectedUserID: connectionGuard.context.effectiveUserID
-        )
-        try connectionGuard.revalidate(observation: observation)
+        do {
+            let observation = try observer.observe(
+                pid: connectionGuard.context.pid,
+                expectedUserID: connectionGuard.context.effectiveUserID
+            )
+            try connectionGuard.revalidate(observation: observation)
+            let currentToken = try auditTokenSource.completeAuditToken(for: connection)
+            guard currentToken.pid == connectionGuard.context.pid,
+                  currentToken.effectiveUserID == connectionGuard.context.effectiveUserID else {
+                throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+            }
+            let currentContext = try currentToken.context(matching: observation)
+            try authorizeAgentSessionConnectionToken(
+                expected: connectionGuard.context,
+                current: { currentContext },
+                terminalClose: { [weak self] in self?.terminallyClose() }
+            )
+        } catch {
+            terminallyClose()
+            throw error
+        }
+    }
+
+    private func terminallyClose() {
+        let shouldClose = terminalCloseLock.withLock {
+            guard !hasTerminallyClosed else { return false }
+            hasTerminallyClosed = true
+            return true
+        }
+        guard shouldClose else { return }
+        let binding = terminalCloseLock.withLock {
+            defer { activeSessionBinding = nil }
+            return activeSessionBinding
+        }
+        if let binding {
+            sessionAssociationRegistry?.invalidate(binding: binding)
+        }
+        coordinator?.invalidateConnection()
+        bootstrapStore.invalidate()
+        connection.invalidate()
     }
 
     private func unavailableAfterAuthorization() -> NSError {
@@ -3591,36 +4353,64 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         let bootstrapID = request.bootstrapID
         let proof = request.proof
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator, qualificationFaultConsumer, transportReplyFaultConsumer] in
-            guard let coordinator else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let activation = try coordinator.start(bootstrapID: bootstrapID, proof: proof)
+                if let runtime = self.runtime,
+                   let registry = self.sessionAssociationRegistry {
+                    let dedicatedAssociation = NativeAgentDedicatedSigningAssociation(
+                        coordinator: coordinator,
+                        transactionStore: runtime.signingTransactions)
+                    _ = try registry.register(
+                        sessionID: activation.status.sessionID,
+                        binding: activation.binding,
+                        coordinator: coordinator,
+                        dedicatedSigningAssociation: dedicatedAssociation)
+                    self.terminalCloseLock.withLock {
+                        self.activeSessionBinding = activation.binding
+                    }
+                }
                 guard let response = AgentPassAgentSessionResponse(
                     sessionID: activation.status.sessionID,
                     leaseID: activation.status.leaseID,
+                    deviceID: activation.binding.deviceID,
                     processBindingDigest: activation.binding.processBindingDigest,
+                    ancestryBindingDigest: activation.binding.ancestryBindingDigest,
                     worktreeBindingDigest: activation.binding.worktreeBindingDigest,
+                    controlSequence: activation.binding.controlSequence,
+                    authorityGeneration: activation.binding.authorityGeneration,
+                    keyGeneration: activation.binding.keyGeneration,
                     expiresAtMilliseconds: activation.status.expiresAtMilliseconds,
                     maxSignatures: activation.status.maxSignatures
                 ) else {
+                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                        self.sessionAssociationRegistry?.invalidate(binding: binding)
+                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
+                    }
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
                     return
                 }
                 do {
-                    try qualificationFaultConsumer.reach(.afterResultEncoded)
+                    try self.qualificationFaultConsumer.reach(.afterResultEncoded)
                 } catch {
                     // The production injected branch never returns after its
                     // atomic receipt. Any ordinary throwing implementation is
                     // therefore a local fault and must not strand reply-less
                     // authority.
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
+                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                        self.sessionAssociationRegistry?.invalidate(binding: binding)
+                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
+                    }
                     throw error
                 }
-                guard !transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
+                guard !self.transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
                 replyBox.call(response, nil)
             } catch {
                 replyBox.call(nil, Self.denial(for: error).nsError)
@@ -3631,12 +4421,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     func agentSessionStatus(_ request: AgentPassAgentSessionStatusRequest, withReply reply: @escaping (AgentPassAgentSessionStatusResponse?, NSError?) -> Void) {
         let sessionID = request.sessionID
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator] in
-            guard let coordinator else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let status = try coordinator.status(sessionID: sessionID)
                 guard let response = AgentPassAgentSessionStatusResponse(
                     sessionID: status.sessionID,
@@ -3656,23 +4447,151 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     func signGitCommit(_ request: AgentPassAgentSignRequest, withReply reply: @escaping (AgentPassAgentSignResponse?, NSError?) -> Void) {
-        // Re-observation is deliberately the last operation before the N3/N4
-        // signing implementation will be allowed to reserve and touch a key.
-        reply(nil, unavailableAfterAuthorization())
+        let replyBox = AgentXPCReplyBox(reply)
+        worker.async { [weak self] in
+            guard let self,
+                  let runtime = self.runtime,
+                  let coordinator = self.coordinator,
+                  let bindingObserver = self.signingBindingObserver else {
+                replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
+                return
+            }
+            do {
+                try self.authorizeConnection()
+                let transactionRequest = try NativeSigningTransactionRequest(request)
+                if let prior = try runtime.signingTransactions.lookup(request: transactionRequest) {
+                    do {
+                        switch prior.phase {
+                        case .completed:
+                            guard let priorAuthority = prior.authority,
+                                  let remaining = prior.remainingSignatures else { throw NativeSigningTransactionError.invalidState }
+                            _ = try coordinator.status(sessionID: request.sessionID)
+                            let observed = try bindingObserver.observeSigningAuthority(
+                                request: transactionRequest,
+                                agentID: priorAuthority.agentID,
+                                keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                            guard observed == priorAuthority,
+                                  prior.remainingSignatures != nil,
+                                  let signature = prior.signature?.data(using: .utf8),
+                                  try runtime.gitCommitSigner.verifyGitCommitSignature(
+                                      payload: request.commitPayload,
+                                      signature: signature) == true else {
+                                throw NativeAgentSessionCoordinatorError.bindingDenied
+                            }
+                            guard let response = AgentPassAgentSignResponse(
+                                    requestID: request.requestID,
+                                    signature: signature,
+                                    remainingSignatures: remaining) else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            replyBox.call(response, nil)
+                        case .signedVerified:
+                            guard let priorAuthority = prior.authority else { throw NativeSigningTransactionError.invalidState }
+                            _ = try coordinator.status(sessionID: request.sessionID)
+                            let observed = try bindingObserver.observeSigningAuthority(
+                                request: transactionRequest,
+                                agentID: priorAuthority.agentID,
+                                keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                            guard observed == priorAuthority else { throw NativeAgentSessionCoordinatorError.bindingDenied }
+                            guard let priorSignature = prior.signature?.data(using: .utf8),
+                                  try runtime.gitCommitSigner.verifyGitCommitSignature(
+                                      payload: request.commitPayload,
+                                      signature: priorSignature) == true else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            let (reservation, _) = try coordinator.recoverSigningReservation(
+                                request,
+                                budgetSequence: prior.budgetSequence)
+                            let finalized = try coordinator.finalizeSigning(reservation)
+                            let completed = try runtime.signingTransactions.complete(
+                                requestID: transactionRequest.requestID,
+                                remainingSignatures: finalized.remainingSignatures)
+                            guard let signature = completed.signature?.data(using: .utf8),
+                                  let response = AgentPassAgentSignResponse(
+                                    requestID: request.requestID,
+                                    signature: signature,
+                                    remainingSignatures: finalized.remainingSignatures) else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            replyBox.call(response, nil)
+                        case .providerStarted:
+                            throw NativeSigningTransactionError.uncertain
+                        case .uncertain:
+                            throw NativeSigningTransactionError.uncertain
+                        case .admitted, .intent:
+                            throw NativeSigningTransactionError.phaseConflict
+                        }
+                    } catch {
+                        if prior.phase == .signedVerified {
+                            do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) }
+                            catch { throw NativeSigningTransactionError.invalidState }
+                        }
+                        throw error
+                    }
+                    return
+                }
+
+                let now = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                let (requestAge, ageOverflow) = now.subtractingReportingOverflow(
+                    request.createdAtMilliseconds)
+                guard !ageOverflow, (-60_000...60_000).contains(requestAge) else {
+                    throw NativeAgentSessionCoordinatorError.sessionDenied
+                }
+
+                let handoff = try coordinator.makeSigningHandoff(
+                    request: request,
+                    authorityProvider: { binding in
+                        try bindingObserver.consumeSigningCapability(
+                            request: request,
+                            agentID: binding.agentID,
+                            verifier: runtime.capabilityVerifier,
+                            nowMilliseconds: now
+                        )
+                        return try bindingObserver.observeSigningAuthority(
+                            request: transactionRequest,
+                            agentID: binding.agentID,
+                            keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                    })
+                let adapter = try NativeAgentSessionCoordinatorSigningAdapter(
+                    handoff: handoff,
+                    coordinator: coordinator,
+                    transactionStore: runtime.signingTransactions)
+                let completed = try adapter.execute { payload in
+                    let signature = try runtime.gitCommitSigner.signGitCommitPayload(payload)
+                    guard try runtime.gitCommitSigner.verifyGitCommitSignature(
+                        payload: payload,
+                        signature: signature) else {
+                        throw NativeAgentGitCommitSignerError.invalidSignature
+                    }
+                    return signature
+                }
+                guard let responseSignature = completed.signature?.data(using: .utf8),
+                      let response = AgentPassAgentSignResponse(
+                        requestID: request.requestID,
+                        signature: responseSignature,
+                        remainingSignatures: completed.remainingSignatures ?? 0) else {
+                    throw NativeSigningTransactionError.invalidState
+                }
+                replyBox.call(response, nil)
+            } catch {
+                replyBox.call(nil, Self.denial(for: error).nsError)
+            }
+        }
     }
 
     func closeAgentSession(_ request: AgentPassAgentCloseSessionRequest, withReply reply: @escaping (AgentPassAgentCloseSessionResponse?, NSError?) -> Void) {
         let sessionID = request.sessionID
         let reason = AgentPassAgentSessionCloseReason(rawValue: request.reason)
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator, clocks] in
-            guard let coordinator, let reason else {
+        worker.async { [weak self] in
+            guard let self, let coordinator = self.coordinator, let reason else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
             }
             do {
+                try self.authorizeConnection()
                 let status = try coordinator.close(sessionID: sessionID, reason: reason)
-                let closedAt = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                let closedAt = try self.clocks.wallClock.sample().millisecondsSinceUnixEpoch
                 guard let response = AgentPassAgentCloseSessionResponse(
                     sessionID: status.sessionID,
                     closedAtMilliseconds: closedAt
@@ -3693,6 +4612,23 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     private static func denial(for error: Error) -> NativeAgentSessionDenialReason {
+        if let error = error as? NativeSigningTransactionError {
+            switch error {
+            case .invalidPath, .invalidRequest: return .malformedRequest
+            case .invalidAuthority, .authorityConflict: return .controlDenied
+            case .requestConflict: return .replayDetected
+            case .capacityExceeded: return .budgetExceeded
+            case .uncertain, .phaseConflict: return .signingOutcomeUnknown
+            case .invalidState: return .internalFailure
+            }
+        }
+        if let error = error as? NativeAgentGitCommitSignerError {
+            switch error {
+            case .invalidPayload: return .malformedRequest
+            case .invalidSigner: return .keyUnavailable
+            case .signingFailed, .invalidSignature: return .internalFailure
+            }
+        }
         guard let error = error as? NativeAgentSessionCoordinatorError else {
             return .internalFailure
         }
@@ -3716,48 +4652,52 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let auditAppender: any NativeAgentSessionAuditAppending
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+    private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
     private let observer = NativeDarwinProcessObservationSource()
+    private let sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry
 
     init(
         configuration: ServiceConfiguration,
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
         qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
-        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming,
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource = NativeAgentAuthenticatedHostUnavailableAuditTokenSource(),
+        sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry
     ) {
         self.configuration = configuration
         self.runtime = runtime
         self.auditAppender = auditAppender
         self.qualificationFaultConsumer = qualificationFaultConsumer
         self.transportReplyFaultConsumer = transportReplyFaultConsumer
+        self.auditTokenSource = auditTokenSource
+        self.sessionAssociationRegistry = sessionAssociationRegistry
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        let peerPID = connection.processIdentifier
-        let peerUID = connection.effectiveUserIdentifier
-        let auditSessionID = connection.auditSessionIdentifier
-        guard peerPID > 0,
-              peerUID == configuration.allowedClientUID,
-              auditSessionID > 0,
-              let normalizedAuditSessionID = UInt32(exactly: auditSessionID) else { return false }
+        let initialToken: NativeAgentAuthenticatedHostCompleteAuditToken
+        do {
+            initialToken = try auditTokenSource.completeAuditToken(for: connection)
+        } catch {
+            return false
+        }
+        guard initialToken.effectiveUserID == configuration.allowedClientUID else { return false }
         connection.setCodeSigningRequirement(configuration.agentClientCodeSigningRequirement)
         do {
-            let observation = try observer.observe(pid: peerPID, expectedUserID: peerUID)
-            let context = try NativeConnectionContext(
-                osProcessID: peerPID,
-                effectiveUserID: peerUID,
-                auditSessionID: normalizedAuditSessionID,
-                pidVersion: observation.process.pidVersion
-            )
+            let observation = try observer.observe(pid: initialToken.pid, expectedUserID: initialToken.effectiveUserID)
+            let context = try initialToken.context(matching: observation)
             let guardValue = try NativeAgentConnectionGuard(context: context, observation: observation)
             connection.exportedInterface = AgentPassAgentXPCInterface.make()
             let endpoint = AgentConnectionEndpoint(
+                connection: connection,
                 connectionGuard: guardValue,
                 observer: observer,
+                auditTokenSource: auditTokenSource,
                 runtime: runtime,
                 auditAppender: auditAppender,
                 qualificationFaultConsumer: qualificationFaultConsumer,
-                transportReplyFaultConsumer: transportReplyFaultConsumer
+                transportReplyFaultConsumer: transportReplyFaultConsumer,
+                sessionAssociationRegistry: sessionAssociationRegistry
             )
             connection.exportedObject = endpoint
             connection.invalidationHandler = { [weak endpoint] in
@@ -4229,7 +5169,10 @@ do {
         let audience = NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID)
         let trust = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: audience)
         controlV2Manager = try NativeControlBundleV2Manager(trust: trust, statePath: statePath)
-        capabilityVerifier = try NativeCapabilityVerifier(trust: NativeCapabilityTrust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID), statePath: capabilityStatePath)
+        capabilityVerifier = try NativeCapabilityVerifier(
+            trust: NativeCapabilityTrust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID),
+            statePath: capabilityStatePath
+        )
         requestEvidenceStore = try NativeRequestEvidenceStore(path: requestEvidencePath)
     } else {
         controlV2Manager = nil
@@ -4555,6 +5498,9 @@ do {
               let activeSigning else {
             throw AgentPassNativeError.invalidConfiguration("Agent runtime device and signing lifecycle authority is unavailable")
         }
+        guard let capabilityVerifier else {
+            throw AgentPassNativeError.invalidConfiguration("Agent runtime capability authority is unavailable")
+        }
         let authorityState = try AgentRuntimeAuthorityState(
             control: controlV2Manager,
             keyGeneration: activeSigning.generation
@@ -4564,12 +5510,18 @@ do {
             authorityState: authorityState,
             deviceSigner: deviceSigner,
             gitSigner: keyStore,
+            capabilityVerifier: capabilityVerifier,
             qualificationFaultConsumer: qualificationFaultConsumer
         )
     }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
-    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
+    let hostListener = NSXPCListener(machServiceName: configuration.hostMachServiceName)
+    let childListener = NSXPCListener(machServiceName: configuration.childMachServiceName)
+    let controlRefreshEvidenceStore = try configuration.controlV2RefreshStatePath.map {
+        try NativeControlRefreshEvidencePOSIXStore(path: "\($0).control-ack")
+    }
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash, controlRefreshEvidenceStore: controlRefreshEvidenceStore)
     if controlV2Manager != nil {
         guard let apiBaseText = configuration.controlV2APIBaseURL,
               let apiBaseURL = URL(string: apiBaseText),
@@ -4605,7 +5557,21 @@ do {
             deviceID: deviceID,
             signer: deviceSigner
         )
+        let deviceAuditOutboxPath = configuration.auditLogPath + ".device-audit-outbox"
+        try validateProtectedOutputPath(path: deviceAuditOutboxPath, label: "Native device audit outbox")
+        let deviceAuditOutbox = try NativeDeviceAuditOutbox(rootPath: deviceAuditOutboxPath)
+        let deviceAuditUploadHealthPath = deviceAuditOutboxPath + ".upload-health.json"
+        try validateProtectedOutputPath(path: deviceAuditUploadHealthPath, label: "Native device audit upload health")
+        let deviceAuditUploadHealth = try NativeDeviceAuditUploadHealthStore(path: deviceAuditUploadHealthPath)
+        try endpoint.installDeviceAuditUploadCoordinator(
+            NativeDeviceAuditUploadCoordinator(outbox: deviceAuditOutbox, transport: transport),
+            outbox: deviceAuditOutbox,
+            health: deviceAuditUploadHealth
+        )
         let snapshotStore = try NativeDeviceRefreshPOSIXSnapshotStore(path: refreshStatePath)
+        guard let evidenceStore = controlRefreshEvidenceStore else {
+            throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 refresh evidence storage is unavailable; reprovision the native service")
+        }
         let initialRefreshState: NativeDeviceRefreshMachineState
         if let snapshotData = try snapshotStore.load() {
             initialRefreshState = try NativeDeviceRefreshSnapshotCodec.decode(snapshotData).state
@@ -4622,7 +5588,8 @@ do {
             snapshotStore: snapshotStore,
             bundleStore: try NativeAtomicControlBundleStore(rootURL: URL(fileURLWithPath: bundleStorePath, isDirectory: true)),
             activator: endpoint.deviceSyncActivation(),
-            acknowledgementSigner: deviceSigner
+            acknowledgementSigner: deviceSigner,
+            evidenceStore: evidenceStore
         )
         let runner = NativeDeviceSyncRunner(
             coordinator: coordinator,
@@ -4643,18 +5610,230 @@ do {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
+    let auditTokenSource = NativeMacOSAuditTokenSource()
+    let sessionAssociationRegistry = NativeAgentCoordinatorSessionAssociationRegistry()
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
     let agentDelegate = AgentListenerDelegate(
         configuration: configuration,
         runtime: agentRuntime,
         auditAppender: endpoint,
         qualificationFaultConsumer: qualificationFaultConsumer,
-        transportReplyFaultConsumer: transportReplyFaultConsumer
+        transportReplyFaultConsumer: transportReplyFaultConsumer,
+        auditTokenSource: auditTokenSource,
+        sessionAssociationRegistry: sessionAssociationRegistry
+    )
+    let hostChildPolicy = try configuration.hostChildCodeDirectoryHash.map {
+        try NativeProcessIdentityPolicy(
+            expectedUID: configuration.allowedClientUID,
+            expectedCodeDirectoryHash: $0.lowercased(),
+            allowedSignatureKinds: [.developerID, .apple],
+            rejectAdHocSignature: true,
+            rejectUnknownAncestors: true
+        )
+    }
+    let hostSigner = NativeAgentAuthenticatedHostClosureSigner { payload in
+        guard let agentRuntime else {
+            throw NativeAgentAuthenticatedHostEndpointError.signerFailed
+        }
+        return try agentRuntime.gitCommitSigner.signGitCommitPayload(payload.payload)
+    }
+    let childRegistry = NativeAgentAuthenticatedChildGitSessionRegistry()
+    let worktreeObserver = NativeDarwinGitWorktreeObserver()
+    let processObserver = NativeDarwinProcessObservationSource()
+    let dedicatedContextProvider: NativeAgentDedicatedSigningServiceContextProvider?
+    if let agentRuntime {
+        dedicatedContextProvider = try NativeAgentDedicatedSigningServiceContextProvider(
+            organizationID: agentRuntime.authority.organizationID,
+            capabilityKeyID: agentRuntime.authority.capabilityKeyID,
+            registry: sessionAssociationRegistry,
+            observeState: { payload in
+                guard payload.peerProcessID > 0, payload.peerProcessPIDVersion > 0 else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
+                let observation = try processObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                )
+                guard observation.process.pidVersion == payload.peerProcessPIDVersion else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
+                let identity = try NativeProcessIdentity.capture(
+                    from: NativeFixedProcessObservationSource(observation: observation)
+                )
+                let worktree = try worktreeObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                ).binding
+                let reobserved = try processObserver.observe(
+                    pid: payload.peerProcessID,
+                    expectedUserID: payload.peerEffectiveUserID
+                )
+                let reobservedIdentity = try NativeProcessIdentity.capture(
+                    from: NativeFixedProcessObservationSource(observation: reobserved)
+                )
+                guard reobservedIdentity.canonicalBindingHash == identity.canonicalBindingHash,
+                      reobservedIdentity.canonicalAncestryBindingHash == identity.canonicalAncestryBindingHash,
+                      reobservedIdentity.pidVersion == identity.pidVersion else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.observationUnavailable
+                }
+                func digest(_ value: String) -> Data? {
+                    guard value.count == 64 else { return nil }
+                    var result = Data(capacity: 32)
+                    var high: UInt8?
+                    for byte in value.utf8 {
+                        let nibble: UInt8?
+                        switch byte {
+                        case 48...57: nibble = byte - 48
+                        case 97...102: nibble = byte - 87
+                        case 65...70: nibble = byte - 55
+                        default: nibble = nil
+                        }
+                        guard let nibble else { return nil }
+                        if let high {
+                            result.append((high << 4) | nibble)
+                        } else {
+                            high = nibble
+                        }
+                    }
+                    return high == nil && result.count == 32 ? result : nil
+                }
+                guard let processDigest = digest(identity.canonicalBindingHash),
+                      let ancestryDigest = digest(identity.canonicalAncestryBindingHash),
+                      let payloadDigest = digest(payload.peerProcessBindingHash),
+                      processDigest == payloadDigest,
+                      let association = sessionAssociationRegistry.lookup(
+                          processBindingDigest: processDigest,
+                          ancestryBindingDigest: ancestryDigest,
+                          worktreeBindingDigest: worktree.digest) else {
+                    throw NativeAgentDedicatedSigningServiceContextProviderError.associationMissing
+                }
+                return try NativeAgentDedicatedSigningObservedState(
+                    binding: association.binding,
+                    worktree: worktree
+                )
+            },
+            sequence: { association in
+                let sequenceBinding = try NativeAgentDedicatedSigningCapabilitySequenceBinding(
+                    coordinatorSessionID: association.sessionID,
+                    agentID: association.binding.agentID
+                )
+                let authority = try agentRuntime.dedicatedCapabilitySequenceAuthorities.authority(
+                    for: sequenceBinding
+                )
+                return Int64(authority.snapshot().acceptedSequence ?? 1)
+            },
+            keyLifecycleIdentity: agentRuntime.gitCommitSigner.keyLifecycleIdentity
+        )
+    } else {
+        dedicatedContextProvider = nil
+    }
+    let dedicatedHostSigner: (any NativeAgentAuthenticatedHostSigning)? = if let agentRuntime,
+                                                                                let dedicatedContextProvider {
+        NativeAgentDedicatedSigningServiceSignerAdapter(
+            capabilityIssuer: agentRuntime.dedicatedSigningCapabilityIssuer,
+            contextProvider: dedicatedContextProvider,
+            provider: { payload in
+                let signature = try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
+                guard try agentRuntime.gitCommitSigner.verifyGitCommitSignature(
+                    payload: payload,
+                    signature: signature
+                ) else {
+                    throw NativeAgentGitCommitSignerError.invalidSignature
+                }
+                return signature
+            }
+        )
+    } else {
+        nil
+    }
+    let hostDelegate = NativeAgentAuthenticatedHostListenerDelegate(
+        allowedClientUID: configuration.allowedClientUID,
+        codeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+        peerPolicyFactory: { observation in
+            try NativeProcessIdentityPolicy(
+                expectedUID: observation.process.uid,
+                expectedBootIdentity: observation.process.bootIdentity,
+                expectedExecutableFileIdentity: observation.process.executableFileIdentity,
+                expectedCodeDirectoryHash: observation.process.codeDirectoryHash,
+                expectedBundleIdentifier: observation.process.bundleIdentifier,
+                expectedTeamIdentifier: observation.process.teamIdentifier,
+                expectedSignatureKind: observation.process.signatureKind,
+                requiredEntitlements: observation.process.entitlements,
+                expectedAncestry: observation.ancestry,
+                rejectAdHocSignature: true,
+                rejectUnknownAncestors: true
+            )
+        },
+        childPolicy: hostChildPolicy,
+        auditTokenSource: auditTokenSource,
+        childFactory: { pid, expectedPIDVersion in
+            let processObservation = try NativeDarwinProcessObservationSource().observe(pid: pid, expectedUserID: configuration.allowedClientUID)
+            guard processObservation.process.pidVersion == expectedPIDVersion else {
+                throw NativeAgentAuthenticatedHostEndpointError.childIdentityMismatch
+            }
+            let worktree = try worktreeObserver.observe(pid: pid, expectedUserID: configuration.allowedClientUID)
+            return (processObservation, worktree.binding.digest)
+        },
+        signer: hostSigner,
+        dedicatedSigner: dedicatedHostSigner,
+        dedicatedChildRegistrar: { sessionID, hostIdentity, observation, signatureBudget in
+            guard let hostProcessDigest = nativeDigestData(hostIdentity.canonicalBindingHash),
+                  let hostAncestryDigest = nativeDigestData(hostIdentity.canonicalAncestryBindingHash),
+                  let agentRuntime, let dedicatedContextProvider,
+                  let association = sessionAssociationRegistry.lookup(
+                      processBindingDigest: hostProcessDigest,
+                      ancestryBindingDigest: hostAncestryDigest,
+                      worktreeBindingDigest: observation.worktreeBindingDigest),
+                  association.isActive else {
+                throw NativeAgentAuthenticatedChildGitError.signerFailed
+            }
+            let childSigner = NativeAgentDedicatedSigningChildSigner(
+                dedicatedSessionID: sessionID,
+                coordinatorBinding: association.binding,
+                contextProvider: dedicatedContextProvider,
+                capabilityIssuer: agentRuntime.dedicatedSigningCapabilityIssuer,
+                provider: { payload in
+                    let signature = try agentRuntime.gitCommitSigner.signGitCommitPayload(payload)
+                    guard try agentRuntime.gitCommitSigner.verifyGitCommitSignature(
+                        payload: payload,
+                        signature: signature
+                    ) else {
+                        throw NativeAgentGitCommitSignerError.invalidSignature
+                    }
+                    return signature
+                },
+                worktreeObserver: worktreeObserver
+            )
+            try childRegistry.register(
+                sessionID: sessionID,
+                identity: observation.identity,
+                worktreeBindingDigest: observation.worktreeBindingDigest,
+                signer: childSigner,
+                signatureBudget: signatureBudget
+            )
+        },
+        childUnregistrar: { bindingHash in
+            childRegistry.unregister(identityBindingHash: bindingHash)
+        }
+    )
+    let childDelegate = NativeAgentAuthenticatedChildGitListenerDelegate(
+        allowedClientUID: configuration.allowedClientUID,
+        codeSigningRequirement: try deriveDedicatedChildCodeSigningRequirement(
+            configuredChildRequirement: configuration.childCodeSigningRequirement,
+            hostCodeSigningRequirement: configuration.agentClientCodeSigningRequirement,
+            managementCodeSigningRequirement: configuration.clientCodeSigningRequirement
+        ),
+        registry: childRegistry,
+        worktreeObserver: worktreeObserver
     )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
+    hostListener.delegate = hostDelegate
+    childListener.delegate = childDelegate
     managementListener.resume()
     agentListener.resume()
+    hostListener.resume()
+    childListener.resume()
     qualificationRuntime?.resume()
     RunLoop.current.run()
 } catch {

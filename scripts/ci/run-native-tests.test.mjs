@@ -8,11 +8,13 @@ import test from "node:test";
 import {
   DEFAULT_TIMEOUT_MS,
   DIAGNOSTIC_CODES,
+  ENVIRONMENT_EXIT_CODE,
   MAX_TIMEOUT_MS,
   TIMEOUT_EXIT_CODE,
   formatDiagnostic,
   main,
   parseArgs,
+  prepareNativeTestEnvironment,
   runNativeTest
 } from "./run-native-tests.mjs";
 
@@ -41,6 +43,29 @@ test("formats only stable, non-secret diagnostics", () => {
   assert.equal(formatDiagnostic({ phase: "signal", code: DIAGNOSTIC_CODES.signal, signal: "SIGTERM" }), "native-test phase=signal code=native_test_signal signal=SIGTERM\n");
 });
 
+test("isolates native test temporary files and cleans up owned state", async () => {
+  const isolated = await prepareNativeTestEnvironment({ PATH: env.PATH });
+  try {
+    assert.match(isolated.environment.TMPDIR, /agentpass-native-suite-/u);
+    assert.equal((await fs.stat(isolated.directory)).isDirectory(), true);
+    assert.equal((await fs.stat(isolated.directory)).mode & 0o077, 0);
+  } finally {
+    await isolated.cleanup();
+  }
+  await assert.rejects(fs.stat(isolated.directory), { code: "ENOENT" });
+});
+
+test("rejects an unsafe caller-selected temporary directory", async () => {
+  await assert.rejects(prepareNativeTestEnvironment({ NATIVE_TEST_TMPDIR: "relative" }), /absolute path/u);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-native-unsafe-"));
+  try {
+    await fs.chmod(directory, 0o755);
+    await assert.rejects(prepareNativeTestEnvironment({ NATIVE_TEST_TMPDIR: directory }), /unsafe/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("preserves a successful and nonzero child exit status", async () => {
   const passed = await runNativeTest(node, script("process.exit(0)"), { cwd, env, timeoutMs: 2_000 });
   assert.equal(passed.exitCode, 0);
@@ -54,6 +79,30 @@ test("preserves a successful and nonzero child exit status", async () => {
   assert.equal(signalled.exitCode, 143);
   assert.equal(signalled.signal, "SIGTERM");
   assert.equal(signalled.reason, DIAGNOSTIC_CODES.signal);
+});
+
+test("expectTests fails closed when a zero-test command exits successfully", async () => {
+  const result = await runNativeTest(node, script("console.log('warning: No matching test cases were run')"), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    expectTests: true
+  });
+  assert.equal(result.exitCode, ENVIRONMENT_EXIT_CODE);
+  assert.equal(result.testCasesObserved, 0);
+  assert.equal(result.reason, DIAGNOSTIC_CODES.noTests);
+});
+
+test("expectTests accepts a command that emits a test-start marker", async () => {
+  const result = await runNativeTest(node, script("console.log('◇ Test \\\"one\\\" started.')"), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    expectTests: true
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.testCasesObserved, 1);
+  assert.equal(result.reason, DIAGNOSTIC_CODES.passed);
 });
 
 test("kills a timed-out process group, including a descendant", async () => {

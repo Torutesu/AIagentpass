@@ -6,6 +6,12 @@ import Testing
 private let runtimeOrigin = URL(string: "https://api.agentpass.test")!
 private let runtimeOrganization = "11111111-1111-4111-8111-111111111111"
 private let runtimeDevice = "22222222-2222-4222-8222-222222222222"
+private let runtimeCapabilityPublicKeyPEM = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=
+-----END PUBLIC KEY-----
+"""
+private let runtimeCapabilityKeyID = "capability-v1"
 
 private func runtimeConfiguration(
   origin: URL? = runtimeOrigin,
@@ -17,7 +23,9 @@ private func runtimeConfiguration(
   perAgentLimit: Int? = 8,
   perWorktreeLimit: Int? = 4,
   bootstrapLimit: Int? = 16,
-  observationPolicy: Int? = 2
+  observationPolicy: Int? = 2,
+  capabilityPublicKeyPEM: String? = runtimeCapabilityPublicKeyPEM,
+  capabilityKeyID: String? = runtimeCapabilityKeyID
 ) throws -> NativeAgentRuntimeConfiguration {
   try NativeAgentRuntimeConfiguration(
     deviceAPIOrigin: origin,
@@ -29,7 +37,9 @@ private func runtimeConfiguration(
     perAgentSessionLimit: perAgentLimit,
     perWorktreeSessionLimit: perWorktreeLimit,
     bootstrapAttemptLimit: bootstrapLimit,
-    worktreeObservationPolicyVersion: observationPolicy
+    worktreeObservationPolicyVersion: observationPolicy,
+    capabilityPublicKeyPEM: capabilityPublicKeyPEM,
+    capabilityKeyID: capabilityKeyID
   )
 }
 
@@ -37,7 +47,8 @@ private func runtimeConfiguration(
   let disabled = try runtimeConfiguration(
     origin: nil, organizationID: nil, deviceID: nil, deviceKeyTag: nil,
     intentDirectory: nil, globalLimit: nil, perAgentLimit: nil, perWorktreeLimit: nil,
-    bootstrapLimit: nil, observationPolicy: nil
+    bootstrapLimit: nil, observationPolicy: nil,
+    capabilityPublicKeyPEM: nil, capabilityKeyID: nil
   )
   #expect(disabled == .disabled)
   #expect(disabled.authority == nil)
@@ -53,11 +64,30 @@ private func runtimeConfiguration(
   #expect(authority.organizationID == runtimeOrganization)
   #expect(authority.deviceID == runtimeDevice)
   #expect(authority.deviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag)
+  #expect(authority.capabilityPublicKeyPEM == runtimeCapabilityPublicKeyPEM)
+  #expect(authority.capabilityKeyID == runtimeCapabilityKeyID)
   #expect(authority.globalSessionLimit == 128)
   #expect(authority.perAgentSessionLimit == 8)
   #expect(authority.perWorktreeSessionLimit == 4)
   #expect(authority.bootstrapAttemptLimit == 16)
   #expect(authority.worktreeObservationPolicy == .v2)
+}
+
+@Test func agentRuntimeConfigurationRequiresCompleteCapabilityTrust() throws {
+  #expect(throws: NativeAgentRuntimeConfigurationError.incomplete) {
+    _ = try runtimeConfiguration(capabilityPublicKeyPEM: nil)
+  }
+  #expect(throws: NativeAgentRuntimeConfigurationError.incomplete) {
+    _ = try runtimeConfiguration(capabilityKeyID: nil)
+  }
+  #expect(throws: NativeAgentRuntimeConfigurationError.invalidCapabilityKey) {
+    _ = try runtimeConfiguration(capabilityPublicKeyPEM: "not-a-public-key")
+  }
+  for value in ["", "-capability", "capability key", String(repeating: "a", count: 129)] {
+    #expect(throws: NativeAgentRuntimeConfigurationError.invalidCapabilityKeyID) {
+      _ = try runtimeConfiguration(capabilityKeyID: value)
+    }
+  }
 }
 
 @Test func agentRuntimeConfigurationRejectsUnsafeOriginsAndIdentities() throws {

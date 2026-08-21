@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -79,11 +79,31 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
 
   const invited = { session_id: "55555555-5555-4555-8555-555555555555", member_id: invitedId, organization_id: organizationId, role: "viewer" };
   const acceptanceInput = { actor: invited, one_time_token: firstInvitation.raw_token, idempotency_key: "accept-invitation-integration" };
-  const accepted = await service.acceptInvitation(acceptanceInput);
-  const acceptedReplay = await service.acceptInvitation(acceptanceInput);
-  assert.equal(accepted.member_id, invitedId);
-  assert.equal(acceptedReplay.member_id, invitedId);
-  assert.equal(acceptedReplay.replayed, true);
+  const acceptedAttempts = await Promise.all([
+    service.acceptInvitation(acceptanceInput),
+    service.acceptInvitation(acceptanceInput)
+  ]);
+  const accepted = acceptedAttempts.find((result) => result.replayed !== true);
+  const acceptedReplay = acceptedAttempts.find((result) => result.replayed === true);
+  assert.ok(accepted);
+  assert.ok(acceptedReplay);
+  assert.equal(accepted.member.member_id, invitedId);
+  assert.equal(accepted.member.role, "viewer");
+  assert.equal(accepted.invitation.invitation_id, firstInvitation.invitation.invitation_id);
+  assert.equal(accepted.invitation.status, "accepted");
+  assert.equal(accepted.invitation.accepted_at, NOW);
+  assert.equal(accepted.invitation.accepted_member_id, invitedId);
+  assert.deepEqual({ invitation: acceptedReplay.invitation, member: acceptedReplay.member }, { invitation: accepted.invitation, member: accepted.member });
+
+  const acceptanceState = await pool.query(`
+    SELECT
+      (SELECT count(*)::int FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active') AS membership_count,
+      (SELECT count(*)::int FROM organization_invitations WHERE organization_id=$1 AND id=$3 AND consumed_by=$2 AND consumed_at IS NOT NULL) AS consumed_count,
+      (SELECT count(*)::int FROM admin_audit_events WHERE organization_id=$1 AND action='invitation.accepted' AND target_id=$3) AS audit_count,
+      (SELECT count(*)::int FROM outbox_events WHERE organization_id=$1 AND action='invitation.accepted' AND aggregate='invitation') AS outbox_count`,
+    [organizationId, invitedId, firstInvitation.invitation.invitation_id]
+  );
+  assert.deepEqual(acceptanceState.rows[0], { membership_count: 1, consumed_count: 1, audit_count: 1, outbox_count: 1 });
 
   await pool.query(`INSERT INTO memberships (organization_id,id,member_id,role,status)
     VALUES ($1,$2,$3,'viewer','active')`, [organizationId, removedMembershipId, removedId]);
@@ -112,7 +132,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   await pool.query(`INSERT INTO capabilities
     (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,issued_membership_version)
     VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8),($1,$9,$3,$4,2,$10,$6,$11,1)`, [
-    organizationId, randomUUID(), agentId, deviceId, "a".repeat(64), EXPIRES, invitedId, accepted.version,
+    organizationId, randomUUID(), agentId, deviceId, "a".repeat(64), EXPIRES, invitedId, accepted.member.version,
     randomUUID(), "b".repeat(64), removedId
   ]);
 
@@ -122,22 +142,22 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1)`, [sessionId, memberId, organizationId, membershipId, role, Buffer.alloc(32, byte), Buffer.alloc(32, byte + 1), NOW, EXPIRES]);
     await pool.query(`INSERT INTO webauthn_challenges
       (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,rp_id,origin,user_verification,status)
-      VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'app.ai-agentpass.com','https://app.ai-agentpass.com','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, Buffer.alloc(32, byte + 2), NOW, EXPIRES]);
+      VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'app.ai-agentpass.com','https://app.ai-agentpass.com','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, createHash("sha256").update(`organization-integration-challenge:${challengeId}`).digest(), NOW, EXPIRES]);
     await pool.query(`UPDATE human_sessions SET recent_auth_at=$2,recent_auth_challenge_id=$3,
       recent_auth_organization_id=$4,recent_auth_operation=$5,recent_auth_consumed_at=NULL
       WHERE id=$1`, [sessionId, NOW, challengeId, organizationId, operation]);
   }
 
-  await seedRecentAuthSession({ sessionId: roleSessionId, challengeId: roleChallengeId, memberId: invitedId, membershipId: accepted.membership_id, role: "viewer", operation: "human.organizations.member.role.update", byte: 10 });
+  await seedRecentAuthSession({ sessionId: roleSessionId, challengeId: roleChallengeId, memberId: invitedId, membershipId: accepted.member.membership_id, role: "viewer", operation: "human.organizations.member.role.update", byte: 10 });
   await seedRecentAuthSession({ sessionId: removeSessionId, challengeId: removeChallengeId, memberId: removedId, membershipId: removedMembershipId, role: "viewer", operation: "human.organizations.member.remove", byte: 20 });
 
-  await repository.updateMemberRole({ organization_id: organizationId, actor_member_id: ownerId, member_id: invitedId, role: "owner", expected_version: accepted.version, idempotency_key: "promote-second-owner" });
+  await repository.updateMemberRole({ organization_id: organizationId, actor_member_id: ownerId, member_id: invitedId, role: "owner", expected_version: accepted.member.version, idempotency_key: "promote-second-owner" });
   const roleSession = await pool.query(`SELECT revoked_at,revoke_reason,version,recent_auth_at,recent_auth_challenge_id,
     recent_auth_organization_id,recent_auth_operation,recent_auth_consumed_at
     FROM human_sessions WHERE id=$1`, [roleSessionId]);
   assert.equal(roleSession.rowCount, 1);
-  assert.equal(new Date(roleSession.rows[0].revoked_at).toISOString(), NOW);
-  assert.equal(roleSession.rows[0].revoke_reason, "membership_role_changed");
+  assert.ok(new Date(roleSession.rows[0].revoked_at).getTime() >= Date.parse(NOW), "role-change revocation must use authoritative database time");
+  assert.equal(roleSession.rows[0].revoke_reason, "membership_changed");
   assert.equal(Number(roleSession.rows[0].version), 2);
   assert.equal(roleSession.rows[0].recent_auth_at, null);
   assert.equal(roleSession.rows[0].recent_auth_challenge_id, null);
@@ -146,7 +166,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(roleSession.rows[0].recent_auth_consumed_at, null);
   const roleChallenge = await pool.query("SELECT status,consumed_at FROM webauthn_challenges WHERE id=$1", [roleChallengeId]);
   assert.equal(roleChallenge.rows[0].status, "consumed");
-  assert.equal(new Date(roleChallenge.rows[0].consumed_at).toISOString(), NOW);
+  assert.ok(new Date(roleChallenge.rows[0].consumed_at).getTime() >= Date.parse(NOW), "role-change challenge consumption must use authoritative database time");
   const roleCapabilities = await pool.query("SELECT count(*)::int AS active FROM capabilities WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL", [organizationId, invitedId]);
   assert.equal(roleCapabilities.rows[0].active, 0);
 
@@ -167,7 +187,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   const removedSession = await pool.query(`SELECT revoked_at,revoke_reason,version,recent_auth_at,recent_auth_challenge_id,
     recent_auth_organization_id,recent_auth_operation,recent_auth_consumed_at
     FROM human_sessions WHERE id=$1`, [removeSessionId]);
-  assert.equal(new Date(removedSession.rows[0].revoked_at).toISOString(), NOW);
+  assert.ok(new Date(removedSession.rows[0].revoked_at).getTime() >= Date.parse(NOW), "member-removal revocation must use authoritative database time");
   assert.equal(removedSession.rows[0].revoke_reason, "membership_removed");
   assert.equal(Number(removedSession.rows[0].version), 2);
   assert.equal(removedSession.rows[0].recent_auth_at, null);
@@ -177,7 +197,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(removedSession.rows[0].recent_auth_consumed_at, null);
   const removeChallenge = await pool.query("SELECT status,consumed_at FROM webauthn_challenges WHERE id=$1", [removeChallengeId]);
   assert.equal(removeChallenge.rows[0].status, "consumed");
-  assert.equal(new Date(removeChallenge.rows[0].consumed_at).toISOString(), NOW);
+  assert.ok(new Date(removeChallenge.rows[0].consumed_at).getTime() >= Date.parse(NOW), "member-removal challenge consumption must use authoritative database time");
   const removedCapabilities = await pool.query("SELECT count(*)::int AS active FROM capabilities WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL", [organizationId, removedId]);
   assert.equal(removedCapabilities.rows[0].active, 0);
 

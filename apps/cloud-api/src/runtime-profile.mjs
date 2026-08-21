@@ -82,6 +82,7 @@ const HOSTED_DEPLOYMENT_IDENTITY_ENV = Object.freeze([
 ]);
 const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_PROVIDER",
+  "AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON",
   "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
   "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
   "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
@@ -91,9 +92,32 @@ const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE",
   "AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE"
 ]);
+const HOSTED_BOOTSTRAP_REQUIRED_ENV = Object.freeze([
+  "AGENTPASS_GITHUB_CLIENT_ID",
+  "AGENTPASS_GITHUB_CLIENT_SECRET",
+  "AGENTPASS_GITHUB_REDIRECT_URI",
+  "AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL",
+  "AGENTPASS_HOSTED_PKCE_KEY_ID",
+  "AGENTPASS_HOSTED_PKCE_KEY",
+  "AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY",
+  "AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY"
+]);
+const HOSTED_BOOTSTRAP_OPTIONAL_ENV = Object.freeze([
+  "AGENTPASS_GITHUB_AUTHORIZATION_ENDPOINT",
+  "AGENTPASS_GITHUB_TOKEN_ENDPOINT",
+  "AGENTPASS_GITHUB_USER_ENDPOINT",
+  "AGENTPASS_GITHUB_TIMEOUT_MS",
+  "AGENTPASS_GITHUB_MAX_RESPONSE_BYTES"
+]);
+const HOSTED_BOOTSTRAP_ENV = Object.freeze([...HOSTED_BOOTSTRAP_REQUIRED_ENV, ...HOSTED_BOOTSTRAP_OPTIONAL_ENV]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
+  "AGENTPASS_MIGRATION_DATABASE_URL",
+  "AGENTPASS_SIGNER_DATABASE_URL",
+  "AGENTPASS_MAINTENANCE_DATABASE_URL",
   "AGENTPASS_DATABASE_MAX_CONNECTIONS",
+  "AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS",
+  "AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS",
   "AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS",
   "AGENTPASS_DATABASE_IDLE_TIMEOUT_MS",
   "AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS",
@@ -138,6 +162,7 @@ const PROFILE_RELATED_ENV = new Set([
   ...HOSTED_PROMOTION_EVIDENCE_ENV,
   ...HOSTED_DEPLOYMENT_IDENTITY_ENV,
   ...HOSTED_KMS_ENV,
+  ...HOSTED_BOOTSTRAP_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
   "AGENTPASS_CONSOLE_ORIGIN",
@@ -167,7 +192,9 @@ const PROFILE_PREFIXES = Object.freeze([
   "AGENTPASS_HUMAN_",
   "AGENTPASS_OWNER_RECOVERY_",
   "AGENTPASS_CAPABILITY_",
-  "AGENTPASS_KMS_"
+  "AGENTPASS_KMS_",
+  "AGENTPASS_GITHUB_",
+  "AGENTPASS_HOSTED_"
 ]);
 
 const ERROR_MESSAGES = Object.freeze({
@@ -218,13 +245,13 @@ export function parseCloudRuntimeProfile(env = process.env) {
   const hostedAuditAnchor = parseHostedPurposeSigner(env, HOSTED_AUDIT_ANCHOR_ENV);
   const hostedPromotionEvidence = parseHostedPurposeSigner(env, HOSTED_PROMOTION_EVIDENCE_ENV);
   const ownerRecoveryNotification = parseOwnerRecoveryNotification(env);
+  const hostedBootstrap = parseHostedBootstrap(env);
   if (profile === CLOUD_RUNTIME_PROFILES.HOSTED) {
     if (fileStore.present || configured(env, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH")) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
     const humanAuth = parseHumanAuth(env);
     if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete
       || !hostedControlBundle.complete || !hostedCapability.complete || !hostedAuditAnchor.complete || !hostedPromotionEvidence.complete
-      || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)
-      || !validExactSecret(env[OPERATIONAL_PROBE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+      || !ownerRecoveryNotification.complete || !hostedBootstrap.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -250,6 +277,7 @@ export function parseCloudRuntimeProfile(env = process.env) {
     || HOSTED_PROMOTION_EVIDENCE_ENV.some((name) => configured(env, name))
     || HOSTED_DEPLOYMENT_IDENTITY_ENV.some((name) => configured(env, name))
     || HOSTED_KMS_ENV.some((name) => configured(env, name))
+    || hostedBootstrap.present
     || ownerRecoveryNotification.present
     || configured(env, CAPABILITY_NONCE_SECRET_ENV)
     || configured(env, OPERATIONAL_PROBE_SECRET_ENV)) {
@@ -268,6 +296,34 @@ export function parseCloudRuntimeProfile(env = process.env) {
     humanAuth: null,
     fileStore: Object.freeze({ dataDir: fileStore.dataDir, tokenRecordsPath: fileStore.tokenRecordsPath })
   });
+}
+
+function parseHostedBootstrap(env) {
+  const present = HOSTED_BOOTSTRAP_ENV.some((name) => configured(env, name));
+  if (!present) return { present: false, complete: false };
+  if (!HOSTED_BOOTSTRAP_REQUIRED_ENV.every((name) => configured(env, name))) return { present: true, complete: false };
+  if (!boundedString(env.AGENTPASS_GITHUB_CLIENT_ID, 256)
+    || !boundedString(env.AGENTPASS_GITHUB_CLIENT_SECRET, 512)
+    || !IDENTIFIER.test(env.AGENTPASS_HOSTED_PKCE_KEY_ID ?? "")
+    || !validCursorSecret(env.AGENTPASS_HOSTED_PKCE_KEY)
+    || !validCursorSecret(env.AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY)
+    || !validCursorSecret(env.AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY)) return { present: true, complete: false };
+  if (new Set([
+    env.AGENTPASS_HOSTED_PKCE_KEY,
+    env.AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY,
+    env.AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY,
+    env.AGENTPASS_HUMAN_AUTH_SECRET
+  ]).size !== 4) return { present: true, complete: false };
+  let redirect;
+  let onboarding;
+  try { redirect = new URL(env.AGENTPASS_GITHUB_REDIRECT_URI); } catch { return { present: true, complete: false }; }
+  try { onboarding = new URL(env.AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL); } catch { return { present: true, complete: false }; }
+  const consoleOrigin = env.AGENTPASS_CONSOLE_ORIGIN;
+  if (redirect.protocol !== "https:" || redirect.origin !== consoleOrigin
+    || redirect.pathname !== "/api/auth/bootstrap/github/callback" || redirect.username || redirect.password || redirect.search || redirect.hash
+    || onboarding.protocol !== "https:" || onboarding.origin !== consoleOrigin
+    || onboarding.pathname !== "/onboarding" || onboarding.username || onboarding.password || onboarding.search || onboarding.hash) return { present: true, complete: false };
+  return { present: true, complete: true };
 }
 
 function parseOwnerRecoveryNotification(env) {
@@ -386,25 +442,34 @@ function parseFileStore(env) {
 function parseDatabase(env) {
   const present = DATABASE_ENV.some((name) => configured(env, name));
   if (!present) return { present: false };
-  const raw = env.AGENTPASS_DATABASE_URL;
-  if (typeof raw !== "string" || raw.length < 1) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  let url;
-  try { url = new URL(raw); } catch { fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID); }
-  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) {
-    fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  }
-  const sslModes = url.searchParams.getAll("sslmode");
-  if (sslModes.length !== 1 || sslModes[0] !== "verify-full") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  for (const key of url.searchParams.keys()) if (key !== "sslmode") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  if (!boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
-    || !boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS, 100, 30_000)) {
+  const urls = [env.AGENTPASS_DATABASE_URL, env.AGENTPASS_MIGRATION_DATABASE_URL, env.AGENTPASS_SIGNER_DATABASE_URL, env.AGENTPASS_MAINTENANCE_DATABASE_URL].map(parseDatabaseRoleUrl);
+  const target = databaseTarget(urls[0]);
+  if (urls.some((url) => databaseTarget(url) !== target) || new Set(urls.map((url) => url.username)).size !== urls.length) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  if (urls.at(-1).username !== "agentpass_maintenance") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  const databaseLimitsValid = boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
+    && boundedInteger(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS, 2, 50)
+    && boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS, 100, 30_000);
+  if (!databaseLimitsValid || !boundedInteger(env.AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS, 1, 10)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
   }
   return { present: true };
 }
+
+function parseDatabaseRoleUrl(raw) {
+  if (typeof raw !== "string" || raw.length < 1) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  let url;
+  try { url = new URL(raw); } catch { fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID); }
+  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  const sslModes = url.searchParams.getAll("sslmode");
+  if (sslModes.length !== 1 || sslModes[0] !== "verify-full") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  for (const key of url.searchParams.keys()) if (key !== "sslmode") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  return url;
+}
+
+function databaseTarget(url) { return `${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}`; }
 
 function parseHumanAuth(env) {
   const present = HUMAN_AUTH_ENV.some((name) => configured(env, name));

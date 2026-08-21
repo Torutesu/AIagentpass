@@ -647,6 +647,7 @@ function assertSession(session, organizationId) {
 function mapCeremonyError(error, phase) {
   if (error instanceof WebAuthnRegistrationError) return error;
   if (error?.code && Object.values(WEBAUTHN_REGISTRATION_ERROR_CODES).includes(error.code)) return new WebAuthnRegistrationError(error.code);
+  if (error?.kind === "storage_unavailable") return new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE);
   return new WebAuthnRegistrationError(phase === "begin" ? WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFIER_UNAVAILABLE : WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFICATION_FAILED);
 }
 

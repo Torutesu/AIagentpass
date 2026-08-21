@@ -62,6 +62,16 @@ private func reserve(_ registry: NativeAgentSessionRegistry, request: String, ca
     #expect(throws: NativeAgentSessionRegistryError.sessionNotActive) { _ = try reserve(registry, request: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", capability: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", nonce: 2) }
 }
 
+@Test func restartingRegistryDoesNotProvideAuthorityForDurableReplay() throws {
+    let live = NativeAgentSessionRegistry()
+    try activate(live, max: 1)
+    _ = try live.status(sessionID: registrySession, connectionTokenIdentity: registryToken, binding: registryBinding(), wallClock: NativeAgentWallClockValue(millisecondsSinceUnixEpoch: 1_786_615_201_000), monotonicClock: NativeAgentMonotonicClockValue(nanoseconds: 2_000, bootIdentity: "boot"))
+    let restarted = NativeAgentSessionRegistry()
+    #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+        _ = try restarted.status(sessionID: registrySession, connectionTokenIdentity: registryToken, binding: registryBinding(), wallClock: NativeAgentWallClockValue(millisecondsSinceUnixEpoch: 1_786_615_201_000), monotonicClock: NativeAgentMonotonicClockValue(nanoseconds: 2_000, bootIdentity: "boot"))
+    }
+}
+
 private final class RegistryResultBox: @unchecked Sendable {
     private let lock = NSLock(); private var successCount = 0
     func success() { lock.withLock { successCount += 1 } }

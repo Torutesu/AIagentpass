@@ -92,6 +92,16 @@ node scripts/postgres/authority-manifest.mjs compare \
 
 ## 証跡
 
+個別のmanifest比較や単一DBのrole checkerの成功だけでは、実PostgreSQL資格証跡をclosedとは扱わない。二つの異なるDB instanceで `role-privilege-check.mjs` を実行し、各結果のopaque digest、同一のローカルschema head、元artifact／復旧artifact、PITR recovery target、同一candidate idを一つのcanonical envelopeへ束ねてから、次の固定 verifier で検証する。
+
+```sh
+node scripts/postgres/backup-restore-qualification.mjs verify \
+  /secure/backup/postgres-qualification.json \
+  release-pkg-sha256-<64-hex> <40-hex-source-commit>
+```
+
+envelopeは `candidate_id`、`source_commit`、artifact／before／after manifest digest、異なる二つのinstance id、各role evidence digest、現在のschema head、`pitr.status=verified`、`compare_same=true` を必須とする。PITRの復旧manifest digestは元manifest digestと一致しなければならず、全instanceのcandidate bindingも一致しなければならない。成功時だけ `status=closed` を返し、入力がない、live DB資格証跡がない、head／role／candidate／PITRのいずれかが未検証なら、秘密や接続情報を出さず `status=not_proven` と非0終了を返す。従ってlive PostgreSQLが無い環境の実行結果を資格証跡の成功に数えてはならない。
+
 バックアップ世代ごとに、値そのものではなく次の証跡をアクセス制御された運用領域へ保存する。
 
 ```text
@@ -120,13 +130,17 @@ manifestにはID、hash、sequence、状態が含まれるため一般公開し�
 verification. It may read tables and sequence state, but it cannot write,
 execute application functions, use sequence values, or perform schema DDL.
 Restore DDL and migration application must use the separately controlled
-`agentpass_migrator`/admin workflow; application traffic uses only
-`agentpass_app`, whose access is DML-only.
+`agentpass_migrator`/admin workflow. Ordinary application repositories use
+`agentpass_app`; managed-signer repositories use `agentpass_signer`.
+Provider-operation, maintenance, lifecycle, and signing access is restricted
+to the 23 exact authority functions introduced by migrations `0049`-`0051`.
+The signer role has no table or sequence privileges.
 
 Apply `scripts/postgres/roles.sql` idempotently before a cutover or restore
-rehearsal. It contains no credential. Keep the three role credentials outside
-the repository in the deployment secret manager and use
-`AGENTPASS_DATABASE_URL` with `sslmode=verify-full`; do not put a URL or
+rehearsal. It contains no credential. Keep the four role credentials outside
+the repository in the deployment secret manager. Runtime uses distinct
+`AGENTPASS_DATABASE_URL`, `AGENTPASS_MIGRATION_DATABASE_URL`, and
+`AGENTPASS_SIGNER_DATABASE_URL` values with `sslmode=verify-full`; do not put a URL or
 credential in a script, log, or ticket. After applying the role boundary, run
 the fixed checker and record only its opaque evidence digest:
 

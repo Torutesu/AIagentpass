@@ -17,6 +17,9 @@ const MAX_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const DEVICE_STATUSES = new Set(["active", "revoked"]);
 const AGENT_STATUSES = new Set(["active", "revoked"]);
 const POLICY_STATUSES = new Set(["active", "disabled"]);
+const CONTROL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const BUNDLE_PATH = /^\/v1\/organizations\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/bundles\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const REFRESH_NONCE_KEY_ID = /^refresh-nonce-v[1-9][0-9]{0,8}$/u;
 
 const DEVICE_AUTH_SELECT = `SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm,devices.public_key_pem,devices.status,devices.metadata,devices.version,devices.created_at,devices.last_seen_at,
         active_epoch.key_epoch AS active_key_epoch,active_epoch.public_key_pem AS active_public_key_pem,active_epoch.status AS active_key_epoch_status,
@@ -72,13 +75,14 @@ export class ControlPlaneResourceRepositoryError extends Error {
   }
 }
 
-export function createPostgresControlPlaneResourceRepository({ client, now = () => new Date().toISOString(), idempotencyTtlMs = MAX_IDEMPOTENCY_TTL_MS, onAuthorityReduction } = {}) {
+export function createPostgresControlPlaneResourceRepository({ client, now = () => new Date().toISOString(), idempotencyTtlMs = MAX_IDEMPOTENCY_TTL_MS, onAuthorityReduction, onDeviceEnrollmentActivated } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (!Number.isSafeInteger(idempotencyTtlMs) || idempotencyTtlMs < 1_000 || idempotencyTtlMs > MAX_IDEMPOTENCY_TTL_MS) {
     throw new TypeError("idempotencyTtlMs must be between 1000 and 86400000");
   }
   if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
+  if (onDeviceEnrollmentActivated !== undefined && typeof onDeviceEnrollmentActivated !== "function") throw new TypeError("onDeviceEnrollmentActivated must be a function");
 
   const api = {
     createDevice: (input = {}) => createDevice(input),
@@ -412,6 +416,12 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const receiptEnvelopeHash = sha256Hex(receipt);
     const completionHash = sha256Hex({ version: 2, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label, platform, algorithm, public_key: publicKey, candidate_id: candidateId, device_key_fingerprint: fingerprint, challenge_nonce_digest: challengeDigest, receipt_hash: receiptEnvelopeHash });
     return runDatabase(async () => inTransaction(async (tx) => {
+      // The refresh authority always takes this advisory lock before the
+      // organization/device rows. Enrollment completion must use the same
+      // order before activating the device, otherwise a concurrent authority
+      // reduction can deadlock with the commit-coupled initial outbox hook.
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+      await lockOrganization(tx, organizationId);
       const enrollmentResult = await tx.query(`SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash,proof_version,candidate_id,device_key_fingerprint,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest
         FROM device_enrollments
         WHERE organization_id=$1 AND id=$2 AND encode(secret_hash,'hex')=$3
@@ -433,6 +443,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         }
         const existingReceipt = await selectPossessionReceipt(tx, organizationId, enrollmentId);
         if (sha256Hex(existingReceipt) !== receiptEnvelopeHash) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
+        await requireInitialDeviceRefresh(tx, { organizationId, deviceId, enrollmentId, completedAt, allowAlreadyApplied: true });
         return mapCompletedDevice(tx, organizationId, deviceId, device);
       }
       if (Date.parse(completedAt) > dateValue(enrollment.expires_at)) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_EXPIRED", "device enrollment has expired");
@@ -450,12 +461,38 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         RETURNING organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at`,
       [organizationId, enrollmentId, deviceId, candidateId, candidate.artifact_sha256, candidate.source_commit, candidate.team_id, fingerprint, keyEpoch, challengeDigest, receipt.purpose, receipt.key_id, receipt.algorithm, JSON.stringify(receipt.statement), receipt.statement_hash, receipt.signature, receipt.statement.issued_at]);
       if (rowCount(insertedReceipt) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "device possession receipt insertion did not return a row");
+      await requireInitialDeviceRefresh(tx, { organizationId, deviceId, enrollmentId, completedAt, allowAlreadyApplied: false });
       const consumed = await tx.query(`UPDATE device_enrollments SET consumed_at=$3,completion_hash=$4
         WHERE organization_id=$1 AND id=$2 AND consumed_at IS NULL
         RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash`, [organizationId, enrollmentId, completedAt, completionHash]);
       if (rowCount(consumed) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
       return completedDevice;
     }));
+  }
+
+  async function requireInitialDeviceRefresh(tx, { organizationId, deviceId, enrollmentId, completedAt, allowAlreadyApplied }) {
+    if (!onDeviceEnrollmentActivated) {
+      throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_REFRESH_UNAVAILABLE", "initial device refresh authority is unavailable");
+    }
+    const refresh = await onDeviceEnrollmentActivated(Object.freeze({
+      tx,
+      organization_id: organizationId,
+      device_id: deviceId,
+      enrollment_id: enrollmentId,
+      occurred_at: completedAt
+    }));
+    const commonValid = refresh && refresh.organization_id === organizationId && refresh.device_id === deviceId
+      && Number.isSafeInteger(refresh.desired_generation) && refresh.desired_generation >= 1;
+    const appliedValid = allowAlreadyApplied === true && commonValid && refresh.state === "already_applied" && refresh.outbox === null;
+    const queued = commonValid && (refresh.state === "queued" || refresh.state === "already_queued") ? refresh.outbox : null;
+    const queuedValid = queued && typeof queued === "object" && !Array.isArray(queued)
+      && Object.keys(queued).length === 3
+      && typeof queued.outbox_id === "string" && UUID.test(queued.outbox_id) && queued.outbox_id === queued.outbox_id.toLowerCase()
+      && typeof queued.refresh_nonce_key_id === "string" && REFRESH_NONCE_KEY_ID.test(queued.refresh_nonce_key_id)
+      && typeof queued.refresh_nonce_digest === "string" && SHA256.test(queued.refresh_nonce_digest);
+    if (!appliedValid && !queuedValid) {
+      throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_REFRESH_UNAVAILABLE", "initial device refresh authority returned invalid evidence");
+    }
   }
 
   async function getDeviceEnrollmentPossessionReceipt(input) {
@@ -1077,7 +1114,7 @@ function normalizePossessionReceipt(input) {
 function normalizePossessionReceiptStatement(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement must be an object");
   const keys = Object.keys(input);
-  const allowed = ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "device_key_epoch", "challenge_nonce_digest", "issued_at"];
+  const allowed = ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "device_key_epoch", "challenge_nonce_digest", "control", "issued_at"];
   if (keys.length !== allowed.length || keys.some((key) => !allowed.includes(key))) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement has invalid fields");
   const issuedAt = input.issued_at;
   if (typeof issuedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(issuedAt) || timestamp(issuedAt, "issued_at") !== issuedAt) {
@@ -1095,10 +1132,34 @@ function normalizePossessionReceiptStatement(input) {
     device_key_fingerprint: deviceKeyFingerprint(input.device_key_fingerprint),
     device_key_epoch: safeInteger(input.device_key_epoch, "device_key_epoch"),
     challenge_nonce_digest: exactLowerPattern(input.challenge_nonce_digest, SHA256, "challenge_nonce_digest"),
+    control: normalizeReceiptControl(input.control),
     issued_at: issuedAt
   };
   if (statement.version !== 1) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement version is invalid");
   return statement;
+}
+
+function normalizeReceiptControl(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control metadata is invalid");
+  const keys = Object.keys(input);
+  if (keys.length !== 6 || keys.some((key) => !["format_epoch", "issuer", "key_id", "public_key", "bundle_path", "refresh_hint"].includes(key))) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control metadata is invalid");
+  if (input.format_epoch !== 2 || !CONTROL_ID.test(input.issuer ?? "") || !CONTROL_ID.test(input.key_id ?? "") || !BUNDLE_PATH.test(input.bundle_path ?? "")) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control metadata is invalid");
+  const publicKey = canonicalReceiptEd25519PublicKey(input.public_key);
+  const hint = input.refresh_hint;
+  if (!hint || typeof hint !== "object" || Array.isArray(hint) || Object.keys(hint).length !== 3 || !Object.keys(hint).every((key) => ["key_id", "algorithm", "public_key"].includes(key)) || !CONTROL_ID.test(hint.key_id ?? "") || hint.algorithm !== "ed25519") throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt refresh hint is invalid");
+  const refreshPublicKey = canonicalReceiptEd25519PublicKey(hint.public_key);
+  if (refreshPublicKey === publicKey) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt refresh hint must be purpose separated");
+  return { format_epoch: 2, issuer: input.issuer, key_id: input.key_id, public_key: publicKey, bundle_path: input.bundle_path, refresh_hint: { key_id: hint.key_id, algorithm: "ed25519", public_key: refreshPublicKey } };
+}
+
+function canonicalReceiptEd25519PublicKey(value) {
+  if (typeof value !== "string" || /PRIVATE\s+KEY/iu.test(value)) throw new ControlPlaneResourceRepositoryError("ERR_SECRET_MATERIAL", "possession receipt control metadata contains private key material");
+  let key;
+  try { key = crypto.createPublicKey(value); } catch { throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control public key is invalid"); }
+  if (key.type !== "public" || key.asymmetricKeyType !== "ed25519") throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control public key is invalid");
+  const canonical = key.export({ type: "spki", format: "pem" }).toString();
+  if (canonical !== value) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt control public key is not canonical");
+  return canonical;
 }
 
 function assertPossessionReceiptBinding(receipt, { enrollmentId, organizationId, deviceId, candidate, fingerprint, challengeDigest }) {
@@ -1111,7 +1172,8 @@ function assertPossessionReceiptBinding(receipt, { enrollmentId, organizationId,
     || receipt.statement.source_commit !== candidate.source_commit
     || receipt.statement.team_id !== candidate.team_id
     || receipt.statement.device_key_fingerprint !== fingerprint
-    || receipt.statement.challenge_nonce_digest !== challengeDigest) {
+    || receipt.statement.challenge_nonce_digest !== challengeDigest
+    || receipt.statement.control.bundle_path !== `/v1/organizations/${organizationId}/bundles/${deviceId}`) {
     throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "possession receipt does not match its enrollment binding");
   }
 }

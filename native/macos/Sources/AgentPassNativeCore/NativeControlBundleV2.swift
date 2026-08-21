@@ -486,6 +486,11 @@ public final class NativeCapabilityVerifier: @unchecked Sendable {
     public init(trust: NativeCapabilityTrust, statePath: String? = nil) throws { self.trust = trust; self.statePath = statePath; if let statePath { try nativeCapabilityLoad(path: statePath, sequence: &durableSequence, consumed: &consumed); durableLoaded = true } }
 
     public func verify(_ data: Data, options: NativeCapabilityVerificationOptions = .init()) throws -> NativeCapability {
+        lock.lock(); defer { lock.unlock() }
+        return try verifyLocked(data, options: options)
+    }
+
+    private func verifyLocked(_ data: Data, options: NativeCapabilityVerificationOptions) throws -> NativeCapability {
         let object = try NativeStrictJSON.object(from: data, maxBytes: NativeControlBundleV2Codec.maxBytes, maxDepth: NativeControlBundleV2Codec.maxDepth)
         let capability = try NativeCapabilityCodec.parseObject(object, nowMilliseconds: options.nowMilliseconds, maxTTLMilliseconds: options.maxTTLMilliseconds)
         guard capability.issuer == trust.issuer || trust.issuer == nil else { throw NativeControlBundleV2Error(.issuerKeyMismatch, "Capability key is not trusted for this issuer") }
@@ -518,12 +523,44 @@ public final class NativeCapabilityVerifier: @unchecked Sendable {
 
     @discardableResult
     public func verifyAndConsume(_ data: Data, options: NativeCapabilityVerificationOptions = .init(), operation: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, tag: String? = nil) throws -> NativeCapability {
-        let capability = try verify(data, options: options)
-        if let operation, let repository, let branch, let remote, !policyScopeAllows(capability.scope, operation: operation, repository: repository, branch: branch, remote: remote, tag: tag) { throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request") }
         lock.lock(); defer { lock.unlock() }
+        let capability = try verifyLocked(data, options: options)
+        if let operation, let repository, let branch, let remote, !policyScopeAllows(capability.scope, operation: operation, repository: repository, branch: branch, remote: remote, tag: tag) { throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request") }
         guard !consumed.contains(capability.capabilityID) else { throw NativeControlBundleV2Error(.capabilityConsumed, "Cloud capability has already been consumed") }
         consumed.insert(capability.capabilityID)
         if let statePath { do { try nativeCapabilityPersist(path: statePath, sequence: durableSequence, consumed: consumed) } catch { consumed.remove(capability.capabilityID); throw error } }
+        return capability
+    }
+
+    /// Atomically verifies and consumes one capability against every remote
+    /// observed in the repository. This prevents an allowed `origin` from
+    /// masking an additional unapproved push/fetch authority.
+    @discardableResult
+    public func verifyAndConsume(
+        _ data: Data,
+        options: NativeCapabilityVerificationOptions = .init(),
+        operation: String,
+        repository: String,
+        branch: String,
+        remotes: [String]
+    ) throws -> NativeCapability {
+        lock.lock(); defer { lock.unlock() }
+        let capability = try verifyLocked(data, options: options)
+        guard !remotes.isEmpty,
+              remotes.allSatisfy({ policyScopeAllows(
+                capability.scope, operation: operation, repository: repository,
+                branch: branch, remote: $0
+              ) }) else {
+            throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request")
+        }
+        guard !consumed.contains(capability.capabilityID) else {
+            throw NativeControlBundleV2Error(.capabilityConsumed, "Cloud capability has already been consumed")
+        }
+        consumed.insert(capability.capabilityID)
+        if let statePath {
+            do { try nativeCapabilityPersist(path: statePath, sequence: durableSequence, consumed: consumed) }
+            catch { consumed.remove(capability.capabilityID); throw error }
+        }
         return capability
     }
 

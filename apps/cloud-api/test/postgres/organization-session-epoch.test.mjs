@@ -62,7 +62,10 @@ class EpochMockClient {
     }
     if (text.startsWith("UPDATE webauthn_challenges")) return result([], 1);
     if (text.startsWith("UPDATE human_sessions")) return result([], 1);
-    if (text.startsWith("UPDATE capabilities")) return result([], 1);
+    if (text.startsWith("SELECT set_config('agentpass.organization_id'")) return result([{ organization_id: params[0] }], 1);
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
+      return result([{ result: { state: "revoked", capabilities: [] } }], 1);
+    }
     if (text.startsWith("INSERT INTO admin_audit_heads")) return result([], 1);
     if (text.startsWith("SELECT sequence,event_hash FROM admin_audit_heads")) return result([{ sequence: 0, event_hash: ZERO_HASH }]);
     if (text.startsWith("INSERT INTO admin_audit_events")) return result([], 1);

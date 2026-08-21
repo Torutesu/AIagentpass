@@ -19,11 +19,27 @@ import {
   POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS,
   POSSESSION_RECEIPT_VERSION
 } from "./possession-receipt-signer.mjs";
+import {
+  PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH,
+  PLATFORM_PROMOTION_CAPABILITIES,
+  PLATFORM_PROMOTION_ISSUE_PATH,
+  PLATFORM_PROMOTION_OPERATIONS,
+  PLATFORM_PROMOTION_REPLAY_PATH,
+  PLATFORM_OPERATOR_ROLE,
+  isPlatformPromotionPath,
+  normalizePlatformOperatorAuthorization,
+  normalizePlatformPromotionRequest,
+  normalizePlatformPromotionResult,
+  platformPromotionContextHash
+} from "./platform-promotion-http-contract.mjs";
+import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
+import { AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS } from "./agent-launch-authority-handoff-api.mjs";
+import { normalizeDeviceAuditUpload } from "./device-audit-ingestion.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
 const HUMAN_AUTH_SESSION_PATH = "/api/auth/session";
-const HUMAN_AUTH_SESSION_SWITCH_PATH = "/api/auth/session/organization-switch";
+const HUMAN_AUTH_SESSION_RESUME_PATH = "/api/auth/session/resume";
 const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
 const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
 const HUMAN_AUTH_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
@@ -40,6 +56,8 @@ const HUMAN_AUDIT_EXPORT_VERIFY_PATH = new RegExp(`^/v1/organizations/(?<organiz
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
+const AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/(?<sessionId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/signing-capabilities$/u;
+const AGENT_LAUNCH_AUTHORITY_HANDOFF_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/(?<sessionId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/launch-authority-handoff$/u;
 const QUALIFICATION_GRANT_BATCH_DEVICE_CLAIM_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/qualification-grant-batches\/(?<batchId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/claim$/u;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const RFC3339_MILLISECONDS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -57,7 +75,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, platformPromotionApi, platformPromotionRepository, platformAuthenticator, platformAuthBinding, platformAuditAppender, platformPromotionEnabled = false, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -73,12 +91,21 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (auditExportVerifier !== undefined && auditExportIssuanceService === undefined) {
     throw new TypeError("auditExportVerifier requires auditExportIssuanceService");
   }
+  if (platformPromotionIssuanceService !== undefined && (!platformPromotionIssuanceService
+    || typeof platformPromotionIssuanceService.issuePlatformPromotion !== "function"
+    || typeof platformPromotionIssuanceService.replayPlatformPromotion !== "function")) {
+    throw new TypeError("platformPromotionIssuanceService must expose issuePlatformPromotion() and replayPlatformPromotion()");
+  }
+  if (platformPromotionIssuanceService !== undefined && typeof platformOperatorAuthorizer !== "function") {
+    throw new TypeError("platformOperatorAuthorizer is required with platformPromotionIssuanceService");
+  }
   const effectiveHumanAuthOrigin = humanAuthOrigin ?? humanSession?.expectedOrigin;
   if (auditExportIssuanceService !== undefined && (humanSession === undefined || recentAuthService === undefined
     || typeof effectiveHumanAuthOrigin !== "string" || !effectiveHumanAuthOrigin)) {
     throw new TypeError("audit export Human API requires humanSession, recentAuthService, and expectedOrigin");
   }
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
+  if (agentLaunchAuthorityHandoffApi !== undefined && (!agentLaunchAuthorityHandoffApi || typeof agentLaunchAuthorityHandoffApi.handle !== "function" || agentLaunchAuthorityHandoffApi.paths?.prepare !== AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS.prepare)) throw new TypeError("agentLaunchAuthorityHandoffApi must expose handle() and the exact launch handoff path");
   if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
   if (platformPromotionApi !== undefined && (!platformPromotionApi || typeof platformPromotionApi.handle !== "function")) throw new TypeError("platformPromotionApi must expose handle()");
   if (platformAuditAppender !== undefined && typeof platformAuditAppender !== "function") throw new TypeError("platformAuditAppender must be a function");
@@ -93,6 +120,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
   if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.signPossessionReceipt !== "function")) throw new TypeError("possessionReceiptSigner must expose signPossessionReceipt()");
+  if (platformSessionHttpApi !== undefined && (!platformSessionHttpApi || typeof platformSessionHttpApi.handle !== "function" || !platformSessionHttpApi.paths || typeof platformSessionHttpApi.paths.challenge !== "string" || typeof platformSessionHttpApi.paths.assertion !== "string" || typeof platformSessionHttpApi.paths.revoke !== "string")) throw new TypeError("platformSessionHttpApi must expose handle() and platform paths");
+  if (platformPromotionHttpApi !== undefined && (!platformPromotionHttpApi || Array.isArray(platformPromotionHttpApi) || typeof platformPromotionHttpApi.handle !== "function" || !platformPromotionHttpApi.paths || Array.isArray(platformPromotionHttpApi.paths) || platformPromotionHttpApi.paths.issue !== PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH)) throw new TypeError("platformPromotionHttpApi must expose handle() and paths.issue");
+  if (hostedBootstrapHttpApi !== undefined && (!hostedBootstrapHttpApi || Array.isArray(hostedBootstrapHttpApi) || typeof hostedBootstrapHttpApi.handle !== "function" || !hasExactHostedBootstrapHttpPaths(hostedBootstrapHttpApi.paths))) throw new TypeError("hostedBootstrapHttpApi must expose handle() and the exact Hosted bootstrap paths");
   if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
   if (readiness !== undefined && typeof readiness !== "function") throw new TypeError("readiness must be a function");
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
@@ -148,7 +178,43 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   async function handleRequest(request, response) {
     const requestId = crypto.randomUUID();
     try {
-      const agentSessionRoute = request.method === "POST" ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) : null;
+      if (platformSessionHttpApi && isPlatformSessionHttpPath(request.url, platformSessionHttpApi.paths)) {
+        // Platform Session is its own trust boundary. Pass the untouched
+        // IncomingMessage through so its boundary owns body/header/cookie
+        // parsing and generic Cloud authentication cannot reinterpret it.
+        return await platformSessionHttpApi.handle(request, response);
+      }
+      if (hostedBootstrapHttpApi && isHostedBootstrapHttpPath(request.url)) {
+        // Hosted bootstrap is an independent trust boundary. Preserve the
+        // original IncomingMessage, including its one-shot body stream, and
+        // let that boundary own the response contract exactly once.
+        return await hostedBootstrapHttpApi.handle(request, response);
+      }
+      if (platformPromotionHttpApi && isPlatformPromotionHttpIssuePath(request.url, platformPromotionHttpApi.paths.issue)) {
+        // Authorized Platform Promotion is its own trust boundary. Keep this
+        // raw-request dispatch before every generic Human/Device route so the
+        // injected boundary, not Cloud authentication, owns the wire format.
+        return await platformPromotionHttpApi.handle(request, response);
+      }
+      const agentLaunchAuthorityRoute = request.method === "POST"
+        ? AGENT_LAUNCH_AUTHORITY_HANDOFF_PATH.exec(request.url)
+        : null;
+      if (agentLaunchAuthorityHandoffApi && agentLaunchAuthorityRoute) {
+        const admissionDecision = await acquireRateLimit(admission, {
+          tenantId: agentLaunchAuthorityRoute.groups.organizationId,
+          principalType: "device",
+          principalId: transportPrincipalId(request)
+        });
+        if (!admissionDecision.allowed) return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true));
+        const bodyBytes = await readBody(request, 16 * 1024);
+        const result = await agentLaunchAuthorityHandoffApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
+        const normalized = normalizeAgentSessionDeviceResult(result);
+        if (!normalized) throw apiError("agent_launch_authority_handoff_unavailable", 503, "Agent launch authority handoff API is unavailable");
+        return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
+      }
+      const agentSessionRoute = request.method === "POST"
+        ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) ?? AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH.exec(request.url)
+        : null;
       if (agentSessionDeviceApi && agentSessionRoute) {
         const admissionDecision = await acquireRateLimit(admission, {
           tenantId: agentSessionRoute.groups.organizationId,
@@ -177,25 +243,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
-      if (isPlatformPromotionPath(url.pathname)) {
-        if (!effectivePlatformPromotionApi) {
-          if (platformPromotionEnabled) return send(response, 503, { error: { code: "platform_promotion_unavailable", message: "Platform promotion API is unavailable" }, request_id: requestId });
-          return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
-        }
-        let bodyBytes;
-        try { bodyBytes = await readBody(request, 256 * 1024); }
-        catch { return send(response, 400, { error: { code: "invalid_platform_request", message: "Platform promotion request is invalid" }, request_id: requestId }); }
-        let result;
-        try {
-          result = await effectivePlatformPromotionApi.handle({ method: request.method, url: request.url, request, headers: request.headers, body: bodyBytes, requestId });
-        } catch (error) {
-          const status = platformPromotionErrorStatus(error?.status);
-          const code = platformPromotionErrorCode(error?.code);
-          return send(response, status, { error: { code, message: status === 401 ? "Authentication failed" : status === 403 ? "Authorization denied" : status === 400 ? "Platform promotion request is invalid" : "Platform promotion API is unavailable" }, request_id: requestId });
-        }
-        const normalized = normalizePlatformPromotionResult({ ...result, body: { ...result?.body, request_id: requestId }, request_id: requestId });
-        if (!normalized) return send(response, 503, { error: { code: "platform_promotion_unavailable", message: "Platform promotion API is unavailable" }, request_id: requestId });
-        return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
+      if (platformPromotionIssuanceService && isPlatformPromotionPath(url.pathname)) {
+        return await handlePlatformPromotion(request, response, url, requestId);
       }
       if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname)
@@ -256,12 +305,16 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       const gapCount = result?.body?.ingestion?.gaps?.length;
       if (Number.isSafeInteger(gapCount) && gapCount > 0) recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount);
       if (result.status === 204) sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers });
-      else send(response, result.status ?? 200, { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
+      else send(response, result.status ?? 200, result.omitRequestId ? result.body : { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
     } catch (error) {
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
-      send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
+      if (!response.headersSent && !response.writableEnded) {
+        send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
+      } else if (!response.writableEnded && typeof response.destroy === "function") {
+        response.destroy();
+      }
     }
   }
 
@@ -476,6 +529,98 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     sendRawJson(response, normalized.status, normalized.encoded, mergeResponseHeaders(normalized.headers, rateLimitHeaders(rateLimit)));
   }
 
+  async function handlePlatformPromotion(request, response, url, requestId) {
+    let rateLimitHeadersValue = {};
+    try {
+      const operation = url.pathname === PLATFORM_PROMOTION_ISSUE_PATH
+        ? PLATFORM_PROMOTION_OPERATIONS.issue
+        : PLATFORM_PROMOTION_OPERATIONS.replay;
+      if (request.method !== "POST") throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: "POST" });
+      if (url.search || url.hash) throw apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
+      const admissionDecision = await acquireRateLimit(admission, {
+        tenantId: "platform-operator",
+        principalType: "human",
+        principalId: transportPrincipalId(request)
+      });
+      if (!admissionDecision.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admissionDecision, true));
+      if (!humanSession || typeof humanSession.authenticateRequest !== "function") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+      if (request.headers.authorization !== undefined) throw apiError("human_session_invalid", 401, "Authentication failed");
+      if (request.headers.origin !== effectiveHumanAuthOrigin || request.headers.origin === "null") throw apiError("human_session_request_denied", 403, "Authentication failed");
+      const bodyBytes = await readBody(request);
+      const body = parseBody(bodyBytes);
+      const input = normalizePlatformPromotionRequest(body, request.headers["idempotency-key"]);
+      const authenticated = await humanSession.authenticateRequest({
+        method: "POST",
+        headers: request.headers,
+        origin: request.headers.origin,
+        cookie: request.headers.cookie,
+        csrfToken: request.headers["agentpass-csrf"]
+      });
+      const principal = authenticated?.session;
+      if (!principal || typeof principal !== "object" || Array.isArray(principal)) throw apiError("human_session_invalid", 401, "Authentication failed");
+      let authorization;
+      try {
+        authorization = normalizePlatformOperatorAuthorization(await platformOperatorAuthorizer({
+          principal: { ...principal },
+          operation,
+          capability: PLATFORM_PROMOTION_CAPABILITIES[operation],
+          request: { method: request.method, path: url.pathname },
+          input: { ...input }
+        }), operation);
+      } catch (error) {
+        if (error?.code === "ERR_PLATFORM_PROMOTION_HTTP_AUTHORIZATION") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+        throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+      }
+      if (authorization.allowed !== true || authorization.role !== PLATFORM_OPERATOR_ROLE) throw apiError("platform_operator_denied", 403, "Platform operator authorization denied");
+      const contextHash = platformPromotionContextHash(input, operation);
+      await requireAuditExportRecentAuth({
+        verifier: recentAuthVerifier,
+        principal,
+        proof: request.headers["agentpass-recent-auth"],
+        organizationId: principal.organization_id,
+        operation,
+        contextHash,
+        now: now()
+      });
+      const rateLimit = await acquireRateLimit(limiter, { tenantId: "platform-operator", principalType: "human", principalId: principal.member_id });
+      if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
+      rateLimitHeadersValue = rateLimitHeaders(rateLimit);
+      let result;
+      try {
+        result = operation === PLATFORM_PROMOTION_OPERATIONS.issue
+          ? await platformPromotionIssuanceService.issuePlatformPromotion(input)
+          : await platformPromotionIssuanceService.replayPlatformPromotion(input);
+      } catch (error) {
+        throw mapPlatformPromotionServiceError(error);
+      }
+      if (result === null) throw apiError("platform_promotion_not_found", 404, "Platform promotion was not found");
+      let promotion;
+      try {
+        promotion = normalizePlatformPromotionResult(result, input);
+      } catch {
+        throw apiError("platform_promotion_unavailable", 503, "Platform promotion issuance is unavailable");
+      }
+      return send(response, operation === PLATFORM_PROMOTION_OPERATIONS.issue && promotion.replayed !== true ? 201 : 200, {
+        promotion,
+        request_id: requestId
+      }, {
+        ...rateLimitHeadersValue,
+        "cache-control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff"
+      });
+    } catch (error) {
+      const mapped = mapError(error);
+      return send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, {
+        ...rateLimitHeadersValue,
+        "cache-control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        ...(mapped.headers ?? {})
+      });
+    }
+  }
+
   function buildRoutes() {
     const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuthOperation = undefined) => ({ method, pattern, role, handle, device, enrollment, recentAuthOperation });
     return [
@@ -670,25 +815,31 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           const pendingDevice = typeof store.getDevice === "function" ? await store.getDevice({ organizationId: body.organization_id, deviceId: body.device_id }) : undefined;
           const deviceKeyEpoch = nextEnrollmentDeviceKeyEpoch(pendingDevice);
           const issuedAt = new Date(now()).toISOString();
-          let possessionReceipt = await existingPossessionReceiptForEnrollment(store, body.organization_id, body.device_id, body.enrollment_id);
-          const hadCommittedReceipt = Boolean(possessionReceipt);
-          if (!possessionReceipt) {
-            possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
-              version: 1,
-              enrollment_id: body.enrollment_id,
-              organization_id: body.organization_id,
-              device_id: body.device_id,
-              candidate_id: expectedCandidate.candidate_id,
-              artifact_sha256: expectedCandidate.artifact_sha256,
-              source_commit: expectedCandidate.source_commit,
-              team_id: expectedCandidate.team_id,
-              device_key_fingerprint: body.device_key_fingerprint,
-              device_key_epoch: deviceKeyEpoch,
-              challenge_nonce_digest: challengeNonceDigest,
-              issued_at: issuedAt
-            });
-          }
-          const completionInput = {
+          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
+          const controlTrust = {
+            format_epoch: 2,
+            issuer: controlBundleSigner.issuer,
+            key_id: controlMetadata.key_id,
+            public_key: controlMetadata.public_key,
+            bundle_path: `/v1/organizations/${body.organization_id}/bundles/${body.device_id}`,
+            refresh_hint: refreshHintTrust
+          };
+          const possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
+            version: 1,
+            enrollment_id: body.enrollment_id,
+            organization_id: body.organization_id,
+            device_id: body.device_id,
+            candidate_id: expectedCandidate.candidate_id,
+            artifact_sha256: expectedCandidate.artifact_sha256,
+            source_commit: expectedCandidate.source_commit,
+            team_id: expectedCandidate.team_id,
+            device_key_fingerprint: body.device_key_fingerprint,
+            device_key_epoch: deviceKeyEpoch,
+            challenge_nonce_digest: challengeNonceDigest,
+            control: controlTrust,
+            issued_at: issuedAt
+          });
+          const device = await completeV2EnrollmentInStore(store, {
             proofVersion: 2,
             enrollmentId: body.enrollment_id,
             organizationId: body.organization_id,
@@ -717,7 +868,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           if (typeof store.getDeviceEnrollmentPossessionReceipt !== "function" && typeof store.appendDevicePossessionReceipt === "function") {
             await store.appendDevicePossessionReceipt({ organizationId: body.organization_id, deviceId: body.device_id, receipt: possessionReceipt });
           }
-          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
           const completedEpoch = positiveDeviceKeyEpoch(device);
           return {
             status: 201,
@@ -732,11 +882,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
                 device_key_epoch: completedEpoch,
                 control: {
                   format_epoch: 2,
-                  issuer: controlBundleSigner.issuer,
-                  key_id: controlBundleSigner.key_id,
-                  public_key: controlMetadata.public_key,
-                  bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`,
-                  refresh_hint: refreshHintTrust
+                  ...controlTrust
                 }
               }
             }
@@ -823,17 +969,18 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return { status: 201, body: { revocation } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/revocations$`), "viewer", async ({ organizationId, url }) => ({ body: { revocations: (await store.listRevocations({ organizationId })).slice(-optionalLimit(url)) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url }) => {
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url, principal }) => {
         requireExactQueryKeys(url, new Set(["device_id", "cursor", "limit"]));
-        const page = await activitySource.listDeviceAuditEvents({ organizationId, deviceId: requiredUuidQuery(url, "device_id"), cursor: optionalQuery(url, "cursor"), limit: optionalLimit(url) });
+        const page = await activitySource.listDeviceAuditEvents({ organizationId, principalId: principal.member_id, deviceId: requiredUuidQuery(url, "device_id"), cursor: optionalQuery(url, "cursor"), limit: optionalLimit(url) });
         if (!page || typeof page !== "object" || !Array.isArray(page.events) || (page.next_cursor !== null && typeof page.next_cursor !== "string")) throw new Error("audit repository returned an invalid page");
         return { body: { events: page.events, next_cursor: page.next_cursor } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/admin-events$`), "auditor", async ({ organizationId, url }) => ({ body: { events: await store.listAdminAuditEvents({ organizationId, limit: optionalLimit(url) }) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId }) => ({ body: { health: await store.getAuditHealth({ organizationId }) } })),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId, principal }) => ({ body: { health: await store.getAuditHealth({ organizationId, principalId: principal.member_id }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), null, async ({ organizationId, principal, body }) => {
         rejectUnknown(body, new Set(["batch_id", "events"]), "audit_ingestion");
-        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, deviceId: principal.device_id, events: body.events, idempotencyKey: body.batch_id ?? crypto.randomUUID() }) } };
+        const upload = normalizeDeviceAuditUpload({ organizationId, deviceId: principal.device_id, batchId: body.batch_id, events: body.events });
+        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, ...(principal.member_id ? { principalId: principal.member_id } : {}), deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id }) }, omitRequestId: true };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");
@@ -863,7 +1010,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         if (url.search || principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's enrollment receipt");
         const readReceipt = store.getDevicePossessionReceipt ?? store.getDeviceEnrollmentPossessionReceipt;
         if (typeof readReceipt !== "function") throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable");
-        const receipt = validatePossessionReceiptResponse(await readReceipt.call(store, { organizationId, deviceId: match.deviceId }), { organizationId, deviceId: match.deviceId });
+        const receipt = await readReceipt.call(store, { organizationId, deviceId: match.deviceId });
+        validateAuthoritativeReceiptForDevice(receipt, { organizationId, deviceId: match.deviceId });
         return { body: { receipt } };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
@@ -875,6 +1023,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           let preparedStatement;
           const authority = await store.snapshotAndAssignBundleHead({
             organizationId,
+            principalId: principal.member_id,
             deviceId: match.deviceId,
             minimumSequence: 1,
             issuedAt: new Date(issuedMs).toISOString(),
@@ -983,9 +1132,9 @@ function isExactHumanAuthPath(url, method = undefined) {
   if (url.hash) return false;
   if (HUMAN_AGENT_SESSION_GRANT_PATH.test(url.pathname)) return true;
   if (HUMAN_QUALIFICATION_GRANT_BATCH_PATH.test(url.pathname)) return true;
-  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_SESSION_SWITCH_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
+  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_SESSION_RESUME_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
   if (isExactHumanOrganizationPath(url, method)) return true;
-  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
+  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/revoke-others|\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }
 
 function isExactHumanOrganizationPath(url, method) {
@@ -1160,6 +1309,16 @@ function mapAuditExportServiceError(error, create) {
   if (create && code.includes("uncertain")) return apiError("audit_export_uncertain", 503, "Audit export outcome is uncertain");
   if (code.includes("input") || code.includes("binding")) return apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
   return apiError("audit_export_unavailable", 503, "Audit export is unavailable");
+}
+
+function mapPlatformPromotionServiceError(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  if (code.includes("input") || code.includes("binding")) return apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
+  if (code.includes("conflict")) return apiError("platform_promotion_idempotency_conflict", 409, "Platform promotion idempotency conflicts with prior state");
+  if (code.includes("in_progress")) return apiError("platform_promotion_in_progress", 409, "Platform promotion is already in progress");
+  if (code.includes("uncertain")) return apiError("platform_promotion_uncertain", 409, "Platform promotion outcome is uncertain");
+  if (code.includes("not_found") || code.includes("absent")) return apiError("platform_promotion_not_found", 404, "Platform promotion was not found");
+  return apiError("platform_promotion_unavailable", 503, "Platform promotion issuance is unavailable");
 }
 
 function normalizeAuditExportPublicResult(value, expected) {
@@ -1676,6 +1835,25 @@ async function signAndValidatePossessionReceipt(signer, statement) {
   } catch { throw apiError("possession_receipt_signing_unavailable", 503, "Possession receipt signing is unavailable"); }
 }
 
+function validateAuthoritativeReceiptForDevice(receipt, { organizationId, deviceId }) {
+  try {
+    const expectedKeys = ["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).sort().join(",") !== expectedKeys.slice().sort().join(",")
+      || receipt.version !== POSSESSION_RECEIPT_VERSION || receipt.purpose !== POSSESSION_RECEIPT_PURPOSE
+      || !POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS.includes(receipt.algorithm)
+      || typeof receipt.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(receipt.key_id)
+      || typeof receipt.statement_hash !== "string" || !SHA256_HEX.test(receipt.statement_hash)
+      || typeof receipt.signature !== "string" || !BASE64URL_SIGNATURE.test(receipt.signature)
+      || Buffer.from(receipt.signature, "base64url").toString("base64url") !== receipt.signature) throw new Error("invalid receipt envelope");
+    const statement = normalizePossessionReceiptStatement(receipt.statement);
+    if (canonicalJson(statement) !== canonicalJson(receipt.statement)
+      || sha256Text(canonicalJson(statement)) !== receipt.statement_hash
+      || statement.organization_id !== organizationId
+      || statement.device_id !== deviceId
+      || statement.control.bundle_path !== `/v1/organizations/${organizationId}/bundles/${deviceId}`) throw new Error("invalid receipt binding");
+  } catch { throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable"); }
+}
+
 function deriveEnrollmentV2Credential(secret, identity) {
   return crypto.createHmac("sha256", secret).update("AgentPass-Enrollment-Credential-v2\0", "utf8").update(canonicalJson(identity), "utf8").digest("base64url");
 }
@@ -1916,13 +2094,18 @@ function publicDeploymentIdentity(value) {
 
 function publicReadinessChecks(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
+  const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
+  const suppliedSignerCheckNames = Object.keys(value).filter((key) => key.endsWith("_signer")).sort();
+  if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks");
+  const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
   if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
   if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks");
   if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks");
+  if (platformSession !== undefined && (!platformSession || typeof platformSession.enabled !== "boolean" || typeof platformSession.ok !== "boolean" || typeof platformSession.code !== "string")) throw new Error("invalid readiness checks");
+  if (platformPromotion !== undefined && (!platformPromotion || typeof platformPromotion.enabled !== "boolean" || typeof platformPromotion.ok !== "boolean" || typeof platformPromotion.code !== "string")) throw new Error("invalid readiness checks");
   if (ownerRecoveryOutbox !== undefined && (!ownerRecoveryOutbox || typeof ownerRecoveryOutbox.ok !== "boolean" || typeof ownerRecoveryOutbox.code !== "string"
     || !["running", "idle", "draining", "closed", "unavailable"].includes(ownerRecoveryOutbox.worker_state)
     || !integerOrNull(ownerRecoveryOutbox.pending_count) || !integerOrNull(ownerRecoveryOutbox.uncertain_count) || !integerOrNull(ownerRecoveryOutbox.dead_letter_count)
@@ -1934,43 +2117,49 @@ function publicReadinessChecks(value) {
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.accepted_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.uncertain_count)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.stale_started_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.oldest_nonterminal_age_ms)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.last_success_age_ms))) throw new Error("invalid readiness checks");
+  const publicKeyFingerprint = /^(?:[0-9a-f]{64}|SHA256:[A-Za-z0-9_-]{43})$/u;
   if (agentSessionSigner !== undefined && (!agentSessionSigner || typeof agentSessionSigner.ok !== "boolean"
-    || typeof agentSessionSigner.purpose !== "string" || agentSessionSigner.algorithm !== "ed25519"
+    || agentSessionSigner.purpose !== "agentpass.agent-session-grant" || agentSessionSigner.algorithm !== "ed25519"
     || (agentSessionSigner.key_id !== null && typeof agentSessionSigner.key_id !== "string")
-    || (agentSessionSigner.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(agentSessionSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+    || (agentSessionSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(agentSessionSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   if (qualificationManifestSigner !== undefined && (!qualificationManifestSigner || typeof qualificationManifestSigner.ok !== "boolean"
     || qualificationManifestSigner.purpose !== "agentpass.qualification-grant-batch-manifest" || qualificationManifestSigner.algorithm !== "ed25519"
     || (qualificationManifestSigner.key_id !== null && typeof qualificationManifestSigner.key_id !== "string")
-    || (qualificationManifestSigner.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(qualificationManifestSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+    || (qualificationManifestSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(qualificationManifestSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.ok !== "boolean"
     || possessionReceiptSigner.purpose !== "device-enrollment-possession-receipt" || possessionReceiptSigner.algorithm !== "ed25519"
     || (possessionReceiptSigner.key_id !== null && typeof possessionReceiptSigner.key_id !== "string")
-    || (possessionReceiptSigner.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(possessionReceiptSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
-  const additionalSigners = [
-    ["refresh_hint_signer", refreshHintSigner, "agentpass.refresh-hint"],
-    ["capability_signer", capabilitySigner, "agentpass.capability"],
-    ["control_bundle_signer", controlBundleSigner, "agentpass.control-bundle"],
-    ["audit_anchor_signer", auditAnchorSigner, "agentpass.audit-anchor"],
-    ["promotion_evidence_signer", promotionEvidenceSigner, "agentpass.promotion-evidence"]
+    || (possessionReceiptSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(possessionReceiptSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+  const signerChecks = [
+    [refreshHintSigner, "agentpass.refresh-hint"],
+    [capabilitySigner, "agentpass.capability"],
+    [controlBundleSigner, "agentpass.control-bundle"],
+    [auditAnchorSigner, "agentpass.audit-anchor"],
+    [promotionEvidenceSigner, "agentpass.promotion-evidence"]
   ];
-  for (const [, signer, purpose] of additionalSigners) {
+  for (const [signer, purpose] of signerChecks) {
     if (signer !== undefined && (!signer || typeof signer.ok !== "boolean" || signer.purpose !== purpose || signer.algorithm !== "ed25519"
       || (signer.key_id !== null && typeof signer.key_id !== "string")
-      || (signer.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+      || (signer.public_key_fingerprint !== null && !publicKeyFingerprint.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   }
-  if (managedSigners !== undefined) validateManagedSignerReadiness(managedSigners);
   return Object.freeze({
     database: Object.freeze({ ok: database.ok, probe: database.probe }),
     schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
     pool: Object.freeze({ ok: pool.ok, max_connections: pool.max_connections, total_connections: pool.total_connections, idle_connections: pool.idle_connections, waiting_connections: pool.waiting_connections, utilization_percent: pool.utilization_percent, saturated: pool.saturated }),
     drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight }),
+    ...(platformSession === undefined ? {} : { platform_session: Object.freeze({ enabled: platformSession.enabled, ok: platformSession.ok, code: platformSession.code }) }),
+    ...(platformPromotion === undefined ? {} : { platform_promotion: Object.freeze({ enabled: platformPromotion.enabled, ok: platformPromotion.ok, code: platformPromotion.code }) }),
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
     ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
     ...(managedSigners === undefined ? {} : { managed_signers: Object.freeze({ version: 1, cardinality: managedSigners.cardinality, ok: managedSigners.ok, code: managedSigners.code, signers: Object.freeze(Object.fromEntries(MANAGED_SIGNER_NAMES.map((name) => [name, Object.freeze({ ...managedSigners.signers[name] })]))) }) }),
     ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
     ...(qualificationManifestSigner === undefined ? {} : { qualification_manifest_signer: Object.freeze({ ok: qualificationManifestSigner.ok, purpose: qualificationManifestSigner.purpose, algorithm: qualificationManifestSigner.algorithm, key_id: qualificationManifestSigner.key_id, public_key_fingerprint: qualificationManifestSigner.public_key_fingerprint }) }),
     ...(possessionReceiptSigner === undefined ? {} : { possession_receipt_signer: Object.freeze({ ok: possessionReceiptSigner.ok, purpose: possessionReceiptSigner.purpose, algorithm: possessionReceiptSigner.algorithm, key_id: possessionReceiptSigner.key_id, public_key_fingerprint: possessionReceiptSigner.public_key_fingerprint }) }),
-    ...Object.fromEntries(additionalSigners.filter(([, signer]) => signer !== undefined).map(([name, signer]) => [name, Object.freeze({ ok: signer.ok, purpose: signer.purpose, algorithm: signer.algorithm, key_id: signer.key_id, public_key_fingerprint: signer.public_key_fingerprint })]))
+    ...(refreshHintSigner === undefined ? {} : { refresh_hint_signer: Object.freeze({ ok: refreshHintSigner.ok, purpose: refreshHintSigner.purpose, algorithm: refreshHintSigner.algorithm, key_id: refreshHintSigner.key_id, public_key_fingerprint: refreshHintSigner.public_key_fingerprint }) }),
+    ...(capabilitySigner === undefined ? {} : { capability_signer: Object.freeze({ ok: capabilitySigner.ok, purpose: capabilitySigner.purpose, algorithm: capabilitySigner.algorithm, key_id: capabilitySigner.key_id, public_key_fingerprint: capabilitySigner.public_key_fingerprint }) }),
+    ...(controlBundleSigner === undefined ? {} : { control_bundle_signer: Object.freeze({ ok: controlBundleSigner.ok, purpose: controlBundleSigner.purpose, algorithm: controlBundleSigner.algorithm, key_id: controlBundleSigner.key_id, public_key_fingerprint: controlBundleSigner.public_key_fingerprint }) }),
+    ...(auditAnchorSigner === undefined ? {} : { audit_anchor_signer: Object.freeze({ ok: auditAnchorSigner.ok, purpose: auditAnchorSigner.purpose, algorithm: auditAnchorSigner.algorithm, key_id: auditAnchorSigner.key_id, public_key_fingerprint: auditAnchorSigner.public_key_fingerprint }) }),
+    ...(promotionEvidenceSigner === undefined ? {} : { promotion_evidence_signer: Object.freeze({ ok: promotionEvidenceSigner.ok, purpose: promotionEvidenceSigner.purpose, algorithm: promotionEvidenceSigner.algorithm, key_id: promotionEvidenceSigner.key_id, public_key_fingerprint: promotionEvidenceSigner.public_key_fingerprint }) })
   });
 }
 
@@ -2002,6 +2191,35 @@ function publicMetricsReport(value) {
     }
   }
   return Object.freeze({ version: 1, counters: Object.freeze(counters), ...(gauges === undefined ? {} : { gauges: Object.freeze(gauges) }), valid: true });
+}
+
+function isPlatformSessionHttpPath(rawUrl, paths) {
+  let pathname;
+  try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
+  catch { return false; }
+  return pathname === paths.challenge || pathname === paths.assertion || pathname === paths.revoke;
+}
+
+function hasExactHostedBootstrapHttpPaths(paths) {
+  if (!paths || typeof paths !== "object" || Array.isArray(paths)) return false;
+  const expectedKeys = Object.keys(HOSTED_BOOTSTRAP_HTTP_PATHS);
+  const actualKeys = Object.keys(paths);
+  return actualKeys.length === expectedKeys.length
+    && expectedKeys.every((key) => paths[key] === HOSTED_BOOTSTRAP_HTTP_PATHS[key]);
+}
+
+function isHostedBootstrapHttpPath(rawUrl) {
+  let pathname;
+  try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
+  catch { return false; }
+  return Object.values(HOSTED_BOOTSTRAP_HTTP_PATHS).includes(pathname);
+}
+
+function isPlatformPromotionHttpIssuePath(rawUrl, issuePath) {
+  let pathname;
+  try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
+  catch { return false; }
+  return pathname === issuePath;
 }
 
 function send(response, status, value, headers = {}) {

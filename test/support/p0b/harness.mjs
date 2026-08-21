@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { Pool } from "pg";
+import { createMigrationRunner } from "../../../apps/cloud-api/src/postgres/migration-runner.mjs";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LOOPBACK = "127.0.0.1";
@@ -19,9 +20,23 @@ const SECRET_ENV_PREFIX = "AGENTPASS_";
 const MAX_CAPTURED_OUTPUT = 8 * 1024;
 const MAX_DIAGNOSTIC_OUTPUT = 2 * 1024;
 const MAX_CA_BYTES = 256 * 1024;
+const P0B_PROCESS_TERM_TIMEOUT_MS = 1_000;
+const P0B_PROCESS_FORCE_TIMEOUT_MS = 1_000;
+const P0B_PROXY_CLOSE_TIMEOUT_MS = 1_500;
+const P0B_POOL_CLOSE_TIMEOUT_MS = 2_000;
+const P0B_DATABASE_QUERY_TIMEOUT_MS = 2_000;
+const P0B_TEMP_CLEANUP_TIMEOUT_MS = 2_000;
 const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
 const P0B_CLOUD_PROCESS = path.join(REPOSITORY_ROOT, "test/support/p0b/cloud-runtime-process.mjs");
+const P0B_DATABASE_ROLES = Object.freeze({
+  app: "agentpass_app",
+  migration: "agentpass_migrator",
+  signer: "agentpass_signer",
+  maintenance: "agentpass_maintenance"
+});
+const PROCESS_STOP_PROMISES = new WeakMap();
+const RESOURCE_CLOSE_PROMISES = new WeakMap();
 
 export class P0BSkip extends Error {
   constructor(code, diagnostic) {
@@ -67,6 +82,33 @@ export function createVerifiedPostgresPoolOptions(value, { ca } = {}) {
   if (url.port) options.port = Number(url.port);
   if (ca !== undefined) options.ssl.ca = ca;
   return options;
+}
+
+async function prepareP0BDatabaseAuthorities(database) {
+  const rolesSql = (await fsp.readFile(path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql"), "utf8"))
+    .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+    .trim();
+  await database.pool.query(rolesSql);
+
+  const migrationClient = await database.pool.connect();
+  try {
+    await createMigrationRunner({ client: migrationClient, applicationVersion: "p0b-authority-bootstrap" }).run();
+  } finally {
+    migrationClient.release();
+  }
+
+  await database.pool.query(rolesSql);
+
+  const credentials = Object.create(null);
+  for (const [authority, role] of Object.entries(P0B_DATABASE_ROLES)) {
+    const password = crypto.randomBytes(32).toString("hex");
+    await database.pool.query(`ALTER ROLE ${role} PASSWORD '${password}'`);
+    const roleUrl = new URL(database.url);
+    roleUrl.username = role;
+    roleUrl.password = password;
+    credentials[authority] = roleUrl.toString();
+  }
+  return Object.freeze(credentials);
 }
 
 export async function readPostgresCaFile(caFile, { env = process.env } = {}) {
@@ -173,29 +215,39 @@ export async function createDisposablePostgres({ adminUrl, databaseName = random
     await pool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
     created = true;
   } catch (error) {
-    await pool.end().catch(() => {});
+    await endPool(pool);
     if (["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"].includes(error?.code)) throw new P0BSkip("postgres_unavailable", "PostgreSQL is unavailable; P0-B lane skipped");
     throw new Error("P0-B disposable PostgreSQL database could not be created");
   }
-  try { await pool.end(); } catch (error) {
+  if (!await endPool(pool)) {
     if (created) await dropDisposableDatabase(baseOptions, databaseName);
-    throw new Error(`P0-B PostgreSQL admin pool could not close (${redactP0BDiagnostic(error?.message ?? "unknown")})`);
+    throw new Error("P0-B PostgreSQL admin pool could not close (cleanup timeout)");
   }
   const database = new URL(admin.toString());
   database.pathname = `/${databaseName}`;
   const databaseOptions = createVerifiedPostgresPoolOptions(database, { ca: ca?.pem });
   const databasePool = new Pool({ ...databaseOptions, max: 8, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-  let removed = false;
+  let closePromise;
   return Object.freeze({
     url: database.toString(),
     caCertificate: ca?.pem,
     async close() {
-      if (removed) return;
-      removed = true;
-      await databasePool.end().catch(() => {});
-      const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-      try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
-      finally { await cleanupPool.end().catch(() => {}); }
+      if (!closePromise) {
+        closePromise = (async () => {
+          await endPool(databasePool);
+          const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+          try {
+            await boundedCleanup(
+              () => cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`),
+              P0B_DATABASE_QUERY_TIMEOUT_MS,
+              () => forceDestroyPool(cleanupPool)
+            );
+          } finally {
+            await endPool(cleanupPool);
+          }
+        })();
+      }
+      await closePromise;
     },
     pool: databasePool
   });
@@ -213,6 +265,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   try {
     const certificates = await createTestCertificates(temp);
     database = await createDisposablePostgres({ env });
+    const databaseAuthorities = await prepareP0BDatabaseAuthorities(database);
     const organizationId = crypto.randomUUID();
     const files = await createRuntimeFiles(temp);
     if (prepareDatabase) await prepareDatabase(Object.freeze({
@@ -227,7 +280,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     const consolePort = await reservePort();
     const consoleTlsPort = await reservePort();
     const common = {
-      AGENTPASS_DATABASE_URL: database.url,
+      AGENTPASS_DATABASE_URL: databaseAuthorities.app,
+      AGENTPASS_MIGRATION_DATABASE_URL: databaseAuthorities.migration,
+      AGENTPASS_SIGNER_DATABASE_URL: databaseAuthorities.signer,
+      AGENTPASS_MAINTENANCE_DATABASE_URL: databaseAuthorities.maintenance,
+      AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_HOST: LOOPBACK,
       AGENTPASS_CLOUD_PORT: cloudPort,
@@ -250,6 +307,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CAPABILITY_NONCE_SECRET: files.capabilitySecret,
       AGENTPASS_HUMAN_CURSOR_SECRET: files.cursorSecret,
       AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x35).toString("base64url"),
+      ...p0bHostedBootstrapEnvironment(consoleTlsPort),
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
       AGENTPASS_OPERATIONAL_PROBE_SECRET: files.probeSecret,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
@@ -319,6 +377,24 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
       tlsSpkiPin: await certificateSpkiPin(certificates.cert),
       databaseUrl: database.url, organizationId,
+      cloudProcessState() {
+        if (!cloudProcess) return "exited";
+        return cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null ? "exited" : "running";
+      },
+      async cloudReadinessState() {
+        if (!cloudProcess || cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null) return "unavailable";
+        try {
+          const ca = await fsp.readFile(certificates.caCert, "utf8");
+          const result = await httpsRequest(new URL("/health/ready", `https://localhost:${cloudTlsPort}/`), {
+            ca,
+            headers: { "AgentPass-Operational-Token": files.probeSecret },
+            timeoutMs: 1_500
+          });
+          return result.status === 200 ? "ready" : "unavailable";
+        } catch {
+          return "unavailable";
+        }
+      },
       async close() { await closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp }); }
     });
   } catch (error) {
@@ -330,13 +406,31 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   }
 }
 
+export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
+  if (!Number.isSafeInteger(consoleTlsPort) || consoleTlsPort < 1 || consoleTlsPort > 65_535) {
+    throw new TypeError("P0-B Console TLS port is invalid");
+  }
+  const consoleOrigin = `https://localhost:${consoleTlsPort}`;
+  return Object.freeze({
+    AGENTPASS_GITHUB_CLIENT_ID: "agentpass-p0b-github-client",
+    AGENTPASS_GITHUB_CLIENT_SECRET: "agentpass-p0b-github-secret",
+    AGENTPASS_GITHUB_REDIRECT_URI: `${consoleOrigin}/api/auth/bootstrap/github/callback`,
+    AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: `${consoleOrigin}/onboarding`,
+    AGENTPASS_HOSTED_PKCE_KEY_ID: "p0b-hosted-pkce-v1",
+    AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x36).toString("base64url"),
+    AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x37).toString("base64url"),
+    AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x38).toString("base64url")
+  });
+}
+
 export async function closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp } = {}) {
-  await consoleProxy?.close?.().catch(() => {});
-  await cloudProxy?.close?.().catch(() => {});
-  await stopProcess(consoleProcess);
-  await stopProcess(cloudProcess);
-  await database?.close?.().catch(() => {});
-  if (temp) await fsp.rm(temp, { recursive: true, force: true }).catch(() => {});
+  await Promise.all([
+    closeResource(consoleProxy, P0B_PROXY_CLOSE_TIMEOUT_MS),
+    closeResource(cloudProxy, P0B_PROXY_CLOSE_TIMEOUT_MS)
+  ]);
+  await Promise.all([stopProcess(consoleProcess), stopProcess(cloudProcess)]);
+  await closeResource(database, P0B_POOL_CLOSE_TIMEOUT_MS + P0B_DATABASE_QUERY_TIMEOUT_MS + P0B_POOL_CLOSE_TIMEOUT_MS);
+  if (temp) await boundedCleanup(() => fsp.rm(temp, { recursive: true, force: true }), P0B_TEMP_CLEANUP_TIMEOUT_MS);
 }
 
 export function randomDatabaseName() { return `agentpass_p0b_${process.pid}_${crypto.randomBytes(6).toString("hex")}`.slice(0, 63); }
@@ -364,8 +458,15 @@ async function createTrustedCaBundle(directory, files, certificates = []) {
 
 async function dropDisposableDatabase(baseOptions, databaseName) {
   const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-  try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
-  finally { await cleanupPool.end().catch(() => {}); }
+  try {
+    await boundedCleanup(
+      () => cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`),
+      P0B_DATABASE_QUERY_TIMEOUT_MS,
+      () => forceDestroyPool(cleanupPool)
+    );
+  } finally {
+    await endPool(cleanupPool);
+  }
 }
 
 async function createRuntimeFiles(directory) {
@@ -459,15 +560,108 @@ function processDiagnostic(child) {
   return `${state}${safeOutput}`;
 }
 
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const pid = child.pid;
-  try { process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
-  await new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-    const timer = setTimeout(() => { try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} } resolve(); }, 3_000);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
+async function boundedCleanup(task, timeoutMs, onAbort) {
+  const timedOut = Symbol("cleanup_timeout");
+  let timer;
+  const operation = Promise.resolve().then(task).then(() => true, () => false);
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), timeoutMs);
   });
+  const result = await Promise.race([operation, timeout]);
+  clearTimeout(timer);
+  if (result === timedOut || result === false) {
+    try { onAbort?.(); } catch {}
+    return false;
+  }
+  return true;
+}
+
+async function closeResource(resource, timeoutMs) {
+  if (!resource || (typeof resource !== "object" && typeof resource !== "function") || typeof resource.close !== "function") return;
+  let closePromise = RESOURCE_CLOSE_PROMISES.get(resource);
+  if (!closePromise) {
+    closePromise = boundedCleanup(() => resource.close(), timeoutMs);
+    RESOURCE_CLOSE_PROMISES.set(resource, closePromise);
+  }
+  await closePromise;
+}
+
+async function endPool(pool) {
+  if (!pool || typeof pool.end !== "function") return true;
+  return boundedCleanup(() => pool.end(), P0B_POOL_CLOSE_TIMEOUT_MS, () => forceDestroyPool(pool));
+}
+
+function forceDestroyPool(pool) {
+  const clients = new Set([
+    ...(Array.isArray(pool?._clients) ? pool._clients : []),
+    ...(Array.isArray(pool?._idle) ? pool._idle.map((item) => item?.client).filter(Boolean) : [])
+  ]);
+  for (const item of pool?._idle ?? []) {
+    try { clearTimeout(item?.timeoutId); } catch {}
+  }
+  for (const client of clients) {
+    try { client.connection?.stream?.destroy(); } catch {}
+  }
+}
+
+function processExited(child) {
+  return Boolean(child?.p0bSpawnError) || child?.exitCode != null || child?.signalCode != null;
+}
+
+function sendProcessSignal(child, signal) {
+  const pid = child?.pid;
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    if (process.platform !== "win32") {
+      try { process.kill(-pid, signal); } catch {}
+    }
+    try { process.kill(pid, signal); } catch {}
+  }
+  try { child?.kill?.(signal); } catch {}
+}
+
+function waitForProcessExit(child, timeoutMs) {
+  if (processExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.("exit", onExit);
+      child.removeListener?.("error", onError);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const onError = () => finish(processExited(child));
+    child.once?.("exit", onExit);
+    child.once?.("error", onError);
+    if (processExited(child)) {
+      finish(true);
+      return;
+    }
+    timer = setTimeout(() => finish(processExited(child)), timeoutMs);
+  });
+}
+
+async function stopProcess(child) {
+  if (!child || typeof child !== "object") return;
+  let stopPromise = PROCESS_STOP_PROMISES.get(child);
+  if (!stopPromise) {
+    stopPromise = (async () => {
+      if (processExited(child)) return;
+      sendProcessSignal(child, "SIGTERM");
+      if (await waitForProcessExit(child, P0B_PROCESS_TERM_TIMEOUT_MS)) return;
+      sendProcessSignal(child, "SIGKILL");
+      if (!await waitForProcessExit(child, P0B_PROCESS_FORCE_TIMEOUT_MS)) {
+        try { child.stdout?.destroy(); } catch {}
+        try { child.stderr?.destroy(); } catch {}
+        try { child.unref?.(); } catch {}
+      }
+    })();
+    PROCESS_STOP_PROMISES.set(child, stopPromise);
+  }
+  await stopPromise;
 }
 
 async function createTlsProxy({ cert, key, targetPort, port }) {
@@ -490,12 +684,33 @@ async function createTlsProxy({ cert, key, targetPort, port }) {
   server.keepAliveTimeout = 1_000;
   server.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, LOOPBACK, resolve); });
+  let closePromise;
+  const forceClose = () => {
+    try { server.closeIdleConnections?.(); } catch {}
+    try { server.closeAllConnections?.(); } catch {}
+    for (const upstream of upstreams) {
+      try { upstream.destroy(); } catch {}
+    }
+    for (const socket of sockets) {
+      try { socket.destroy(); } catch {}
+    }
+  };
   return Object.freeze({
     port,
     async close() {
-      for (const upstream of upstreams) upstream.destroy();
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(() => resolve()));
+      if (!closePromise) {
+        closePromise = (async () => {
+          let closeOperation;
+          try {
+            closeOperation = new Promise((resolve) => server.close(() => resolve()));
+          } catch {
+            closeOperation = Promise.resolve();
+          }
+          forceClose();
+          await boundedCleanup(closeOperation, P0B_PROXY_CLOSE_TIMEOUT_MS, forceClose);
+        })();
+      }
+      await closePromise;
     }
   });
 }

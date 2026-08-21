@@ -59,13 +59,14 @@ export const HUMAN_ORGANIZATION_SERVICE_METHODS = Object.freeze([
   "listInvitations",
   "createInvitation",
   "revokeInvitation",
+  "reissueInvitation",
   "acceptInvitation"
 ]);
 
 export const HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS = Object.freeze({
   updateMemberRole: "human.organizations.member.role.update",
   removeMember: "human.organizations.member.remove",
-  revokeInvitation: "human.organizations.invitation.revoke"
+  reissueInvitation: "human.organizations.invitation.reissue"
 });
 
 export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
@@ -167,8 +168,9 @@ export class HumanOrganizationsHttpError extends Error {
  * - updateMemberRole({ actor, organization_id, member_id, role, expected_version, idempotency_key }) -> member
  * - removeMember({ actor, organization_id, member_id, expected_version, idempotency_key }) -> member
  * - createInvitation({ actor, organization_id, role, expires_at, idempotency_key }) -> { invitation, raw_token }
+ * - reissueInvitation({ actor, organization_id, invitation_id, expires_at, expected_version, recent_authorization, idempotency_key }) -> { invitation, raw_token }
  * - revokeInvitation({ actor, organization_id, invitation_id, expected_version, idempotency_key }) -> invitation
- * - acceptInvitation({ actor, one_time_token, idempotency_key }) -> member
+ * - acceptInvitation({ actor, one_time_token, idempotency_key }) -> { invitation, member }
  */
 export function createHumanOrganizationsHttpApi({
   humanSession,
@@ -225,7 +227,7 @@ export function createHumanOrganizationsHttpApi({
       if (route.name === "renameOrganization") return await renameOrganization(session, route, body, idempotencyKey, request);
       if (route.name === "updateMemberRole") return await updateMemberRole(session, route, body, idempotencyKey, request);
       if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey, request);
-      if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey);
+      if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey, request);
       if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey, request);
       return await acceptInvitation(session, body, idempotencyKey, requestId);
     } catch (error) {
@@ -354,11 +356,13 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function createInvitation(actor, route, body, idempotencyKey) {
+  async function createInvitation(actor, route, body, idempotencyKey, request) {
     await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationCreate, session: actor, organizationId: route.organizationId });
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["role", "expires_at"]));
+    const isReissue = Boolean(body && typeof body === "object" && !Array.isArray(body) && Object.hasOwn(body, "reissue_invitation_id"));
+    const input = parseBody(body, isReissue ? new Set(["reissue_invitation_id", "expires_at"]) : new Set(["role", "expires_at"]));
+    if (isReissue) return await reissueInvitation(actor, route, input, idempotencyKey, request);
     if (typeof input.role !== "string" || !INVITABLE_ROLES.has(input.role)) throw invalidRequest();
     const expiresAt = requiredDate(input.expires_at, "expires_at");
     try {
@@ -387,13 +391,34 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function acceptInvitation(actor, body, idempotencyKey, requestId) {
+  async function reissueInvitation(actor, route, body, idempotencyKey, request) {
+    const input = parseBody(body, new Set(["reissue_invitation_id", "expires_at"]));
+    let invitationId;
+    try { invitationId = requiredUuid(input.reissue_invitation_id, "reissue_invitation_id"); } catch { throw invalidRequest(); }
+    const expiresAt = requiredDate(input.expires_at, "expires_at");
+    const expectedVersion = requiredExpectedVersion(request);
+    const recentAuthorization = await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+    try {
+      const result = await organizationService.reissueInvitation({ actor, organization_id: route.organizationId, invitation_id: invitationId, expires_at: expiresAt, expected_version: expectedVersion, idempotency_key: idempotencyKey, recent_authorization: recentAuthorization });
+      const invitation = normalizeInvitation(result?.invitation ?? result, route.organizationId, invitationId);
+      const rawToken = result?.replayed === true ? undefined : result?.raw_token ?? result?.invitation_token ?? result?.token;
+      if (result?.replayed !== true && !isOpaqueToken(rawToken)) throw new Error("invitation service did not return one raw token");
+      return response(201, { invitation, ...(rawToken === undefined ? {} : { one_time_token: rawToken }) });
+    } catch (error) {
+      throw mapServiceError(error, "invitation");
+    }
+  }
+
+  async function acceptInvitation(actor, body, idempotencyKey) {
     await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationAccept, session: actor, organizationId: actor.organization_id });
     const input = parseBody(body, new Set(["one_time_token"]));
     if (!isOpaqueToken(input.one_time_token)) throw invalidRequest();
     try {
       const result = await organizationService.acceptInvitation({ actor, one_time_token: input.one_time_token, idempotency_key: idempotencyKey });
-      return response(201, { request_id: requestId.toLowerCase(), member: normalizeMember(result) });
+      return response(201, {
+        invitation: normalizeInvitation(result?.invitation, undefined),
+        member: normalizeMember(result?.member, result?.invitation?.organization_id)
+      });
     } catch (error) {
       throw mapServiceError(error, "invitation");
     }
@@ -585,7 +610,7 @@ function normalizeNextCursor(result) {
 
 function normalizeOrganization(value, expectedOrganizationId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("organization record is invalid");
-  const organizationId = requiredUuid(value.organization_id ?? value.id, "organization_id");
+  const organizationId = requiredAliasedUuid(value, "organization_id", "id", "organization_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("organization binding is invalid");
   const output = { organization_id: organizationId, version: outputVersion(value.version), name: requiredName(value.name) };
   if (value.created_at !== undefined) output.created_at = requiredDate(value.created_at, "created_at");
@@ -596,7 +621,7 @@ function normalizeOrganization(value, expectedOrganizationId = undefined) {
 function normalizeMember(value, expectedOrganizationId = undefined, expectedMemberId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("member record is invalid");
   const organizationId = requiredUuid(value.organization_id, "organization_id");
-  const memberId = requiredUuid(value.member_id ?? value.id, "member_id");
+  const memberId = requiredAliasedUuid(value, "member_id", "id", "member_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("member binding is invalid");
   if (expectedMemberId !== undefined && memberId !== expectedMemberId) throw new Error("member binding is invalid");
   if (!ROLES.has(value.role)) throw new Error("member role is invalid");
@@ -609,20 +634,41 @@ function normalizeMember(value, expectedOrganizationId = undefined, expectedMemb
 function normalizeInvitation(value, expectedOrganizationId = undefined, expectedInvitationId = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invitation record is invalid");
   const organizationId = requiredUuid(value.organization_id, "organization_id");
-  const invitationId = requiredUuid(value.invitation_id ?? value.id, "invitation_id");
+  const invitationId = requiredAliasedUuid(value, "invitation_id", "id", "invitation_id");
   if (expectedOrganizationId !== undefined && organizationId !== expectedOrganizationId) throw new Error("invitation binding is invalid");
   if (expectedInvitationId !== undefined && invitationId !== expectedInvitationId) throw new Error("invitation binding is invalid");
   if (!new Set(["admin", "auditor", "viewer"]).has(value.role)) throw new Error("invitation role is invalid");
   if (typeof value.status !== "string" || !new Set(["pending", "accepted", "revoked", "expired"]).has(value.status)) throw new Error("invitation status is invalid");
   const output = { invitation_id: invitationId, organization_id: organizationId, version: outputVersion(value.version), role: value.role, status: value.status };
   for (const field of ["created_at", "expires_at"]) if (value[field] !== undefined) output[field] = requiredDate(value[field], field);
-  for (const field of ["accepted_at", "consumed_at", "revoked_at"]) if (value[field] !== undefined) output[field === "consumed_at" ? "accepted_at" : field] = nullableDate(value[field], field);
+  if (value.accepted_at !== undefined && value.consumed_at !== undefined) {
+    const acceptedAt = nullableDate(value.accepted_at, "accepted_at");
+    const consumedAt = nullableDate(value.consumed_at, "consumed_at");
+    if (acceptedAt !== consumedAt) throw new Error("invitation acceptance aliases conflict");
+    output.accepted_at = acceptedAt;
+  } else if (value.accepted_at !== undefined) {
+    output.accepted_at = nullableDate(value.accepted_at, "accepted_at");
+  } else if (value.consumed_at !== undefined) {
+    output.accepted_at = nullableDate(value.consumed_at, "consumed_at");
+  }
+  if (value.accepted_member_id !== undefined) output.accepted_member_id = value.accepted_member_id === null ? null : requiredUuid(value.accepted_member_id, "accepted_member_id");
   return output;
 }
 
 function outputVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error("resource version is invalid");
   return value;
+}
+
+function requiredAliasedUuid(value, primary, alias, field) {
+  const primaryValue = value[primary];
+  const aliasValue = value[alias];
+  const selected = primaryValue ?? aliasValue;
+  const normalized = requiredUuid(selected, field);
+  if (primaryValue !== undefined && aliasValue !== undefined && requiredUuid(primaryValue, field) !== requiredUuid(aliasValue, field)) {
+    throw new Error(`${field} aliases conflict`);
+  }
+  return normalized;
 }
 
 function requiredDate(value, field) {
@@ -662,7 +708,7 @@ function mapServiceError(error, resource) {
   if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN, { status: 403, cause: error });
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "err_expected_version_mismatch", "stale_version"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, { status: 409, cause: error });
-  if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED, { status: 409, cause: error });
+  if (["invitation_replayed", "err_invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED, { status: 409, cause: error });
   if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code)) return invalidRequest();
   return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE, { status: 503, cause: error });
 }

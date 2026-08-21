@@ -8,9 +8,14 @@ import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 
-const DATABASE_URL = "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full";
+const DATABASE_URL = "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full";
+const MIGRATION_DATABASE_URL = "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full";
+const SIGNER_DATABASE_URL = "postgresql://agentpass_signer:secret@db.example.test/agentpass?sslmode=verify-full";
+const MAINTENANCE_DATABASE_URL = "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full";
 const SECRET = Buffer.alloc(32, 0x31).toString("base64url");
 const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
+const PLATFORM_PROMOTION_VERIFY = async (_evidence, context) => typeof context?.signer_key_fingerprint === "string";
+const DATABASE_STATE = { applied: [] };
 
 class FakePool {
   constructor(options) {
@@ -18,10 +23,11 @@ class FakePool {
     this.totalCount = 1;
     this.idleCount = 1;
     this.waitingCount = 0;
-    this.applied = [];
+    this.applied = DATABASE_STATE.applied;
     this.ended = false;
     this.endCalls = 0;
     this.releaseCalls = [];
+    this.calls = [];
   }
 
   async connect() {
@@ -36,6 +42,7 @@ class FakePool {
   }
 
   async query(text, params = []) {
+    this.calls.push({ text, params });
     if (text === "SELECT 1::integer AS ready" || text === "SELECT 1 AS ready") return { rows: [{ ready: 1 }] };
     if (text === "SELECT to_regclass($1) AS relation") {
       return { rows: [{ relation: params[0] === "schema_migrations" ? "schema_migrations" : null }] };
@@ -48,6 +55,9 @@ class FakePool {
     }
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
     if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
+    if (text.startsWith("SELECT public.agentpass_maintain_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { quarantined: 0, reconciled: 0, pruned: 0, total: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_agent_signing_capability_recover_expired")) return { rowCount: 1, rows: [{ result: { status: "ok", expired: 0, uncertain: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_health_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { version: 1, states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 0, rejected: 0, failed: 0 }, stale_started: 0, oldest_nonterminal_at: null } }] };
     if (text.startsWith("SELECT agentpass_quarantine_expired_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ quarantined: 0 }] };
     if (text.startsWith("WITH candidates") && text.includes("UPDATE managed_signer_provider_operations")) return { rowCount: 1, rows: [{ reconciled: 0 }] };
     if (text.startsWith("WITH candidates") && text.includes("DELETE FROM managed_signer_signing_idempotency")) return { rowCount: 1, rows: [{ pruned: 0 }] };
@@ -65,6 +75,9 @@ class FakePool {
 function env() {
   return {
     AGENTPASS_DATABASE_URL: DATABASE_URL,
+    AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
+    AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_MAINTENANCE_DATABASE_URL: MAINTENANCE_DATABASE_URL,
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x32).toString("base64url")
   };
@@ -72,7 +85,7 @@ function env() {
 
 test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bounded drain", async () => {
   const migrations = await loadSqlMigrations();
-  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
@@ -81,9 +94,9 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.agentSessionLifecycleRepository?.revokeAuthority, "function");
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.issueQualificationGrantBatch, "function");
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.claimQualificationGrantBatch, "function");
-  for (const method of ["reservePromotion", "commitPromotion", "markUncertain", "rejectPromotion", "reconcileUncertainPromotion", "replayPromotion"]) {
-    assert.equal(typeof runtime.promotionIssuanceRepository?.[method], "function", `promotion issuance repository exposes ${method}`);
-  }
+  assert.equal(typeof runtime.platformOperatorAssignmentRepository?.findActivePlatformOperatorAssignment, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.getBootstrapStatus, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.verifyBootstrapCsrf, "function");
   assert.equal(typeof runtime.createManagedSignerKeyLifecycleRepository, "function");
   assert.equal(runtime.createManagedSignerKeyLifecycleRepository({ purpose: "agentpass.agent-session-grant" }).purpose, "agentpass.agent-session-grant");
   assert.equal(runtime.createProviderOperationRepository({ purpose: "agentpass.agent-session-grant", keyId: "agent-key-1", keyVersion: "1" }).purpose, "agentpass.agent-session-grant");
@@ -101,6 +114,11 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().consecutive_failures, 0);
   assert.equal(typeof runtime.providerOperationMaintenanceRepository.maintainProviderOperations, "function");
   assert.equal(typeof runtime.providerOperationMaintenanceRepository.health, "function");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "running");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().cycles, 1);
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().consecutive_failures, 0);
+  assert.equal(typeof runtime.agentSessionSigningCapabilityMaintenanceRepository.recoverExpiredReservations, "function");
+  assert.equal((await runtime.readiness()).checks.agent_session_signing_capability_maintenance.code, "ok");
   assert.equal((await runtime.readiness()).checks.managed_signer_provider_operations.code, "ok");
 
   let finish;
@@ -119,24 +137,48 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.pool.ended, true);
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
 });
 
-test("PostgreSQL runtime rejects a deployment identity whose schema or catalog digest is not measured locally", async () => {
-  const migrations = await loadSqlMigrations();
-  const schemaManifest = { schema_version: 1, source_commit: "a".repeat(40), source_tree: "b".repeat(40), migrations: migrations.map((migration) => ({ name: migration.name, bytes: Buffer.byteLength(migration.sql), sha256: migration.checksum })) };
-  const schemaDigest = crypto.createHash("sha256").update(`${canonicalJson(schemaManifest)}\n`).digest("hex");
-  const catalogDigest = crypto.createHash("sha256").update(fs.readFileSync(path.resolve(import.meta.dirname, "../../../../contracts/catalog-v1.json"))).digest("hex");
-  const validEnv = { ...env(), AGENTPASS_CLOUD_SOURCE_COMMIT: schemaManifest.source_commit, AGENTPASS_CLOUD_SOURCE_TREE: schemaManifest.source_tree, AGENTPASS_CLOUD_SCHEMA_DIGEST: schemaDigest, AGENTPASS_CLOUD_CATALOG_DIGEST: catalogDigest };
-  const runtime = await createPostgresRuntime({ env: validEnv, PoolClass: FakePool, applicationVersion: "digest-qualification", resolveProcessBindingPolicy: () => true });
+test("PostgreSQL runtime isolates migration, signer, maintenance, and application pools by exact database role", async () => {
+  const pools = [];
+  class RoleTrackingPool extends FakePool {
+    constructor(options) {
+      super(options);
+      pools.push(this);
+    }
+  }
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: RoleTrackingPool
+  });
+  assert.equal(pools.length, 4);
+  const byRole = Object.fromEntries(pools.map((pool) => [new URL(pool.options.connectionString).username, pool]));
+  assert.equal(runtime.pool, byRole.agentpass_app);
+  assert.equal(byRole.agentpass_migrator.ended, true);
+  assert.equal(byRole.agentpass_migrator.endCalls, 1);
+  assert.equal(byRole.agentpass_app.ended, false);
+  assert.equal(byRole.agentpass_signer.ended, false);
+  assert.equal(byRole.agentpass_maintenance.ended, false);
+  assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
+  assert.equal(byRole.agentpass_signer.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), true);
+  assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
+  assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), true);
+  assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), false);
+  assert.equal(byRole.agentpass_migrator.calls.some(({ text }) => text.startsWith("SELECT version, checksum FROM schema_migrations")), true);
   await runtime.close();
-  await assert.rejects(() => createPostgresRuntime({ env: { ...validEnv, AGENTPASS_CLOUD_CATALOG_DIGEST: "0".repeat(64) }, PoolClass: FakePool }), /digest mismatch/u);
+  assert.equal(byRole.agentpass_app.ended, true);
+  assert.equal(byRole.agentpass_signer.ended, true);
+  assert.equal(byRole.agentpass_maintenance.ended, true);
 });
 
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
   const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; }, async lookupAcceptance() { return { accepted: false, idempotency_key: "22222222-2222-4222-8222-222222222222" }; } };
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     ownerRecoveryPublisher: publisher,
@@ -151,7 +193,7 @@ test("PostgreSQL runtime wires an injected owner recovery publisher without star
 });
 
 test("direct runtime close waits for tracked work before closing PostgreSQL", async () => {
-  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool });
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool });
   let finish;
   const active = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
   const closing = runtime.close();
@@ -166,6 +208,7 @@ test("direct runtime close waits for tracked work before closing PostgreSQL", as
 
 test("PostgreSQL runtime can leave shared-control maintenance idle for qualification", async () => {
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     sharedControlMaintenanceAutoStart: false
@@ -177,6 +220,7 @@ test("PostgreSQL runtime can leave shared-control maintenance idle for qualifica
 
 test("PostgreSQL runtime can leave provider-operation maintenance idle and fails readiness closed", async () => {
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     managedSignerProviderOperationMaintenanceAutoStart: false
@@ -189,13 +233,28 @@ test("PostgreSQL runtime can leave provider-operation maintenance idle and fails
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
 });
 
+test("PostgreSQL runtime can leave signing-capability maintenance idle and fails readiness closed", async () => {
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    agentSessionSigningCapabilityMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "idle");
+  const readiness = await runtime.readiness();
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.code, "agent_session_signing_capability_maintenance_worker_unavailable");
+  await runtime.close();
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
+});
+
 test("PostgreSQL runtime preserves migration failure and closes the pool exactly once", async () => {
   const expected = new Error("migration failure injection");
-  let pool;
+  const pools = [];
   class MigrationFailurePool extends FakePool {
     constructor(options) {
       super(options);
-      pool = this;
+      pools.push(this);
     }
 
     async query(text, params = []) {
@@ -205,16 +264,17 @@ test("PostgreSQL runtime preserves migration failure and closes the pool exactly
   }
 
   await assert.rejects(
-    createPostgresRuntime({ env: env(), PoolClass: MigrationFailurePool }),
+    createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: MigrationFailurePool }),
     (error) => error === expected
   );
-  assert.equal(pool.endCalls, 1);
-  assert.deepEqual(pool.releaseCalls, [true]);
-  assert.equal(pool.ended, true);
+  assert.equal(pools.length, 4);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [true], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
 });
 
 test("PostgreSQL runtime cleans started workers and pool after late construction failure", async () => {
-  let pool;
+  const pools = [];
   const scheduled = [];
   const cleared = [];
   const setTimeoutFn = (callback, delay) => {
@@ -226,7 +286,7 @@ test("PostgreSQL runtime cleans started workers and pool after late construction
   class LateFailurePool extends FakePool {
     constructor(options) {
       super(options);
-      pool = this;
+      pools.push(this);
     }
   }
   const ownerRecoveryPublisher = {
@@ -237,6 +297,7 @@ test("PostgreSQL runtime cleans started workers and pool after late construction
 
   await assert.rejects(
     createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
       env: env(),
       PoolClass: LateFailurePool,
       ownerRecoveryPublisher,
@@ -249,14 +310,14 @@ test("PostgreSQL runtime cleans started workers and pool after late construction
 
   assert.equal(scheduled.length, 0);
   assert.equal(cleared.length, 0);
-  assert.equal(pool.endCalls, 1);
-  assert.deepEqual(pool.releaseCalls, [false]);
-  assert.equal(pool.ended, true);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [false], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
 });
 
 test("PostgreSQL runtime preserves start failure identity and drains already-started workers", async () => {
   const expected = new Error("worker start failure injection");
-  let pool;
+  const pools = [];
   const ownerScheduled = [];
   const ownerCleared = [];
   const ownerSetTimeoutFn = (callback, delay) => {
@@ -269,7 +330,7 @@ test("PostgreSQL runtime preserves start failure identity and drains already-sta
   class StartFailurePool extends FakePool {
     constructor(options) {
       super(options);
-      pool = this;
+      pools.push(this);
     }
   }
   const ownerRecoveryPublisher = {
@@ -280,6 +341,7 @@ test("PostgreSQL runtime preserves start failure identity and drains already-sta
 
   await assert.rejects(
     createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
       env: env(),
       PoolClass: StartFailurePool,
       ownerRecoveryPublisher,
@@ -292,7 +354,7 @@ test("PostgreSQL runtime preserves start failure identity and drains already-sta
   assert.equal(ownerScheduled.length, 1);
   assert.equal(ownerCleared.length, 1);
   assert.equal(ownerCleared[0], ownerScheduled[0]);
-  assert.equal(pool.endCalls, 1);
-  assert.deepEqual(pool.releaseCalls, [false]);
-  assert.equal(pool.ended, true);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [false], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
 });

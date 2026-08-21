@@ -45,9 +45,10 @@ export async function bindHostedManagedSignerProvider({
   version = 1,
   algorithm = "ed25519",
   publicKey,
-  publicKeyFingerprint
+  publicKeyFingerprint,
+  operationGate
 } = {}) {
-  validateInput({ postgresRuntime, provider, purpose, keyId, version, algorithm, publicKeyFingerprint });
+  validateInput({ postgresRuntime, provider, purpose, keyId, version, algorithm, publicKeyFingerprint, operationGate });
   const normalizedPublicKey = parsePinnedPublicKey(publicKey);
   const pinnedFingerprint = fingerprint(normalizedPublicKey);
   if (pinnedFingerprint !== publicKeyFingerprint) fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.CONFIG);
@@ -117,7 +118,8 @@ export async function bindHostedManagedSignerProvider({
         purpose,
         keyId,
         keyVersion: String(active.key_version),
-        publicKey: normalizedPublicKey
+        publicKey: normalizedPublicKey,
+        ...(operationGate === undefined ? {} : { operationGate })
       });
     } catch {
       fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
@@ -134,7 +136,8 @@ export async function bindHostedManagedSignerProvider({
       keyVersion: active.key_version,
       publicKey: normalizedPublicKey,
       version,
-      algorithm
+      algorithm,
+      ...(operationGate === undefined ? {} : { operationGate })
     });
   } catch {
     fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.CONFIG);
@@ -191,6 +194,8 @@ function validateInput(value) {
     || typeof value.keyId !== "string" || !KEY_ID.test(value.keyId)
     || !Number.isSafeInteger(value.version) || value.version < 1
     || value.algorithm !== "ed25519" || typeof value.publicKeyFingerprint !== "string" || !SHA256.test(value.publicKeyFingerprint)
+    || (value.operationGate !== undefined && (!value.operationGate
+      || typeof value.operationGate.track !== "function" || typeof value.operationGate.assertAccepting !== "function"))
     || (hasDirectSign && (typeof value.provider.provider_id !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(value.provider.provider_id)
       || /(?:private|secret|credential|diagnostic|debug|trace|token|pem)/iu.test(value.provider.provider_id)))) {
@@ -199,7 +204,7 @@ function validateInput(value) {
 }
 
 function validateRepository(value) {
-  for (const method of ["snapshot", "initialize", "reserveSignature", "startSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature"]) {
+  for (const method of ["snapshot", "initialize", "reserveSignature", "startSignature", "fenceSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature"]) {
     if (typeof value?.[method] !== "function") fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
   }
 }

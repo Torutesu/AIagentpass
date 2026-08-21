@@ -244,6 +244,20 @@ test("maps verifier denial, repository replay/conflict, not-found, rate-limit, a
   assertError(await denied.api.handle(requestFor(denied, { nonce: "device-session-nonce-map-000001" })), 403, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
   assert.equal(denied.calls.repository.length, 0);
 
+  const booleanSuccess = await fixture({ grantVerifier: async () => true });
+  assertError(await booleanSuccess.api.handle(requestFor(booleanSuccess, { nonce: "device-session-nonce-map-000002" })), 403, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
+  assert.equal(booleanSuccess.calls.repository.length, 0);
+
+  const unboundStructuredSuccess = await fixture({ grantVerifier: async () => ({ verified: true }) });
+  assertError(await unboundStructuredSuccess.api.handle(requestFor(unboundStructuredSuccess, { nonce: "device-session-nonce-map-000003" })), 403, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
+  assert.equal(unboundStructuredSuccess.calls.repository.length, 0);
+
+  const substitutedStructuredSuccess = await fixture({
+    grantVerifier: async (grant) => ({ verified: true, grant: { ...grant, statement: { ...grant.statement, grant_id: IDS.otherDevice } } })
+  });
+  assertError(await substitutedStructuredSuccess.api.handle(requestFor(substitutedStructuredSuccess, { nonce: "device-session-nonce-map-000004" })), 403, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
+  assert.equal(substitutedStructuredSuccess.calls.repository.length, 0);
+
   for (const [error, status, code] of [
     [{ code: "ERR_GRANT_CONSUMED", message: "do not expose" }, 409, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_CONFLICT],
     [{ code: "ERR_GRANT_NOT_FOUND", message: "tenant SQL" }, 404, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.NOT_FOUND],

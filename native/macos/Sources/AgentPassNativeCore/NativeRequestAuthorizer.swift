@@ -123,10 +123,16 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
             guard evidence.capabilityID == parsedCapability.capabilityID, evidence.capabilitySequence == parsedCapability.sequence else { throw AgentPassNativeError.unauthorizedClient("request_evidence_conflict") }
             throw AgentPassNativeError.unauthorizedClient("request_replay")
         }
-        let capability = try capabilityValidator.verify(capabilityData, audience: NativeCapabilityAudience(agentID: authorized.agentID, deviceID: deviceID), nowMilliseconds: nowMilliseconds)
+        let capability = try capabilityValidator.verifyAndConsume(
+            capabilityData,
+            audience: NativeCapabilityAudience(agentID: authorized.agentID, deviceID: deviceID),
+            operation: "git.commit.sign",
+            repository: authorized.repository,
+            branch: authorized.branch,
+            remote: authorized.remote,
+            nowMilliseconds: nowMilliseconds
+        )
         try v2ControlManager?.validateCapability(capabilityID: capability.capabilityID)
-        guard NativeControlBundleV2Codec.policyScopeAllows(capability.scope, operation: "git.commit.sign", repository: authorized.repository, branch: authorized.branch, remote: authorized.remote) else { throw AgentPassNativeError.unauthorizedClient("capability_scope_denied") }
-        try capabilityValidator.consume(capability.capabilityID)
         try requestEvidenceStore?.record(requestID: authorized.requestID, capabilityID: capability.capabilityID, capabilitySequence: capability.sequence)
         return authorized
     }

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 import { loadSqlMigrations } from "../../apps/cloud-api/src/postgres/migration-runner.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -36,6 +37,8 @@ const AUTHORITY_TABLES = Object.freeze([
   ["agents", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["agent_session_grants", "t.organization_id = ANY($1::uuid[])", "security"],
   ["agent_sessions", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["agent_session_signing_capability_reservations", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["agent_capability_sequence_heads", "t.organization_id = ANY($1::uuid[])", "security"],
   ["qualification_grant_control_heads", "t.organization_id = ANY($1::uuid[])", "security"],
   ["qualification_grant_batches", "t.organization_id = ANY($1::uuid[])", "security"],
   ["qualification_grant_batch_steps", "t.organization_id = ANY($1::uuid[])", "security"],
@@ -85,17 +88,26 @@ const AUTHORITY_TABLES = Object.freeze([
   ["managed_signer_keys", "$1::uuid[] IS NOT NULL", "security"],
   ["managed_signer_key_lifecycle_operations", "$1::uuid[] IS NOT NULL", "security"],
   ["managed_signer_signing_idempotency", "$1::uuid[] IS NOT NULL", "security"],
+  ["managed_signer_provider_operations", "$1::uuid[] IS NOT NULL", "security"],
   ["platform_promotion_approvals", "$1::uuid[] IS NOT NULL", "security"],
+  ["platform_promotion_deployments", "$1::uuid[] IS NOT NULL", "security"],
   ["platform_promotion_issuances", "$1::uuid[] IS NOT NULL", "security"],
-  ["platform_deployment_state", "$1::uuid[] IS NOT NULL", "security"],
-  ["platform_promotion_audit_events", "$1::uuid[] IS NOT NULL", "security"],
+  ["platform_principals", "$1::uuid[] IS NOT NULL", "security"],
+  ["platform_operator_assignments", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["platform_credentials", "$1::uuid[] IS NOT NULL", "security"],
+  ["platform_sessions", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["platform_session_challenges", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["platform_authorization_proofs", "t.organization_id = ANY($1::uuid[])", "security"],
   ["schema_migration_attempts", "$1::uuid[] IS NOT NULL", "migration"]
 ]);
 const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => name));
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "47";
+// The authority snapshot must follow the same catalog/files head as runtime
+// readiness. Keep the string representation because the durable manifest
+// protocol stores migration versions as decimal strings.
+export const REQUIRED_MIGRATION_VERSION = String(POSTGRES_SCHEMA_HEAD.version);
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({

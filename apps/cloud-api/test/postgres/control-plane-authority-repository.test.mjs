@@ -20,6 +20,7 @@ const ids = {
 };
 const HASH = "a".repeat(64);
 const NOW = "2026-08-13T00:00:00.000Z";
+const DATABASE_NOW = "2026-08-13T00:00:00.000001Z";
 const LATER = "2026-08-13T00:15:00.000Z";
 
 class FakeClient {
@@ -42,9 +43,11 @@ class FakeClient {
     if (text.startsWith("SELECT id\n        FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT organization_id,generation")) return result([{ organization_id: ids.organization, generation: 3 }]);
     if (text.startsWith("SELECT generation\n")) return result([{ generation: 3 }]);
+    if (text.startsWith("SELECT enrollment.device_id,enrollment.proof_version")) return result([{ device_id: ids.device, proof_version: 2, possession_recorded: true }]);
     if (text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], refresh_nonce_key_id: params[4], refresh_nonce_digest: params[5], replayed: false }]);
     if (text.startsWith("SELECT state.organization_id")) return result([{ organization_id: ids.organization, device_id: ids.device, desired_generation: 3, refresh_state: "pending", outbox_id: "88888888-8888-4888-8888-888888888888", refresh_nonce_key_id: "refresh-nonce-v3", refresh_nonce_digest: crypto.createHash("sha256").update(Buffer.alloc(16, 0x42)).digest(), published_at: NOW, expires_at: LATER }]);
     if (text.startsWith("SELECT attempt_count,status,expires_at")) return result([{ attempt_count: 0, status: "pending", expires_at: LATER }]);
+    if (text.startsWith("WITH database_clock AS MATERIALIZED")) return result([{ delivered_at: DATABASE_NOW, expired: false }]);
     if (text.startsWith("SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
     if (text.startsWith("SELECT desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
     if (text.startsWith("UPDATE device_refresh_outbox") && text.includes("attempt_count=$5")) return result([{ outbox_id: params[2], desired_generation: params[3], status: "delivered", attempt_count: params[4] }]);
@@ -62,7 +65,15 @@ class FakeClient {
       if (text.includes("target_type=$2")) return result();
       return result([revocationRow()]);
     }
-    if (text.startsWith("SELECT id AS capability_id")) return result();
+    if (text.startsWith("SELECT public.agentpass_capability_authority_issue(")) {
+      return result([{ result: { state: "issued", capability: { organization_id: params[0], capability_id: params[1], agent_id: params[2], device_id: params[3], sequence: params[4], statement_hash: params[5], expires_at: params[6], revoked_at: null, issued_by_member_id: params[7], issued_membership_version: 1 } } }]);
+    }
+    if (text.startsWith("SELECT public.agentpass_capability_authority_list_revoked(")) {
+      return result([{ result: { state: "listed", capability_ids: [] } }]);
+    }
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
+      return result([{ result: { state: "revoked", capabilities: [], capability_ids: [], revoked_count: 0 } }]);
+    }
     if (text.startsWith("SELECT COALESCE(MAX(sequence)")) return result([{ sequence: 1 }]);
     if (text.startsWith("INSERT INTO revocations")) return result([revocationRow()]);
     if (text.startsWith("SELECT organization_id,device_id,format_epoch,sequence,statement_hash") && text.includes("bundle_heads")) {
@@ -139,7 +150,8 @@ test("exposes a frozen control-plane authority API with migration 0011 gaps clos
   for (const method of [
     "createRevocation", "getRevocation", "listRevocations", "issueCapabilityMetadata", "listRevokedCapabilityIds",
     "assignBundleHead", "acknowledgeBundle", "getBundleAcknowledgement", "ingestDeviceAuditEvents",
-    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState"
+    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState",
+    "ensureInitialDeviceRefresh"
   ]) assert.equal(typeof api[method], "function", method);
   assert.deepEqual(CONTROL_PLANE_SCHEMA_GAPS, []);
   assert.deepEqual(Object.keys(DEVICE_REFRESH_POLL_RETURN_SHAPE), ["organization_id", "device_id", "desired_generation", "refresh_state", "outbox_id", "refresh_nonce_key_id", "refresh_nonce_digest", "published_at", "expires_at"]);
@@ -215,6 +227,10 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   assert.deepEqual(first.snapshot.policy_scope.operations, ["git.commit.sign"]);
   assert.deepEqual(first.snapshot.revoked_devices, [ids.device]);
   assert.equal(first.snapshot.global_revoked, false);
+  const capabilityList = client.calls.find(({ text }) => text.startsWith("SELECT public.agentpass_capability_authority_list_revoked("));
+  assert.ok(capabilityList);
+  assert.deepEqual(capabilityList.params, [ids.organization, NOW, 257]);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT id AS capability_id")), false);
   assert.match(first.snapshot.state_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(first.head.sequence, 1);
   assert.equal(first.head.state_fingerprint, HASH);
@@ -291,6 +307,47 @@ test("authority reduction derives a restart-safe nonce and sends only key id plu
   assert.equal(client.calls.at(-1).text, "COMMIT");
 });
 
+test("initial device activation queues only that device at its existing authority generation", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const queued = await api.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.device,
+    enrollment_id: "99999999-9999-4999-8999-999999999999",
+    requested_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z"
+  });
+  assert.equal(queued.organization_id, ids.organization);
+  assert.equal(queued.device_id, ids.device);
+  assert.equal(queued.desired_generation, 3);
+  assert.equal(queued.state, "queued");
+  assert.match(queued.outbox.outbox_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(queued.outbox.refresh_nonce_key_id, "refresh-nonce-v3");
+  const enqueue = client.calls.find(({ text }) => text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed"));
+  assert.ok(enqueue);
+  assert.equal(enqueue.params[1], ids.organization);
+  assert.equal(enqueue.params[2], ids.device);
+  assert.equal(enqueue.params[3], 3);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT organization_id,generation")), false);
+  assert.equal(client.calls.some(({ text }) => text.includes("agentpass_advance_authority_generation")), false);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("initial device refresh does not create another outbox after the generation is applied", async () => {
+  const client = new FakeClient();
+  client.refreshState = { ...client.refreshState, observed_generation: 3, refresh_state: "applied" };
+  const resultValue = await repository(client).ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.device,
+    enrollment_id: "99999999-9999-4999-8999-999999999999",
+    requested_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z"
+  });
+  assert.equal(resultValue.state, "already_applied");
+  assert.equal(resultValue.outbox, null);
+  assert.equal(client.calls.some(({ text }) => text.includes("agentpass_request_device_refresh")), false);
+});
+
 test("exact revocation replay returns the committed generation without advancing or enqueueing again", async () => {
   class ReplayClient extends FakeClient {
     async query(text, params = []) {
@@ -355,6 +412,11 @@ test("refresh delivery evidence and device fetching state commit atomically with
   assert.equal(client.calls[0].text, "BEGIN");
   assert.ok(client.calls.some(({ text }) => text.startsWith("INSERT INTO device_refresh_delivery_attempts")));
   assert.ok(client.calls.some(({ text }) => text.includes("refresh_state=CASE") && text.includes("'fetching'")));
+  assert.ok(client.calls.some(({ text }) => text.includes("clock_timestamp()") && text.includes("AS expired")));
+  const deliveryWrites = client.calls.filter(({ text }) => text.startsWith("UPDATE device_refresh_outbox") || text.startsWith("INSERT INTO device_refresh_delivery_attempts") || (text.startsWith("UPDATE device_control_plane_state") && text.includes("last_delivered_at")));
+  assert.equal(deliveryWrites.length, 3);
+  assert.equal(deliveryWrites.every(({ params }) => params.includes(DATABASE_NOW)), true);
+  assert.equal(deliveryWrites.some(({ params }) => params.includes(NOW)), false);
   assert.equal(client.calls.flatMap(({ params }) => params).some((value) => typeof value === "string" && /^[A-Za-z0-9_-]{22}$/u.test(value)), false);
   assert.equal(client.calls.at(-1).text, "COMMIT");
 });

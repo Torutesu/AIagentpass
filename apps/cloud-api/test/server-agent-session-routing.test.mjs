@@ -6,7 +6,9 @@ import { createCloudApi } from "../src/server.mjs";
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
 const GRANT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const PATH = `/v1/organizations/${ORGANIZATION_ID}/devices/${DEVICE_ID}/agent-session-grants/${GRANT_ID}/consume`;
+const SIGNING_CAPABILITY_PATH = `/v1/organizations/${ORGANIZATION_ID}/devices/${DEVICE_ID}/agent-sessions/${SESSION_ID}/signing-capabilities`;
 const RESPONSE = { request_id: "33333333-3333-4333-8333-333333333333", accepted: true };
 
 async function startServer(t, options = {}) {
@@ -72,6 +74,25 @@ test("does not expose or fall through the Device API path when the adapter is ab
   assert.equal(response.status, 404);
   assert.equal((await response.json()).error.code, "not_found");
   assert.deepEqual(calls, []);
+});
+
+test("routes the exact signing-capability path through the same raw Device boundary", async (t) => {
+  const calls = [];
+  const rawBody = Buffer.from(`{"request_id":"${GRANT_ID}"}`, "utf8");
+  const base = await startServer(t, {
+    agentSessionDeviceApi: {
+      async handle(input) {
+        calls.push(input);
+        return { status: 201, body: RESPONSE, headers: { "Cache-Control": "no-store" } };
+      }
+    }
+  });
+  const response = await fetch(`${base}${SIGNING_CAPABILITY_PATH}`, { method: "POST", body: rawBody });
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, SIGNING_CAPABILITY_PATH);
+  assert.deepEqual(Buffer.from(calls[0].body), rawBody);
 });
 
 test("does not intercept missing grant IDs, query/trailing slash, case, substitution, or method variants", async (t) => {

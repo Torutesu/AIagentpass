@@ -55,8 +55,13 @@ const RFC3339_UTC_PATTERN =
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
 const CANONICAL_MILLISECOND_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BASE64URL_16_BYTES = /^[A-Za-z0-9_-]{22}$/;
+const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/;
 const BASE64URL_64_BYTES = /^[A-Za-z0-9_-]{86}$/;
 const SAFE_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const SAFE_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const TEAM_ID = /^[A-Z0-9]{10}$/;
+const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/;
+const PEM_PUBLIC_KEY = /^-----BEGIN PUBLIC KEY-----[\s\S]+-----END PUBLIC KEY-----\n?$/;
 const P256_HALF_ORDER = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
 
 export const REFRESH_HINT_TYPE = "agentpass.refresh-hint";
@@ -65,6 +70,10 @@ export const REFRESH_HINT_SIGNATURE_ALGORITHM = "ed25519";
 export const BUNDLE_ACK_SIGNATURE_ALGORITHM = "p256-sha256";
 export const REFRESH_HINT_SIGNATURE_DOMAIN = "AgentPass-Refresh-Hint-v1\0";
 export const BUNDLE_ACK_SIGNATURE_DOMAIN = "AgentPass-Bundle-Ack-v1\0";
+export const ONBOARDING_INVITATION_DELIVERY_TYPE = "agentpass.browser-onboarding.invitation";
+export const ONBOARDING_TRUST_INSTALLATION_ACK_TYPE = "agentpass.browser-onboarding.trust-installation-ack";
+export const ONBOARDING_CONTRACT_VERSION = 1;
+export const ONBOARDING_INVITATION_VERSION = 2;
 export const BUNDLE_ACK_RESULTS = Object.freeze(["applied", "blocked"]);
 export const DEVICE_REFRESH_STATES = Object.freeze([
   "pending",
@@ -318,6 +327,157 @@ export function normalizeBundleAcknowledgement(input) {
   }, issues, "bundle_ack");
 }
 
+/** Public, non-secret local setup data imported by the browser-led flow. */
+export function normalizeOnboardingPreflight(input) {
+  const object = asObject(input, "onboarding_preflight");
+  const issues = [];
+  exactKeys(object, ["version", "platform", "candidate_id", "device_key_fingerprint"], "onboarding_preflight", issues);
+  return finish({
+    version: protocolVersion(object.version, "onboarding_preflight.version", issues),
+    platform: constantString(object.platform, "macos", "onboarding_preflight.platform", issues),
+    candidate_id: boundedPattern(object.candidate_id, SAFE_CANDIDATE_ID, "onboarding_preflight.candidate_id", issues),
+    device_key_fingerprint: boundedPattern(object.device_key_fingerprint, FINGERPRINT, "onboarding_preflight.device_key_fingerprint", issues)
+  }, issues, "onboarding_preflight");
+}
+
+/**
+ * Normalize the only credential-bearing browser delivery envelope. It is a
+ * one-shot in-memory body: the correlation id and nonce may identify a
+ * loopback path, but the invitation itself is never a URL, argv, environment
+ * value, durable document, or authority selector.
+ */
+export function normalizeOnboardingInvitationDelivery(input) {
+  const object = asObject(input, "onboarding_invitation_delivery");
+  const issues = [];
+  exactKeys(object, ["version", "type", "correlation_id", "nonce", "invitation"], "onboarding_invitation_delivery", issues);
+  let invitation;
+  try {
+    invitation = normalizeOnboardingInvitation(object.invitation);
+  } catch (error) {
+    if (error instanceof ProtocolValidationError) issues.push(...error.issues.map((item) => ({ ...item, path: `onboarding_invitation_delivery.${item.path}` })));
+    else issues.push(issue("onboarding_invitation_delivery.invitation", "invalid_value", "invitation is invalid"));
+  }
+  return finish({
+    version: protocolVersion(object.version, "onboarding_invitation_delivery.version", issues),
+    type: constantString(object.type, ONBOARDING_INVITATION_DELIVERY_TYPE, "onboarding_invitation_delivery.type", issues),
+    correlation_id: exactBase64Url(object.correlation_id, 32, BASE64URL_32_BYTES, "onboarding_invitation_delivery.correlation_id", issues),
+    nonce: exactBase64Url(object.nonce, 32, BASE64URL_32_BYTES, "onboarding_invitation_delivery.nonce", issues),
+    invitation
+  }, issues, "onboarding_invitation_delivery");
+}
+
+/** Normalize the secret-free local acknowledgement emitted after trust install. */
+export function normalizeOnboardingTrustInstallationAcknowledgement(input) {
+  const object = asObject(input, "trust_installation_ack");
+  const issues = [];
+  exactKeys(object, [
+    "version", "type", "organization_id", "device_id", "enrollment_id", "device_key_epoch",
+    "control_format_epoch", "control_sequence", "control_statement_hash", "trust_fingerprint", "installed_at", "result"
+  ], "trust_installation_ack", issues);
+  return finish({
+    version: protocolVersion(object.version, "trust_installation_ack.version", issues),
+    type: constantString(object.type, ONBOARDING_TRUST_INSTALLATION_ACK_TYPE, "trust_installation_ack.type", issues),
+    organization_id: uuid(object.organization_id, "trust_installation_ack.organization_id", issues),
+    device_id: uuid(object.device_id, "trust_installation_ack.device_id", issues),
+    enrollment_id: uuid(object.enrollment_id, "trust_installation_ack.enrollment_id", issues),
+    device_key_epoch: positiveSequence(object.device_key_epoch, "trust_installation_ack.device_key_epoch", issues),
+    control_format_epoch: exactInteger(object.control_format_epoch, 2, "trust_installation_ack.control_format_epoch", issues),
+    control_sequence: positiveSequence(object.control_sequence, "trust_installation_ack.control_sequence", issues),
+    control_statement_hash: sha256(object.control_statement_hash, "trust_installation_ack.control_statement_hash", issues),
+    trust_fingerprint: boundedPattern(object.trust_fingerprint, FINGERPRINT, "trust_installation_ack.trust_fingerprint", issues),
+    installed_at: canonicalMillisecondTimestamp(object.installed_at, "trust_installation_ack.installed_at", issues),
+    result: enumValue(object.result, "trust_installation_ack.result", ["installed", "already_installed"], issues)
+  }, issues, "trust_installation_ack");
+}
+
+/** Control ACK is the existing signed bundle ACK under its onboarding name. */
+export function normalizeOnboardingControlAcknowledgement(input) {
+  return normalizeBundleAcknowledgement(input);
+}
+
+export function normalizeOnboardingInvitation(input) {
+  const issues = [];
+  const invitation = normalizeOnboardingInvitationValue(input, issues);
+  if (issues.length) throw new ProtocolValidationError(issues);
+  return finish(invitation, [], "onboarding_invitation");
+}
+
+function normalizeOnboardingInvitationValue(input, issues) {
+  const object = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  exactKeys(object, [
+    "version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform",
+    "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "endpoint",
+    "possession_receipt_verification"
+  ], "onboarding_invitation", issues);
+  const candidate = object.candidate_binding && typeof object.candidate_binding === "object" && !Array.isArray(object.candidate_binding)
+    ? object.candidate_binding : {};
+  exactKeys(candidate, ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"], "onboarding_invitation.candidate_binding", issues);
+  const challenge = object.challenge && typeof object.challenge === "object" && !Array.isArray(object.challenge) ? object.challenge : {};
+  exactKeys(challenge, ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"], "onboarding_invitation.challenge", issues);
+  const verification = object.possession_receipt_verification && typeof object.possession_receipt_verification === "object" && !Array.isArray(object.possession_receipt_verification)
+    ? object.possession_receipt_verification : {};
+  exactKeys(verification, ["key_id", "algorithm", "public_key"], "onboarding_invitation.possession_receipt_verification", issues);
+  const invitation = {
+    version: exactInteger(object.version, ONBOARDING_INVITATION_VERSION, "onboarding_invitation.version", issues),
+    proof_version: exactInteger(object.proof_version, ONBOARDING_INVITATION_VERSION, "onboarding_invitation.proof_version", issues),
+    enrollment_id: uuid(object.enrollment_id, "onboarding_invitation.enrollment_id", issues),
+    organization_id: uuid(object.organization_id, "onboarding_invitation.organization_id", issues),
+    device_id: uuid(object.device_id, "onboarding_invitation.device_id", issues),
+    label: stringValue(object.label, "onboarding_invitation.label", { maxBytes: LIMITS.maxNameBytes, nonEmpty: true }, issues),
+    platform: constantString(object.platform, "macos", "onboarding_invitation.platform", issues),
+    candidate_binding: {
+      version: exactInteger(candidate.version, 1, "onboarding_invitation.candidate_binding.version", issues),
+      enrollment_id: uuid(candidate.enrollment_id, "onboarding_invitation.candidate_binding.enrollment_id", issues),
+      organization_id: uuid(candidate.organization_id, "onboarding_invitation.candidate_binding.organization_id", issues),
+      device_id: uuid(candidate.device_id, "onboarding_invitation.candidate_binding.device_id", issues),
+      candidate_id: boundedPattern(candidate.candidate_id, SAFE_CANDIDATE_ID, "onboarding_invitation.candidate_binding.candidate_id", issues),
+      artifact_sha256: sha256(candidate.artifact_sha256, "onboarding_invitation.candidate_binding.artifact_sha256", issues),
+      source_commit: boundedPattern(candidate.source_commit, /^[0-9a-f]{40}$/, "onboarding_invitation.candidate_binding.source_commit", issues),
+      team_id: boundedPattern(candidate.team_id, TEAM_ID, "onboarding_invitation.candidate_binding.team_id", issues),
+      device_key_fingerprint: boundedPattern(candidate.device_key_fingerprint, FINGERPRINT, "onboarding_invitation.candidate_binding.device_key_fingerprint", issues),
+      expires_at: canonicalMillisecondTimestamp(candidate.expires_at, "onboarding_invitation.candidate_binding.expires_at", issues)
+    },
+    challenge_id: uuid(object.challenge_id, "onboarding_invitation.challenge_id", issues),
+    nonce: exactBase64Url(object.nonce, 32, BASE64URL_32_BYTES, "onboarding_invitation.nonce", issues),
+    expires_at: canonicalMillisecondTimestamp(object.expires_at, "onboarding_invitation.expires_at", issues),
+    challenge: {
+      challenge_id: uuid(challenge.challenge_id, "onboarding_invitation.challenge.challenge_id", issues),
+      nonce: exactBase64Url(challenge.nonce, 32, BASE64URL_32_BYTES, "onboarding_invitation.challenge.nonce", issues),
+      expires_at: canonicalMillisecondTimestamp(challenge.expires_at, "onboarding_invitation.challenge.expires_at", issues),
+      candidate_id: boundedPattern(challenge.candidate_id, SAFE_CANDIDATE_ID, "onboarding_invitation.challenge.candidate_id", issues),
+      device_key_fingerprint: boundedPattern(challenge.device_key_fingerprint, FINGERPRINT, "onboarding_invitation.challenge.device_key_fingerprint", issues)
+    },
+    credential: exactBase64Url(object.credential, 32, BASE64URL_32_BYTES, "onboarding_invitation.credential", issues),
+    endpoint: boundedPattern(object.endpoint, /^\/v1\/enrollments\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "onboarding_invitation.endpoint", issues),
+    possession_receipt_verification: {
+      key_id: safeKeyId(verification.key_id, "onboarding_invitation.possession_receipt_verification.key_id", issues),
+      algorithm: enumValue(verification.algorithm, "onboarding_invitation.possession_receipt_verification.algorithm", ["ed25519", "p256-sha256"], issues),
+      public_key: stringValue(verification.public_key, "onboarding_invitation.possession_receipt_verification.public_key", { maxBytes: LIMITS.maxPublicKeyBytes, nonEmpty: true, allowNewlines: true }, issues)
+    }
+  };
+  if (invitation.possession_receipt_verification.public_key !== undefined && !PEM_PUBLIC_KEY.test(invitation.possession_receipt_verification.public_key)) issues.push(issue("onboarding_invitation.possession_receipt_verification.public_key", "invalid_public_key", "expected a PEM public key"));
+  if (typeof invitation.possession_receipt_verification.public_key === "string" && /PRIVATE KEY/i.test(invitation.possession_receipt_verification.public_key)) issues.push(issue("onboarding_invitation.possession_receipt_verification.public_key", "invalid_public_key", "private key material is not allowed"));
+  if (invitation.challenge_id !== undefined && invitation.enrollment_id !== undefined && invitation.challenge_id !== invitation.enrollment_id) issues.push(issue("onboarding_invitation.challenge_id", "inconsistent_value", "challenge_id must equal enrollment_id"));
+  if (invitation.endpoint !== undefined && invitation.enrollment_id !== undefined && invitation.endpoint !== `/v1/enrollments/${invitation.enrollment_id}`) issues.push(issue("onboarding_invitation.endpoint", "inconsistent_value", "endpoint must match enrollment_id"));
+  for (const [label, actual, expected] of [["candidate_binding.enrollment_id", invitation.candidate_binding.enrollment_id, invitation.enrollment_id], ["candidate_binding.organization_id", invitation.candidate_binding.organization_id, invitation.organization_id], ["candidate_binding.device_id", invitation.candidate_binding.device_id, invitation.device_id], ["candidate_binding.expires_at", invitation.candidate_binding.expires_at, invitation.expires_at], ["challenge.challenge_id", invitation.challenge.challenge_id, invitation.challenge_id], ["challenge.nonce", invitation.challenge.nonce, invitation.nonce], ["challenge.expires_at", invitation.challenge.expires_at, invitation.expires_at], ["challenge.candidate_id", invitation.challenge.candidate_id, invitation.candidate_binding.candidate_id], ["challenge.device_key_fingerprint", invitation.challenge.device_key_fingerprint, invitation.candidate_binding.device_key_fingerprint]]) {
+    if (leftValueMismatch(label, actual, expected)) issues.push(issue(`onboarding_invitation.${label}`, "inconsistent_value", "invitation binding does not match"));
+  }
+  return invitation;
+}
+
+function leftValueMismatch(_label, actual, expected) {
+  return actual !== undefined && expected !== undefined && actual !== expected;
+}
+
+function boundedPattern(value, pattern, path, issues) {
+  if (typeof value !== "string") {
+    issues.push(issue(path, "invalid_type", "expected a bounded string"));
+    return undefined;
+  }
+  if (Buffer.byteLength(value, "utf8") > LIMITS.maxStringBytes || !pattern.test(value)) issues.push(issue(path, "invalid_value", "value is outside the bounded contract"));
+  return value;
+}
+
 // This is the closed public inventory of the wire contracts exposed by this
 // package.  Keep this data deliberately boring: it is metadata for discovery
 // and compatibility checks, not an authority document.  In particular, it
@@ -328,7 +488,11 @@ const CONTRACT_DEFINITIONS = [
   { kind: "operation_decision_v1", version: PROTOCOL_VERSION, purpose: "operation-decision", parser_version: PROTOCOL_VERSION },
   { kind: "audit_event_v1", version: PROTOCOL_VERSION, purpose: "audit-event", parser_version: PROTOCOL_VERSION },
   { kind: "refresh_hint_v1", version: PROTOCOL_VERSION, purpose: "refresh-hint", parser_version: PROTOCOL_VERSION },
-  { kind: "bundle_ack_v1", version: PROTOCOL_VERSION, purpose: "bundle-ack", parser_version: PROTOCOL_VERSION }
+  { kind: "bundle_ack_v1", version: PROTOCOL_VERSION, purpose: "bundle-ack", parser_version: PROTOCOL_VERSION },
+  { kind: "onboarding_preflight_v1", version: ONBOARDING_CONTRACT_VERSION, purpose: "onboarding-preflight", parser_version: ONBOARDING_CONTRACT_VERSION },
+  { kind: "onboarding_invitation_delivery_v1", version: ONBOARDING_CONTRACT_VERSION, purpose: "onboarding-invitation-delivery", parser_version: ONBOARDING_CONTRACT_VERSION },
+  { kind: "onboarding_trust_installation_ack_v1", version: ONBOARDING_CONTRACT_VERSION, purpose: "onboarding-trust-installation-ack", parser_version: ONBOARDING_CONTRACT_VERSION },
+  { kind: "onboarding_control_ack_v1", version: ONBOARDING_CONTRACT_VERSION, purpose: "onboarding-control-ack", parser_version: ONBOARDING_CONTRACT_VERSION }
 ];
 
 const CONTRACT_PARSERS = Object.freeze({
@@ -337,7 +501,11 @@ const CONTRACT_PARSERS = Object.freeze({
   operation_decision_v1: normalizeDecision,
   audit_event_v1: normalizeAuditEvent,
   refresh_hint_v1: normalizeRefreshHint,
-  bundle_ack_v1: normalizeBundleAcknowledgement
+  bundle_ack_v1: normalizeBundleAcknowledgement,
+  onboarding_preflight_v1: normalizeOnboardingPreflight,
+  onboarding_invitation_delivery_v1: normalizeOnboardingInvitationDelivery,
+  onboarding_trust_installation_ack_v1: normalizeOnboardingTrustInstallationAcknowledgement,
+  onboarding_control_ack_v1: normalizeOnboardingControlAcknowledgement
 });
 const PUBLIC_CONTRACT_METADATA_KEYS = Object.freeze(["kind", "version", "purpose", "parser_version"]);
 
@@ -416,6 +584,22 @@ export function parseBundleAcknowledgementJson(input) {
   return parseContractJson("bundle_ack_v1", input);
 }
 
+export function parseOnboardingPreflightJson(input) {
+  return parseContractJson("onboarding_preflight_v1", input);
+}
+
+export function parseOnboardingInvitationDeliveryJson(input) {
+  return parseContractJson("onboarding_invitation_delivery_v1", input);
+}
+
+export function parseOnboardingTrustInstallationAcknowledgementJson(input) {
+  return parseContractJson("onboarding_trust_installation_ack_v1", input);
+}
+
+export function parseOnboardingControlAcknowledgementJson(input) {
+  return parseContractJson("onboarding_control_ack_v1", input);
+}
+
 /**
  * Decode any public contract through the parser selected by the closed
  * manifest. Unknown kinds fail before the input crosses the JSON boundary.
@@ -438,6 +622,10 @@ export function validateDecision(input) { return normalizeDecision(input); }
 export function validateAuditEvent(input) { return normalizeAuditEvent(input); }
 export function validateRefreshHint(input) { return normalizeRefreshHint(input); }
 export function validateBundleAcknowledgement(input) { return normalizeBundleAcknowledgement(input); }
+export function validateOnboardingPreflight(input) { return normalizeOnboardingPreflight(input); }
+export function validateOnboardingInvitationDelivery(input) { return normalizeOnboardingInvitationDelivery(input); }
+export function validateOnboardingTrustInstallationAcknowledgement(input) { return normalizeOnboardingTrustInstallationAcknowledgement(input); }
+export function validateOnboardingControlAcknowledgement(input) { return normalizeOnboardingControlAcknowledgement(input); }
 
 export function isValidAgentDescriptor(input) { return valid(normalizeAgentDescriptor, input); }
 export function isValidScope(input) { return valid(normalizeScope, input); }
@@ -446,6 +634,10 @@ export function isValidDecision(input) { return valid(normalizeDecision, input);
 export function isValidAuditEvent(input) { return valid(normalizeAuditEvent, input); }
 export function isValidRefreshHint(input) { return valid(normalizeRefreshHint, input); }
 export function isValidBundleAcknowledgement(input) { return valid(normalizeBundleAcknowledgement, input); }
+export function isValidOnboardingPreflight(input) { return valid(normalizeOnboardingPreflight, input); }
+export function isValidOnboardingInvitationDelivery(input) { return valid(normalizeOnboardingInvitationDelivery, input); }
+export function isValidOnboardingTrustInstallationAcknowledgement(input) { return valid(normalizeOnboardingTrustInstallationAcknowledgement, input); }
+export function isValidOnboardingControlAcknowledgement(input) { return valid(normalizeOnboardingControlAcknowledgement, input); }
 
 function normalizePatternSet(input, path, issues, required) {
   const object = input === undefined && !required ? {} : asObject(input, path);

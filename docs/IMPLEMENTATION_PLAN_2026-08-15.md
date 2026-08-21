@@ -5,7 +5,7 @@ Status: active
 Planning baseline: `codex/agent-platform` after the C2 immutable audit-export
 download, verification, Human BFF, and Console checkpoint
 
-Planning date: 2026-08-15
+Planning date: 2026-08-15; execution ledger refreshed 2026-08-16
 
 Current evidence authority: the dated
 [production-readiness audit](PRODUCTION_READINESS_AUDIT_2026-08-20.md) is the
@@ -603,16 +603,12 @@ against their stored SHA-256, rebound to the exact identity/range, root-folded,
 and returned with the historical-key-verified anchor. New admin events use the
 canonical v2 writer and are independently recomputed; legacy v1 remains
 explicitly linkage-only. C2's remaining product surface is the Human BFF/API
-and Console workflow. C3 has an approval authority but does not yet have the
-managed-signer transaction or atomic deployment transition. Migration
-`0047_platform_promotion_issuance.sql` and the first repository boundary now
-exist locally: candidate/artifact/qualification and approval digests are
-immutable, one open reservation is allowed per deployment/environment, claims
-are opaque and fenced, terminal outcomes are closed, and deployment
-generations are monotonic. The repository supports reservation, exact replay,
-commit, uncertain, and rejection paths but is not yet composed into Cloud
-runtime/API or qualified against real PostgreSQL; no C3 production evidence is
-claimed.
+and Console workflow. C3 now has a locally committed foundation in `4343b0f`:
+promotion-evidence v3 signing and historical verification, migration 0047,
+the deployment/promotion ledger repository, and a fail-closed issuance state
+machine. It is not yet runtime-enabled. Commit-bound cryptographic
+verification, historical lifecycle resolution, catalog/runtime composition,
+the platform-operator API, and fresh-PostgreSQL qualification remain open.
 
 The next implementation commits, in dependency order, are:
 
@@ -630,14 +626,18 @@ The next implementation commits, in dependency order, are:
    and returns a deeply frozen public result. Signer acceptance with an unknown
    commit outcome becomes a durable uncertain state; replay never re-signs or
    re-snapshots.
-4. `C3-promotion-ledger`: persist candidate identity, artifact/manifest/SBOM
+4. `C3-promotion-ledger` — foundation committed locally in `4343b0f`: persist candidate identity, artifact/manifest/SBOM
    digests, the exact qualification-report set, approval digest, signer
    lifecycle, opaque claim lease, provider operation, and deployment transition.
-   Concurrent promotions for one deployment/environment are serialized.
-5. `C3-runtime`: resolve an unexpired environment quorum, issue promotion
+   Concurrent promotions for one deployment/environment are serialized. The
+   migration still requires catalog/authority-manifest registration and a
+   fresh PostgreSQL privilege/race run before this item closes.
+5. `C3-runtime` — signer/service primitives committed locally in `4343b0f`:
+   resolve an unexpired environment quorum, issue promotion
    evidence v3 through the promotion-only managed signer, self-verify it, and
    commit evidence plus deployment state atomically. Rebuild-on-promotion and
-   v2 issuance are rejected.
+   v2 issuance are rejected. The Cloud runtime and commit-bound independent
+   verifier composition remain open.
 6. `C2/C3-apis-console`: expose bounded Human-BFF audit export operations and a
    separate platform-operator promotion surface. Add role/recent-WebAuthn/CSRF/
    `If-Match`/idempotency enforcement, redacted DTOs, and Console loading,
@@ -940,3 +940,174 @@ rollback notes, telemetry/privacy review, and evidence-index update. CI success
 on mocks is implementation evidence only. Real KMS, protected PostgreSQL,
 physical Mac, notarization, browser E2E, staging drills, and independent review
 must be labeled separately and cannot be inferred from unit-test success.
+
+## 10. Forward execution ledger — 2026-08-16
+
+This ledger is the short operational view of the remaining implementation. It
+does not replace the security gates above. Source-complete means code and local
+tests exist; qualified means the exact pushed source passed the named external
+or physical evidence lane.
+
+### N1 — source-bound regression closure
+
+Current boundary: `6de3b1b` adds fail-closed hosted signer drain checkpoints;
+`faf48e2` adds secret-free P0-B scenario diagnostics; `919974a` protects the
+final active organization owner in Console. All changes are pushed to
+`github/codex/agent-platform`. GitHub Actions run `31897993653` is the source
+qualification run for this boundary.
+
+Implementation steps:
+
+1. Require terminal success from root tests, browser E2E, PostgreSQL integration,
+   PostgreSQL 16 authority, PostgreSQL 17 authority, and P0-B live process.
+2. If P0-B fails, retain only the stable scenario code; diagnose through the
+   scenario's bounded harness without printing child output or credentials.
+3. Fix any failure in a focused commit, rerun its local suite, push, and require
+   a new all-green source-bound run.
+
+Exit gate: the exact head has six terminal green jobs, no unexpected skip, a
+clean worktree, and a matching remote branch SHA.
+
+### N2 — Human authority and Console completion
+
+Implementation order:
+
+1. Finish last-owner and last-usable-passkey protection in both authoritative
+   PostgreSQL races and browser UX. A partial page must never be treated as a
+   complete member or credential set.
+2. Complete invitation accept/revoke/reissue journeys with one-use tokens,
+   idempotency, expiry, cross-tenant hiding, concurrent acceptance, and an
+   authoritative post-mutation read. No token may enter a URL, durable browser
+   storage, telemetry, or rendered error.
+3. Complete passkey registration, rename, revoke, clone/sign-count response,
+   recovery re-enrollment, session list, self/admin revoke, and session/epoch
+   invalidation. Every high-risk action uses operation-bound recent WebAuthn.
+4. Exercise Owner/Admin/Auditor/Viewer matrices for organization, membership,
+   invitation, credential, session, recovery, Platform assignment, and policy
+   changes, including stale `If-Match`, replay, lost response, and concurrent
+   mutation.
+5. Emit immutable, tenant-bound, secret-free audit events in the same
+   transaction as every authority reduction.
+
+Exit gate: two-connection PostgreSQL races and deployed-like Playwright tests
+prove no last-owner/last-credential lockout, no caller-selected authority, no
+cross-tenant disclosure, and immediate stale-session denial.
+
+### N3 — browser-first onboarding and thin helper
+
+Implementation order:
+
+1. Freeze one resumable state machine: GitHub identity, first organization,
+   WebAuthn, device enrollment, loopback helper handoff, Agent Session
+   policy/scope/TTL, editor setup, and signed-commit verification.
+2. Derive resume state from Cloud and the local setup journal; browser refresh,
+   closure, listener expiry, Cloud timeout, CLI interruption, native restart,
+   and a lost definitive enrollment response must not reuse an invitation or
+   repeat a definitive POST.
+3. Keep the loopback nonce and credential-bearing invitation memory-only. Add
+   browser URL/DOM/storage/network-log and process argv/environment/log/crash
+   leakage scans.
+4. Qualify exact Origin/Host/nonce/candidate/fingerprint/ACK bindings and
+   Private Network Access behavior in supported production browsers.
+5. Complete Japanese loading, retryable, terminal, unsupported-hardware,
+   expired-handoff, stale-control, and editor-drift guidance. The native app
+   remains an optional status surface; the signed helper and CLI own local
+   authority.
+
+Exit gate: a non-engineer starts one command, completes the browser journey,
+and reaches two verified unattended commits without manually copying an ID,
+fingerprint, endpoint, or invitation in the normal path.
+
+### N4 — immutable macOS distribution
+
+Implementation order:
+
+1. Freeze the helper/XPC/CLI/editor protocol and package inventory, then build
+   one universal artifact for Apple silicon and Intel.
+2. Verify nested identifiers, designated requirements, entitlements,
+   provisioning profiles, launchd definitions, ownership, permissions, receipt,
+   SBOM, and protected-state exclusions before signing.
+3. Sign nested code with Developer ID Application, sign the PKG with Developer
+   ID Installer, notarize, staple, and verify Gatekeeper offline.
+4. Publish direct download and Homebrew metadata that install the exact same PKG
+   digest; neither channel may rebuild or repackage.
+5. Run clean install, upgrade, failed upgrade, rollback, uninstall-preserve,
+   reinstall, purge, reboot, sleep/wake, Secure Enclave loss, and key rotation
+   on Apple silicon/Secure Enclave and Intel/T2 lanes.
+
+External inputs: protected Apple Developer identities, notarization API
+credentials, and clean physical runners. Source work may complete without these
+inputs, but release qualification cannot.
+
+Exit gate: source, manifest, SBOM, Team ID, notarization ticket, package receipt,
+download, Homebrew metadata, and both signed hardware reports bind one digest.
+
+### N5 — PostgreSQL and eight-purpose managed signer productionization
+
+Implementation order:
+
+1. Complete all-eight-purpose readiness and fixed-cardinality redacted metrics;
+   partial, shared, stale, disabled, wrong-algorithm, or fallback-backed signer
+   configurations remain unready.
+2. Close drain ordering across HTTP admission, reservation, database boundaries,
+   provider invocation, reconciliation, maintenance workers, providers, and
+   PostgreSQL. A race that crosses the provider boundary becomes durable
+   uncertainty, never blind replay.
+3. Qualify migrator/app/backup roles, TLS `verify-full`, statement/lock/idle
+   deadlines, bounded pools, migration locks, encrypted backup, isolated PITR
+   restore, authority comparison, rollback, RPO, and RTO.
+4. Provision eight purpose-separated, version-pinned, non-exportable AWS/GCP
+   managed keys with exact IAM and no local/file fallback.
+5. Run two API instances through contention, throttling, outage, lost response,
+   malformed receipt, signature/public-key substitution, rotation, emergency
+   disable, database failover, and lost `COMMIT` response.
+
+External inputs: protected AWS/GCP projects/accounts, IAM principals, managed
+keys, and protected PostgreSQL. The repository harness must reject missing
+inputs rather than silently simulate production evidence.
+
+Exit gate: each operation converges to one verified committed result or one
+bounded operator-actionable terminal state, and all eight purposes pass an
+independently verifiable zero-skip evidence bundle.
+
+### N6 — agent E2E, staging, review, and promotion
+
+Implementation order:
+
+1. Qualify Claude Code, then Cursor, against the same process/repository-bound
+   adapter: two unattended signed commits, hostile sibling/executable/path/
+   repository substitution, contention, expiry, budget, revocation, restart,
+   network loss, Cloud response loss, and audit durability failure.
+2. Deploy immutable Console/API/worker images, schema, PostgreSQL, TLS/DNS,
+   managed signers, rate limits, telemetry, alerts, and the exact N4 package to
+   staging.
+3. Rehearse canary, drain, rollback, migration, failover, PITR, signer rotation
+   and outage, emergency stop, owner recovery, uncertain-result adjudication,
+   and incident response.
+4. Commission independent review of local privilege/XPC, loopback handoff,
+   WebAuthn/session/tenant isolation, replay/idempotency, KMS/IAM, package/update
+   supply chain, audit/recovery, privacy, and denial of service. Close every
+   critical/high and retest security-relevant medium finding.
+5. Promote the exact staging image and PKG digests with signed promotion
+   evidence; never rebuild between qualification and production.
+
+Exit gate: production rollback and restore are measured, revocation bounds are
+recorded, no critical/high finding remains, and every deployed artifact resolves
+to the qualified source and digest.
+
+### Parallel lanes and merge discipline
+
+- Lane A: N2 Human authority, then the corresponding Console vertical slices.
+- Lane B: N3 onboarding state machine and thin-helper browser qualification.
+- Lane C: N5 source hardening; protected real-provider/restore evidence follows
+  only after source-bound CI is green.
+- Lane D: N4 packaging may advance against the frozen protocol, while signing,
+  notarization, and physical qualification remain protected gates.
+- N6 agent E2E waits for the matching N2/N3/N5 authority and the exact N4
+  candidate. Production promotion waits for every prior gate.
+
+Every merge unit must be independently reviewable, have focused negative tests,
+pass affected regression suites, contract validation, lint, whitespace and
+secret scans, update the relevant runbook, be committed and pushed, and receive
+source-bound CI. External evidence is attached to the exact commit/artifact; a
+mock, skipped test, simulator, or unsigned build never substitutes for it.

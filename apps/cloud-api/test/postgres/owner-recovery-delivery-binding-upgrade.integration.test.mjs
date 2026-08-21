@@ -8,6 +8,7 @@ import {
   loadSqlMigrations,
   migrationChecksum
 } from "../../src/postgres/migration-runner.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const applicationVersion = "owner-recovery-delivery-binding-upgrade-qualification";
@@ -25,7 +26,7 @@ test("0034 to 0035 quarantines legacy delivery, preserves terminals, and starts 
   });
 
   const migrations = await loadSqlMigrations();
-  assert.equal(migrations.length, 46);
+  assert.equal(migrations.length, POSTGRES_SCHEMA_HEAD.migration_count);
   const through35 = migrations.slice(0, 35);
 
   const before35Client = await pool.connect();

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildTestEnvironment,
+  liveBrowserFailureReason,
   parseArgs,
   parseProtectedEnvironment,
   prepareQualificationOutput,
@@ -60,6 +61,16 @@ test("test environment overrides stale external-disable state without printing s
   });
 });
 
+test("live browser scenario filter is passed through the qualified child environment", () => {
+  const env = buildTestEnvironment({
+    PATH: "/bin",
+    P0B_LIVE_BROWSER_SCENARIO: "accepts keyboard wake"
+  }, { P0B_POSTGRES_ADMIN_URL: ADMIN_URL });
+  assert.equal(env.P0B_LIVE_BROWSER_SCENARIO, "accepts keyboard wake");
+  assert.throws(() => buildTestEnvironment({ P0B_LIVE_BROWSER_SCENARIO: "bad\nfilter" }, {}), /browser scenario filter is invalid/);
+  assert.throws(() => buildTestEnvironment({ P0B_LIVE_BROWSER_SCENARIO: "x".repeat(129) }, {}), /browser scenario filter is invalid/);
+});
+
 test("qualification output is absolute, private, and removes stale evidence before a run", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-report-test-"));
   const output = path.join(directory, "qualification.json");
@@ -83,4 +94,28 @@ test("diagnostic reason is stable and code-only", () => {
     fixtureTimeoutMs: 1200,
     fixtureImage: "postgres:17-alpine"
   });
+});
+
+test("preserves a hard child timeout over a provisional browser marker", () => {
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_timeout",
+    internal: { timed_out: true, safe_failure_code: "admin_device_revoke" }
+  }), "child_timeout");
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_signal",
+    internal: { timed_out: false, safe_failure_code: "admin_device_revoke" }
+  }), "child_exit_nonzero_admin_device_revoke");
+  assert.equal(liveBrowserFailureReason({
+    reason: "child_exit_nonzero",
+    internal: { timed_out: false, safe_failure_code: null }
+  }), "child_exit_nonzero");
+});
+
+test("every static live-browser safe failure marker is allow-listed by the orchestrator", async () => {
+  const browserSource = await fs.readFile(new URL("../../test/p0b-live-browser.integration.test.mjs", import.meta.url), "utf8");
+  const runnerSource = await fs.readFile(new URL("./run-live-process.mjs", import.meta.url), "utf8");
+  const browserMarkers = new Set([...browserSource.matchAll(/["'](P0B_SAFE_[A-Z0-9_]+_FAILED)["']/gu)].map((match) => match[1]));
+  const runnerMarkers = new Set([...runnerSource.matchAll(/["'](P0B_SAFE_[A-Z0-9_]+_FAILED)["']/gu)].map((match) => match[1]));
+  assert.ok(browserMarkers.size > 0);
+  assert.deepEqual([...browserMarkers].filter((marker) => !runnerMarkers.has(marker)), []);
 });

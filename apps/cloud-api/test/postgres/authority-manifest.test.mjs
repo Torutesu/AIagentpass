@@ -16,6 +16,7 @@ import {
   compareAuthorityManifests,
   createAuthorityManifest,
   digestBackupArtifact,
+  REQUIRED_MIGRATION_VERSION,
   readBoundedRegularFile,
   sealAuthorityManifest,
   verifyAuthorityManifest,
@@ -25,14 +26,14 @@ import {
 } from "../../../../scripts/postgres/authority-manifest.mjs";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
-const PLATFORM_MIGRATION_URL = new URL("../../../../contracts/postgres/0047_platform_promotion_issuance.sql", import.meta.url);
+const PROMOTION_AUTHORITY_MIGRATION_URL = new URL("../../../../contracts/postgres/0048_platform_promotion_authority_boundary.sql", import.meta.url);
 const AUTHORITY_MANIFEST_CONTRACT_URL = new URL("../../../../scripts/postgres/authority-manifest.v1.json", import.meta.url);
 const TABLES = [
   "organizations", "members", "memberships", "human_sessions", "webauthn_credentials", "webauthn_challenges", "upstream_identities",
-  "devices", "device_enrollments", "release_candidates", "device_enrollment_possession_receipts", "agents", "agent_session_grants", "agent_sessions", "qualification_grant_control_heads", "qualification_grant_batches", "qualification_grant_batch_steps", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements",
+  "devices", "device_enrollments", "release_candidates", "device_enrollment_possession_receipts", "agents", "agent_session_grants", "agent_sessions", "agent_session_signing_capability_reservations", "agent_capability_sequence_heads", "qualification_grant_control_heads", "qualification_grant_batches", "qualification_grant_batch_steps", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements",
   "cloud_agent_audit_heads", "cloud_agent_audit_events",
   "admin_audit_heads", "admin_audit_events", "outbox_events", "organization_invitations", "device_audit_events", "device_audit_heads",
-  "device_audit_gaps", "device_audit_export_heads", "device_audit_export_entries", "audit_export_issuances", "audit_export_payloads", "idempotency_records", "device_request_nonces", "rate_limit_buckets", "anonymous_rate_limit_buckets", "human_identity_assertion_replays", "owner_recovery_requests", "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_outbox", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_retention_ledger", "owner_recovery_webauthn_challenges", "owner_recovery_idempotency_records", "control_plane_authority_generations", "device_key_epochs", "device_control_plane_state", "control_bundle_statements", "device_refresh_outbox", "device_refresh_delivery_attempts", "device_bundle_acknowledgements", "device_manual_wake_events", "device_manual_wake_requests", "managed_signer_key_lifecycles", "managed_signer_keys", "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency", "platform_promotion_approvals", "platform_promotion_issuances", "platform_deployment_state", "platform_promotion_audit_events", "schema_migration_attempts"
+  "device_audit_gaps", "device_audit_export_heads", "device_audit_export_entries", "audit_export_issuances", "audit_export_payloads", "idempotency_records", "device_request_nonces", "rate_limit_buckets", "anonymous_rate_limit_buckets", "human_identity_assertion_replays", "owner_recovery_requests", "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_outbox", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_retention_ledger", "owner_recovery_webauthn_challenges", "owner_recovery_idempotency_records", "control_plane_authority_generations", "device_key_epochs", "device_control_plane_state", "control_bundle_statements", "device_refresh_outbox", "device_refresh_delivery_attempts", "device_bundle_acknowledgements", "device_manual_wake_events", "device_manual_wake_requests", "managed_signer_key_lifecycles", "managed_signer_keys", "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency", "managed_signer_provider_operations", "platform_promotion_approvals", "platform_promotion_deployments", "platform_promotion_issuances", "platform_principals", "platform_operator_assignments", "platform_credentials", "platform_sessions", "platform_session_challenges", "platform_authorization_proofs", "schema_migration_attempts"
 ];
 
 const hash = (value) => crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
@@ -75,7 +76,7 @@ async function emptyManifest(artifact_digest = undefined) {
   return sealAuthorityManifest({
     schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION,
     kind: MANIFEST_KIND,
-    migration_version: "47",
+    migration_version: REQUIRED_MIGRATION_VERSION,
     migrations: migrations.map(({ version, name, checksum }) => ({ version: String(version), name, checksum })),
     tenant_ids: [ORG],
     tenants: [{ organization_id: ORG }],
@@ -108,23 +109,27 @@ test("rejects correlated count drift, invalid constraints, and tenant-integrity 
   await assert.rejects(createAuthorityManifest({ client }), (error) => error.code === DIAGNOSTICS.CROSS_TENANT.code);
 });
 
-test("tracks migration 0047 platform authority objects and runtime boundary exactly", async () => {
+test("tracks migration 0048 authority boundary objects exactly", async () => {
   const contract = JSON.parse(await readFile(AUTHORITY_MANIFEST_CONTRACT_URL, "utf8"));
-  const sql = await readFile(PLATFORM_MIGRATION_URL, "utf8");
-  assert.equal(contract.migration_version, 47);
-  assert.deepEqual(contract.tables, ["platform_promotion_approvals", "platform_promotion_issuances", "platform_deployment_state", "platform_promotion_audit_events"]);
-  assert.deepEqual(contract.functions, ["agentpass_promotion_digest_array_valid", "agentpass_guard_platform_promotion_issuance", "agentpass_guard_platform_deployment_generation", "agentpass_guard_platform_promotion_audit_event"]);
-  assert.deepEqual(contract.triggers, ["platform_promotion_issuances_guard", "platform_deployment_generation_guard", "platform_promotion_audit_events_guard"]);
-  assert.equal(contract.views.length, 0);
+  const sql = await readFile(PROMOTION_AUTHORITY_MIGRATION_URL, "utf8");
+  assert.equal(contract.migration_version, 48);
+  assert.deepEqual(contract.tables, []);
+  assert.deepEqual(contract.functions, [
+    "agentpass_platform_promotion_issuance_result",
+    "agentpass_platform_promotion_statement_canonical_json",
+    "agentpass_platform_promotion_request_digest",
+    "agentpass_platform_promotion_issuance_reserve",
+    "agentpass_platform_promotion_issuance_replay",
+    "agentpass_platform_promotion_issuance_commit",
+    "agentpass_platform_promotion_issuance_uncertain",
+    "agentpass_platform_promotion_issuance_get"
+  ]);
+  assert.deepEqual(contract.triggers, []);
+  assert.deepEqual(contract.policies, []);
+  assert.deepEqual(contract.views, []);
   for (const objectName of [...contract.functions, ...contract.triggers, ...contract.policies, ...contract.views]) assert.match(sql, new RegExp(`\\b${objectName}\\b`, "u"));
-  for (const table of contract.tables) {
-    assert.equal(contract.table_contracts[table].scope, "deployment");
-    assert.equal(contract.table_contracts[table].rls, "force");
-    assert.match(sql, new RegExp(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`, "u"));
-  }
-  assert.deepEqual(contract.table_contracts.platform_promotion_approvals.runtime_privileges, ["select"]);
-  assert.deepEqual(contract.table_contracts.platform_promotion_issuances.runtime_privileges, ["select", "insert", "update"]);
-  assert.deepEqual(contract.table_contracts.platform_deployment_state.runtime_privileges, ["select", "insert", "update"]);
+  assert.deepEqual(contract.table_contracts, {});
+  assert.deepEqual(contract.view_contracts, {});
 });
 
 test("normalizes before comparison and rejects unknown or secret-like nested fields", async () => {

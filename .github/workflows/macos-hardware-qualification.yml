@@ -1,0 +1,212 @@
+name: macOS hardware qualification evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character commit being qualified
+        required: true
+        type: string
+      source_tree:
+        description: Exact 40-character Git tree being qualified
+        required: true
+        type: string
+      artifact_path:
+        description: Absolute path to the manifest-bound signed PKG on the protected runner
+        required: true
+        type: string
+      release_manifest_path:
+        description: Absolute path to the signed release manifest on the protected runner
+        required: true
+        type: string
+      release_manifest_signature_path:
+        description: Absolute path to the detached release manifest signature
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-hardware-qualification-${{ inputs.source_commit }}-${{ inputs.source_tree }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: ${{ matrix.architecture }}
+    if: ${{ github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: agentpass-hardware-apple-silicon
+          - architecture: x86_64
+            runner: agentpass-hardware-intel
+    runs-on: ["self-hosted", "macOS", "${{ matrix.runner }}"]
+    timeout-minutes: 30
+    env:
+      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_DEVELOPER_ID_TEAM_ID }}
+      RELEASE_MANIFEST_PUBLIC_KEY: ${{ vars.AGENTPASS_RELEASE_MANIFEST_PUBLIC_KEY_PATH }}
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_FINGERPRINT }}
+      RUNNER_ATTESTATION: /opt/agentpass/macos/runner-attestation.json
+      RUNNER_ATTESTATION_SIGNATURE: /opt/agentpass/macos/runner-attestation.sig
+      RUNNER_ATTESTATION_PUBLIC_KEY: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_PUBLIC_KEY_PATH }}
+      RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_FINGERPRINT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+      - name: Bind checkout to the requested source commit and tree
+        env:
+          REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          REQUESTED_SOURCE_TREE: ${{ inputs.source_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ "$REQUESTED_SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo "source_tree must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SOURCE_COMMIT" ]] || { echo "checkout is not the requested source commit" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD^{tree})" == "$REQUESTED_SOURCE_TREE" ]] || { echo "checkout is not the requested source tree" >&2; exit 1; }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+      - name: Require protected runner and trust inputs before probes
+        env:
+          ARTIFACT: ${{ inputs.artifact_path }}
+          MANIFEST: ${{ inputs.release_manifest_path }}
+          MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
+          ATTESTATION_SIGNATURE: ${{ env.RUNNER_ATTESTATION_SIGNATURE }}
+          ATTESTATION_PUBLIC_KEY: ${{ env.RUNNER_ATTESTATION_PUBLIC_KEY }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
+          EXPECTED_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "expected Developer ID Team ID is missing or invalid" >&2; exit 1; }
+          [[ "$EXPECTED_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9_-]{43}$ ]] || { echo "release manifest fingerprint is missing or invalid" >&2; exit 1; }
+          for value in "$ARTIFACT" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$ATTESTATION" "$ATTESTATION_SIGNATURE" "$ATTESTATION_PUBLIC_KEY"; do
+            [[ "$value" == /* && "$value" != *$'\0'* ]] || { echo "qualification paths must be absolute" >&2; exit 1; }
+            [[ -f "$value" && ! -L "$value" ]] || { echo "qualification input is missing or symlinked: $value" >&2; exit 1; }
+          done
+          for value in "$ATTESTATION" "$ATTESTATION_SIGNATURE" "$ATTESTATION_PUBLIC_KEY"; do
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "runner attestation inputs must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            [[ "$mode" == 400 || "$mode" == 440 || "$mode" == 444 || "$mode" == 600 || "$mode" == 640 || "$mode" == 644 ]] || { echo "runner attestation input is not protected: $value" >&2; exit 1; }
+          done
+          /usr/bin/arch >/dev/null
+          /usr/sbin/sysctl -n kern.hv_vmm_present >/dev/null
+      - name: Verify the signed manifest, package, notarization, and Developer ID Team ID
+        env:
+          MANIFEST: ${{ inputs.release_manifest_path }}
+          MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          EXPECTED_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
+        run: scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$EXPECTED_FINGERPRINT" "$EXPECTED_TEAM_ID"
+      - name: Require fixed physical probes and protected staging directory
+        env:
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
+          AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
+          AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+          AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR: ${{ vars.AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256 }}
+          AGENTPASS_NSXPC_PROBE_SHA256: ${{ vars.AGENTPASS_NSXPC_PROBE_SHA256 }}
+          AGENTPASS_CRASH_RESTART_PROBE_SHA256: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SHA256 }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          check_acl_free() {
+            local value="$1" label="$2" permissions
+            permissions="$(/bin/ls -lde "$value" 2>/dev/null | /usr/bin/awk 'NR == 1 { print $1 }')"
+            [[ -n "$permissions" && "$permissions" != *+ ]] || { echo "$label has an ACL or could not be inspected" >&2; exit 1; }
+          }
+          check_probe_path() {
+            local value="$1" label="$2" current mode
+            [[ -n "$value" && "$value" == /* && -f "$value" && -x "$value" && ! -L "$value" ]] || { echo "$label must be a regular non-symlink executable" >&2; exit 1; }
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "$label must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label must not be writable" >&2; exit 1;; esac
+            check_acl_free "$value" "$label"
+            current="$(dirname "$value")"
+            while true; do
+              [[ -d "$current" && ! -L "$current" ]] || { echo "$label has an unprotected ancestor directory" >&2; exit 1; }
+              [[ "$(stat -f '%Su' "$current")" == root ]] || { echo "$label ancestor directory must be root-owned" >&2; exit 1; }
+              mode="$(stat -f '%Lp' "$current")"
+              case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label ancestor directory must not be writable" >&2; exit 1;; esac
+              check_acl_free "$current" "$label ancestor directory"
+              [[ "$current" == / ]] && break
+              current="$(dirname "$current")"
+            done
+          }
+          check_staging_directory() {
+            local value="$1" label="$2" current mode
+            [[ -n "$value" && "$value" == /* && -d "$value" && ! -L "$value" ]] || { echo "$label must be an existing non-symlink directory" >&2; exit 1; }
+            [[ "$(stat -f '%Su' "$value")" == root ]] || { echo "$label must be root-owned" >&2; exit 1; }
+            mode="$(stat -f '%Lp' "$value")"
+            case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label must not be writable" >&2; exit 1;; esac
+            check_acl_free "$value" "$label"
+            current="$(dirname "$value")"
+            while true; do
+              [[ -d "$current" && ! -L "$current" ]] || { echo "$label has an unprotected ancestor directory" >&2; exit 1; }
+              [[ "$(stat -f '%Su' "$current")" == root ]] || { echo "$label ancestor directory must be root-owned" >&2; exit 1; }
+              mode="$(stat -f '%Lp' "$current")"
+              case "$mode" in [2367][0-7][0-7]|[0-7][2367][0-7]|[0-7][0-7][2367]) echo "$label ancestor directory must not be writable" >&2; exit 1;; esac
+              check_acl_free "$current" "$label ancestor directory"
+              [[ "$current" == / ]] && break
+              current="$(dirname "$current")"
+            done
+          }
+          check_staging_directory "$AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR" "probe staging directory"
+          check_probe_path "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE" "launchd host-child probe"
+          check_probe_path "$AGENTPASS_NSXPC_PROBE" "NSXPC probe"
+          check_probe_path "$AGENTPASS_CRASH_RESTART_PROBE" "crash/restart probe"
+          developer_id_re='^Developer ID Application: [^()]+ \([A-Z0-9]{10}\)$'
+          check_probe_binding() {
+            local digest="$1" identity="$2" label="$3"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "$label exact expected SHA-256 is required and invalid" >&2; exit 1; }
+            [[ -z "$identity" || "$identity" =~ $developer_id_re ]] || { echo "$label expected signing identity is invalid" >&2; exit 1; }
+          }
+          check_probe_binding "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256" "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY" "launchd host-child probe"
+          check_probe_binding "$AGENTPASS_NSXPC_PROBE_SHA256" "$AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY" "NSXPC probe"
+          check_probe_binding "$AGENTPASS_CRASH_RESTART_PROBE_SHA256" "$AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY" "crash/restart probe"
+      - name: Run fail-closed qualification and write canonical evidence
+        env:
+          AGENTPASS_QUALIFICATION_ARTIFACT: ${{ inputs.artifact_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST: ${{ inputs.release_manifest_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_SIGNATURE: ${{ inputs.release_manifest_signature_path }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_PUBLIC_KEY: ${{ env.RELEASE_MANIFEST_PUBLIC_KEY }}
+          AGENTPASS_QUALIFICATION_RELEASE_MANIFEST_FINGERPRINT: ${{ env.RELEASE_MANIFEST_FINGERPRINT }}
+          AGENTPASS_QUALIFICATION_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          AGENTPASS_QUALIFICATION_SOURCE_TREE: ${{ inputs.source_tree }}
+          AGENTPASS_QUALIFICATION_EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
+          AGENTPASS_QUALIFICATION_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR: ${{ vars.AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR }}
+          AGENTPASS_QUALIFICATION_OUTPUT: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
+          AGENTPASS_RUNNER_ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
+          AGENTPASS_RUNNER_ATTESTATION_SIGNATURE: ${{ env.RUNNER_ATTESTATION_SIGNATURE }}
+          AGENTPASS_RUNNER_ATTESTATION_PUBLIC_KEY: ${{ env.RUNNER_ATTESTATION_PUBLIC_KEY }}
+          AGENTPASS_RUNNER_ATTESTATION_FINGERPRINT: ${{ env.RUNNER_ATTESTATION_FINGERPRINT }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE }}
+          AGENTPASS_NSXPC_PROBE: ${{ vars.AGENTPASS_NSXPC_PROBE }}
+          AGENTPASS_CRASH_RESTART_PROBE: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256 }}
+          AGENTPASS_NSXPC_PROBE_SHA256: ${{ vars.AGENTPASS_NSXPC_PROBE_SHA256 }}
+          AGENTPASS_CRASH_RESTART_PROBE_SHA256: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SHA256 }}
+          AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY }}
+          AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
+        run: native/macos/scripts/qualification/run-hardware-qualification.sh
+      - name: Independently verify canonical evidence and all bound digests
+        run: node native/macos/Qualification/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-hardware-qualification-${{ matrix.architecture }}-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
+          if-no-files-found: error
+          retention-days: 14

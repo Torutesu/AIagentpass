@@ -138,6 +138,24 @@ struct NativeDeviceSyncHTTPTransportTests {
         )
     }
 
+    private func auditEvent() throws -> NativeDeviceAuditEvent {
+        try NativeDeviceAuditEvent(
+            eventID: "33333333-3333-4333-8333-333333333333",
+            requestID: "44444444-4444-4444-8444-444444444444",
+            agentID: "55555555-5555-4555-8555-555555555555",
+            decision: "allow",
+            reason: "allowed",
+            policySequence: 7,
+            capabilitySequence: 9,
+            repository: "/Users/agent/repository",
+            branch: "refs/heads/main",
+            remote: "origin",
+            payloadDigest: String(repeating: "a", count: 64),
+            deviceTimestamp: "2026-08-20T05:00:00.000Z",
+            previousHash: String(repeating: "0", count: 64)
+        )
+    }
+
     @Test func pollAuthenticatesEveryRequestAndUsesTheExactOpenAPITarget() async throws {
         let signer = TransportTestSigner()
         let hintBody = try refreshHintResponse()
@@ -214,6 +232,49 @@ struct NativeDeviceSyncHTTPTransportTests {
             #expect(request.value(forHTTPHeaderField: "AgentPass-Timestamp") == String(transportNow))
             #expect(request.value(forHTTPHeaderField: "AgentPass-Signature") != nil)
         }
+    }
+
+    @Test func auditUploadUsesDeviceAuthAndDecodesTheBoundedIngestionEnvelope() async throws {
+        let signer = TransportTestSigner()
+        let event = try auditEvent()
+        let batch = try NativeDeviceAuditBatch(events: [event])
+        let responseBody = try NativeStrictJSON.data([
+            "ingestion": [
+                "device_id": transportDeviceID,
+                "accepted": [event.eventID],
+                "duplicates": [],
+                "gaps": [],
+                "head": [
+                    "last_hash": event.eventHash,
+                    "last_event_id": event.eventID,
+                    "chain_status": "continuous",
+                    "gap_count": 0
+                ]
+            ]
+        ])
+        DeviceSyncTestURLProtocol.install { request in
+            #expect(request.httpMethod == "POST")
+            #expect(request.url?.absoluteString == "https://api.example.test/v1/organizations/11111111-1111-4111-8111-111111111111/audit/events")
+            #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+            let body = try self.requestBody(request)
+            let decoded = try NativeDeviceAuditBatch.decode(body)
+            #expect(decoded == batch)
+            return self.response(for: request, status: 202, body: responseBody)
+        }
+        let client = try transport(signer: signer)
+
+        let result = try await client.uploadAuditBatch(batch)
+        #expect(result.deviceID == transportDeviceID)
+        #expect(result.acceptedEventIDs == [event.eventID])
+        #expect(result.duplicateEventIDs.isEmpty)
+        #expect(result.gapCount == 0)
+        #expect(result.headHash == event.eventHash)
+        #expect(result.headEventID == event.eventID)
+        #expect(result.chainStatus == "continuous")
+        let request = try #require(DeviceSyncTestURLProtocol.capturedRequests().first)
+        #expect(request.value(forHTTPHeaderField: "AgentPass-Device") == transportDeviceID)
+        #expect(request.value(forHTTPHeaderField: "AgentPass-Signature") != nil)
+        #expect(try requestBody(request).count <= NativeDeviceAuditEvent.maxBytes * NativeDeviceAuditBatch.maxEvents)
     }
 
     @Test func poll204IsNoChangeAndDoesNotAcceptAResponseBody() async throws {

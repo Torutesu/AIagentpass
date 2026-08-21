@@ -76,6 +76,13 @@ test("two API replicas share fixed bootstrap admission without attacker-controll
           csrf_token: "c".repeat(43),
           setCookie: `__Host-agentpass_session=${"s".repeat(43)}; Path=/; HttpOnly; Secure; SameSite=Strict`
         };
+      },
+      async rotateSession() {
+        return {
+          session: publicSession(),
+          csrf_token: "c".repeat(43),
+          setCookie: `__Host-agentpass_session=${"s".repeat(43)}; Path=/; HttpOnly; Secure; SameSite=Strict`
+        };
       }
     }
   }));

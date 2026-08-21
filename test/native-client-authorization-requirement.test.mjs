@@ -64,7 +64,7 @@ test('production listeners export separate management and connection-scoped Agen
   assert.doesNotMatch(agentEndpoint, /ServiceEndpoint|AgentPassNativeServiceProtocol|rotateAudit|stageKey|applyControlBundle/u);
 });
 
-test('Agent bootstrap and session lifecycle are connection-bound while signing remains fail closed', () => {
+test('Agent bootstrap, sessions, and durable signing remain connection-bound and fail closed', () => {
   const agentEndpoint = service.slice(service.indexOf('private final class AgentConnectionEndpoint'), service.indexOf('private final class AgentListenerDelegate'));
   assert.match(agentEndpoint, /NativeAgentBootstrapChallengeStore/u);
   assert.match(agentEndpoint, /connectionGuard\.context\.tokenIdentity/u);
@@ -82,8 +82,13 @@ test('Agent bootstrap and session lifecycle are connection-bound while signing r
   assert.match(agentEndpoint, /coordinator\.status\(sessionID: sessionID\)/u);
   assert.match(agentEndpoint, /coordinator\.close\(sessionID: sessionID, reason: reason\)/u);
   assert.match(agentEndpoint, /coordinator\?\.invalidateConnection\(\)/u);
-  assert.match(agentEndpoint, /func signGitCommit[\s\S]*unavailableAfterAuthorization\(\)/u);
-  assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|\.sign\(/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*authorizeConnection\(\)/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*coordinator\.reserveSigningRequest\(request\)/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*bindingObserver\.observeSigningAuthority/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*signingTransactions\.markProviderStarted/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*gitCommitSigner\.signGitCommitPayload/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*Self\.denial\(for: error\)\.nsError/u);
+  assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|error as NSError/u);
 });
 
 test('Agent runtime never invents a signing-key generation', () => {

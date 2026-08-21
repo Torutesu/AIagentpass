@@ -58,7 +58,8 @@ function service(overrides = {}) {
     async listInvitations(input) { calls.listInvitations.push(input); return { items: [invitation()], next_cursor: null }; },
     async createInvitation(input) { calls.createInvitation.push(input); return { invitation: invitation({ role: input.role, expires_at: input.expires_at }), raw_token: INVITATION_TOKEN }; },
     async revokeInvitation(input) { calls.revokeInvitation.push(input); return invitation({ status: "revoked", version: input.expected_version + 1 }); },
-    async acceptInvitation(input) { calls.acceptInvitation.push(input); return member({ role: "viewer" }); }
+    async reissueInvitation(input) { calls.reissueInvitation.push(input); return { invitation: invitation({ version: input.expected_version + 1, expires_at: input.expires_at }), raw_token: INVITATION_TOKEN }; },
+    async acceptInvitation(input) { calls.acceptInvitation.push(input); return { invitation: invitation({ status: "accepted", version: 2, accepted_at: CREATED_AT, accepted_member_id: MEMBER_ID }), member: member({ role: "viewer" }) }; }
   };
   const result = {};
   for (const method of HUMAN_ORGANIZATION_SERVICE_METHODS) {
@@ -303,27 +304,28 @@ test("requires operation-bound recent auth before role updates and member remova
   assert.equal(recentCalls[0].organization_id, ORGANIZATION_ID);
 });
 
-test("requires operation-bound recent auth before invitation revoke", async () => {
-  const denied = fixture({ recentAuthService: { authorize: async () => { throw new Error("should not be called without proof"); } }, api: { now: () => NOW } });
-  const missing = await denied.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 } }));
+test("reissues invitations only with operation-bound recent auth and returns the new token once", async () => {
+  const recentCalls = [];
+  const recentAuthService = {
+    async authorize(input) {
+      recentCalls.push(input);
+      return { authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, operation: input.operation, verified: true };
+    }
+  };
+  const { api, calls } = fixture({ recentAuthService, api: { now: () => NOW } });
+  const path = HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID);
+  const result = await api.handle(request(path, { method: "POST", body: { reissue_invitation_id: INVITATION_ID, expires_at: "2026-08-20T00:00:00.000Z" }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF, "if-match": '"1"' } }));
+  assert.equal(result.status, 201);
+  assert.equal(result.body.one_time_token, INVITATION_TOKEN);
+  assert.equal(calls.reissueInvitation[0].invitation_id, INVITATION_ID);
+  assert.equal(calls.reissueInvitation[0].expected_version, 1);
+  assert.equal(calls.reissueInvitation[0].recent_authorization.operation, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+  assert.equal(recentCalls[0].operation, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+  assert.equal(JSON.stringify(result.body).split(INVITATION_TOKEN).length - 1, 1);
+
+  const missing = await fixture({ recentAuthService, api: { now: () => NOW } }).api.handle(request(path, { method: "POST", body: { reissue_invitation_id: INVITATION_ID, expires_at: "2026-08-20T00:00:00.000Z" }, headers: { "if-match": '"1"' } }));
   assert.equal(missing.status, 401);
   assert.equal(missing.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
-  assert.equal(denied.calls.revokeInvitation.length, 0);
-
-  const recentCalls = [];
-  const allowed = fixture({
-    recentAuthService: {
-      async authorize(input) {
-        recentCalls.push(input);
-        return { authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: input.principal.member_id, operation: input.operation, organization_id: input.organization_id, verified: true };
-      }
-    },
-    api: { now: () => NOW }
-  });
-  const result = await allowed.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitationRevoke(ORGANIZATION_ID, INVITATION_ID), { method: "POST", body: { expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
-  assert.equal(result.status, 200);
-  assert.deepEqual(recentCalls.map((call) => call.operation), [HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation]);
-  assert.deepEqual(allowed.calls.revokeInvitation[0].recent_authorization, { session_id: actor().session_id, challenge_id: RECENT_AUTH_PROOF, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.revokeInvitation, authenticated_at: NOW });
 });
 
 test("rejects missing, cross-operation, cross-tenant, replayed, failed, stale, and unavailable recent auth without mutation", async () => {
@@ -414,8 +416,11 @@ test("accepts a one-time token for the authenticated member and never returns to
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.acceptInvitation, { method: "POST", body: { one_time_token: INVITATION_TOKEN } }));
   assert.equal(result.status, 201);
-  assert.match(result.body.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
-  assert.deepEqual(Object.keys(result.body).sort(), ["member", "request_id"]);
+  assert.deepEqual(Object.keys(result.body).sort(), ["invitation", "member"]);
+  assert.equal(result.body.invitation.status, "accepted");
+  assert.equal(result.body.invitation.accepted_at, CREATED_AT);
+  assert.equal(result.body.invitation.accepted_member_id, MEMBER_ID);
+  assert.equal(result.body.member.member_id, MEMBER_ID);
   assert.deepEqual(calls.acceptInvitation[0], { actor: actor(), one_time_token: INVITATION_TOKEN, idempotency_key: "test-key-1" });
   assertNoSecret(result, INVITATION_TOKEN, "token_hash", "public_key");
 });
@@ -437,6 +442,29 @@ test("maps cross-tenant paths to non-disclosing not-found and never calls the se
     assert.equal(result.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATION_NOT_FOUND);
   }
   assert.equal(calls.renameOrganization.length + calls.listMembers.length + calls.updateMemberRole.length + calls.listInvitations.length + calls.revokeInvitation.length, 0);
+});
+
+test("fails closed on conflicting response aliases instead of projecting an ambiguous tenant record", async () => {
+  const organizationResult = fixture({ serviceOverrides: {
+    listOrganizations: async () => ({ items: [organization({ id: OTHER_ORGANIZATION_ID })], next_cursor: null })
+  } });
+  const organizationResponse = await organizationResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organizations));
+  assert.equal(organizationResponse.status, 503);
+  assert.equal(organizationResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
+
+  const memberResult = fixture({ serviceOverrides: {
+    listMembers: async () => ({ items: [member({ id: OTHER_MEMBER_ID })], next_cursor: null })
+  } });
+  const memberResponse = await memberResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.members(ORGANIZATION_ID)));
+  assert.equal(memberResponse.status, 503);
+  assert.equal(memberResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
+
+  const invitationResult = fixture({ serviceOverrides: {
+    listInvitations: async () => ({ items: [invitation({ consumed_at: "2026-08-20T00:00:00.000Z", accepted_at: CREATED_AT })], next_cursor: null })
+  } });
+  const invitationResponse = await invitationResult.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID)));
+  assert.equal(invitationResponse.status, 503);
+  assert.equal(invitationResponse.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE);
 });
 
 test("redacts service internals and maps not-found, owner constraints, replay, conflict, and outages", async () => {

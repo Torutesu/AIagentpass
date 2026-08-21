@@ -25,6 +25,9 @@ const DIGEST = "a".repeat(64);
 const CANDIDATE = { candidate_id: "release-2026.08.13", source_commit: "b".repeat(40), artifact_sha256: "c".repeat(64), manifest_sha256: "d".repeat(64), team_id: "ABCDE12345", status: "active", created_at: NOW, retired_at: null };
 const DEVICE_FINGERPRINT = `SHA256:${"E".repeat(43)}`;
 const CHALLENGE_DIGEST = "f".repeat(64);
+const CONTROL_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const REFRESH_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const publicPem = (key) => key.export({ type: "spki", format: "pem" }).toString();
 const SCOPE = { operations: ["git.commit.sign"], repositories: ["/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } };
 const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PUBLIC KEY-----";
 
@@ -40,6 +43,7 @@ class FakeClient {
   async query(text, params = []) {
     this.calls.push({ text, params });
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return result();
+    if (text.startsWith("SELECT pg_advisory_xact_lock")) return result([{ locked: true }]);
     if (text.startsWith("SELECT id FROM organizations")) return result([{ id: params[0] }]);
     if (text.startsWith("DELETE FROM idempotency_records")) return result();
     if (text.startsWith("INSERT INTO idempotency_records")) {
@@ -136,7 +140,7 @@ function agentRow(overrides = {}) { return { organization_id: ids.organization, 
 function policyRow(overrides = {}) { return { organization_id: ids.organization, id: ids.policy, sequence: 1, name: "default", scope_json: SCOPE, status: "active", created_by: ids.member, created_at: NOW, updated_at: NOW, version: 1, ...overrides }; }
 function enrollmentRow(overrides = {}) { return { id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, label: "New Mac", platform: "macos", created_at: NOW, expires_at: EXPIRES, consumed_at: null, completion_hash: null, ...overrides }; }
 function possessionReceiptStatement() {
-  return { version: 1, enrollment_id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, issued_at: NOW };
+  return { version: 1, enrollment_id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, control: { format_epoch: 2, issuer: "agentpass-cloud", key_id: "control-v1", public_key: publicPem(CONTROL_TEST_KEYS.publicKey), bundle_path: `/v1/organizations/${ids.organization}/bundles/${ids.device2}`, refresh_hint: { key_id: "refresh-v1", algorithm: "ed25519", public_key: publicPem(REFRESH_TEST_KEYS.publicKey) } }, issued_at: NOW };
 }
 function possessionReceipt() {
   const statement = possessionReceiptStatement();
@@ -146,7 +150,24 @@ function possessionReceiptRow() {
   const receipt = possessionReceipt();
   return { organization_id: ids.organization, enrollment_id: ids.enrollment, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, purpose: receipt.purpose, signer_key_id: receipt.key_id, signature_algorithm: receipt.algorithm, statement_json: receipt.statement, statement_hash: receipt.statement_hash, signature_base64url: receipt.signature, issued_at: NOW };
 }
-function repo(client = new FakeClient()) { return { repository: createPostgresControlPlaneResourceRepository({ client, now: () => NOW }), client }; }
+function repo(client = new FakeClient(), options = {}) { return { repository: createPostgresControlPlaneResourceRepository({ client, now: () => NOW, ...options }), client }; }
+
+function enrollmentRefreshHook(calls = []) {
+  return async (input) => {
+    calls.push(input);
+    return {
+      organization_id: input.organization_id,
+      device_id: input.device_id,
+      desired_generation: 1,
+      state: "queued",
+      outbox: {
+        outbox_id: "99999999-9999-4999-8999-999999999999",
+        refresh_nonce_key_id: "refresh-nonce-v1",
+        refresh_nonce_digest: "9".repeat(64)
+      }
+    };
+  };
+}
 
 test("exposes the CloudStore resource API and requires tenant-scoped identity", () => {
   const { repository } = repo();
@@ -428,7 +449,8 @@ test("resolves an active release candidate server-side and stores only v2 bindin
 
 test("completes v2 atomically with the signer envelope and exposes a tenant-safe receipt lookup", async () => {
   const client = new PossessionFakeClient();
-  const { repository } = repo(client);
+  const refreshes = [];
+  const { repository } = repo(client, { onDeviceEnrollmentActivated: enrollmentRefreshHook(refreshes) });
   const receipt = possessionReceipt();
   const completed = await repository.completeDeviceEnrollment({
     proof_version: 2,
@@ -448,14 +470,112 @@ test("completes v2 atomically with the signer envelope and exposes a tenant-safe
   });
   assert.equal(completed.status, "active");
   assert.equal(completed.key_epoch, 1);
+  const authorityLockIndex = client.calls.findIndex(({ text }) => text.startsWith("SELECT pg_advisory_xact_lock"));
+  const enrollmentLockIndex = client.calls.findIndex(({ text }) => text.startsWith("SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash") && text.includes("proof_version"));
+  assert.ok(authorityLockIndex > -1 && authorityLockIndex < enrollmentLockIndex);
   const receiptInsertIndex = client.calls.findIndex(({ text }) => text.startsWith("INSERT INTO device_enrollment_possession_receipts"));
   const enrollmentUpdateIndex = client.calls.findIndex(({ text }) => text.startsWith("UPDATE device_enrollments"));
   assert.ok(receiptInsertIndex > -1 && receiptInsertIndex < enrollmentUpdateIndex);
+  assert.equal(refreshes.length, 1);
+  assert.equal(refreshes[0].tx, client);
+  assert.equal(refreshes[0].organization_id, ids.organization);
+  assert.equal(refreshes[0].device_id, ids.device2);
+  assert.equal(refreshes[0].enrollment_id, ids.enrollment);
   const receiptInsert = client.calls[receiptInsertIndex];
   assert.match(receiptInsert.text, /purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url/u);
   assert.match(receiptInsert.text, /decode\(\$10,'hex'\)/u);
   assert.doesNotMatch(receiptInsert.text, /challenge_id|raw_nonce|credential_secret|private_key/iu);
   assert.deepEqual(await repository.getDeviceEnrollmentPossessionReceipt({ organization_id: ids.organization, device_id: ids.device2 }), receipt);
+});
+
+test("v2 completion fails closed and rolls back when initial refresh cannot be queued", async () => {
+  const client = new PossessionFakeClient();
+  const { repository } = repo(client, { onDeviceEnrollmentActivated: async () => { throw new Error("refresh unavailable"); } });
+  await assert.rejects(repository.completeDeviceEnrollment({
+    proof_version: 2,
+    organization_id: ids.organization,
+    enrollment_id: ids.enrollment,
+    device_id: ids.device2,
+    label: "New Mac",
+    platform: "macos",
+    algorithm: "p256-sha256",
+    public_key: PUBLIC_KEY,
+    credential_digest: DIGEST,
+    candidate_id: CANDIDATE.candidate_id,
+    device_key_fingerprint: DEVICE_FINGERPRINT,
+    challenge_nonce_digest: CHALLENGE_DIGEST,
+    possession_receipt: possessionReceipt(),
+    completed_at: NOW
+  }));
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE device_enrollments")), false);
+});
+
+test("v2 completion requires commit-coupled initial refresh authority", async () => {
+  const client = new PossessionFakeClient();
+  const { repository } = repo(client);
+  await assert.rejects(repository.completeDeviceEnrollment({
+    proof_version: 2,
+    organization_id: ids.organization,
+    enrollment_id: ids.enrollment,
+    device_id: ids.device2,
+    label: "New Mac",
+    platform: "macos",
+    algorithm: "p256-sha256",
+    public_key: PUBLIC_KEY,
+    credential_digest: DIGEST,
+    candidate_id: CANDIDATE.candidate_id,
+    device_key_fingerprint: DEVICE_FINGERPRINT,
+    challenge_nonce_digest: CHALLENGE_DIGEST,
+    possession_receipt: possessionReceipt(),
+    completed_at: NOW
+  }), { code: "ERR_DEVICE_REFRESH_UNAVAILABLE" });
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
+});
+
+test("v2 completion rejects malformed or cross-tenant initial refresh evidence", async () => {
+  const valid = {
+    organization_id: ids.organization,
+    device_id: ids.device2,
+    desired_generation: 1,
+    state: "queued",
+    outbox: {
+      outbox_id: "99999999-9999-4999-8999-999999999999",
+      refresh_nonce_key_id: "refresh-nonce-v1",
+      refresh_nonce_digest: "9".repeat(64)
+    }
+  };
+  const invalidEvidence = [
+    { ...valid, organization_id: ids.organization2 },
+    { ...valid, device_id: ids.device },
+    { ...valid, desired_generation: 0 },
+    { ...valid, state: "queued", outbox: null },
+    { ...valid, state: "already_applied", outbox: null },
+    { ...valid, outbox: { ...valid.outbox, refresh_nonce_digest: "9".repeat(63) } },
+    { ...valid, outbox: { ...valid.outbox, extra: true } }
+  ];
+  for (const evidence of invalidEvidence) {
+    const client = new PossessionFakeClient();
+    const { repository } = repo(client, { onDeviceEnrollmentActivated: async () => evidence });
+    await assert.rejects(repository.completeDeviceEnrollment({
+      proof_version: 2,
+      organization_id: ids.organization,
+      enrollment_id: ids.enrollment,
+      device_id: ids.device2,
+      label: "New Mac",
+      platform: "macos",
+      algorithm: "p256-sha256",
+      public_key: PUBLIC_KEY,
+      credential_digest: DIGEST,
+      candidate_id: CANDIDATE.candidate_id,
+      device_key_fingerprint: DEVICE_FINGERPRINT,
+      challenge_nonce_digest: CHALLENGE_DIGEST,
+      possession_receipt: possessionReceipt(),
+      completed_at: NOW
+    }), { code: "ERR_DEVICE_REFRESH_UNAVAILABLE" });
+    assert.equal(client.calls.at(-1).text, "ROLLBACK");
+    assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE device_enrollments")), false);
+  }
 });
 
 test("rejects raw v2 possession material and preserves retired candidate receipts", async () => {

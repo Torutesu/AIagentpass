@@ -9,6 +9,16 @@
         "operationId": "completeDeviceEnrollment",
         "summary": "Complete a one-time device enrollment",
         "description": "Consumes the one-time enrollment credential and proof-of-possession, then returns the active device identity epoch and the two purpose-separated public trust roots required by the native client. The enrollment response never contains private key material or an enrollment credential. The response is no-store and includes a request_id envelope field.",
+        "x-agentpass-browser-onboarding": {
+          "preflight_schema": "../schemas/device-onboarding-preflight-v1.schema.json",
+          "invitation_delivery_schema": "../schemas/device-onboarding-invitation-delivery-v1.schema.json",
+          "possession_receipt_schema": "../schemas/device-possession-receipt-v1.schema.json",
+          "trust_installation_ack_schema": "../schemas/device-trust-installation-ack-v1.schema.json",
+          "control_ack_schema": "../schemas/bundle-ack-v1.schema.json",
+          "authority_fields": "server-derived only; caller cannot select organization, device, authority generation, or trust roots",
+          "secret_transport": "credential is one-shot in-memory delivery only and is forbidden in argv, environment, URL, and durable storage",
+          "downgrade": "reject browser-led proof versions other than 2"
+        },
         "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/EnrollmentId" },
@@ -130,6 +140,39 @@
         }
       }
     },
+    "/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities": {
+      "post": {
+        "operationId": "issueAgentSessionSigningCapability",
+        "summary": "Issue one server-scoped, one-use Agent Session signing capability",
+        "description": "The authenticated Device requests one capability for the exact organization, device, and active Agent Session in the path. The JSON body contains only a public request_id. Operation, scope, signer purpose, key, algorithm, lifetime, one-use budget, capability sequence, control sequence, and authority generation are resolved and signed by the server; caller-supplied authority fields, downgrade versions, cross-tenant/device/session substitutions, and replay or conflicting request identities fail closed. An exact retry returns the same committed public result without issuing a second capability. The response is no-store and contains no private key, bearer token, provider diagnostic, or raw device credential.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/DeviceId" },
+          { "$ref": "#/components/parameters/AgentSessionId" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/IssueAgentSessionSigningCapability" },
+        "x-agentpass-contract-status": "frozen-f1a",
+        "x-agentpass-runtime-path": "/v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id + authenticated-device", "binding": "authenticated device belongs to path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id + authenticated-device", "binding": "path.device_id == authenticated.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "x-agentpass-agent-session-scope": { "kind": "agent-session", "source": "path.session_id + server session record", "binding": "session is active and belongs to path organization/device", "cross-session-disclosure": false, "additionalProperties": false },
+        "x-agentpass-request-binding": { "canonical-form": "canonical-json({request_id})", "digest": "sha256(UTF-8 canonical-form)", "idempotency-key": "body.request_id", "caller-authority-fields": [], "additionalProperties": false },
+        "x-agentpass-authority": { "capability-schema": "../schemas/agent-signing-capability-v1.schema.json", "response-schema": "../schemas/agent-session-signing-capability-response-v1.schema.json", "signature-domain": "AgentPass-Agent-Signing-Capability-v1\u0000", "derived-fields": ["organization_id", "operation", "scope", "key_purpose", "key_id", "algorithm", "max_signatures", "one_use", "issued_at", "not_before", "expires_at", "sequence", "remaining_session_signatures", "control_sequence", "authority_generation"], "one-use": true, "private-material": "never-accepted-or-returned", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-request-id-same-server-binding": "return-original-committed-result", "same-request-id-different-server-binding": "request_id_reused", "additionalProperties": false },
+        "x-agentpass-transport": { "redirects": "forbidden", "cache-control": "no-store", "request-body-content-type": "application/json", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/AgentSessionSigningCapabilityIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/organizations/{organization_id}/bundles/{device_id}": {
       "get": {
         "operationId": "fetchControlBundle",
@@ -230,7 +273,15 @@
           "403": { "$ref": "#/components/responses/Forbidden" }
         }
       },
-      "post": { "operationId": "appendDeviceAuditEvents", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } }
+      "post": {
+        "operationId": "appendDeviceAuditEvents",
+        "summary": "Upload a device audit event batch",
+        "description": "Accepts a device-authenticated, content-addressed batch of ordered audit events. batch_id is the stable retry identity; organization_id is the path tenant binding and device_id is derived from the authenticated device signature.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceAuditUpload" },
+        "responses": { "202": { "$ref": "#/components/responses/DeviceAuditIngestionAccepted" } }
+      }
     }
   },
   "components": {
@@ -252,6 +303,7 @@
       "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "GrantId": { "name": "grant_id", "in": "path", "required": true, "description": "Agent Session Grant identifier. The body statement.grant_id must exactly equal this path value.", "schema": { "type": "string", "format": "uuid" } },
+      "AgentSessionId": { "name": "session_id", "in": "path", "required": true, "description": "Active Agent Session identifier. It is transport scope only; the caller cannot select or widen the operation, scope, key, lifetime, budget, or generations.", "schema": { "type": "string", "format": "uuid" } },
       "QualificationBatchId": { "name": "batch_id", "in": "path", "required": true, "description": "Qualification batch identifier. The manifest.statement.batch_id must exactly equal this path value.", "schema": { "type": "string", "format": "uuid" } },
       "AfterGeneration": { "name": "after_generation", "in": "query", "required": false, "description": "Return a hint only when a strictly newer committed authority generation exists. This is a cursor, not authority.", "schema": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "default": 0 } },
       "WaitMs": { "name": "wait_ms", "in": "query", "required": false, "description": "Bounded long-poll wait duration in milliseconds.", "schema": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0 } },
@@ -269,6 +321,16 @@
         "required": true,
         "description": "Public candidate and release bindings for the batch claim. The batch_id, organization_id, and device_id are path/authentication bindings. No Grant, manifest, signature, private key, or nonce is accepted in the body.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchClaimRequest" } } }
+      },
+      "IssueAgentSessionSigningCapability": {
+        "required": true,
+        "description": "Only the public request_id is accepted. Organization, device, and session are path/authentication bindings; operation, scope, signer purpose, key, algorithm, lifetime, budget, and generations are server-derived.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionSigningCapabilityRequest" } } }
+      },
+      "DeviceAuditUpload": {
+        "required": true,
+        "description": "A stable, content-addressed device audit batch. The authenticated device and organization path are authoritative and are not repeated in the body.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditUploadV1" } } }
       }
     },
     "responses": {
@@ -276,11 +338,13 @@
       "DeviceEnrollmentCompleted": { "description": "The one-time enrollment was consumed and the device is active. The response is no-store and contains no private key or enrollment credential.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceEnrollmentCompletedResponse" } } } },
       "DeviceEnrollmentReceipt": { "description": "A device-authenticated, Cloud-signed possession receipt. The response is no-store and contains no private key, enrollment credential, or raw challenge nonce.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DevicePossessionReceiptV1" } } } },
       "AgentSessionGrantConsumed": { "description": "The exact Agent Session Grant was consumed or recognized as an idempotent duplicate and a process-bound Session Lease was committed. The response is no-store and contains no private key or bearer session token.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionLeaseResponse" } } } },
+      "AgentSessionSigningCapabilityIssued": { "description": "The exact Device-authenticated Agent Session request was committed or recognized as an exact retry. The response contains one canonical Cloud-signed, one-use signing capability and safe public metadata only; it is no-store and must not be obtained through a redirect.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionSigningCapabilityResponse" } } } },
       "QualificationGrantBatchClaimed": { "description": "The exact device-bound qualification batch was claimed or recognized as an exact retry. The response is no-store, contains one purpose-separated Ed25519 manifest with exactly seven ordered steps, and embeds only the unchanged Agent Session Grant v1 envelopes; it contains no private key or bearer token.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchClaimResponse" } } } },
       "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
       "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect. It includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
       "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
       "DeviceAuditList": { "description": "A bounded, tenant/device-scoped audit page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditListResponse" } } } },
+      "DeviceAuditIngestionAccepted": { "description": "The device audit batch was ingested, with accepted event IDs, idempotent duplicates, any visible chain gaps, and the committed device head.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditIngestionResponseV1" } } } },
       "InvalidCursor": { "description": "The cursor is malformed, tampered, expired, or bound to another tenant/device/resource.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvalidCursorEnvelope" } } } },
       "BadRequest": { "description": "Stable 400 error for malformed, out-of-range, or body/path-inconsistent input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "Authentication is required or invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -293,11 +357,18 @@
     "schemas": {
       "ScopeV1": { "$ref": "../schemas/scope-v1.schema.json" },
       "BundleAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
+      "OnboardingControlAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
       "RefreshHintV1": { "$ref": "../schemas/refresh-hint-v1.schema.json" },
       "DeviceEnrollmentCompletionV2": { "$ref": "../schemas/device-enrollment-completion-v2.schema.json" },
       "DevicePossessionReceiptV1": { "$ref": "../schemas/device-possession-receipt-v1.schema.json" },
+      "DeviceOnboardingPreflightV1": { "$ref": "../schemas/device-onboarding-preflight-v1.schema.json" },
+      "DeviceOnboardingInvitationDeliveryV1": { "$ref": "../schemas/device-onboarding-invitation-delivery-v1.schema.json" },
+      "DeviceTrustInstallationAcknowledgementV1": { "$ref": "../schemas/device-trust-installation-ack-v1.schema.json" },
       "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
       "AgentSessionLeaseV1": { "$ref": "../schemas/agent-session-lease-v1.schema.json" },
+      "AgentSigningCapabilityV1": { "$ref": "../schemas/agent-signing-capability-v1.schema.json" },
+      "AgentSessionSigningCapabilityRequest": { "$ref": "../schemas/agent-session-signing-capability-request-v1.schema.json" },
+      "AgentSessionSigningCapabilityResponse": { "$ref": "../schemas/agent-session-signing-capability-response-v1.schema.json" },
       "QualificationGrantBatchClaimRequest": { "$ref": "../schemas/qualification-grant-batch-claim-v1.schema.json" },
       "QualificationGrantBatchManifestV1": { "$ref": "../schemas/qualification-grant-batch-manifest-v1.schema.json" },
       "AgentSessionGrantConsumeRequest": {
@@ -322,6 +393,8 @@
         }
       },
       "ControlBundleV2": { "$ref": "../schemas/control-bundle-v2.schema.json" },
+      "DeviceAuditUploadV1": { "$ref": "../schemas/device-audit-upload-v1.schema.json" },
+      "DeviceAuditIngestionResponseV1": { "$ref": "../schemas/device-audit-ingestion-response-v1.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Server-generated correlation identifier added to every non-204 response." },
       "DeviceEnrollmentControlTrust": {
         "type": "object",

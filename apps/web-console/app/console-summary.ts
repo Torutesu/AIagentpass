@@ -85,6 +85,15 @@ export type ConsoleSummaryParseOptions = Readonly<{
   organizationId?: string;
 }>;
 
+export type ConsoleActivityPageParseOptions = Readonly<{
+  organizationId: string;
+}>;
+
+export type ConsoleActivityPageViewModel = Readonly<{
+  activity: ReadonlyArray<ConsoleSummaryViewModel["audit"]["activity"][number]>;
+  nextCursor: string | null;
+}>;
+
 export class ConsoleSummaryParseError extends TypeError {
   readonly code = "ERR_CONSOLE_SUMMARY_PARSE" as const;
   readonly path: string;
@@ -163,6 +172,20 @@ export function parseConsoleSummary(input: unknown, options: ConsoleSummaryParse
     policies,
     audit: { health, activity, nextCursor },
   });
+}
+
+/**
+ * Parse the cursor-paginated public activity response independently from the
+ * landing summary. The BFF owns cursor integrity; the browser only retains
+ * the opaque cursor in memory and never treats it as an authority object.
+ */
+export function parseConsoleActivityPage(input: unknown, options: ConsoleActivityPageParseOptions): ConsoleActivityPageViewModel {
+  const organizationId = id(options.organizationId, "options.organizationId");
+  const root = record(input, "$", ["activity", "next_cursor"]);
+  const activity = array(root.activity, "$.activity", MAX_ACTIVITY_RECORDS)
+    .map((value, index) => parseActivity(value, `$.activity[${index}]`, organizationId, undefined));
+  if (new Set(activity.map((item) => item.eventId)).size !== activity.length) fail("$.activity", "duplicate_event_id");
+  return deepFreeze({ activity, nextCursor: nullableCursor(root.next_cursor, "$.next_cursor") });
 }
 
 function parseOrganization(value: unknown, path: string): ConsoleSummaryViewModel["organization"] {
@@ -288,11 +311,11 @@ function parseHealth(value: unknown, path: string, deviceIds: ReadonlySet<string
   };
 }
 
-function parseActivity(value: unknown, path: string, organizationId: string, deviceIds: ReadonlySet<string>): ConsoleSummaryViewModel["audit"]["activity"][number] {
+function parseActivity(value: unknown, path: string, organizationId: string, deviceIds: ReadonlySet<string> | undefined): ConsoleSummaryViewModel["audit"]["activity"][number] {
   const object = record(value, path, ["organization_id", "device_id", "event_id", "event", "received_at"]);
   tenant(object.organization_id, `${path}.organization_id`, organizationId);
   const deviceId = id(required(object.device_id, `${path}.device_id`), `${path}.device_id`);
-  if (!deviceIds.has(deviceId)) fail(`${path}.device_id`, "unknown_device");
+  if (deviceIds !== undefined && !deviceIds.has(deviceId)) fail(`${path}.device_id`, "unknown_device");
   const eventId = id(required(object.event_id, `${path}.event_id`), `${path}.event_id`);
   const sourcePath = `${path}.event`;
   const source = record(object.event, sourcePath, [...AUDIT_EVENT_KEYS]);

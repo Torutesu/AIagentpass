@@ -6,6 +6,7 @@ import pg from "pg";
 
 import {
   bundleAcknowledgementSigningData,
+  canonicalJson,
   normalizeBundleAcknowledgement
 } from "../../../../packages/protocol/src/index.mjs";
 import { createRefreshHintService } from "../../src/refresh-hint-service.mjs";
@@ -32,6 +33,8 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const migrationClient = await poolA.connect();
   try { await createMigrationRunner({ client: migrationClient, applicationVersion: "g4-refresh-integration" }).run(); }
   finally { migrationClient.release(); }
+  const serverVersion = await poolA.query("SHOW server_version_num");
+  assert.match(String(serverVersion.rows[0].server_version_num), /^17\d{4}$/u);
 
   const ids = {
     organization: crypto.randomUUID(),
@@ -55,6 +58,12 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const deviceBKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const deviceAPublic = deviceAKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   const deviceBPublic = deviceBKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
+  const initialEnrollmentId = crypto.randomUUID();
+  const candidateId = `g4-${crypto.randomUUID()}`;
+  const artifactDigest = "c".repeat(64);
+  const sourceCommit = "b".repeat(40);
+  const challengeDigest = "d".repeat(64);
+  const deviceFingerprint = `SHA256:${crypto.createHash("sha256").update(deviceAKeys.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
   await poolA.query("INSERT INTO organizations (id,name) VALUES ($1,'G4 integration')", [ids.organization]);
   await poolA.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,'G4 owner'),($3,$4,'G4 removed'),($5,$6,'G4 race member')", [ids.member, `g4-${ids.member}`, ids.removedMember, `g4-${ids.removedMember}`, ids.raceMember, `g4-${ids.raceMember}`]);
   await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'owner','active')", [ids.organization, ids.membership, ids.member]);
@@ -62,6 +71,47 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'admin','active')", [ids.organization, ids.raceMembership, ids.raceMember]);
   await poolA.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status,metadata)
     VALUES ($1,$2,'Mac A','p256-sha256',$3,'active','{}'::jsonb),($1,$4,'Mac B','p256-sha256',$5,'active','{}'::jsonb)`, [ids.organization, ids.deviceA, deviceAPublic, ids.deviceB, deviceBPublic]);
+  const controlKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+  const refreshKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+  const receiptIssuedAt = new Date().toISOString();
+  const receiptStatement = {
+    version: 1,
+    enrollment_id: initialEnrollmentId,
+    organization_id: ids.organization,
+    device_id: ids.deviceA,
+    candidate_id: candidateId,
+    artifact_sha256: artifactDigest,
+    source_commit: sourceCommit,
+    team_id: "ABCDE12345",
+    device_key_fingerprint: deviceFingerprint,
+    device_key_epoch: 1,
+    challenge_nonce_digest: challengeDigest,
+    control: {
+      format_epoch: 2,
+      issuer: "agentpass-cloud",
+      key_id: "control-v1",
+      public_key: controlKey,
+      bundle_path: `/v1/organizations/${ids.organization}/bundles/${ids.deviceA}`,
+      refresh_hint: { key_id: "refresh-v1", algorithm: "ed25519", public_key: refreshKey }
+    },
+    issued_at: receiptIssuedAt
+  };
+  await poolA.query(`INSERT INTO release_candidates
+    (candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,created_at)
+    VALUES ($1,$2,$3,$4,'ABCDE12345',$5)`, [candidateId, sourceCommit, artifactDigest, "e".repeat(64), receiptIssuedAt]);
+  await poolA.query(`INSERT INTO device_enrollments
+    (id,organization_id,device_id,secret_hash,created_by,created_at,expires_at,label,platform,proof_version,candidate_id,device_key_fingerprint,challenge_nonce_digest)
+    VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,$7,'Mac A','macos',2,$8,$9,decode($10,'hex'))`, [
+    initialEnrollmentId, ids.organization, ids.deviceA, "a".repeat(64), ids.member, receiptIssuedAt,
+    new Date(Date.parse(receiptIssuedAt) + 15 * 60_000).toISOString(), candidateId, deviceFingerprint, challengeDigest
+  ]);
+  await poolA.query(`INSERT INTO device_enrollment_possession_receipts
+    (organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at)
+    VALUES ($1,$2,$3,$4,$5,$6,'ABCDE12345',$7,1,decode($8,'hex'),'device-enrollment-possession-receipt','g4-receipt-v1','ed25519',$9::jsonb,$10,$11,$12)`, [
+    ids.organization, initialEnrollmentId, ids.deviceA, candidateId, artifactDigest, sourceCommit,
+    deviceFingerprint, challengeDigest, JSON.stringify(receiptStatement),
+    crypto.createHash("sha256").update(canonicalJson(receiptStatement)).digest("hex"), "A".repeat(86), receiptIssuedAt
+  ]);
   await poolA.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
     VALUES ($1,$2,$3,'claude-code','G4 agent',$4,'active')`, [ids.organization, ids.agent, ids.deviceA, deviceAPublic]);
   await poolA.query(`INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,issued_membership_version)
@@ -81,6 +131,84 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const codec = createRefreshNonceCodec({ keys: { "refresh-nonce-v3": Buffer.alloc(32, 0x73) }, activeKeyId: "refresh-nonce-v3" });
   const repositoryA = createControlPlaneAuthorityRepository({ client: poolA, cursorSecret: Buffer.alloc(32, 0x41), refreshNonceCodec: codec });
   const repositoryB = createControlPlaneAuthorityRepository({ client: poolB, cursorSecret: Buffer.alloc(32, 0x42), refreshNonceCodec: codec });
+  const initialRequestedAt = new Date().toISOString();
+  const initialRefresh = await repositoryA.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.deviceA,
+    enrollment_id: initialEnrollmentId,
+    requested_at: initialRequestedAt,
+    expires_at: new Date(Date.parse(initialRequestedAt) + 5 * 60_000).toISOString()
+  });
+  assert.equal(initialRefresh.desired_generation, 1);
+  assert.equal(initialRefresh.state, "queued");
+  await poolA.query("UPDATE device_refresh_outbox SET status='failed' WHERE organization_id=$1 AND outbox_id=$2", [ids.organization, initialRefresh.outbox.outbox_id]);
+  const replayRequestedAt = new Date().toISOString();
+  const terminalRecovery = await repositoryB.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.deviceA,
+    enrollment_id: initialEnrollmentId,
+    requested_at: replayRequestedAt,
+    expires_at: new Date(Date.parse(replayRequestedAt) + 5 * 60_000).toISOString()
+  });
+  assert.equal(terminalRecovery.state, "queued");
+  assert.notEqual(terminalRecovery.outbox.outbox_id, initialRefresh.outbox.outbox_id);
+  await poolA.query(`UPDATE device_refresh_outbox
+    SET expires_at=clock_timestamp()
+    WHERE organization_id=$1 AND outbox_id=$2`, [ids.organization, terminalRecovery.outbox.outbox_id]);
+  const pendingExpiryRequestedAt = new Date(Date.now() + 1_000).toISOString();
+  const [pendingExpiryRecoveryA, pendingExpiryRecoveryB] = await Promise.all([
+    repositoryA.ensureInitialDeviceRefresh({
+      organization_id: ids.organization,
+      device_id: ids.deviceA,
+      enrollment_id: initialEnrollmentId,
+      requested_at: pendingExpiryRequestedAt,
+      expires_at: new Date(Date.parse(pendingExpiryRequestedAt) + 5 * 60_000).toISOString()
+    }),
+    repositoryB.ensureInitialDeviceRefresh({
+      organization_id: ids.organization,
+      device_id: ids.deviceA,
+      enrollment_id: initialEnrollmentId,
+      requested_at: pendingExpiryRequestedAt,
+      expires_at: new Date(Date.parse(pendingExpiryRequestedAt) + 5 * 60_000).toISOString()
+    })
+  ]);
+  assert.deepEqual(new Set([pendingExpiryRecoveryA.state, pendingExpiryRecoveryB.state]), new Set(["queued", "already_queued"]));
+  assert.equal(pendingExpiryRecoveryA.outbox.outbox_id, pendingExpiryRecoveryB.outbox.outbox_id);
+  assert.notEqual(pendingExpiryRecoveryA.outbox.outbox_id, terminalRecovery.outbox.outbox_id);
+  const expiredPending = await poolA.query("SELECT status,last_error_code FROM device_refresh_outbox WHERE organization_id=$1 AND outbox_id=$2", [ids.organization, terminalRecovery.outbox.outbox_id]);
+  assert.deepEqual(expiredPending.rows, [{ status: "failed", last_error_code: "refresh_expired" }]);
+
+  await poolA.query(`UPDATE device_refresh_outbox
+    SET status='delivered',first_delivered_at=clock_timestamp(),last_delivered_at=clock_timestamp(),expires_at=clock_timestamp()
+    WHERE organization_id=$1 AND outbox_id=$2`, [ids.organization, pendingExpiryRecoveryA.outbox.outbox_id]);
+  const deliveredExpiryRequestedAt = new Date(Date.now() + 2_000).toISOString();
+  const deliveredExpiryRecovery = await repositoryA.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.deviceA,
+    enrollment_id: initialEnrollmentId,
+    requested_at: deliveredExpiryRequestedAt,
+    expires_at: new Date(Date.parse(deliveredExpiryRequestedAt) + 5 * 60_000).toISOString()
+  });
+  assert.equal(deliveredExpiryRecovery.state, "queued");
+  assert.notEqual(deliveredExpiryRecovery.outbox.outbox_id, pendingExpiryRecoveryA.outbox.outbox_id);
+  const expiredDelivered = await poolA.query("SELECT status,last_error_code FROM device_refresh_outbox WHERE organization_id=$1 AND outbox_id=$2", [ids.organization, pendingExpiryRecoveryA.outbox.outbox_id]);
+  assert.deepEqual(expiredDelivered.rows, [{ status: "expired", last_error_code: "refresh_expired" }]);
+  const activeReplayRequestedAt = new Date().toISOString();
+  const initialRefreshReplay = await repositoryA.ensureInitialDeviceRefresh({
+    organization_id: ids.organization,
+    device_id: ids.deviceA,
+    enrollment_id: initialEnrollmentId,
+    requested_at: activeReplayRequestedAt,
+    expires_at: new Date(Date.parse(activeReplayRequestedAt) + 5 * 60_000).toISOString()
+  });
+  assert.equal(initialRefreshReplay.state, "already_queued");
+  assert.equal(initialRefreshReplay.outbox.outbox_id, deliveredExpiryRecovery.outbox.outbox_id);
+  const initialOutboxes = await poolA.query(`SELECT device_id,count(*)::int AS count
+    FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=1
+    GROUP BY device_id ORDER BY device_id`, [ids.organization]);
+  assert.deepEqual(initialOutboxes.rows, [{ device_id: ids.deviceA, count: 4 }]);
+  const generationBeforeReduction = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(generationBeforeReduction.rows[0].generation), 1);
   const auditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository: createPostgresAdminAuditRepository({ client: poolA }) });
   const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
@@ -277,19 +405,11 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(capabilityAudit.rows[0].count, 1);
 
   const humanRepository = createPostgresHumanRepository({ client: poolA, onAuthorityReduction });
-  const credentialRevokedAt = new Date().toISOString();
-  const revokedCredential = await humanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialA.toString("base64url"), expected_version: 1, revoked_at: credentialRevokedAt, reason: "integration_management", authority_reduction: true });
-  assert.equal(revokedCredential.version, 2);
-  const credentialGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(credentialGeneration.rows[0].generation), 7);
-  const sessionRevokedAt = new Date().toISOString();
-  const revokedSession = await humanRepository.revokeManagedSession({ actor_session_id: ids.sessionA, target_session_id: ids.sessionB, member_id: ids.member, organization_id: ids.organization, expected_version: 1, revoked_at: sessionRevokedAt, reason: "integration_management", authority_reduction: true });
-  assert.equal(revokedSession.version, 2);
-  const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(sessionGeneration.rows[0].generation), 8);
-  const humanAudits = await poolA.query("SELECT action,count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action IN ('credential.revoked','session.revoked') GROUP BY action ORDER BY action", [ids.organization]);
-  assert.deepEqual(humanAudits.rows, [{ action: "credential.revoked", count: 1 }, { action: "session.revoked", count: 1 }]);
-
+  // A credential revocation also advances the member identity epoch and
+  // invalidates every human session for that member. Exercise the rollback
+  // boundary while the actor session is still active, then revoke the managed
+  // session before the credential so this test does not expect a mutation of
+  // an already-invalidated session.
   const failingHumanRepository = createPostgresHumanRepository({
     client: poolA,
     onAuthorityReduction: async (input) => {
@@ -305,11 +425,26 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(rolledBackCredential.rows[0].revoked_at, null);
   assert.equal(Number(rolledBackCredential.rows[0].version), 1);
   const generationAfterAuditFailure = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(generationAfterAuditFailure.rows[0].generation), 8);
-  const outboxAfterAuditFailure = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=9", [ids.organization]);
+  assert.equal(Number(generationAfterAuditFailure.rows[0].generation), 6);
+  const outboxAfterAuditFailure = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=7", [ids.organization]);
   assert.equal(outboxAfterAuditFailure.rows[0].count, 0);
   const auditsAfterFailure = await poolA.query("SELECT count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action='credential.revoked'", [ids.organization]);
-  assert.equal(auditsAfterFailure.rows[0].count, 1);
+  assert.equal(auditsAfterFailure.rows[0].count, 0);
+
+  const sessionRevokedAt = new Date().toISOString();
+  const revokedSession = await humanRepository.revokeManagedSession({ actor_session_id: ids.sessionA, target_session_id: ids.sessionB, member_id: ids.member, organization_id: ids.organization, expected_version: 1, revoked_at: sessionRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedSession.version, 2);
+  const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(sessionGeneration.rows[0].generation), 7);
+
+  const credentialRevokedAt = new Date().toISOString();
+  const revokedCredential = await humanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialA.toString("base64url"), expected_version: 1, revoked_at: credentialRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedCredential.version, 2);
+  const credentialGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(credentialGeneration.rows[0].generation), 8);
+  const humanAudits = await poolA.query("SELECT action,count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action IN ('credential.revoked','session.revoked') GROUP BY action ORDER BY action", [ids.organization]);
+  assert.deepEqual(humanAudits.rows, [{ action: "credential.revoked", count: 1 }, { action: "session.revoked", count: 1 }]);
+
   await humanRepository.revokeSession({ session_id: ids.sessionA, revoked_at: new Date().toISOString(), reason: "logout" });
   const generationAfterLogout = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(generationAfterLogout.rows[0].generation), 8);

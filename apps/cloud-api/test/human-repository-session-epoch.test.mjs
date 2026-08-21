@@ -28,7 +28,10 @@ const sessionInput = Object.freeze({
 
 test("session creation snapshots the current organization and membership epochs", async () => {
   const calls = [];
-  const client = { async query(text, params) { calls.push({ text, params }); return { rowCount: 1, rows: [{ id: ids.session }] }; } };
+  const client = { async query(text, params) {
+    calls.push({ text, params });
+    return { rowCount: 1, rows: [{ id: ids.session, ...sessionInput, token_hash_hex: sessionInput.token_hash, csrf_token_hash_hex: sessionInput.csrf_token_hash, revoked_at: null }] };
+  } };
   const repository = createPostgresHumanRepository({ client });
 
   await repository.createSession(sessionInput);
@@ -63,10 +66,72 @@ test("all authority-bearing session and credential paths require exact current e
 
   const authorityQueries = calls.filter(({ text }) => /human_sessions/.test(text));
   assert.ok(authorityQueries.length >= 10);
+  assert.match(calls[1].text, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(calls[1].text, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
   for (const { text } of authorityQueries) {
     assert.match(text, /authority_epoch/);
     assert.match(text, /session_epoch/);
   }
+});
+
+test("token authentication and WebAuthn allow-list lookup require a currently usable session", async () => {
+  const calls = [];
+  const client = { async query(text, params) {
+    calls.push({ text, params });
+    return { rowCount: 0, rows: [] };
+  } };
+  const repository = createPostgresHumanRepository({ client });
+
+  assert.equal(await repository.findSessionByTokenHash({ token_hash: "a".repeat(64) }), null);
+  assert.deepEqual(await repository.listCredentialsForSession({ session_id: ids.session, organization_id: ids.organization }), []);
+
+  const sessionLookup = calls[0].text;
+  assert.match(sessionLookup, /s\.revoked_at IS NULL/);
+  assert.match(sessionLookup, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(sessionLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
+  assert.match(sessionLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.match(sessionLookup, /m\.session_epoch=s\.membership_session_epoch/);
+
+  const credentialLookup = calls[1].text;
+  assert.match(credentialLookup, /s\.revoked_at IS NULL/);
+  assert.match(credentialLookup, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(credentialLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
+  assert.match(credentialLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.match(credentialLookup, /m\.session_epoch=s\.membership_session_epoch/);
+});
+
+test("session lookup normalizes node-postgres Date values before the JSON boundary", async () => {
+  const client = { async query() {
+    return { rowCount: 1, rows: [{
+      id: ids.session,
+      member_id: ids.member,
+      membership_id: ids.membership,
+      organization_id: ids.organization,
+      role: "owner",
+      token_hash_hex: "a".repeat(64),
+      csrf_token_hash_hex: "b".repeat(64),
+      created_at: new Date("2026-08-14T00:00:00.000Z"),
+      expires_at: new Date("2026-08-14T08:00:00.000Z"),
+      last_seen_at: new Date("2026-08-14T00:01:00.000Z"),
+      idle_expires_at: new Date("2026-08-14T00:31:00.000Z"),
+      recent_auth_at: null,
+      revoked_at: null
+    }] };
+  } };
+  const repository = createPostgresHumanRepository({ client });
+
+  const session = await repository.findSessionByTokenHash({ token_hash: "a".repeat(64) });
+  const [safeSession] = await repository.listSafeSessions({ member_id: ids.member, organization_id: ids.organization });
+  assert.equal(session.created_at, "2026-08-14T00:00:00.000Z");
+  assert.equal(session.expires_at, "2026-08-14T08:00:00.000Z");
+  assert.equal(session.last_seen_at, "2026-08-14T00:01:00.000Z");
+  assert.equal(session.idle_expires_at, "2026-08-14T00:31:00.000Z");
+  assert.equal(session.recent_auth_at, null);
+  assert.equal(session.revoked_at, null);
+  assert.equal(safeSession.created_at, "2026-08-14T00:00:00.000Z");
+  assert.equal(safeSession.expires_at, "2026-08-14T08:00:00.000Z");
+  assert.equal(safeSession.last_seen_at, "2026-08-14T00:01:00.000Z");
+  assert.equal(safeSession.idle_expires_at, "2026-08-14T00:31:00.000Z");
 });
 
 test("rotateSession atomically snapshots current epochs and revokes the exact old session", async () => {

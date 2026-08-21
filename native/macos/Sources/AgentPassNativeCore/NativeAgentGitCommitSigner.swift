@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum NativeAgentGitCommitSignerError: String, Error, Equatable, Sendable {
@@ -22,6 +23,10 @@ public final class NativeAgentGitCommitSigner: NativeAgentGitCommitSigning, @unc
         self.signer = signer
     }
 
+    public var keyLifecycleIdentity: String {
+        NativeSigningTransactionRequest.hex(SHA256.hash(data: signer.publicKeyX963))
+    }
+
     public func signGitCommitPayload(_ payload: Data) throws -> Data {
         guard !payload.isEmpty, payload.count <= Self.maximumPayloadBytes else {
             throw NativeAgentGitCommitSignerError.invalidPayload
@@ -42,6 +47,23 @@ public final class NativeAgentGitCommitSigner: NativeAgentGitCommitSigning, @unc
                 throw NativeAgentGitCommitSignerError.invalidSignature
             }
             return output
+        }
+    }
+
+    public func verifyGitCommitSignature(payload: Data, signature: Data) throws -> Bool {
+        guard !payload.isEmpty, payload.count <= Self.maximumPayloadBytes,
+              signature.count <= AgentPassAgentSignResponse.maximumSignatureBytes,
+              let armored = String(data: signature, encoding: .utf8) else {
+            throw NativeAgentGitCommitSignerError.invalidSignature
+        }
+        do {
+            return try SSHSIG.verify(
+                payload: payload,
+                signature: armored,
+                namespace: "git",
+                publicKeyX963: signer.publicKeyX963)
+        } catch {
+            throw NativeAgentGitCommitSignerError.invalidSignature
         }
     }
 }

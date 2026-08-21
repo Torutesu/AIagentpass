@@ -89,7 +89,7 @@ export function createPostgresControlPlaneStore(options = {}) {
   const cursorSecret = options.cursorSecret ?? options.auditCursorSecret;
 
   const organizationRepository = options.organizationRepository ?? options.organization ?? (client ? createPostgresOrganizationRepository({ client, now }) : undefined);
-  const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now, onAuthorityReduction: options.onAuthorityReduction }) : undefined);
+  const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now, onAuthorityReduction: options.onAuthorityReduction, onDeviceEnrollmentActivated: options.onDeviceEnrollmentActivated }) : undefined);
   const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec: options.refreshNonceCodec, now, onRevocation: options.onRevocation }) : undefined);
   const auditRepository = options.auditRepository ?? options.audit ?? (client && (cursorCodec || cursorSecret) ? createPostgresAuditRepository({ client, cursorCodec, cursorSecret, now: () => clockMillis(now) }) : undefined);
   const adminAuditRepository = options.adminAuditRepository ?? options.adminAudit ?? (client ? createPostgresAdminAuditRepository({ client, now }) : undefined);
@@ -127,14 +127,14 @@ export function createPostgresControlPlaneStore(options = {}) {
     createDeviceEnrollment: delegate(resourceRepository, "createDeviceEnrollment", "createDeviceEnrollment", { context: true }),
     createPolicy: delegate(resourceRepository, "createPolicy", "createPolicy", { context: true }),
     createRevocation,
-    getAuditHealth: delegate(authorityRepository, "getAuditHealth", "getAuditHealth"),
+    getAuditHealth: delegate(authorityRepository, "getAuditHealth", "getAuditHealth", { context: true }),
     getOrganization: delegate(organizationRepository, "getOrganization", "getOrganization"),
     ingestDeviceAuditEvents: delegate(authorityRepository, "ingestDeviceAuditEvents", "ingestDeviceAuditEvents", { context: true }),
     issueCapabilityMetadata: delegate(capabilityAuthorityRepository ?? authorityRepository, "issueCapabilityMetadata", "issueCapabilityMetadata", { context: true }),
     listAdminAuditEvents: delegate(adminAuditRepository, "listAdminAuditEvents", "listAdminAuditEvents"),
     listAgents: delegate(resourceRepository, "listAgents", "listAgents"),
     listCapabilities: delegate(capabilityReservationRepository ?? capabilityAuthorityRepository ?? authorityRepository, "listCapabilities", "listCapabilities"),
-    listDeviceAuditEvents: delegate(auditRepository ?? authorityRepository, "listDeviceAuditEvents", "listDeviceAuditEvents"),
+    listDeviceAuditEvents: delegate(auditRepository ?? authorityRepository, "listDeviceAuditEvents", "listDeviceAuditEvents", { context: true }),
     listDevices: delegate(resourceRepository, "listDevices", "listDevices"),
     listDeviceReadModels: delegate(resourceRepository, "listDeviceReadModels", "listDeviceReadModels"),
     listPolicies: delegate(resourceRepository, "listPolicies", "listPolicies"),

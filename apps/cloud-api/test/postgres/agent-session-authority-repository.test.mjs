@@ -91,6 +91,9 @@ class ContractClient {
       this.locks.push({ key, tail, release });
       return result([{ locked: true }]);
     }
+    if (text.includes("agentpass_agent_session_grant_issue(")) return this.issueGrantFunction(params);
+    if (text.includes("agentpass_agent_session_grant_get(")) return this.getGrantFunction(params);
+    if (text.includes("agentpass_agent_session_consume(")) return this.consumeGrantFunction(params);
     if (/FROM agents a[\s\S]*JOIN control_plane_authority_generations/u.test(text)) return this.options.staleAuthority ? result() : result([{ "?column?": 1 }]);
     if (text.startsWith("INSERT INTO agent_session_grants")) return this.insertGrant(params);
     if (text.startsWith("SELECT organization_id,grant_id,device_id,agent_id,agent_kind")) return this.selectGrant(text, params);
@@ -122,6 +125,94 @@ class ContractClient {
     this.shared.grants.push(row);
     if (this.options.malformedGrantReturn) return result([{ organization_id: params[0], grant_id: params[1] }]);
     return result([row]);
+  }
+
+  issueGrantFunction(params) {
+    if (this.options.failGrantInsert) throw new Error("grant insert contains private key material");
+    const existing = this.shared.grants.find((row) => row.organization_id === params[0] && row.grant_id === params[1]);
+    if (existing) return result([{ ...existing, inserted: false }]);
+    const row = {
+      organization_id: params[0], grant_id: params[1], device_id: params[2], agent_id: params[3], agent_kind: params[4],
+      adapter_id: params[5], adapter_version: params[6], worktree_binding_sha256: params[7], process_binding_policy_id: params[8],
+      scope_json: JSON.parse(params[9]), max_signatures: params[10], not_before: params[11], expires_at: params[12],
+      control_sequence: params[13], authority_generation: params[14], issuer: params[15], signer_key_id: params[16], statement_hash: params[17],
+      grant_hash: params[18], signature_base64url: params[19], status: "issued", issued_at: params[20],
+      consumed_at: null, consumed_session_id: null, consumed_process_binding_sha256: null, created_by: params[21]
+    };
+    this.shared.grants.push(row);
+    if (this.options.malformedGrantReturn) return result([{ organization_id: params[0], grant_id: params[1] }]);
+    return result([{ ...row, inserted: true }]);
+  }
+
+  getGrantFunction(params) {
+    const row = this.shared.grants.find((candidate) => candidate.organization_id === params[0] && candidate.grant_id === params[1]);
+    if (!row) return result();
+    return result([this.options.crossTenantRow ? { ...row, organization_id: ids.otherOrganization } : row]);
+  }
+
+  consumeGrantFunction(params) {
+    const grant = this.shared.grants.find((row) => row.organization_id === params[0] && row.grant_id === params[1] && row.device_id === params[2]);
+    if (!grant) {
+      const error = new Error("grant not found");
+      error.constraint = "agent_session_authority_grant_not_found";
+      throw error;
+    }
+    if (this.options.crossTenantRow) {
+      const error = new Error("tenant drift");
+      error.constraint = "agent_session_authority_tenant";
+      throw error;
+    }
+    if (grant.status === "consumed") {
+      const existing = this.shared.sessions.find((row) => row.organization_id === params[0] && row.session_id === grant.consumed_session_id && row.grant_id === params[1]);
+      if (!existing || !["challenge_pending", "active", "request_reserved", "signing_intent", "signed"].includes(existing.status)) {
+        const error = new Error("session unavailable");
+        error.constraint = "agent_session_authority_session_unavailable";
+        throw error;
+      }
+      if (Date.parse(existing.expires_at) <= Date.parse(this.options.now ?? NOW)) {
+        const error = new Error("session expired");
+        error.constraint = "agent_session_authority_session_expired";
+        throw error;
+      }
+      if (existing.process_binding_sha256 !== params[20] || existing.ancestry_binding_sha256 !== params[21]
+        || (params[23] && params[22] !== existing.session_id)) {
+        const error = new Error("binding conflict");
+        error.constraint = "agent_session_authority_binding_conflict";
+        throw error;
+      }
+      return result([{ ...existing, replayed: true }]);
+    }
+    if (grant.status !== "issued") {
+      const error = new Error("grant unavailable");
+      error.constraint = "agent_session_authority_grant_unavailable";
+      throw error;
+    }
+    if (this.options.failAgentSessionGrantConsumeUpdate) throw new Error("grant consume update failed");
+    if (Date.parse(this.options.now ?? NOW) < Date.parse(grant.not_before)) {
+      const error = new Error("grant not yet valid");
+      error.constraint = "agent_session_authority_grant_not_yet_valid";
+      throw error;
+    }
+    if (Date.parse(this.options.now ?? NOW) >= Date.parse(grant.expires_at)) {
+      const error = new Error("grant expired");
+      error.constraint = "agent_session_authority_grant_expired";
+      throw error;
+    }
+    if (params[22] === null || params[22] === undefined) {
+      const error = new Error("session id required");
+      error.constraint = "agent_session_authority_session_id_required";
+      throw error;
+    }
+    const sessionParams = [
+      params[0], params[22], params[1], params[2], params[3], params[4], params[5], params[6], params[8], params[18],
+      params[20], params[21], params[7], params[13], params[14], params[10], NOW, params[11], params[12]
+    ];
+    const inserted = this.insertSession(sessionParams);
+    grant.status = "consumed";
+    grant.consumed_at = NOW;
+    grant.consumed_session_id = params[22];
+    grant.consumed_process_binding_sha256 = params[20];
+    return result(inserted.rows.map((row) => ({ ...row, replayed: false })));
   }
 
   selectGrant(text, params) {
@@ -247,12 +338,10 @@ test("persists a canonical grant and returns the exact committed data on retry",
   assert.equal(first.replayed, false);
   assert.equal(second.replayed, true);
   assert.deepEqual(second.grant, first.grant);
-  const insert = client.calls.find((call) => call.text.startsWith("INSERT INTO agent_session_grants"));
-  assert.match(insert.text, /ON CONFLICT \(organization_id,grant_id\) DO NOTHING/u);
-  assert.match(insert.text, /statement_hash/u);
-  assert.match(insert.text, /grant_hash/u);
-  assert.equal(insert.params[0], ids.organization);
-  assert.equal(insert.params[17], first.grant.statement_hash);
+  const issue = client.calls.find((call) => call.text.includes("agentpass_agent_session_grant_issue("));
+  assert.match(issue.text, /SECURITY DEFINER|agentpass_agent_session_grant_issue/u);
+  assert.equal(issue.params[0], ids.organization);
+  assert.equal(issue.params[17], first.grant.statement_hash);
   assert.equal(client.calls.filter((call) => call.text === "BEGIN").length, 2);
 });
 
@@ -278,17 +367,17 @@ test("consumes once, binds both process and ancestry, and replays the original l
   assert.equal(retry.replayed, true);
   assert.deepEqual(retry.lease, first.lease);
   assert.equal(first.lease.not_before, NOT_BEFORE);
-  const insert = client.calls.find((call) => call.text.startsWith("INSERT INTO agent_sessions"));
-  assert.match(insert.text, /ancestry_binding_sha256/u);
-  assert.equal(insert.params[10], PROCESS);
-  assert.equal(insert.params[11], ANCESTRY);
-  assert.equal(insert.params[17], NOT_BEFORE);
-  assert.equal(insert.params[18], EXPIRES);
+  const consume = client.calls.find((call) => call.text.includes("agentpass_agent_session_consume("));
+  assert.match(consume.text, /agentpass_agent_session_consume/u);
+  assert.equal(consume.params[20], PROCESS);
+  assert.equal(consume.params[21], ANCESTRY);
+  assert.equal(consume.params[11], NOT_BEFORE);
+  assert.equal(consume.params[12], EXPIRES);
   assert.equal(client.shared.grants[0].status, "consumed");
   assert.equal(client.shared.grants[0].consumed_at, NOW);
   assert.equal(client.shared.grants[0].consumed_session_id, ids.session);
   assert.equal(client.shared.grants[0].consumed_process_binding_sha256, PROCESS);
-  assert.doesNotMatch(insert.text, /UPDATE\s+agent_session_grants/iu);
+  assert.doesNotMatch(consume.text, /UPDATE\s+agent_session_grants/iu);
   assert.equal(client.calls.some(({ text }) => /UPDATE\s+agent_session_grants/iu.test(text)), false);
   await assert.rejects(repo.consumeAgentSessionGrant({ ...request, process_binding_sha256: "e".repeat(64) }), { code: "ERR_BINDING_CONFLICT" });
   await assert.rejects(repo.consumeAgentSessionGrant({ ...request, ancestry_binding_sha256: "d".repeat(64) }), { code: "ERR_BINDING_CONFLICT" });
@@ -307,6 +396,7 @@ test("never replays a terminal or expired session as a usable Lease", async () =
   await assert.rejects(repo.consumeAgentSessionGrant(request), { code: "ERR_GRANT_UNAVAILABLE" });
   client.shared.sessions[0].status = "challenge_pending";
   client.shared.sessions[0].revoked_at = null;
+  client.options.now = EXPIRES;
   const expiredRepo = repository(client, { now: () => EXPIRES });
   await assert.rejects(expiredRepo.consumeAgentSessionGrant(request), { code: "ERR_GRANT_EXPIRED" });
 });
@@ -321,7 +411,7 @@ test("pins the migration trigger as the only grant-consumption transition", () =
   assert.match(migration, /CREATE TRIGGER agent_sessions_consume_grant BEFORE INSERT ON agent_sessions FOR EACH ROW EXECUTE FUNCTION agentpass_consume_agent_session_grant_for_session\(\);/u);
 });
 
-test("does not mask an absent migration trigger in the fake client", async () => {
+test("does not allow a caller to bypass the function-owned grant transition", async () => {
   const client = new ContractClient({ disableAgentSessionsConsumeGrantTrigger: true });
   const repo = repository(client);
   const issued = issueInput();
@@ -329,12 +419,12 @@ test("does not mask an absent migration trigger in the fake client", async () =>
   const request = consumeInput({ grant: issued.grant });
   const first = await repo.consumeAgentSessionGrant(request);
   assert.equal(first.replayed, false);
-  assert.equal(client.shared.grants[0].status, "issued");
-  assert.equal(client.shared.grants[0].consumed_session_id, null);
+  assert.equal(client.shared.grants[0].status, "consumed");
+  assert.equal(client.shared.grants[0].consumed_session_id, ids.session);
 
   const retry = await repo.consumeAgentSessionGrant(request);
-  assert.equal(retry.replayed, false);
-  assert.equal(client.shared.grants[0].status, "issued");
+  assert.equal(retry.replayed, true);
+  assert.equal(client.shared.grants[0].status, "consumed");
 });
 
 test("rolls back when the migration trigger's grant update fails", async () => {
@@ -366,8 +456,8 @@ test("two competing consumption attempts converge on one committed lease", async
   ]);
   assert.deepEqual(first.lease, second.lease);
   assert.equal(shared.sessions.length, 1);
-  assert.equal(firstClient.calls.filter((call) => call.text.startsWith("SELECT pg_advisory_xact_lock")).length, 2);
-  assert.equal(secondClient.calls.filter((call) => call.text.startsWith("SELECT pg_advisory_xact_lock")).length, 1);
+  assert.equal(firstClient.calls.some((call) => call.text.includes("agentpass_agent_session_consume(")), true);
+  assert.equal(secondClient.calls.some((call) => call.text.includes("agentpass_agent_session_consume(")), true);
 });
 
 test("recovers an ambiguous commit by reading the immutable consumed grant", async () => {
@@ -401,7 +491,7 @@ test("fails closed on tenant context drift, cross-tenant rows, and malformed out
   const crossTenant = new ContractClient({ crossTenantRow: true });
   const crossRepo = repository(crossTenant);
   await crossRepo.issueAgentSessionGrant(issueInput());
-  await assert.rejects(crossRepo.consumeAgentSessionGrant(consumeInput()), (error) => error.code === "ERR_TENANT_DRIFT" || error.code === "ERR_GRANT_NOT_FOUND");
+  await assert.rejects(crossRepo.consumeAgentSessionGrant(consumeInput()), (error) => ["ERR_TENANT_DRIFT", "ERR_TENANT_SCOPE", "ERR_GRANT_NOT_FOUND"].includes(error.code));
 
   const malformed = new ContractClient({ malformedGrantReturn: true });
   await assert.rejects(repository(malformed).issueAgentSessionGrant(issueInput()), { code: "ERR_DB_RESULT" });
@@ -426,7 +516,7 @@ test("uses transaction-local tenant context before any authority query", async (
     "BEGIN",
     "SELECT set_config('agentpass.organization_id',$1,true) AS organization_id",
     "SELECT current_setting('agentpass.organization_id',true) AS organization_id",
-    "SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked"
+    "SELECT * FROM public.agentpass_agent_session_grant_issue(\n        $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text,$6::uuid,$7::text,$8::text,$9::text,\n        $10::jsonb,$11::integer,$12::timestamptz,$13::timestamptz,$14::bigint,$15::bigint,\n        $16::text,$17::text,$18::text,$19::text,$20::text,$21::timestamptz,$22::uuid)"
   ]);
   assert.deepEqual(client.calls[1].params, [ids.organization]);
 });

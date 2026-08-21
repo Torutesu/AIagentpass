@@ -17,7 +17,7 @@
     "native/macos/Resources",
     "native/macos/scripts",
     "scripts/release",
-    "scripts/qualification",
+    "scripts/cursor-runtime",
     "scripts/owner-recovery",
     "scripts/postgres",
     "native/macos/Sources",
@@ -36,15 +36,25 @@
     "agentpass-mcp": "./adapters/mcp-server/bin/agentpass-mcp.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs test/support/p0b/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs apps/cloud-api/test/human-auth/*.test.mjs apps/cloud-api/test/postgres/*.test.mjs scripts/qualification/*.test.mjs scripts/owner-recovery/*.test.mjs scripts/p0b/*.test.mjs scripts/p0b/qualification/*.test.mjs scripts/release/p0c/drivers/*.test.mjs scripts/release/p0c/scenarios/*.test.mjs scripts/release/n3e/*.test.mjs",
-    "test:native": "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
+    "test": "node --test test/*.test.mjs test/support/p0b/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs apps/cloud-api/test/hosted-bootstrap/*.test.mjs apps/cloud-api/test/hosted-identity/*.test.mjs apps/cloud-api/test/human-auth/*.test.mjs apps/cloud-api/test/postgres/*.test.mjs scripts/agent-session-signing-capability/*.test.mjs scripts/cursor-runtime/*.test.mjs scripts/kms-qualification/*.test.mjs scripts/owner-recovery/*.test.mjs scripts/p0b/*.test.mjs scripts/p0b/qualification/*.test.mjs scripts/release/p0c/drivers/*.test.mjs scripts/release/p0c/scenarios/*.test.mjs scripts/release/n3e/*.test.mjs",
+    "test:native": "node scripts/ci/run-native-test-shards.mjs",
+    "test:cursor-runtime": "node --test scripts/cursor-runtime/materialize.test.mjs test/cursor-agent-runtime-manifest-contract.test.mjs",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
     "test:native-installer-preservation": "native/macos/scripts/test-installer-preservation.sh",
+    "test:native-distribution-evidence": "node --test native/macos/scripts/distribution-evidence.test.mjs",
     "test:native-durability-model": "node native/macos/scripts/qualification/g42-posix-kill-restart.mjs",
+    "test:console": "npm test --prefix apps/web-console",
+    "lint:console": "npm run lint --prefix apps/web-console",
     "test:n3e:packaging": "node --test scripts/release/n3e/packaging.test.mjs",
     "test:postgres:g4": "node --test apps/cloud-api/test/postgres/g4-refresh-integration.test.mjs apps/cloud-api/test/postgres/g4-refresh-contention-integration.test.mjs apps/cloud-api/test/postgres/g4-1-refresh-nonce-rotation-integration.test.mjs apps/cloud-api/test/postgres/g4-1-process-kill-qualification.test.mjs apps/cloud-api/test/postgres/g4-1-propagation-postgres-qualification.test.mjs apps/cloud-api/test/postgres/p0b-signed-ack.integration.test.mjs",
+    "test:postgres:strict": "npm run postgres:require-live-env && npm run test:postgres:g4 && npm run test:postgres:w15 && npm run test:postgres:platform-authorization",
     "test:postgres:w15": "node --test --test-concurrency=1 apps/cloud-api/test/postgres/owner-recovery-provider-acceptance.integration.test.mjs apps/cloud-api/test/postgres/owner-recovery-provider-confirmation.integration.test.mjs apps/cloud-api/test/postgres/owner-recovery-outbox-race-matrix.integration.test.mjs apps/cloud-api/test/postgres/owner-recovery-process-loss-qualification.integration.test.mjs",
     "test:postgres:w15:composed": "node --test --test-concurrency=1 apps/cloud-api/test/postgres/owner-recovery-https-provider-composed.integration.test.mjs apps/cloud-api/test/postgres/owner-recovery-retention-confirmation-races.integration.test.mjs",
+    "test:postgres:platform-authorization": "node --test --test-concurrency=1 apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs apps/cloud-api/test/postgres/platform-authorization-failure-qualification.integration.test.mjs apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs",
+    "postgres:require-live-env": "node scripts/postgres/require-live-qualification-env.mjs",
+    "postgres:platform-authorization-evidence": "node scripts/postgres/platform-authorization-qualification-evidence.mjs",
+    "contracts:validate:platform": "node scripts/validate-platform-contract-sync.mjs",
+    "contracts:validate:hosted-identity-bootstrap": "node scripts/validate-hosted-identity-bootstrap.mjs",
     "test:w16": "node scripts/owner-recovery/validate-w16-alerts.mjs \"$PWD/ops/observability/owner-recovery-alerts.v1.json\" && node --test scripts/owner-recovery/validate-w16-alerts.test.mjs scripts/owner-recovery/verify-w16-drill-evidence.test.mjs",
     "test:p0b:live": "node scripts/p0b/run-live-process.mjs",
     "release:validate": "node scripts/release/validate-version.mjs",
@@ -71,8 +81,8 @@
     "qualification:external": "node scripts/release/ci-preflight.mjs external-qualification",
     "postgres:cutover": "node scripts/postgres/cutover.mjs",
     "postgres:authority-manifest": "node scripts/postgres/authority-manifest.mjs",
-    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/agent-sessions/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/recovery/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/owner-recovery/*.mjs scripts/postgres/*.mjs scripts/release/*.mjs scripts/release/n3e/*.mjs scripts/release/p0c/lib/*.mjs scripts/release/p0c/drivers/* scripts/release/p0c/scenarios/* scripts/p0b/*.mjs scripts/p0b/postgres-tls/*.mjs scripts/p0b/qualification/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
-    "prepack": "npm run release:validate && npm run contracts:validate && npm run test:w16 && npm test && npm run test:native && npm run test:native-app && npm run test:native-installer-preservation && npm run test:native-durability-model && npm run lint"
+    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/hosted-bootstrap/*.mjs apps/cloud-api/src/hosted-identity/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/agent-sessions/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/recovery/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/ops/*.mjs scripts/agent-session-signing-capability/*.mjs scripts/cursor-runtime/*.mjs scripts/kms-qualification/*.mjs scripts/owner-recovery/*.mjs scripts/postgres/*.mjs scripts/release/*.mjs scripts/release/qualification/*.mjs scripts/release/n3e/*.mjs scripts/release/p0c/lib/*.mjs scripts/release/p0c/drivers/* scripts/release/p0c/scenarios/* scripts/p0b/*.mjs scripts/p0b/postgres-tls/*.mjs scripts/p0b/qualification/*.mjs native/macos/Qualification/*.mjs && bash -n native/macos/scripts/*.sh native/macos/scripts/qualification/*.sh scripts/release/*.sh",
+    "prepack": "npm run release:validate && npm run contracts:validate && npm run test:w16 && npm test && npm run test:console && npm run lint:console && npm run test:native && npm run test:native-app && npm run test:native-installer-preservation && npm run test:native-durability-model && npm run lint"
   },
   "engines": {
     "node": ">=20"

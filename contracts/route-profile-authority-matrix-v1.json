@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/route-profile-authority-matrix-v1.json",
+  "title": "AgentPass route, runtime profile, and authority matrix v1",
+  "description": "The frozen route and authority boundary for Platform Session and promotion traffic. This inventory is intentionally separate from catalog-v1.json: the frozen catalog enumerates JSON Schema, OpenAPI, and PostgreSQL source contracts.",
+  "contract_id": "agentpass.route-profile-authority-matrix",
+  "version": 1,
+  "status": "frozen",
+  "runtime_selector": {
+    "environment_variable": "AGENTPASS_CLOUD_PROFILE",
+    "accepted_values": ["hosted", "evaluation"],
+    "development_value": "development",
+    "development_policy": "rejected; use evaluation explicitly for local Cloud API work"
+  },
+  "profiles": {
+    "hosted": {
+      "runtime_status": "accepted",
+      "production": true,
+      "authority_source": "postgresql",
+      "authority_components": [
+        "platform-session PostgreSQL repositories and WebAuthn ceremony",
+        "0054 atomic platform authorization reservation",
+        "purpose-bound managed promotion signer"
+      ],
+      "active_routes": [
+        "platform.session.challenge",
+        "platform.session.assertion",
+        "platform.session.revoke",
+        "platform.promotion.issue"
+      ],
+      "legacy_route_policy": "absent"
+    },
+    "evaluation": {
+      "runtime_status": "accepted",
+      "production": false,
+      "authority_source": "reference-file-store",
+      "authority_components": ["explicit protected local evaluation files"],
+      "active_routes": [],
+      "legacy_route_policy": "not-composed",
+      "compatibility_policy": "Legacy promotion services may be injected only by an explicit evaluation/test harness; createCloudRuntime does not compose those routes."
+    },
+    "development": {
+      "runtime_status": "rejected",
+      "production": false,
+      "authority_source": "none",
+      "authority_components": [],
+      "active_routes": [],
+      "legacy_route_policy": "rejected",
+      "rejection_code": "cloud_profile_unknown"
+    }
+  },
+  "routes": [
+    {
+      "id": "platform.session.challenge",
+      "method": "POST",
+      "path": "/api/platform/v1/sessions/challenges",
+      "handler": "platformSessionHttpApi",
+      "profiles": { "hosted": "active", "evaluation": "absent", "development": "rejected" },
+      "authority": {
+        "source": "postgresql",
+        "operation": "database-owned Platform Session authority resolution",
+        "browser_input_is_authority": false,
+        "bootstrap": "Human Session cookie is used only to bootstrap the server-side authority lookup"
+      },
+      "authentication_transport": {
+        "origin": "Origin header must equal the configured HTTPS Console origin",
+        "cookie": "__Host-agentpass_session",
+        "cookie_role": "Human Session bootstrap only",
+        "headers": ["Origin", "Idempotency-Key"],
+        "body": "public promotion intent only",
+        "forbidden": ["__Host-agentpass_platform_session", "agentpass-platform-csrf", "Authorization"]
+      }
+    },
+    {
+      "id": "platform.session.assertion",
+      "method": "POST",
+      "path": "/api/platform/v1/sessions",
+      "handler": "platformSessionHttpApi",
+      "profiles": { "hosted": "active", "evaluation": "absent", "development": "rejected" },
+      "authority": {
+        "source": "postgresql",
+        "operation": "durable challenge plus WebAuthn assertion",
+        "browser_input_is_authority": false,
+        "cookie_read": "none; the platform bearer is issued only in Set-Cookie"
+      },
+      "authentication_transport": {
+        "origin": "Origin header must equal the configured HTTPS Console origin",
+        "cookie": null,
+        "headers": ["Origin"],
+        "body": "one strict WebAuthn assertion envelope",
+        "response_bearer": "Set-Cookie: __Host-agentpass_platform_session only",
+        "response_csrf": "JSON csrf_token",
+        "forbidden": ["__Host-agentpass_session", "__Host-agentpass_platform_session", "Authorization"]
+      }
+    },
+    {
+      "id": "platform.session.revoke",
+      "method": "POST",
+      "path": "/api/platform/v1/sessions/revoke",
+      "handler": "platformSessionHttpApi",
+      "profiles": { "hosted": "active", "evaluation": "absent", "development": "rejected" },
+      "authority": {
+        "source": "postgresql",
+        "operation": "self-revoke by hashed Platform Session bearer",
+        "browser_input_is_authority": false
+      },
+      "authentication_transport": {
+        "origin": "Origin header must equal the configured HTTPS Console origin",
+        "cookie": "__Host-agentpass_platform_session",
+        "cookie_role": "opaque HttpOnly Secure SameSite=Strict bearer",
+        "headers": ["Origin", "agentpass-platform-csrf"],
+        "body": "absent",
+        "forbidden": ["Authorization", "Idempotency-Key"]
+      }
+    },
+    {
+      "id": "platform.promotion.issue",
+      "method": "POST",
+      "path": "/api/platform/v1/promotions",
+      "handler": "platformPromotionHttpApi",
+      "profiles": { "hosted": "active", "evaluation": "absent", "development": "rejected" },
+      "authority": {
+        "source": "postgresql",
+        "operation": "0054 atomic Platform authorization reservation followed by managed signer finalization",
+        "browser_input_is_authority": false,
+        "organization_source": "Platform Session and PostgreSQL authority; request organization_id is checked, not trusted",
+        "legacy_replay_or_get": "absent"
+      },
+      "authentication_transport": {
+        "origin": "Origin header must equal the configured HTTPS Console origin",
+        "cookie": "__Host-agentpass_platform_session",
+        "cookie_role": "opaque HttpOnly Secure SameSite=Strict bearer",
+        "headers": [
+          "Origin",
+          "agentpass-platform-csrf",
+          "agentpass-platform-proof-id",
+          "agentpass-platform-jti",
+          "Idempotency-Key"
+        ],
+        "body": "public promotion intent only",
+        "human_session_cookie": "ignored and never used as promotion authority",
+        "forbidden": ["Authorization", "agentpass-csrf", "replay endpoint", "get endpoint"]
+      }
+    }
+  ],
+  "legacy_routes": [
+    {
+      "id": "legacy.platform.promotion.issue",
+      "method": "POST",
+      "path": "/v1/platform/promotions",
+      "profiles": { "hosted": "absent", "evaluation": "not-composed", "development": "rejected" },
+      "authority": "legacy platform-operator/Human Session path; never a hosted authority"
+    },
+    {
+      "id": "legacy.platform.promotion.replay",
+      "method": "POST",
+      "path": "/v1/platform/promotions/replay",
+      "profiles": { "hosted": "absent", "evaluation": "not-composed", "development": "rejected" },
+      "authority": "legacy replay path; no public hosted replacement"
+    }
+  ]
+}

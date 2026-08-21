@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-promotion-issuance-request-v1.schema.json",
+  "title": "AgentPass platform promotion issuance request v1",
+  "description": "Strict public identity for one platform promotion issuance or replay. The idempotency key is transport-bound in the Idempotency-Key header and is never accepted in this JSON body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["promotion_id", "deployment_id", "environment", "candidate_id"],
+  "properties": {
+    "promotion_id": { "type": "string", "format": "uuid" },
+    "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "environment": { "type": "string", "enum": ["staging", "production"] },
+    "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" }
+  }
+}

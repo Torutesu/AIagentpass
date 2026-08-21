@@ -14,11 +14,11 @@ private func agentHostSource() throws -> String {
     let source = try agentHostSource()
 
     #expect(source.contains("static let activationDocumentFD: Int32 = 3"))
-    #expect(source.contains("static let maximumActivationDocumentBytes = 16 * 1024"))
-    #expect(source.contains("static let maximumProofBytes = AgentPassAgentSessionRequest.maximumProofBytes"))
-    #expect(source.contains("\"schema_version\", \"agent_id\", \"agent_kind\", \"requested_ttl_seconds\", \"proof\""))
-    #expect(source.contains("agentKind == AgentPassAgentAdapterKind.claudeCode.rawValue || agentKind == AgentPassAgentAdapterKind.cursor.rawValue"))
-    #expect(source.contains("Data(document.proof.utf8)"))
+    #expect(source.contains("NativeAgentLaunchAuthorityHandoff.maximumDocumentBytes"))
+    #expect(source.contains("NativeAgentLaunchAuthorityHandoff.decode(data)"))
+    #expect(source.contains("data.resetBytes"))
+    #expect(source.contains("buffer.withUnsafeMutableBytes"))
+    #expect(source.contains("proof: document.proof"))
     #expect(source.contains("AgentPassAgentSessionRequest("))
     #expect(source.contains("arguments == [\"qualification-activate\"]"))
 }
@@ -38,7 +38,8 @@ private func agentHostSource() throws -> String {
     #expect(source.contains("let signalController = ActivationSignalController()"))
     #expect(source.range(of: "let signalController = ActivationSignalController()")!.lowerBound < source.range(of: "let bootstrapResult = waitForReply")!.lowerBound)
     #expect(source.contains("case .timedOut:"))
-    #expect(source.components(separatedBy: "proxy.startAgentSession(sessionRequest, withReply: reply)").count - 1 == 2)
+    let qualificationSource = String(source[source.range(of: "private func runQualificationActivation()")!.lowerBound...])
+    #expect(qualificationSource.components(separatedBy: "proxy.startAgentSession(sessionRequest, withReply: reply)").count - 1 == 2)
     #expect(source.contains("same XPC\n        // connection"))
 }
 
@@ -53,4 +54,15 @@ private func agentHostSource() throws -> String {
     #expect(source.contains("CommandLine.arguments"))
     #expect(source.contains("activationDocumentFD"))
     #expect(source.contains("path:" ) == false)
+}
+
+@Test func launchHostInstallsTerminalCleanupForSignalsAndXPCDisconnect() throws {
+    let source = try agentHostSource()
+
+    #expect(source.contains("terminalController.install()"))
+    #expect(source.contains("serviceClient.connection.invalidationHandler"))
+    #expect(source.contains("terminalController.setConnection(serviceClient.connection)"))
+    #expect(source.contains("terminalController.markBootstrapKnown()"))
+    #expect(source.contains("coordinator.requestTermination()"))
+    #expect(source.contains("agent_session_close_failed"))
 }

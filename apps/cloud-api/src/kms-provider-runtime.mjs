@@ -38,6 +38,7 @@ import {
 
 export const KMS_PROVIDER_RUNTIME_ENV = Object.freeze({
   provider: "AGENTPASS_KMS_PROVIDER",
+  signerKeyVersions: "AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON",
   agentSessionResource: "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
   qualificationManifestResource: "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
   possessionReceiptResource: "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
@@ -58,9 +59,10 @@ const KMS_ENV_PREFIX = "AGENTPASS_KMS_";
 const ALLOWED_KMS_ENV = new Set(Object.values(KMS_PROVIDER_RUNTIME_ENV));
 const PROVIDERS = new Set(["aws", "gcp"]);
 const AWS_KEY_RESOURCE = /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/[A-Za-z0-9][A-Za-z0-9:/._-]{0,2047}$/u;
-const GCP_RESOURCE = /^projects\/[A-Za-z0-9._-]+\/locations\/[A-Za-z0-9._-]+\/keyRings\/[A-Za-z0-9._-]+\/cryptoKeys\/[A-Za-z0-9._-]+\/cryptoKeyVersions\/[A-Za-z0-9._-]+$/u;
+const GCP_RESOURCE = /^projects\/[A-Za-z0-9._-]+\/locations\/[A-Za-z0-9._-]+\/keyRings\/[A-Za-z0-9._-]+\/cryptoKeys\/[A-Za-z0-9._-]+\/cryptoKeyVersions\/([1-9][0-9]*)$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const MAX_PUBLIC_KEY_BYTES = 8 * 1024;
+const MAX_KEY_VERSION = 2_147_483_647;
 
 const PURPOSE_DEFINITIONS = Object.freeze([
   { name: "agentSession", registryName: "agent_session_grant", providerName: "agentSessionSignerProvider", resource: "agentSessionResource", keyIdEnv: "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS", purpose: AGENT_SESSION_GRANT_TYPE, version: AGENT_SESSION_GRANT_VERSION, parse: parseAgentSessionSignerConfig },
@@ -130,6 +132,7 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
     if (name.startsWith(KMS_ENV_PREFIX) && !ALLOWED_KMS_ENV.has(name)) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   const provider = env[KMS_PROVIDER_RUNTIME_ENV.provider];
+  const keyVersions = parseSignerKeyVersions(env[KMS_PROVIDER_RUNTIME_ENV.signerKeyVersions]);
   const resources = Object.fromEntries(PURPOSE_DEFINITIONS.map((definition) => [
     definition.name,
     env[KMS_PROVIDER_RUNTIME_ENV[definition.resource]]
@@ -144,10 +147,17 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   if (resourceValues.some((resource) => !resourcePattern.test(resource))) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
+  if (provider === "gcp" && PURPOSE_DEFINITIONS.some((definition) => {
+    const match = GCP_RESOURCE.exec(resources[definition.name]);
+    return Number(match[1]) !== keyVersions[definition.name];
+  })) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
 
   const parsed = {};
   try {
     for (const definition of PURPOSE_DEFINITIONS) {
+      if (SIGNER_PURPOSE_REGISTRY[definition.registryName]?.hosted_status !== "managed_kms_integrated") {
+        fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+      }
       parsed[definition.name] = definition.parse
         ? definition.parse(env)
         : parseGenericSignerConfig(env, definition);
@@ -162,6 +172,7 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   const purposes = PURPOSE_DEFINITIONS.map((definition) => Object.freeze({
     ...definition,
     resourceId: resources[definition.name],
+    keyVersion: keyVersions[definition.name],
     keyId: parsed[definition.name].keyId,
     publicKey: parsed[definition.name].publicKeyPem ?? env[definition.publicKeyEnv],
     publicKeyFingerprint: parsed[definition.name].publicKeyFingerprint,
@@ -172,6 +183,7 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
     ...Object.fromEntries(PURPOSE_DEFINITIONS.map(({ name, resource }) => [resource, resources[name]])),
     ...Object.fromEntries(purposes.map((purpose) => [purpose.name, Object.freeze({
       keyId: purpose.keyId,
+      keyVersion: purpose.keyVersion,
       publicKey: purpose.publicKey,
       timeoutMs: purpose.timeoutMs
     })])),
@@ -205,7 +217,7 @@ function createAwsProviders({ config, sdk, reliability, keyLifecycles }) {
         purpose: definition.purpose,
         version: definition.version
       }), "agentpass-aws-kms-ledger-v1");
-      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
+      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name], definition.keyVersion)];
     }));
     return ownedProviders(providers, () => baseClient.destroy?.());
   } catch (error) {
@@ -256,7 +268,7 @@ function createGcpProviders({ config, sdk, reliability, keyLifecycles }) {
         purpose: definition.purpose,
         version: definition.version
       }), "agentpass-gcp-kms-ledger-v1");
-      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
+      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name], definition.keyVersion)];
     }));
     return ownedProviders(providers, () => baseClient.close?.());
   } catch (error) {
@@ -287,8 +299,17 @@ function ownedProviders(providers, destroy) {
   });
 }
 
-function managedSigner(provider, purpose, reliability, lifecycle) {
-  const keyLifecycle = lifecycle ?? createInitialKeyLifecycle(provider, purpose);
+function managedSigner(provider, purpose, reliability, lifecycle, keyVersion) {
+  if (!Number.isSafeInteger(keyVersion) || keyVersion < 1 || keyVersion > MAX_KEY_VERSION) {
+    throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
+  if (lifecycle !== undefined) {
+    const active = lifecycle.snapshot?.().keys?.find((key) => key?.state === "active");
+    if (!active || active.key_version !== keyVersion) {
+      throw new Error("managed signer lifecycle key version mismatch");
+    }
+  }
+  const keyLifecycle = lifecycle ?? createInitialKeyLifecycle(provider, purpose, keyVersion);
   const lifecycleBoundProvider = createManagedSignerLifecycleProvider({ provider, lifecycle: keyLifecycle });
   return createManagedSignerReliabilityProvider({ provider: lifecycleBoundProvider, purpose, ...reliability });
 }
@@ -297,7 +318,7 @@ function identifyProvider(provider, providerId) {
   return Object.freeze({ ...provider, provider_id: providerId });
 }
 
-function createInitialKeyLifecycle(provider, purpose) {
+function createInitialKeyLifecycle(provider, purpose, keyVersion) {
   return createManagedSignerKeyLifecycle({
     purpose,
     algorithm: provider.algorithm,
@@ -307,7 +328,7 @@ function createInitialKeyLifecycle(provider, purpose) {
       algorithm: provider.algorithm,
       keys: [{
         key_id: provider.key_id,
-        key_version: 1,
+        key_version: keyVersion,
         purpose,
         algorithm: provider.algorithm,
         public_key_fingerprint: provider.public_key_fingerprint,
@@ -316,6 +337,27 @@ function createInitialKeyLifecycle(provider, purpose) {
       }]
     }
   });
+}
+
+function parseSignerKeyVersions(raw) {
+  if (typeof raw !== "string" || raw.length < 1 || Buffer.byteLength(raw, "utf8") > 16 * 1024) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
+  let value;
+  try { value = JSON.parse(raw); } catch { fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG); }
+  if (!plainObject(value)) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  const expected = PURPOSE_DEFINITIONS.map(({ purpose }) => purpose).sort();
+  const actual = Object.keys(value).sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
+  return Object.freeze(Object.fromEntries(PURPOSE_DEFINITIONS.map((definition) => {
+    const keyVersion = value[definition.purpose];
+    if (!Number.isSafeInteger(keyVersion) || keyVersion < 1 || keyVersion > MAX_KEY_VERSION) {
+      fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+    }
+    return [definition.name, keyVersion];
+  })));
 }
 
 function bindGcpClient({ baseClient, logicalKeyName, resourceName }) {
@@ -365,7 +407,8 @@ function parseGenericSignerConfig(env, definition) {
   const fingerprint = crypto.createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex");
   const registry = SIGNER_PURPOSE_REGISTRY[definition.registryName];
   if (!registry || registry.purpose !== definition.purpose || registry.protocol_version !== definition.version
-    || registry.signing_version < 1 || registry.managed_algorithm !== "ed25519") {
+    || registry.signing_version < 1 || registry.managed_algorithm !== "ed25519"
+    || registry.hosted_status !== "managed_kms_integrated") {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   return Object.freeze({ keyId, publicKeyPem: canonicalPem, publicKeyFingerprint: fingerprint, timeoutMs });
@@ -376,10 +419,14 @@ function parseRefreshHintSignerConfig(env) {
   const publicKeyPem = env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY;
   const timeoutText = env.AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(keyId ?? "") || typeof publicKeyPem !== "string"
-    || publicKeyPem.length < 1 || publicKeyPem.length > 8 * 1024) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+    || publicKeyPem.length < 1 || publicKeyPem.length > 8 * 1024 || /PRIVATE\s+KEY/iu.test(publicKeyPem)) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
   let publicKey;
   try { publicKey = crypto.createPublicKey(publicKeyPem); } catch { fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG); }
-  if (publicKey.asymmetricKeyType !== REFRESH_HINT_SIGNATURE_ALGORITHM) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== REFRESH_HINT_SIGNATURE_ALGORITHM) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
   const timeoutMs = timeoutText === undefined ? 5_000 : Number(timeoutText);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000 || String(timeoutMs) !== String(timeoutText ?? 5_000)) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);

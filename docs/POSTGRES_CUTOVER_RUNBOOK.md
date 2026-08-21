@@ -189,18 +189,34 @@ Before hosted cutover, apply `scripts/postgres/roles.sql` from the approved
 database-admin workflow. It is idempotent and contains no password, token, or
 other credential. The migration set uses the `public` schema:
 
-- `agentpass_app` has `SELECT`/`INSERT`/`UPDATE`/`DELETE` on tables and
-  sequence `USAGE`/`SELECT` only. It has no schema `CREATE`, database
-  `CREATE`/`TEMP`, object ownership, or migration authority.
+Apply migrations first, then run `roles.sql`, then run the privilege checker,
+and only then start or mark ready any app/signer runtime. Running `roles.sql`
+before a migration is not sufficient: grants are intentionally conditional on
+the exact reviewed functions already existing. Readiness evidence must prove
+all 23 signer entry functions are executable and every other function plus all
+tables and sequences are denied to `agentpass_signer`.
+
+- `agentpass_app` has ordinary application DML and sequence consumption, but
+  no direct mutation of migration, promotion, or managed-signer authority
+  ledgers. It has no schema `CREATE`, database `CREATE`/`TEMP`, object ownership,
+  or migration authority.
+- `agentpass_signer` has no table or sequence privileges. It can execute only
+  the 23 exact, reviewed provider-operation, maintenance, lifecycle, and
+  signing functions introduced by migrations `0049`-`0051`. The lifecycle
+  and signing state is never directly reachable by this role.
 - `agentpass_migrator` owns migration objects and has schema `CREATE`; it is
   not a superuser, createdb role, createrole role, replication role, or RLS
   bypass role.
 - `agentpass_backup` has table and sequence-state `SELECT` only. It cannot
   write, execute functions, alter schema, or consume sequences.
 
-After applying the script, switch `AGENTPASS_DATABASE_URL` to the
-`agentpass_migrator` identity and run the fixed checker using the deployment
-environment only:
+Hosted runtime receives three distinct URLs targeting the same database:
+`AGENTPASS_DATABASE_URL` for `agentpass_app`,
+`AGENTPASS_MIGRATION_DATABASE_URL` for `agentpass_migrator`, and
+`AGENTPASS_SIGNER_DATABASE_URL` for `agentpass_signer`. Keep all credentials in
+the deployment secret manager. For the fixed privilege checker only, set
+`AGENTPASS_DATABASE_URL` to the migrator identity and run it using the
+deployment environment:
 
 ```sh
 node scripts/postgres/role-privilege-check.mjs

@@ -65,7 +65,23 @@ export function createSimpleWebAuthnAssertionVerifier({ credentialRepository, ve
     const info = result?.authenticationInfo;
     if (!result?.verified || info?.credentialID !== assertion.credential_id || info?.userVerified !== true || info?.origin !== ceremony.origin || info?.rpID !== ceremony.rp_id) throw new Error("WebAuthn assertion verification failed");
     const newCounter = integer(info.newCounter, "new credential counter");
-    validateCounterTransition(counter, newCounter);
+    if (!validCounterTransition(counter, newCounter)) {
+      if (typeof credentialRepository.quarantineCredentialClone !== "function") throw new Error("WebAuthn assertion verification failed");
+      let quarantined = false;
+      try {
+        quarantined = await credentialRepository.quarantineCredentialClone({
+          credential_id: assertion.credential_id,
+          session_id: ceremony.session_id,
+          organization_id: ceremony.organization_id,
+          expected_sign_count: counter,
+          observed_sign_count: newCounter
+        });
+      } catch {
+        throw new Error("WebAuthn assertion verification failed");
+      }
+      if (quarantined !== true) throw new Error("WebAuthn assertion verification failed");
+      throw new Error("WebAuthn assertion verification failed");
+    }
     const backup = validateBackupTransition(stored, info);
     let updated;
     try {
@@ -123,11 +139,11 @@ function base64url(value, minimum, maximum) {
   return typeof value === "string" && value.length >= minimum && value.length <= maximum && BASE64URL.test(value);
 }
 
-function validateCounterTransition(previous, next) {
+function validCounterTransition(previous, next) {
   // A zero/zero pair is explicitly allowed for authenticators that do not
   // expose a usable signature counter. Any non-zero counter is reliable and
   // must move strictly forward; equal/rollback values are clone/replay risk.
-  if ((previous !== 0 || next !== 0) && next <= previous) throw new Error("WebAuthn assertion verification failed");
+  return (previous === 0 && next === 0) || next > previous;
 }
 
 function validateBackupTransition(stored, info) {

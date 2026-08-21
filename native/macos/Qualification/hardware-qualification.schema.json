@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/schemas/macos-hardware-qualification-v2.json",
+  "title": "AgentPass macOS P1 hardware qualification evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "source_commit", "source_tree", "release_manifest", "artifact", "machine", "runner_attestation", "checks", "qualified"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "kind": { "const": "agentpass.macos.hardware-qualification" },
+    "source_commit": { "$ref": "#/$defs/sha1" },
+    "source_tree": { "$ref": "#/$defs/sha1" },
+    "release_manifest": { "$ref": "#/$defs/release_manifest" },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "machine": { "$ref": "#/$defs/machine" },
+    "runner_attestation": { "$ref": "#/$defs/runner_attestation" },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launchd_host_child_identity", "nsxpc", "crash_restart"],
+      "properties": {
+        "launchd_host_child_identity": { "$ref": "#/$defs/launchd_check" },
+        "nsxpc": { "$ref": "#/$defs/nsxpc_check" },
+        "crash_restart": { "$ref": "#/$defs/restart_check" }
+      }
+    },
+    "qualified": { "const": true }
+  },
+  "$defs": {
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "developer_id_application": { "type": "string", "pattern": "^Developer ID Application: [^\\r\\n()]+ \\([A-Z0-9]{10}\\)$" },
+    "absolute_path": { "type": "string", "pattern": "^/[^\\u0000]*$" },
+    "safe_name": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]*$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "name", "bytes", "sha256", "signed", "signing_identity", "team_id"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolute_path" },
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "signed": { "const": true },
+        "signing_identity": { "type": "string", "pattern": "^Developer ID Installer: .+\\([A-Z0-9]{10}\\)$" },
+        "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
+      }
+    },
+    "release_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "signature_path", "signature_sha256", "public_key_path", "public_key_fingerprint", "signed", "source_commit", "source_tree", "artifact_name", "artifact_bytes", "artifact_sha256", "release_attestation_sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolute_path" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "signature_path": { "$ref": "#/$defs/absolute_path" },
+        "signature_sha256": { "$ref": "#/$defs/digest" },
+        "public_key_path": { "$ref": "#/$defs/absolute_path" },
+        "public_key_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "signed": { "const": true },
+        "source_commit": { "$ref": "#/$defs/sha1" },
+        "source_tree": { "$ref": "#/$defs/sha1" },
+        "artifact_name": { "$ref": "#/$defs/safe_name" },
+        "artifact_bytes": { "type": "integer", "minimum": 1 },
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "release_attestation_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "hardware_class", "model_identifier", "os_version", "os_build", "native_execution", "vm_detected", "rosetta_detected"],
+      "properties": {
+        "architecture": { "enum": ["arm64", "x86_64"] },
+        "hardware_class": { "enum": ["apple_silicon", "intel"] },
+        "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
+        "os_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
+        "os_build": { "type": "string", "pattern": "^[A-Za-z0-9]{3,32}$" },
+        "native_execution": { "const": true },
+        "vm_detected": { "const": false },
+        "rosetta_detected": { "const": false }
+      }
+    },
+    "runner_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "signature_path", "signature_sha256", "public_key_path", "public_key_fingerprint", "signed", "owner_uid", "mode", "schema_version", "kind", "runner_id", "architecture", "hardware_class", "model_identifier", "native_execution", "vm_detected", "rosetta_detected", "attested_at"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolute_path" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "signature_path": { "$ref": "#/$defs/absolute_path" },
+        "signature_sha256": { "$ref": "#/$defs/digest" },
+        "public_key_path": { "$ref": "#/$defs/absolute_path" },
+        "public_key_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "signed": { "const": true },
+        "owner_uid": { "const": 0 },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
+        "schema_version": { "const": 1 },
+        "kind": { "const": "agentpass.macos.protected-runner-attestation" },
+        "runner_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" },
+        "architecture": { "enum": ["arm64", "x86_64"] },
+        "hardware_class": { "enum": ["apple_silicon", "intel"] },
+        "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
+        "native_execution": { "const": true },
+        "vm_detected": { "const": false },
+        "rosetta_detected": { "const": false },
+        "attested_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "exit_code", "executable_sha256", "stdout_sha256", "stderr_sha256", "probe", "observed"],
+      "properties": {
+        "status": { "const": "passed" },
+        "exit_code": { "const": 0 },
+        "executable_sha256": { "$ref": "#/$defs/digest" },
+        "stdout_sha256": { "$ref": "#/$defs/digest" },
+        "stderr_sha256": { "$ref": "#/$defs/digest" },
+        "probe": { "$ref": "#/$defs/probe" },
+        "observed": { "type": "object" }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "owner_uid", "mode", "sha256", "expected_sha256", "signing_identity", "expected_signing_identity", "ancestor_directories_protected", "acl_checked", "executed_from_staging_copy", "verified_before_execution", "verified_after_execution"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolute_path" },
+        "owner_uid": { "const": 0 },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "expected_sha256": { "$ref": "#/$defs/digest" },
+        "signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
+        "expected_signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
+        "ancestor_directories_protected": { "const": true },
+        "acl_checked": { "const": true },
+        "executed_from_staging_copy": { "const": true },
+        "verified_before_execution": { "const": true },
+        "verified_after_execution": { "const": true }
+      }
+    },
+    "launchd_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["service_label", "host_pid", "child_pid", "host_identity", "child_identity", "identity_match"], "properties": { "service_label": { "type": "string", "minLength": 1 }, "host_pid": { "type": "integer", "minimum": 1 }, "child_pid": { "type": "integer", "minimum": 1 }, "host_identity": { "type": "object" }, "child_identity": { "type": "object" }, "identity_match": { "const": true } } } } }] },
+    "nsxpc_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["mach_service", "connection_accepted", "authorized_client", "wrong_identity_denied"], "properties": { "mach_service": { "type": "string", "minLength": 1 }, "connection_accepted": { "const": true }, "authorized_client": { "const": true }, "wrong_identity_denied": { "const": true } } } } }] },
+    "restart_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["initial_pid", "crash_signal", "restarted_pid", "restart_count", "state_recovered"], "properties": { "initial_pid": { "type": "integer", "minimum": 1 }, "crash_signal": { "type": "string", "minLength": 1 }, "restarted_pid": { "type": "integer", "minimum": 1 }, "restart_count": { "type": "integer", "minimum": 1 }, "state_recovered": { "const": true } } } } }] }
+  }
+}

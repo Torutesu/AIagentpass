@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -5,7 +6,10 @@ import { Pool } from "pg";
 
 import { SIGNER_PROTOCOL_VERSIONS } from "../../src/managed-signer-provider-contract.mjs";
 import { createDurableManagedSignerProvider } from "../../src/durable-managed-signer-provider.mjs";
-import { createProviderOperationReconciliationAdapter } from "../../src/provider-operation-reconciliation-adapter.mjs";
+import {
+  PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES,
+  createProviderOperationReconciliationAdapter,
+} from "../../src/provider-operation-reconciliation-adapter.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import {
   canonicalManagedSignerRequestDigest,
@@ -16,7 +20,7 @@ import { createPostgresProviderOperationRepository } from "../../src/postgres/pr
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
-test("0041 converges two PostgreSQL-backed adapter instances and recovers a started operation", {
+test("0041 converges two PostgreSQL-backed adapters and quarantines a started operation without re-signing", {
   skip: !DATABASE_URL,
   timeout: 60_000,
 }, async (t) => {
@@ -34,7 +38,7 @@ test("0041 converges two PostgreSQL-backed adapter instances and recovers a star
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-integration" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -87,10 +91,11 @@ test("0041 converges two PostgreSQL-backed adapter instances and recovers a star
     claim_token: reserved.claim_token,
     uncertain_reason: "process_interrupted",
   });
-  const recovered = await adapter(secondRepository).lookup(recoveryBinding, recoveryBytes);
-  assert.equal(recovered.state, "committed");
-  assert.equal(signCalls, 2);
-  assert.equal((await firstRepository.getOperation(operation)).state, "committed");
+  await assert.rejects(adapter(secondRepository).lookup(recoveryBinding, recoveryBytes), {
+    code: PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES.UNCERTAIN,
+  });
+  assert.equal(signCalls, 1);
+  assert.equal((await firstRepository.getOperation(operation)).state, "uncertain");
 });
 
 test("0041 quarantines only expired started operations with bounded two-pool maintenance", {
@@ -123,7 +128,7 @@ test("0041 quarantines only expired started operations with bounded two-pool mai
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-maintenance-integration" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -282,7 +287,7 @@ test("0042 runs bounded deployment-wide reconciliation and retention across two 
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-race-matrix" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -513,7 +518,7 @@ test("0041 converges 100 identical requests across two PostgreSQL pools", {
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-convergence-integration" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -584,7 +589,7 @@ test("0041 composes with lifecycle fencing across lost commits and emergency dis
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-composed-integration" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -993,6 +998,6 @@ function delegateProviderRepository(repository, overrides = {}) {
 
 function delegateLifecycleRepository(repository, overrides = {}) {
   return Object.freeze(Object.fromEntries([
-    "snapshot", "reserveSignature", "startSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature",
+    "snapshot", "reserveSignature", "startSignature", "fenceSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature",
   ].map((method) => [method, overrides[method] ?? ((...args) => repository[method](...args))])));
 }

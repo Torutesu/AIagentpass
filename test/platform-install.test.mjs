@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import crypto from "node:crypto";
 import { deriveReleaseCandidateId } from "../lib/release-candidate-identity.mjs";
-import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
+import { assertInstallVersionAllowed, executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
 import { readInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
 
 const owner = process.getuid?.();
@@ -21,6 +21,7 @@ function fixture() {
   const artifactSha256 = crypto.createHash("sha256").update(fs.readFileSync(pkg)).digest("hex");
   fs.writeFileSync(manifest, JSON.stringify({
     schema_version: 4,
+    version: "0.18.0",
     candidate_id: deriveReleaseCandidateId(artifactSha256),
     source: { commit: "c".repeat(40) },
     artifacts: [{ role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(pkg), sha256: artifactSha256 }],
@@ -47,7 +48,7 @@ test("production install plan requires pinned identities and a verified package"
     const plan = verifyProductionInstall(inputs, value.verifier);
     assert.equal(plan.package, value.pkg);
     assert.equal(plan.verified, true);
-    assert.deepEqual(Object.keys(plan.releaseReceipt).sort(), ["artifact_sha256", "candidate_id", "kind", "manifest_sha256", "release_signer_fingerprint", "source_commit", "team_id", "version"]);
+    assert.deepEqual(Object.keys(plan.releaseReceipt).sort(), ["artifact_sha256", "candidate_id", "kind", "manifest_sha256", "release_signer_fingerprint", "release_version", "source_commit", "team_id", "version"]);
     assert.equal(plan.preservesProtectedState, true);
     assert.throws(() => executeProductionInstall(plan, { uid: 501 }), /requires root/);
   } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
@@ -96,6 +97,7 @@ test("release staging snapshots inputs and only removes its private directory", 
     const artifactSha256 = crypto.createHash("sha256").update(fs.readFileSync(value.pkg)).digest("hex");
     fs.writeFileSync(value.manifest, JSON.stringify({
       schema_version: 4,
+      version: "0.18.0",
       candidate_id: deriveReleaseCandidateId(artifactSha256),
       source: { commit: "c".repeat(40) },
       artifacts: [
@@ -177,4 +179,23 @@ test("execution leaves the previous receipt untouched when app verification fail
     }), /verification failed/);
     assert.throws(() => readInstalledReleaseReceipt({ root: stateRoot, owner }), (error) => error.code === "INSTALLED_RECEIPT_MISSING");
   } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
+});
+
+test("install policy allows first install and an exact same-release repair", () => {
+  const candidate = { release_version: "1.2.3", candidate_id: "candidate", artifact_sha256: "a".repeat(64), manifest_sha256: "b".repeat(64) };
+  assert.deepEqual(assertInstallVersionAllowed(candidate, null), { decision: "first_install" });
+  assert.deepEqual(assertInstallVersionAllowed(candidate, { ...candidate }), { decision: "same_release" });
+});
+
+test("install policy refuses older releases and same-version artifact substitution", () => {
+  const installed = { release_version: "1.2.3", candidate_id: "candidate-new", artifact_sha256: "a".repeat(64), manifest_sha256: "b".repeat(64) };
+  assert.throws(
+    () => assertInstallVersionAllowed({ ...installed, release_version: "1.2.2" }, installed),
+    (error) => error.code === "RELEASE_DOWNGRADE_REFUSED"
+  );
+  assert.throws(
+    () => assertInstallVersionAllowed({ ...installed, artifact_sha256: "c".repeat(64) }, installed),
+    (error) => error.code === "RELEASE_SAME_VERSION_MISMATCH"
+  );
+  assert.deepEqual(assertInstallVersionAllowed({ ...installed, release_version: "1.2.4" }, installed), { decision: "upgrade" });
 });

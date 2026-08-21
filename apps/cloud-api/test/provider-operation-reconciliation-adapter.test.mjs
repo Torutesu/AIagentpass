@@ -11,6 +11,8 @@ import {
   createProviderOperationReconciliationAdapter,
   PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES as CODES,
 } from "../src/provider-operation-reconciliation-adapter.mjs";
+import { createDrainController } from "../src/postgres/operational-health.mjs";
+import { SIGNER_PURPOSE_REGISTRY } from "../src/signer-purpose-registry.mjs";
 
 const PURPOSE = "agentpass.capability";
 const KEY_ID = "fixture-kms-key";
@@ -280,18 +282,25 @@ function createRepository({
   };
 }
 
-function createProvider({ pair = crypto.generateKeyPairSync("ed25519"), sign = undefined, metadata = undefined } = {}) {
+function createProvider({
+  pair = crypto.generateKeyPairSync("ed25519"),
+  sign = undefined,
+  metadata = undefined,
+  purpose = PURPOSE,
+  keyId = KEY_ID,
+  version = 1,
+} = {}) {
   const calls = { metadata: [], sign: [] };
   const provider = {
-    purpose: PURPOSE,
-    key_id: KEY_ID,
+    purpose,
+    key_id: keyId,
     algorithm: "ed25519",
-    version: 1,
+    version,
     async publicKeyMetadata(request) {
       calls.metadata.push({ ...request });
       return metadata ?? {
         algorithm: "ed25519",
-        key_id: KEY_ID,
+        key_id: keyId,
         public_key: pair.publicKey,
       };
     },
@@ -304,19 +313,37 @@ function createProvider({ pair = crypto.generateKeyPairSync("ed25519"), sign = u
   return { provider, pair, calls };
 }
 
-function createAdapterFixture(repositoryOptions = {}, providerOptions = {}) {
+function createAdapterFixture(repositoryOptions = {}, providerOptions = {}, operationGate = undefined, bindingOptions = {}) {
+  const purpose = bindingOptions.purpose ?? PURPOSE;
+  const keyId = bindingOptions.keyId ?? KEY_ID;
+  const keyVersion = bindingOptions.keyVersion ?? KEY_VERSION;
+  const providerId = bindingOptions.providerId ?? PROVIDER_ID;
+  const protocolVersion = bindingOptions.protocolVersion ?? SIGNER_PROTOCOL_VERSIONS[purpose];
+  const operationId = bindingOptions.operationId ?? "managed-signer-v1-provider-operation-001";
   const repo = createRepository(repositoryOptions);
-  const providerFixture = createProvider(providerOptions);
+  const providerFixture = createProvider({ ...providerOptions, purpose, keyId, version: protocolVersion });
   const adapter = createProviderOperationReconciliationAdapter({
     provider: providerFixture.provider,
-    providerId: PROVIDER_ID,
+    providerId,
     repository: repo.repository,
-    purpose: PURPOSE,
-    keyId: KEY_ID,
-    keyVersion: KEY_VERSION,
+    purpose,
+    keyId,
+    keyVersion,
     waitTimeoutMs: 50,
+    ...(operationGate === undefined ? {} : { operationGate }),
   });
-  return { ...repo, ...providerFixture, adapter, binding: bindingFor() };
+  return {
+    ...repo,
+    ...providerFixture,
+    adapter,
+    binding: bindingFor(PAYLOAD, {
+      purpose,
+      key_id: keyId,
+      key_version: keyVersion,
+      protocol_version: protocolVersion,
+      operation_id: operationId,
+    }),
+  };
 }
 
 test("wraps a direct Ed25519 KMS provider in the exact managed-signer adapter shape", async () => {
@@ -350,6 +377,87 @@ test("wraps a direct Ed25519 KMS provider in the exact managed-signer adapter sh
     provider_receipt: result.provider_receipt,
     signature: result.signature,
   });
+});
+
+test("reconciles exact bytes through the provider-operation ledger for every hosted signer purpose", async () => {
+  const entries = Object.values(SIGNER_PURPOSE_REGISTRY);
+  assert.equal(entries.length, 8);
+  const seenPurposes = new Set();
+
+  for (const [index, entry] of entries.entries()) {
+    const keyId = `fixture-${entry.name}-key`;
+    const providerId = `fixture-${entry.name}`;
+    const keyVersion = String(index + 1);
+    const operationId = `managed-signer-v1-${entry.name}-operation`;
+    const fixture = createAdapterFixture({}, {}, undefined, {
+      purpose: entry.purpose,
+      keyId,
+      keyVersion,
+      providerId,
+      protocolVersion: entry.protocol_version,
+      operationId,
+    });
+
+    const result = await fixture.adapter.signOnce(fixture.binding, PAYLOAD);
+    const row = fixture.rows.get(operationId);
+    const providerCall = fixture.calls.sign[0];
+
+    seenPurposes.add(fixture.binding.purpose);
+    assert.deepEqual(fixture.events.slice(0, 4), ["reserve", "start", "accepted", "commit"]);
+    assert.equal(providerCall.purpose, entry.purpose);
+    assert.equal(providerCall.key_id, keyId);
+    assert.equal(providerCall.version, entry.protocol_version);
+    assert.deepEqual(providerCall.bytes, PAYLOAD);
+    assert.equal(row.state, "committed");
+    assert.equal(row.operation_id, operationId);
+    assert.equal(row.purpose, entry.purpose);
+    assert.equal(row.key_id, keyId);
+    assert.equal(row.key_version, keyVersion);
+    assert.equal(row.request_digest, digest(PAYLOAD));
+    assert.equal(result.provider_receipt.operation_id, operationId);
+    assert.equal(fixture.calls.sign.length, 1);
+
+    const replay = await fixture.adapter.lookup(fixture.binding, PAYLOAD);
+    assert.equal(replay.state, "committed");
+    assert.equal(fixture.calls.sign.length, 1);
+  }
+
+  assert.deepEqual([...seenPurposes].sort(), entries.map(({ purpose }) => purpose).sort());
+});
+
+test("does not reserve a provider operation after the shared drain fence", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const fixture = createAdapterFixture({}, {}, operationGate);
+  operationGate.beginDrain();
+
+  await assert.rejects(fixture.adapter.signOnce(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
+  assert.deepEqual(fixture.events, []);
+  assert.equal(fixture.calls.sign.length, 0);
+});
+
+test("marks a started provider operation uncertain when drain wins before provider call", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const fixture = createAdapterFixture({}, {}, operationGate);
+  const originalStart = fixture.repository.startOperation.bind(fixture.repository);
+  let entered;
+  const startEntered = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const releaseStart = new Promise((resolve) => { release = resolve; });
+  fixture.repository.startOperation = async (input) => {
+    entered();
+    await releaseStart;
+    return originalStart(input);
+  };
+
+  const signing = fixture.adapter.signOnce(fixture.binding, PAYLOAD);
+  await startEntered;
+  operationGate.beginDrain();
+  release();
+
+  await assert.rejects(signing, { code: CODES.UNCERTAIN });
+  assert.equal(fixture.calls.sign.length, 0);
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
+  assert.ok(fixture.events.includes("uncertain"));
 });
 
 test("accepts opaque base64url claims whose first character is underscore or hyphen", async () => {
@@ -397,7 +505,7 @@ test("releases the in-process entry after completion and rechecks durable termin
   assert.equal(fixture.events.filter((event) => event === "reserve").length, 2);
 });
 
-test("quarantines a crash after the provider boundary without a duplicate sign", async () => {
+test("quarantines a lost provider result without a second direct provider sign", async () => {
   const fixture = createAdapterFixture({ failRecordAcceptedOnce: true });
   const first = fixture.adapter;
   await assert.rejects(first.signOnce(fixture.binding, PAYLOAD), { code: CODES.REPOSITORY });
@@ -414,7 +522,20 @@ test("quarantines a crash after the provider boundary without a duplicate sign",
   });
   await assert.rejects(second.lookup(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
   assert.equal(fixture.calls.sign.length, 1);
-  assert.equal(fixture.calls.sign[0].bytes.length, PAYLOAD.length);
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
+});
+
+test("quarantines a process-lost started operation before any recovery provider call", async () => {
+  const fixture = createAdapterFixture();
+  fixture.seed({
+    ...fixture.binding,
+    algorithm: "ed25519",
+    bytes_length: PAYLOAD.length,
+    request_digest: digest(PAYLOAD),
+  }, "started");
+
+  await assert.rejects(fixture.adapter.lookup(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
+  assert.equal(fixture.calls.sign.length, 0);
   assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
 });
 

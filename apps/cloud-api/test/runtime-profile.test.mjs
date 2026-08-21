@@ -10,6 +10,9 @@ import {
 
 const SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
 const DATABASE_URL = "postgresql://agent:database-password@db.example.test/agentpass?sslmode=verify-full";
+const MIGRATION_DATABASE_URL = "postgresql://migrator:database-password@db.example.test/agentpass?sslmode=verify-full";
+const SIGNER_DATABASE_URL = "postgresql://signer:database-password@db.example.test/agentpass?sslmode=verify-full";
+const MAINTENANCE_DATABASE_URL = "postgresql://agentpass_maintenance:database-password@db.example.test/agentpass?sslmode=verify-full";
 
 function evaluationEnv(overrides = {}) {
   return {
@@ -24,6 +27,16 @@ function hostedEnv(overrides = {}) {
   return {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_DATABASE_URL: DATABASE_URL,
+    AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
+    AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_MAINTENANCE_DATABASE_URL: MAINTENANCE_DATABASE_URL,
+    AGENTPASS_DATABASE_MAX_CONNECTIONS: "10",
+    AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS: "4",
+    AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
+    AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS: "5000",
+    AGENTPASS_DATABASE_IDLE_TIMEOUT_MS: "30000",
+    AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS: "8000",
+    AGENTPASS_DATABASE_LOCK_TIMEOUT_MS: "2000",
     AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
     AGENTPASS_WEBAUTHN_RP_ID: "example.test",
     AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console",
@@ -32,6 +45,14 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: "/srv/agentpass/hosted/console-public.pem",
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x5b).toString("base64url"),
+    AGENTPASS_GITHUB_CLIENT_ID: "agentpass-profile-test",
+    AGENTPASS_GITHUB_CLIENT_SECRET: "github-profile-test-secret",
+    AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/api/auth/bootstrap/github/callback",
+    AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: "https://console.example.test/onboarding",
+    AGENTPASS_HOSTED_PKCE_KEY_ID: "hosted-pkce-v1",
+    AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x5c).toString("base64url"),
+    AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x5d).toString("base64url"),
+    AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x5e).toString("base64url"),
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
     AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"),
     AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: "hosted-refresh-public-key-pin",
@@ -123,6 +144,9 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
 
   for (const name of [
     "AGENTPASS_DATABASE_URL",
+    "AGENTPASS_MIGRATION_DATABASE_URL",
+    "AGENTPASS_SIGNER_DATABASE_URL",
+    "AGENTPASS_MAINTENANCE_DATABASE_URL",
     "AGENTPASS_CONSOLE_ORIGIN",
     "AGENTPASS_WEBAUTHN_RP_ID",
     "AGENTPASS_IDENTITY_ASSERTION_ISSUER",
@@ -131,6 +155,14 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
     "AGENTPASS_HUMAN_CURSOR_SECRET",
     "AGENTPASS_HUMAN_AUTH_SECRET",
+    "AGENTPASS_GITHUB_CLIENT_ID",
+    "AGENTPASS_GITHUB_CLIENT_SECRET",
+    "AGENTPASS_GITHUB_REDIRECT_URI",
+    "AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL",
+    "AGENTPASS_HOSTED_PKCE_KEY_ID",
+    "AGENTPASS_HOSTED_PKCE_KEY",
+    "AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY",
+    "AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY",
     "AGENTPASS_CAPABILITY_NONCE_SECRET",
     "AGENTPASS_OPERATIONAL_PROBE_SECRET",
     "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY",
@@ -162,7 +194,10 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
   ]) {
     const env = hostedEnv();
     delete env[name];
-    assertProfileError(() => parseCloudRuntimeProfile(env), CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    const expected = ["AGENTPASS_MIGRATION_DATABASE_URL", "AGENTPASS_SIGNER_DATABASE_URL", "AGENTPASS_MAINTENANCE_DATABASE_URL"].includes(name)
+      ? CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+      : CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE;
+    assertProfileError(() => parseCloudRuntimeProfile(env), expected);
   }
 });
 
@@ -235,8 +270,36 @@ test("rejects hosted file-store compatibility inputs and evaluation auth inputs"
 
 test("fails closed for partial, malformed, stale, unsafe, and unknown configuration", () => {
   assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: undefined })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/wrong" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x5c).toString("base64url") })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_HOSTED_PKCE_KEY: SECRET })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
+  assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: undefined })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_MIGRATION_DATABASE_URL: undefined })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_SIGNER_DATABASE_URL: DATABASE_URL })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_SIGNER_DATABASE_URL: "postgresql://signer:pw@other.example.test/agentpass?sslmode=verify-full" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
   );
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: "postgresql://agent:pw@db.example.test/agentpass?sslmode=require" })),

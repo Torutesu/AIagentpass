@@ -65,6 +65,9 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
   private var pendingAttempt: Attempt?
   private var completedStart: CompletedStart?
   private var sessionBindings: [String: NativeAgentSessionBinding] = [:]
+  /// The verified Cloud Lease is retained only while its corresponding local
+  /// registry session is active. It is never reconstructed from an Agent DTO.
+  private var activeLeases: [String: NativeAgentVerifiedCloudLease] = [:]
   private var auditedClosedSessions: Set<String> = []
 
   public init(
@@ -150,6 +153,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         throw NativeAgentSessionCoordinatorError.sessionDenied
       }
       guard status.state == .active else {
+        _ = stateLock.withLock { activeLeases.removeValue(forKey: status.sessionID) }
         throw NativeAgentSessionCoordinatorError.sessionDenied
       }
       return NativeAgentSessionActivationResult(
@@ -541,6 +545,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         return false
       }
       sessionBindings[status.sessionID] = attempt.binding
+      activeLeases[status.sessionID] = lease
       completedStart = CompletedStart(
         bootstrapID: attempt.bootstrapID, proofDigest: proofDigest, result: result)
       pendingAttempt = nil
@@ -576,15 +581,196 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       throw NativeAgentSessionCoordinatorError.bindingDenied
     }
     do {
-      return try registry.status(
+      let status = try registry.status(
         sessionID: sessionID.lowercased(),
         connectionTokenIdentity: connectionTokenIdentity,
         binding: expected,
         wallClock: sampleWall(),
         monotonicClock: sampleMonotonic())
+      if status.state != .active {
+        _ = stateLock.withLock { activeLeases.removeValue(forKey: status.sessionID) }
+      }
+      return status
     } catch {
       throw NativeAgentSessionCoordinatorError.sessionDenied
     }
+  }
+
+  /// Reserves one fixed Git-sign request after a fresh process, worktree,
+  /// control, generation, and key binding observation. The returned
+  /// reservation is the only authority accepted by the signing transitions.
+  public func reserveSigningRequest(
+    _ request: AgentPassAgentSignRequest
+  ) throws -> (NativeAgentSessionReservation, NativeAgentSessionBinding) {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[request.sessionID.lowercased()] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      let reservation = try registry.reserve(
+        sessionID: request.sessionID.lowercased(),
+        requestID: request.requestID.lowercased(),
+        capabilityID: request.capabilityID.lowercased(),
+        nonce: request.requestNonce,
+        payloadDigest: Data(SHA256.hash(data: request.commitPayload)),
+        connectionTokenIdentity: connectionTokenIdentity,
+        binding: expected,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+      return (reservation, expected)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  /// Creates the only signing handoff accepted by the generic Agent XPC
+  /// adapter. The session binding and verified Lease come from this
+  /// connection's private activation state; the service supplies a complete
+  /// authority only after it has re-observed the same binding and consumed the
+  /// signed capability. A missing authority, Lease, or active registry entry
+  /// fails closed.
+  public func makeSigningHandoff(
+    request: AgentPassAgentSignRequest,
+    authorityProvider: (NativeAgentSessionBinding) throws
+      -> NativeSigningTransactionAuthority?
+  ) throws -> NativeAgentSessionCoordinatorSigningHandoff {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+
+    let sessionID = request.sessionID.lowercased()
+    guard let binding = stateLock.withLock({ sessionBindings[sessionID] }),
+      let lease = stateLock.withLock({ activeLeases[sessionID] })
+    else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: binding)
+
+    let status: NativeAgentSessionRegistryStatus
+    do {
+      status = try registry.status(
+        sessionID: sessionID,
+        connectionTokenIdentity: connectionTokenIdentity,
+        binding: binding,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    guard status.state == .active,
+      lease.binding == binding,
+      lease.sessionID == sessionID,
+      lease.usedSignatures == status.usedSignatures,
+      lease.maxSignatures == status.maxSignatures,
+      lease.expiresAtMilliseconds == status.expiresAtMilliseconds,
+      lease.usedSignatures < lease.maxSignatures,
+      let authority = try authorityProvider(binding)
+    else {
+      if status.state != .active {
+        _ = stateLock.withLock { activeLeases.removeValue(forKey: sessionID) }
+      }
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+
+    do {
+      return try NativeAgentSessionCoordinatorSigningHandoff.issue(
+        request: request,
+        binding: binding,
+        lease: lease,
+        authority: authority)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.bindingDenied
+    }
+  }
+
+  /// Performs the final binding observation and crosses the registry's
+  /// durable-intent boundary. No provider may be called before this returns.
+  public func beginSigningIntent(
+    _ reservation: NativeAgentSessionReservation
+  ) throws -> NativeAgentSessionBinding {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[reservation.sessionID] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      try registry.beginSigningIntent(reservation)
+      return expected
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  public func recoverSigningReservation(
+    _ request: AgentPassAgentSignRequest,
+    budgetSequence: Int
+  ) throws -> (NativeAgentSessionReservation, NativeAgentSessionBinding) {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[request.sessionID.lowercased()] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      let reservation = try registry.recoverSigningReservation(
+        sessionID: request.sessionID.lowercased(),
+        requestID: request.requestID.lowercased(),
+        capabilityID: request.capabilityID.lowercased(),
+        payloadDigest: Data(SHA256.hash(data: request.commitPayload)),
+        budgetSequence: budgetSequence,
+        connectionTokenIdentity: connectionTokenIdentity,
+        binding: expected,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+      return (reservation, expected)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  public func recordSigning(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.recordSigned(reservation)
+  }
+
+  public func completeSigning(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    let status = try registry.complete(reservation)
+    updateActiveLease(for: reservation.sessionID, status: status)
+    return status
+  }
+
+  public func finalizeSigning(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    let status = try registry.finalizeSigning(reservation)
+    updateActiveLease(for: reservation.sessionID, status: status)
+    return status
+  }
+
+  public func releaseSigningBeforeKey(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.releaseBeforeKey(reservation)
+  }
+
+  public func markSigningOutcomeUnknown(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.markOutcomeUnknown(reservation)
+    _ = stateLock.withLock { activeLeases.removeValue(forKey: reservation.sessionID) }
   }
 
   public func close(
@@ -618,6 +804,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       }
       _ = stateLock.withLock { auditedClosedSessions.insert(status.sessionID) }
     }
+    _ = stateLock.withLock { activeLeases.removeValue(forKey: status.sessionID) }
     return status
   }
 
@@ -629,6 +816,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       invalidated = true
       pendingAttempt = nil
       completedStart = nil
+      activeLeases.removeAll()
       return sessionBindings
     }
     let statuses = registry.invalidateOwned(
@@ -718,6 +906,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     binding: NativeAgentSessionBinding,
     reasonCode: String = "binding_changed"
   ) {
+    _ = stateLock.withLock { activeLeases.removeValue(forKey: sessionID.lowercased()) }
     try? registry.invalidate(
       sessionID: sessionID.lowercased(),
       connectionTokenIdentity: connectionTokenIdentity,
@@ -726,6 +915,42 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       NativeAgentSessionAuditEvidence(
         action: .sessionInvalidated, sessionID: sessionID.lowercased(),
         binding: binding, reasonCode: reasonCode))
+  }
+
+  private func updateActiveLease(
+    for sessionID: String,
+    status: NativeAgentSessionRegistryStatus
+  ) {
+    stateLock.withLock {
+      guard let lease = activeLeases[sessionID.lowercased()] else { return }
+      guard status.state == .active else {
+        activeLeases.removeValue(forKey: sessionID.lowercased())
+        return
+      }
+      activeLeases[sessionID.lowercased()] = NativeAgentVerifiedCloudLease(
+        version: lease.version,
+        type: lease.type,
+        sessionID: lease.sessionID,
+        grantID: lease.grantID,
+        organizationID: lease.organizationID,
+        deviceID: lease.deviceID,
+        agentID: lease.agentID,
+        agentKind: lease.agentKind,
+        adapterID: lease.adapterID,
+        adapterVersion: lease.adapterVersion,
+        processBindingSHA256: lease.processBindingSHA256,
+        ancestryBindingSHA256: lease.ancestryBindingSHA256,
+        worktreeBindingSHA256: lease.worktreeBindingSHA256,
+        maxSignatures: lease.maxSignatures,
+        usedSignatures: status.usedSignatures,
+        notBefore: lease.notBefore,
+        expiresAt: lease.expiresAt,
+        notBeforeMilliseconds: lease.notBeforeMilliseconds,
+        expiresAtMilliseconds: lease.expiresAtMilliseconds,
+        controlSequence: lease.controlSequence,
+        authorityGeneration: lease.authorityGeneration,
+        binding: lease.binding)
+    }
   }
 
   private func completeRecoveredV4Outcome(

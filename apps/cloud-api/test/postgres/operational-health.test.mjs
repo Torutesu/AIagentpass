@@ -72,6 +72,11 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordManagedSignerProviderOperationMaintenanceQuarantined(5);
   metrics.recordManagedSignerProviderOperationMaintenanceReconciled(4);
   metrics.recordManagedSignerProviderOperationMaintenancePruned(6);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceCycle(2);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceSuccess();
+  metrics.recordAgentSessionSigningCapabilityMaintenanceFailure(3);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceExpired(5);
+  metrics.recordAgentSessionSigningCapabilityMaintenanceUncertain(4);
   for (const operation of Object.values(HUMAN_RECOVERY_OPERATIONS)) metrics.recordHumanRecoveryOperation(operation);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
@@ -127,6 +132,11 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     managed_signer_provider_operation_maintenance_quarantined_total: 5,
     managed_signer_provider_operation_maintenance_reconciled_total: 4,
     managed_signer_provider_operation_maintenance_pruned_total: 6,
+    agent_session_signing_capability_maintenance_cycle_total: 2,
+    agent_session_signing_capability_maintenance_success_total: 1,
+    agent_session_signing_capability_maintenance_failure_total: 3,
+    agent_session_signing_capability_maintenance_expired_total: 5,
+    agent_session_signing_capability_maintenance_uncertain_total: 4,
     owner_recovery_outbox_claim_total: 0,
     owner_recovery_outbox_publish_total: 0,
     owner_recovery_outbox_retry_total: 0,
@@ -501,6 +511,22 @@ test("drain rejects readiness immediately and waits for tracked work within the 
   assert.equal(closed, true);
   assert.equal((await health.readiness()).code, "closed");
   assert.throws(() => drain.acquire(), { code: "draining" });
+  assert.throws(() => drain.assertAccepting(), { code: "draining" });
+});
+
+test("drain close is shared and idempotent across concurrent and repeated callers", async () => {
+  const drain = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const release = drain.acquire();
+  let closeCalls = 0;
+  const close = drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 1; } });
+  const concurrent = drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 100; } });
+  setTimeout(release, 5);
+  const first = await close;
+  assert.deepEqual(await concurrent, first);
+  const second = await drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 1000; } });
+  assert.deepEqual(second, first);
+  assert.equal(closeCalls, 1);
+  assert.throws(() => drain.assertAccepting(), { code: "draining" });
 });
 
 test("drain does not close storage when tracked work exceeds the bounded timeout", async () => {

@@ -3,13 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 41 schemas, 3 OpenAPI documents, 25 fixtures, and 47 PostgreSQL migrations/);
+  assert.match(result.stdout, new RegExp(`validated 59 schemas, 2 OpenAPI documents, 24 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -126,6 +127,15 @@ test("Human P1 organization, member, and invitation operations declare security 
 
   const invitationRole = openapi.components.schemas.InviteRole;
   assert.deepEqual(invitationRole.enum, ["admin", "auditor", "viewer"]);
+  const invitationMutation = openapi.paths["/organizations/{organization_id}/invitations"].post;
+  assert.match(invitationMutation["x-agentpass-reissue-operation"], /reissue_invitation_id/);
+  assert.equal(invitationMutation["x-agentpass-recent-auth-operation"], "human.organizations.invitation.reissue");
+  assert.deepEqual(openapi.components.requestBodies.CreateInvitation.content["application/json"].schema.oneOf, [
+    { $ref: "#/components/schemas/CreateInvitationRequest" },
+    { $ref: "#/components/schemas/ReissueInvitationRequest" }
+  ]);
+  assert.deepEqual(openapi.components.schemas.ReissueInvitationRequest.required, ["reissue_invitation_id", "expires_at"]);
+  assert.equal(openapi.components.schemas.ReissueInvitationRequest.additionalProperties, false);
   assert.equal(openapi.components.schemas.InvitationCreatedResponse.properties.one_time_token.writeOnly, true);
   assert.match(openapi.paths["/invitations/accept"].post.description, /not bound to an email/i);
   assert.match(openapi.components.schemas.AcceptInvitationRequest.description, /no email field/i);

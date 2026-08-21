@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   HUMAN_SESSION_CSRF_HEADER,
   HUMAN_SESSION_ERROR_CODES,
@@ -14,10 +16,14 @@ const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
 const MAX_CURSOR_LENGTH = 512;
 const MAX_LABEL_LENGTH = 128;
+const MAX_REVOKED_SESSION_RESPONSE_ITEMS = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CREDENTIAL_ID = /^[A-Za-z0-9_-]+$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_HEADER = "agentpass-recent-auth";
+const RECENT_AUTH_CONTEXT_HEADER = "agentpass-recent-auth-context";
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
+const IF_MATCH = /^"([1-9][0-9]*)"$/u;
 const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const METHODS = Object.freeze({
@@ -25,7 +31,8 @@ const METHODS = Object.freeze({
   renameCredential: "PATCH",
   revokeCredential: "POST",
   listSessions: "GET",
-  revokeSession: "POST"
+  revokeSession: "POST",
+  revokeOtherSessions: "POST"
 });
 
 export const HUMAN_MANAGEMENT_HTTP_PATHS = Object.freeze({
@@ -33,6 +40,7 @@ export const HUMAN_MANAGEMENT_HTTP_PATHS = Object.freeze({
   credential: (credentialId) => `${CREDENTIALS_PATH}/${encodeURIComponent(credentialId)}`,
   credentialRevoke: (credentialId) => `${CREDENTIALS_PATH}/${encodeURIComponent(credentialId)}/revoke`,
   sessions: SESSIONS_PATH,
+  revokeOtherSessions: `${SESSIONS_PATH}/revoke-others`,
   session: (sessionId) => `${SESSIONS_PATH}/${encodeURIComponent(sessionId)}`,
   sessionRevoke: (sessionId) => `${SESSIONS_PATH}/${encodeURIComponent(sessionId)}/revoke`
 });
@@ -42,12 +50,14 @@ export const HUMAN_MANAGEMENT_REPOSITORY_METHODS = Object.freeze([
   "renameCredential",
   "revokeCredential",
   "listSessions",
-  "revokeSession"
+  "revokeSession",
+  "revokeOtherSessions"
 ]);
 
 export const HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS = Object.freeze({
   revokeCredential: "human.management.credential.revoke",
-  revokeCurrentSession: "human.management.session.revoke"
+  revokeCurrentSession: "human.management.session.revoke",
+  revokeOtherSessions: "human.management.sessions.revoke_others"
 });
 
 export const HUMAN_MANAGEMENT_HTTP_ERROR_CODES = Object.freeze({
@@ -61,6 +71,9 @@ export const HUMAN_MANAGEMENT_HTTP_ERROR_CODES = Object.freeze({
   SESSION_NOT_FOUND: "human_management_session_not_found",
   VERSION_CONFLICT: "human_management_version_conflict",
   LAST_ACTIVE_CREDENTIAL: "human_management_last_active_credential",
+  IDEMPOTENCY_REQUIRED: "human_management_idempotency_required",
+  IDEMPOTENCY_CONFLICT: "human_management_idempotency_conflict",
+  IF_MATCH_REQUIRED: "human_management_if_match_required",
   RECENT_AUTH_REQUIRED: "human_management_recent_auth_required",
   RECENT_AUTH_FAILED: "human_management_recent_auth_failed",
   RECENT_AUTH_STALE: "human_management_recent_auth_stale",
@@ -80,6 +93,9 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.SESSION_NOT_FOUND]: "The session was not found",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT]: "The resource was changed by another request",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL]: "The last active credential cannot be revoked",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED]: "An Idempotency-Key is required",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT]: "The idempotency key conflicts with another request",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IF_MATCH_REQUIRED]: "A valid If-Match is required",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: "Recent WebAuthn authentication is required",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: "Recent WebAuthn authentication failed",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: "Recent WebAuthn authentication is stale",
@@ -99,6 +115,9 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.SESSION_NOT_FOUND]: 404,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT]: 409,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL]: 409,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED]: 400,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT]: 409,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IF_MATCH_REQUIRED]: 400,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: 401,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: 401,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: 401,
@@ -143,6 +162,7 @@ export class HumanManagementHttpError extends Error {
  *   protect_last_active=true atomically while holding its member/org lock.
  * - listSessions(input) -> { items: SessionRecord[], next_cursor?: string|null }
  * - revokeSession(input) -> SessionRecord
+ * - revokeOtherSessions(input) -> SessionRecord[]
  *
  * All mutation methods must enforce the supplied expected_version atomically.
  */
@@ -191,8 +211,9 @@ export function createHumanManagementHttpApi({
       if (route.name === "listCredentials") return await listCredentials(session, request);
       if (route.name === "listSessions") return await listSessions(session, request);
       const body = await readJsonBody(request, maxBodyBytes);
-      if (route.name === "renameCredential") return await renameCredential(session, route.id, body);
+      if (route.name === "renameCredential") return await renameCredential(session, route.id, body, request);
       if (route.name === "revokeCredential") return await revokeCredential(session, route.id, body, request);
+      if (route.name === "revokeOtherSessions") return await revokeOtherSessions(session, body, request);
       return await revokeSession(session, route.id, body, request);
     } catch (error) {
       return mapError(error);
@@ -268,20 +289,24 @@ export function createHumanManagementHttpApi({
     }
   }
 
-  async function renameCredential(session, rawId, body) {
+  async function renameCredential(session, rawId, body, request) {
     const credentialId = requiredRouteCredentialId(rawId);
-    const input = parseBody(body, new Set(["label", "expected_version"]));
+    const input = parseBody(body, new Set(["label"]));
     const label = requiredLabel(input.label);
-    const expectedVersion = requiredVersion(input.expected_version);
+    const expectedVersion = requiredExpectedVersion(request);
+    const idempotencyKey = requiredIdempotencyKey(request);
     try {
       const record = await repository.renameCredential({
         ...scope(session),
         credential_id: credentialId,
         label,
-        expected_version: expectedVersion
+        expected_version: expectedVersion,
+        idempotency_key: idempotencyKey
       });
       if (!record) throw repositoryNotFound();
-      return response(200, { credential: normalizeCredential(record, session) });
+      const publicRecord = normalizeCredential(record, session);
+      if (publicRecord.credential_id !== credentialId || publicRecord.status !== "active" || publicRecord.version !== expectedVersion + 1 || publicRecord.label !== label) throw new Error("credential rename result is not authoritative");
+      return response(200, { credential: publicRecord });
     } catch (error) {
       throw mapRepositoryError(error, "credential");
     }
@@ -289,19 +314,24 @@ export function createHumanManagementHttpApi({
 
   async function revokeCredential(session, rawId, body, request) {
     const credentialId = requiredRouteCredentialId(rawId);
-    const input = parseBody(body, new Set(["expected_version"]));
-    const expectedVersion = requiredVersion(input.expected_version);
-    await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential);
+    parseBody(body, new Set());
+    const expectedVersion = requiredExpectedVersion(request);
+    const idempotencyKey = requiredIdempotencyKey(request);
+    const contextHash = credentialContextHash(HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential, credentialId, expectedVersion);
+    await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential, contextHash);
     try {
       const record = await repository.revokeCredential({
         ...scope(session),
         credential_id: credentialId,
         expected_version: expectedVersion,
+        idempotency_key: idempotencyKey,
         protect_last_active: true,
         reason: "human_management"
       });
       if (!record) throw repositoryNotFound();
-      return response(200, { credential: normalizeCredential(record, session) });
+      const publicRecord = normalizeCredential(record, session);
+      if (publicRecord.credential_id !== credentialId || publicRecord.status !== "revoked" || publicRecord.version !== expectedVersion + 1 || publicRecord.revoked_at === null) throw new Error("credential revocation result is not authoritative");
+      return response(200, { credential: publicRecord });
     } catch (error) {
       throw mapRepositoryError(error, "credential");
     }
@@ -322,11 +352,46 @@ export function createHumanManagementHttpApi({
         reason: "human_management"
       });
       if (!record) throw repositoryNotFound();
-      const publicRecord = normalizeSession({ ...record, session_id: record.session_id ?? sessionId }, session);
+      // A revoke mutation is only authoritative when the repository returns
+      // the exact requested target in a revoked state.  Without this check a
+      // broken or stale adapter could return another active session; the
+      // self-revoke branch would then clear the current cookie while leaving
+      // the current authority usable.
+      const publicRecord = normalizeSession(record, session);
+      if (publicRecord.session_id !== sessionId || publicRecord.status !== "revoked" || publicRecord.revoked_at === null) {
+        throw new Error("session revocation result is not authoritative");
+      }
       const extraHeaders = session.session_id === sessionId
         ? { "Set-Cookie": serializeClearedSessionCookie() }
         : undefined;
       return response(200, { session: publicRecord }, extraHeaders);
+    } catch (error) {
+      throw mapRepositoryError(error, "session");
+    }
+  }
+
+  async function revokeOtherSessions(session, body, request) {
+    parseBody(body, new Set());
+    await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeOtherSessions);
+    try {
+      const records = await repository.revokeOtherSessions({
+        ...scope(session),
+        reason: "human_management"
+      });
+      if (!Array.isArray(records)) throw new Error("other-session revocation result is invalid");
+      const revokedSessions = records.map((record) => normalizeSession(record, session));
+      const ids = new Set();
+      for (const revoked of revokedSessions) {
+        if (revoked.is_current || revoked.status !== "revoked" || revoked.revoked_at === null || ids.has(revoked.session_id)) {
+          throw new Error("other-session revocation result is not authoritative");
+        }
+        ids.add(revoked.session_id);
+      }
+      return response(200, {
+        revoked_sessions: revokedSessions.slice(0, MAX_REVOKED_SESSION_RESPONSE_ITEMS),
+        revoked_count: revokedSessions.length,
+        truncated: revokedSessions.length > MAX_REVOKED_SESSION_RESPONSE_ITEMS
+      });
     } catch (error) {
       throw mapRepositoryError(error, "session");
     }
@@ -348,13 +413,16 @@ export function createHumanManagementHttpApi({
     };
   }
 
-  async function requireRecentAuth(session, request, operation) {
+  async function requireRecentAuth(session, request, operation, contextHash = undefined) {
     if (!recentAuthService) {
       throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503 });
     }
     const proof = header(request.headers, RECENT_AUTH_HEADER);
     if (typeof proof !== "string" || proof.length < 32 || proof.length > 4_096) {
       throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED, { status: 401 });
+    }
+    if (contextHash !== undefined && header(request.headers, RECENT_AUTH_CONTEXT_HEADER) !== contextHash) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED, { status: 401 });
     }
 
     let authenticatedAt;
@@ -372,13 +440,14 @@ export function createHumanManagementHttpApi({
         principal: session,
         organization_id: session.organization_id,
         operation,
+        ...(contextHash === undefined ? {} : { context_hash: contextHash }),
         now: authenticatedAt
       });
     } catch (error) {
       throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
     }
 
-    const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified"];
+    const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified", ...(contextHash === undefined ? [] : ["context_hash"] )];
     const exactShape = authorization && typeof authorization === "object" && !Array.isArray(authorization)
       && Object.keys(authorization).sort().join(",") === expectedKeys.sort().join(",")
       && authorization.verified === true
@@ -386,6 +455,7 @@ export function createHumanManagementHttpApi({
       && authorization.member_id === session.member_id
       && authorization.organization_id === session.organization_id
       && authorization.operation === operation
+      && (contextHash === undefined || authorization.context_hash === contextHash)
       && typeof authorization.challenge_id === "string"
       && UUID.test(authorization.challenge_id)
       && authorization.challenge_id.toLowerCase() === proof.toLowerCase()
@@ -436,6 +506,7 @@ function resolveRoute(rawUrl, basePath) {
   const path = url.pathname;
   if (path === `${prefix}${CREDENTIALS_PATH}`) return { name: "listCredentials", query: url.searchParams };
   if (path === `${prefix}${SESSIONS_PATH}`) return { name: "listSessions", query: url.searchParams };
+  if (path === `${prefix}${SESSIONS_PATH}/revoke-others`) return { name: "revokeOtherSessions", query: url.searchParams };
   const credentialPrefix = `${prefix}${CREDENTIALS_PATH}/`;
   if (path.startsWith(credentialPrefix)) {
     const id = path.slice(credentialPrefix.length);
@@ -568,6 +639,28 @@ function requiredVersion(value) {
   return value;
 }
 
+function requiredIdempotencyKey(request) {
+  const value = header(request.headers, "idempotency-key");
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED, { status: 400 });
+  return value;
+}
+
+function requiredExpectedVersion(request) {
+  const value = header(request.headers, "if-match");
+  const match = IF_MATCH.exec(value ?? "");
+  if (!match) throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IF_MATCH_REQUIRED, { status: 400 });
+  return requiredVersion(Number(match[1]));
+}
+
+function credentialContextHash(operation, credentialId, expectedVersion) {
+  const canonical = `{"credential_id":${JSON.stringify(credentialId)},"expected_version":${expectedVersion},"operation":${JSON.stringify(operation)},"version":1}`;
+  return createSha256(canonical);
+}
+
+function createSha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function outputVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error("resource version is invalid");
   return value;
@@ -592,7 +685,7 @@ function requiredRouteUuid(value) {
 }
 
 function requiredCredentialId(value) {
-  if (typeof value !== "string" || value.length < 16 || value.length > 1_024 || !CREDENTIAL_ID.test(value) || value.includes("=")) throw new Error("credential id is invalid");
+  if (typeof value !== "string" || value.length < 22 || value.length > 1_366 || !CREDENTIAL_ID.test(value) || value.includes("=")) throw new Error("credential id is invalid");
   const bytes = Buffer.from(value, "base64url");
   if (bytes.length < 16 || bytes.length > 1_024 || bytes.toString("base64url") !== value) throw new Error("credential id is invalid");
   return value;
@@ -649,6 +742,9 @@ function mapRepositoryError(error, resource) {
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) {
     return new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
   }
+  if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) {
+    return new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, { status: 409, cause: error });
+  }
   if (["last_active_credential", "sole_active_credential", "last_credential", "err_last_active_credential", "err_sole_active_credential"].includes(code)) {
     return new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL, { status: 409, cause: error });
   }
@@ -703,7 +799,7 @@ function normalizeRequest(input) {
 
 function normalizeHeaders(input) {
   const result = {};
-  const names = ["origin", "cookie", "content-type", "content-length", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER];
+  const names = ["origin", "cookie", "content-type", "content-length", "idempotency-key", "if-match", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER, RECENT_AUTH_CONTEXT_HEADER];
   if (input && typeof input.get === "function") {
     for (const name of names) {
       const value = input.get(name);

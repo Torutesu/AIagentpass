@@ -1,0 +1,14 @@
+{
+  "session": {
+    "session_id": "66666666-6666-4666-8666-666666666666",
+    "operation": "platform.promotion.issue",
+    "capability": "platform.promotion.issue",
+    "authenticated_at": "2026-08-15T00:00:00.000Z",
+    "issued_at": "2026-08-15T00:00:00.000Z",
+    "expires_at": "2026-08-15T00:15:00.000Z",
+    "status": "active"
+  },
+  "challenge_id": "55555555-5555-4555-8555-555555555555",
+  "csrf_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "authenticated_at": "2026-08-15T00:00:00.000Z"
+}

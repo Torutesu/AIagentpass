@@ -89,6 +89,7 @@ public final class NativeDeviceSyncHTTPTransport: NSObject, URLSessionDataDelega
     public static let maximumBundleResponseBytes = NativeControlBundleV2Codec.maxBytes
     public static let maximumPollResponseBytes = NativeRefreshHintCodec.maxBytes
     public static let maximumAcknowledgementResponseBytes = NativeBundleAcknowledgementCodec.maxBytes
+    public static let maximumAuditUploadResponseBytes = 64 * 1024
     public static let requestTimeout: TimeInterval = 35
     public static let resourceTimeout: TimeInterval = 40
     public static let maximumPollWaitMilliseconds = 30_000
@@ -332,6 +333,41 @@ public final class NativeDeviceSyncHTTPTransport: NSObject, URLSessionDataDelega
 
     public func submitAcknowledgement(_ acknowledgement: NativeBundleAcknowledgement) async throws -> NativeDeviceSyncAcknowledgementResponse {
         try await acknowledgeControlBundle(acknowledgement)
+    }
+
+    /// Uploads one bounded, canonical, hash-chained redacted audit batch. The
+    /// same Device-authenticated request boundary is used as refresh/ACK; no
+    /// private key, repository content, or bearer credential enters the body.
+    public func uploadAuditBatch(_ batch: NativeDeviceAuditBatch) async throws -> NativeDeviceAuditIngestionResponse {
+        guard batch.events.allSatisfy({ $0.eventID.isEmpty == false }) else { throw NativeDeviceSyncHTTPTransportError.invalidRequest }
+        let body: Data
+        do {
+            body = try batch.canonicalData()
+            guard body.count <= NativeDeviceAuditEvent.maxBytes * NativeDeviceAuditBatch.maxEvents else {
+                throw NativeDeviceSyncHTTPTransportError.invalidRequest
+            }
+        } catch let error as NativeDeviceSyncHTTPTransportError {
+            throw error
+        } catch {
+            throw NativeDeviceSyncHTTPTransportError.invalidRequest
+        }
+        let url = try makeURL(path: ["organizations", organizationID, "audit", "events"], query: [])
+        let request = try authenticatedRequest(method: "POST", url: url, body: body)
+        let response = try await perform(
+            request,
+            expectedStatus: 202,
+            expectedContentType: "application/json",
+            maximumBytes: Self.maximumAuditUploadResponseBytes,
+            requiresNoStore: false,
+            allowNoContent: false
+        )
+        do {
+            return try NativeDeviceAuditIngestionResponse.decode(response.body, expectedDeviceID: deviceID)
+        } catch let error as NativeDeviceSyncHTTPTransportError {
+            throw error
+        } catch {
+            throw NativeDeviceSyncHTTPTransportError.malformedResponse
+        }
     }
 
     // MARK: URLSession delegate and bounded response collection

@@ -10,6 +10,7 @@ import {
   createBrowserCliHandoff,
   normalizeBrowserCliHandoffPreflight
 } from "../lib/browser-cli-handoff.mjs";
+import { ONBOARDING_INVITATION_DELIVERY_TYPE } from "../lib/onboarding-contract.mjs";
 import { canonicalJson } from "../lib/identity.mjs";
 
 const ORIGIN = "http://localhost:3001";
@@ -73,7 +74,7 @@ function invitation(overrides = {}) {
 
 function bodyFor(handle, value = invitation()) {
   const challenge = handle.getPublicPreflight();
-  return JSON.stringify({ version: 1, correlation_id: challenge.correlation_id, nonce: challenge.nonce, invitation: value });
+  return JSON.stringify({ version: 1, type: ONBOARDING_INVITATION_DELIVERY_TYPE, correlation_id: challenge.correlation_id, nonce: challenge.nonce, invitation: value });
 }
 
 function request(url, { method = "GET", origin = ORIGIN, host, headers = {}, body = undefined } = {}) {

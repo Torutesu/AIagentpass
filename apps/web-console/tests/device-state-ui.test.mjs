@@ -72,6 +72,19 @@ test("device state cards expose wake only for actionable non-synced states and u
   assert.doesNotMatch(deviceStateSource, /generation:|outbox:|nonce:|bundle:|policy:|secret:/);
 });
 
+test("wake mutation keeps the WebAuthn session snapshot through the BFF request", async () => {
+  const source = await readFile(componentPath, "utf8");
+  const fetchConsole = source.slice(source.indexOf("async function fetchConsole"), source.indexOf("function supportsWebAuthn"));
+  const requestRefresh = source.slice(source.indexOf("const requestDeviceRefresh"), source.indexOf("const currentLabel"));
+
+  assert.match(fetchConsole, /sessionOverride\?: ConsoleSession/);
+  assert.match(fetchConsole, /const session = sessionOverride \?\? await consoleSessionContext\.get/);
+  assert.match(requestRefresh, /const session = await consoleSessionContext\.get\(\)/);
+  assert.match(requestRefresh, /const \{ organizationId, csrfToken \} = session/);
+  assert.match(requestRefresh, /authenticateRecentAuth\(\{ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION, organizationId, csrfToken \}\)/);
+  assert.match(requestRefresh, /body: JSON\.stringify\(\{ target_id: deviceId \}\),\s+\}, session\);/);
+});
+
 test("state-specific styling preserves a text/status hook in the stylesheet", async () => {
   const styles = await readFile(stylesPath, "utf8");
   for (const state of ["synced", "pending", "blocked", "stale", "offline", "revoked"]) {

@@ -31,7 +31,7 @@ function actor(role = "owner") {
 }
 
 function repository(overrides = {}) {
-  const methods = ["listOrganizationsForMember", "createOrganizationWithOwner", "renameOrganization", "listMembers", "updateMemberRole", "removeMember", "listInvitations", "createInvitation", "revokeInvitation", "acceptInvitation"];
+  const methods = ["listOrganizationsForMember", "createOrganizationWithOwner", "renameOrganization", "listMembers", "updateMemberRole", "removeMember", "listInvitations", "createInvitation", "revokeInvitation", "reissueInvitation", "acceptInvitation"];
   const defaults = Object.fromEntries(methods.map((method) => [method, async () => ({})]));
   return Object.freeze({ ...defaults, ...overrides });
 }

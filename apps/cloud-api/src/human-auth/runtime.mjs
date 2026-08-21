@@ -37,6 +37,8 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "audit.export.retrieve",
   "audit.export.download",
   "audit.export.verify",
+  "platform.promotion.issue",
+  "platform.promotion.replay",
   WEBAUTHN_REGISTRATION_OPERATION,
   WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,

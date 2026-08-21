@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { canonicalJson, normalizeScope } from "../../../../packages/protocol/src/index.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
+import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -54,32 +55,23 @@ export function createPostgresCapabilityReservationRepository({ client, nonceSec
         idempotencyKey,
         requestHash,
         operation: async (tx) => {
-          await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:capability-reservation:${organizationId}:${issuedByMemberId}`]);
-          const membership = await tx.query(`SELECT role,version FROM memberships
-            WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR SHARE`, [organizationId, issuedByMemberId]);
-          if (rowCount(membership) !== 1 || !["owner", "admin"].includes(membership.rows[0].role)) throw new CapabilityReservationRepositoryError("ERR_MEMBER_NOT_ACTIVE", "capability issuer is not an active organization administrator");
-          const membershipVersion = positiveInteger(membership.rows[0].version, "membership_version");
-          const audience = await tx.query(`SELECT a.id FROM agents a JOIN devices d
-              ON d.organization_id=a.organization_id AND d.id=a.device_id
-            WHERE a.organization_id=$1 AND a.id=$2 AND a.device_id=$3
-              AND a.status='active' AND d.status='active' FOR SHARE OF a,d`, [organizationId, agentId, deviceId]);
-          if (rowCount(audience) !== 1) throw new CapabilityReservationRepositoryError("ERR_AUDIENCE", "capability audience is unavailable");
+          await installTenantContext(tx, organizationId);
           const notBefore = timestamp(input.issuedAt ?? input.issued_at ?? now(), "issued_at");
           const expiresAt = new Date(Date.parse(notBefore) + ttlMs).toISOString();
           const statement = capabilityStatement({ capabilityId, nonce, issuer, keyId, agentId, deviceId, scope, notBefore, expiresAt, sequence });
           const statementHash = digestHex(canonicalJson(statement));
-          const inserted = await tx.query(`INSERT INTO capabilities
-            (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,
-             issued_membership_version,issuer,key_id,scope_json,not_before,nonce_digest)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9,$10,$11,$12::jsonb,$13::timestamptz,$14::bytea)
-            ON CONFLICT (organization_id,id) DO NOTHING
-            RETURNING organization_id,id AS capability_id,agent_id,device_id,sequence,statement_hash,expires_at,
-              issued_by_member_id,issued_membership_version,issuer,key_id,scope_json,not_before,revoked_at,version`, [
+          const issued = await tx.query(`SELECT public.agentpass_capability_reservation_issue(
+            $1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9,$10,$11::jsonb,$12::timestamptz,$13::bytea
+          ) AS result`, [
             organizationId, capabilityId, agentId, deviceId, sequence, statementHash, expiresAt,
-            issuedByMemberId, membershipVersion, issuer, keyId, JSON.stringify(scope), notBefore, digestBuffer(nonce)
+            issuedByMemberId, issuer, keyId, JSON.stringify(scope), notBefore, digestBuffer(nonce)
           ]);
-          if (rowCount(inserted) !== 1) throw new CapabilityReservationRepositoryError("ERR_CAPABILITY_CONFLICT", "capability identity already exists");
-          return { responseStatus: 201, response: publicReservation(inserted.rows[0]) };
+          const record = functionResult(issued);
+          if (record.state === "member_not_active") throw new CapabilityReservationRepositoryError("ERR_MEMBER_NOT_ACTIVE", "capability issuer is not an active organization administrator");
+          if (record.state === "audience_absent") throw new CapabilityReservationRepositoryError("ERR_AUDIENCE", "capability audience is unavailable");
+          if (record.state === "conflict") throw new CapabilityReservationRepositoryError("ERR_CAPABILITY_CONFLICT", "capability identity already exists");
+          if (record.state !== "issued" || !record.capability) throw new CapabilityReservationRepositoryError("ERR_DATABASE", "capability authority returned an invalid result");
+          return { responseStatus: 201, response: publicReservation(record.capability) };
         }
       });
       if (outcome.state === "conflict") throw new CapabilityReservationRepositoryError("ERR_IDEMPOTENCY_CONFLICT", "idempotency key conflicts with another capability request");
@@ -94,17 +86,14 @@ export function createPostgresCapabilityReservationRepository({ client, nonceSec
   async function listCapabilities(input = {}) {
     const organizationId = uuid(input.organizationId ?? input.organization_id, "organization_id");
     try {
-      const result = await client.query(`SELECT organization_id,id AS capability_id,agent_id,device_id,sequence,statement_hash,
-          expires_at,issued_by_member_id,issued_membership_version,issuer,key_id,scope_json,not_before,revoked_at,version
-        FROM capabilities
-        WHERE organization_id=$1
-          AND issuer IS NOT NULL
-          AND key_id IS NOT NULL
-          AND scope_json IS NOT NULL
-          AND not_before IS NOT NULL
-        ORDER BY not_before ASC,id ASC LIMIT 1001`, [organizationId]);
-      if ((result.rows ?? []).length > 1000) throw new CapabilityReservationRepositoryError("ERR_LIMIT", "capability result exceeds the supported limit");
-      return Object.freeze((result.rows ?? []).map(publicReservation));
+      return await transaction(client, async (tx) => {
+        await installTenantContext(tx, organizationId);
+        const result = await tx.query("SELECT public.agentpass_capability_reservation_list($1,$2) AS result", [organizationId, 1001]);
+        const record = functionResult(result);
+        if (record.state !== "listed" || !Array.isArray(record.capabilities)) throw new CapabilityReservationRepositoryError("ERR_DATABASE", "capability authority returned an invalid result");
+        if (record.capabilities.length > 1000) throw new CapabilityReservationRepositoryError("ERR_LIMIT", "capability result exceeds the supported limit");
+        return Object.freeze(record.capabilities.map(publicReservation));
+      });
     } catch (error) {
       if (error instanceof CapabilityReservationRepositoryError) throw error;
       throw new CapabilityReservationRepositoryError("ERR_DATABASE", "capability reservation storage is unavailable", error);
@@ -158,6 +147,9 @@ function positiveInteger(value, field) { const result = typeof value === "string
 function digest(value, field) { if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) throw new CapabilityReservationRepositoryError("ERR_DATABASE", `${field} is invalid`); return value; }
 function timestamp(value, field) { const date = value instanceof Date ? value : new Date(value); if (Number.isNaN(date.getTime())) throw new CapabilityReservationRepositoryError("ERR_INPUT", `${field} is invalid`); return date.toISOString(); }
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
+function functionResult(result) { const value = rowCount(result) === 1 ? result.rows?.[0]?.result : undefined; if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.state !== "string") throw new CapabilityReservationRepositoryError("ERR_DATABASE", "capability authority returned an invalid result"); return value; }
+async function installTenantContext(tx, organizationId) { const result = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]); if (rowCount(result) !== 1 || result.rows?.[0]?.organization_id !== organizationId) throw new CapabilityReservationRepositoryError("ERR_DATABASE", "capability tenant context is unavailable"); }
+async function transaction(client, operation) { const tx = typeof client.connect === "function" ? await client.connect() : client; try { return await withTransaction(tx, operation); } finally { if (tx !== client) tx.release?.(); } }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client must provide query(text, params)"); }
 
 export default createPostgresCapabilityReservationRepository;

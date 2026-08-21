@@ -9,6 +9,22 @@ private let fixedUUID3 = "33333333-3333-4333-8333-333333333333"
 private let digest = Data(repeating: 0xA5, count: 32)
 private let nonce = Data(repeating: 0x5A, count: 32)
 
+private func fixedCapability(_ capabilityID: String = fixedUUID3) throws -> Data {
+    try NativeStrictJSON.data([
+        "version": 1, "capability_id": capabilityID,
+        "nonce": String(repeating: "N", count: 32), "issuer": "agentpass-cloud",
+        "key_id": "capability-v1",
+        "audience": ["agent_id": fixedUUID, "device_id": fixedUUID2],
+        "scope": [
+            "operations": ["git.commit.sign"], "repositories": ["/work/repo"],
+            "branches": ["allow": ["feature/*"], "deny": []],
+            "remotes": ["allow": ["git@example.test:repo.git"], "deny": []],
+        ],
+        "not_before": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:00:30.000Z",
+        "sequence": 1, "signature": String(repeating: "A", count: 86) + "==",
+    ])
+}
+
 private func archive(_ object: NSSecureCoding) throws -> Data {
     try NSKeyedArchiver.archivedData(withRootObject: object, requiringSecureCoding: true)
 }
@@ -93,8 +109,13 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     let session = try #require(AgentPassAgentSessionResponse(
         sessionID: fixedUUID,
         leaseID: fixedUUID2,
+        deviceID: fixedUUID3,
         processBindingDigest: digest,
+        ancestryBindingDigest: digest,
         worktreeBindingDigest: digest,
+        controlSequence: 12,
+        authorityGeneration: 7,
+        keyGeneration: 99,
         expiresAtMilliseconds: 4_000_000_000_000,
         maxSignatures: 2
     ))
@@ -110,6 +131,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
         sessionID: fixedUUID,
         requestID: fixedUUID2,
         capabilityID: fixedUUID3,
+        capability: try fixedCapability(),
         commitPayload: Data("tree abc\nauthor AgentPass\n\nmessage\n".utf8),
         requestNonce: nonce,
         createdAtMilliseconds: 4_000_000_000_000
@@ -130,16 +152,22 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
 
     #expect(decodedBootstrap.challenge == nonce)
     #expect(decodedSessionRequest.proof == nonce)
+    #expect(decodedSession.deviceID == fixedUUID3)
     #expect(decodedSession.processBindingDigest == digest)
+    #expect(decodedSession.ancestryBindingDigest == digest)
+    #expect(decodedSession.controlSequence == 12)
+    #expect(decodedSession.authorityGeneration == 7)
+    #expect(decodedSession.keyGeneration == 99)
     #expect(decodedStatusRequest.sessionID == fixedUUID)
     #expect(decodedStatus.usedSignatures == 1)
+    #expect(decodedSignRequest.capability == (try fixedCapability()))
     #expect(decodedSignRequest.commitPayload.starts(with: Data("tree".utf8)))
     #expect(decodedSignResponse.signature.count == 64)
     #expect(decodedCloseRequest.reason == "completed")
     #expect(decodedCloseResponse.status == "closed")
 
     let publicPropertyNames = [
-        "token", "sessionToken", "capability", "privateKey", "privateKeyData", "operation", "namespace", "signerArguments"
+        "token", "sessionToken", "privateKey", "privateKeyData", "operation", "namespace", "signerArguments"
     ]
     for name in publicPropertyNames {
         #expect(String(describing: type(of: decodedSignRequest)).contains(name) == false)
@@ -168,8 +196,26 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     #expect(AgentPassAgentSessionResponse(
         sessionID: fixedUUID,
         leaseID: fixedUUID2,
+        deviceID: fixedUUID3,
         processBindingDigest: Data(repeating: 0, count: 31),
+        ancestryBindingDigest: digest,
         worktreeBindingDigest: digest,
+        controlSequence: 12,
+        authorityGeneration: 7,
+        keyGeneration: 99,
+        expiresAtMilliseconds: 4_000_000_000_000,
+        maxSignatures: 2
+    ) == nil)
+    #expect(AgentPassAgentSessionResponse(
+        sessionID: fixedUUID,
+        leaseID: fixedUUID2,
+        deviceID: fixedUUID3,
+        processBindingDigest: digest,
+        ancestryBindingDigest: digest,
+        worktreeBindingDigest: digest,
+        controlSequence: 0,
+        authorityGeneration: 7,
+        keyGeneration: 99,
         expiresAtMilliseconds: 4_000_000_000_000,
         maxSignatures: 2
     ) == nil)
@@ -184,6 +230,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
         sessionID: fixedUUID,
         requestID: fixedUUID2,
         capabilityID: fixedUUID3,
+        capability: try! fixedCapability(),
         commitPayload: Data(repeating: 0, count: AgentPassAgentSignRequest.maximumCommitPayloadBytes + 1),
         requestNonce: nonce,
         createdAtMilliseconds: 4_000_000_000_000
@@ -191,9 +238,44 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     #expect(AgentPassAgentCloseSessionRequest(sessionID: fixedUUID, reason: "revoke_all") == nil)
 }
 
+@Test func agentSignDTORejectsCapabilitySubstitutionAndNonCanonicalAuthority() throws {
+    #expect(AgentPassAgentSignRequest(
+        sessionID: fixedUUID,
+        requestID: fixedUUID2,
+        capabilityID: fixedUUID2,
+        capability: try fixedCapability(fixedUUID3),
+        commitPayload: Data("tree abc\n\nmessage\n".utf8),
+        requestNonce: nonce,
+        createdAtMilliseconds: 4_000_000_000_000
+    ) == nil)
+
+    let canonical = try fixedCapability()
+    var object = try #require(JSONSerialization.jsonObject(with: canonical) as? [String: Any])
+    object["unexpected"] = true
+    let widened = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    #expect(AgentPassAgentSignRequest(
+        sessionID: fixedUUID,
+        requestID: fixedUUID2,
+        capabilityID: fixedUUID3,
+        capability: widened,
+        commitPayload: Data("tree abc\n\nmessage\n".utf8),
+        requestNonce: nonce,
+        createdAtMilliseconds: 4_000_000_000_000
+    ) == nil)
+}
+
 @Test func secureDecoderRejectsWrongObjectClassesAndMissingRequiredFields() throws {
     let archiver = NSKeyedArchiver(requiringSecureCoding: true)
     archiver.encode("not-a-uuid" as NSString, forKey: "session_id")
+    archiver.encode(fixedUUID2 as NSString, forKey: "lease_id")
+    archiver.encode(fixedUUID3 as NSString, forKey: "device_id")
+    archiver.encode(digest as NSData, forKey: "process_binding_digest")
+    archiver.encode(digest as NSData, forKey: "ancestry_binding_digest")
+    archiver.encode(digest as NSData, forKey: "worktree_binding_digest")
+    archiver.encode(NSNumber(value: 1), forKey: "control_sequence")
+    archiver.encode(NSNumber(value: 1), forKey: "authority_generation")
+    archiver.encode(NSNumber(value: 1), forKey: "key_generation")
+    archiver.encode(NSNumber(value: 4_000_000_000_000 as Int64), forKey: "expires_at_ms")
     archiver.encode(NSNumber(value: 1), forKey: "max_signatures")
     archiver.finishEncoding()
     let wrongDecoded = try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassAgentSessionResponse.self, from: archiver.encodedData)
@@ -204,4 +286,52 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     incompleteArchiver.finishEncoding()
     let incompleteDecoded = try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassAgentSessionStatusRequest.self, from: incompleteArchiver.encodedData)
     #expect(incompleteDecoded == nil)
+
+    let unknownArchiver = NSKeyedArchiver(requiringSecureCoding: true)
+    unknownArchiver.encode(fixedUUID as NSString, forKey: "session_id")
+    unknownArchiver.encode(fixedUUID2 as NSString, forKey: "lease_id")
+    unknownArchiver.encode(fixedUUID3 as NSString, forKey: "device_id")
+    unknownArchiver.encode(digest as NSData, forKey: "process_binding_digest")
+    unknownArchiver.encode(digest as NSData, forKey: "ancestry_binding_digest")
+    unknownArchiver.encode(digest as NSData, forKey: "worktree_binding_digest")
+    unknownArchiver.encode(NSNumber(value: 1), forKey: "control_sequence")
+    unknownArchiver.encode(NSNumber(value: 1), forKey: "authority_generation")
+    unknownArchiver.encode(NSNumber(value: 1), forKey: "key_generation")
+    unknownArchiver.encode(NSNumber(value: 4_000_000_000_000 as Int64), forKey: "expires_at_ms")
+    unknownArchiver.encode(NSNumber(value: 2), forKey: "max_signatures")
+    unknownArchiver.encode("future" as NSString, forKey: "future_authority")
+    unknownArchiver.finishEncoding()
+    #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassAgentSessionResponse.self, from: unknownArchiver.encodedData)) == nil)
+}
+
+@Test("generic Agent XPC routes new signing through the coordinator adapter")
+func genericAgentSigningCutoverKeepsReplayAndAuthorityBoundaries() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let sourceURL = testDirectory
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Sources/AgentPassNativeService/main.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let signStart = try #require(source.range(of: "func signGitCommit("))
+    let closeStart = try #require(source.range(of: "func closeAgentSession(", range: signStart.upperBound..<source.endIndex))
+    let signBody = String(source[signStart.lowerBound..<closeStart.lowerBound])
+
+    #expect(signBody.contains("coordinator.makeSigningHandoff"))
+    #expect(signBody.contains("NativeAgentSessionCoordinatorSigningAdapter"))
+    #expect(signBody.contains("adapter.execute"))
+    #expect(signBody.contains("consumeSigningCapability"))
+    #expect(signBody.contains("verifyGitCommitSignature"))
+    for phase in [".completed", ".signedVerified", ".providerStarted", ".uncertain"] {
+        #expect(signBody.contains(phase))
+    }
+    #expect(signBody.contains("recoverSigningReservation"))
+    #expect(signBody.contains("markUncertain"))
+    #expect(signBody.contains("case .completed"))
+    #expect(signBody.contains("case .signedVerified"))
+    #expect(signBody.contains("case .providerStarted"))
+    #expect(signBody.contains("case .uncertain"))
+    #expect(signBody.contains("runtime.signingTransactions.admit") == false)
+    #expect(signBody.contains("runtime.signingTransactions.markIntent") == false)
+    #expect(signBody.contains("runtime.signingTransactions.markProviderStarted") == false)
+    #expect(signBody.contains("runtime.signingTransactions.recordVerified") == false)
 }

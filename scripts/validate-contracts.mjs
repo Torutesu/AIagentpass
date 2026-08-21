@@ -52,6 +52,9 @@ const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "bundle-ack-v1.schema.json": "bundle-ack.valid.json",
   "device-audit-list-v1.schema.json": "device-audit-list.valid.json",
   "device-enrollment-v1.schema.json": "device-enrollment.valid.json",
+  "device-onboarding-invitation-delivery-v1.schema.json": "device-onboarding-invitation-delivery.valid.json",
+  "device-onboarding-preflight-v1.schema.json": "device-onboarding-preflight.valid.json",
+  "device-trust-installation-ack-v1.schema.json": "device-trust-installation-ack.valid.json",
   "device-possession-receipt-verification-v1.schema.json": "device-possession-receipt-verification.valid.json",
   "doctor-report-v1.schema.json": "doctor-report.valid.json",
   "refresh-hint-v1.schema.json": "refresh-hint.valid.json"
@@ -195,15 +198,7 @@ if (migrationNames.length < 1 || migrationNames.some((name, index) => Number(nam
 const migrations = migrationNames.map((name) => ({ name, sql: fs.readFileSync(path.join(contracts, "postgres", name), "utf8") }));
 for (const migration of migrations) {
   if (!migration.sql.trim().startsWith("BEGIN;") || !migration.sql.trim().endsWith("COMMIT;")) fail(`${migration.name} must be transactional`);
-  // A statement-level BEFORE TRUNCATE trigger is a protective constraint, not
-  // a destructive migration operation. Remove only that grammar before
-  // checking for executable DROP/TRUNCATE statements; an actual TRUNCATE
-  // command remains rejected.
-  const migrationWithoutComments = migration.sql.replace(/--[^\r\n]*/gu, "").replace(/\/\*[\s\S]*?\*\//gu, "");
-  const migrationWithoutProtectiveTruncateTrigger = migrationWithoutComments
-    .replace(/\bBEFORE\s+TRUNCATE\s+ON\b/giu, "BEFORE ON")
-    .replace(/\bREVOKE\s+TRUNCATE\s+ON\b/giu, "REVOKE ON");
-  if (/\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE)\b/i.test(migrationWithoutProtectiveTruncateTrigger)) fail(`${migration.name} contains a destructive statement`);
+  if (/\bDROP\s+(?:TABLE|COLUMN)\b|\bTRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?[a-z_]/i.test(migration.sql)) fail(`${migration.name} contains a destructive statement`);
 }
 const sql = migrations[0].sql;
 for (const table of ["organizations", "memberships", "human_sessions", "webauthn_credentials", "devices", "device_enrollments", "agents", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events", "idempotency_records", "admin_audit_events"]) {

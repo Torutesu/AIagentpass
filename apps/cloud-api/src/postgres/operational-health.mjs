@@ -1,5 +1,9 @@
+import { POSTGRES_SCHEMA_HEAD, POSTGRES_SCHEMA_HEAD_SOURCE_VERSION } from "./schema-head.mjs";
+
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 41;
+// Backwards-compatible export for adapters; the value is derived from the
+// catalog/files source at module load and is never maintained independently.
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = POSTGRES_SCHEMA_HEAD.version;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -76,6 +80,11 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "managed_signer_provider_operation_maintenance_quarantined_total",
   "managed_signer_provider_operation_maintenance_reconciled_total",
   "managed_signer_provider_operation_maintenance_pruned_total",
+  "agent_session_signing_capability_maintenance_cycle_total",
+  "agent_session_signing_capability_maintenance_success_total",
+  "agent_session_signing_capability_maintenance_failure_total",
+  "agent_session_signing_capability_maintenance_expired_total",
+  "agent_session_signing_capability_maintenance_uncertain_total",
   "owner_recovery_outbox_claim_total",
   "owner_recovery_outbox_publish_total",
   "owner_recovery_outbox_retry_total",
@@ -229,6 +238,11 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordManagedSignerProviderOperationMaintenanceQuarantined: (amount = 1) => increment("managed_signer_provider_operation_maintenance_quarantined_total", amount),
     recordManagedSignerProviderOperationMaintenanceReconciled: (amount = 1) => increment("managed_signer_provider_operation_maintenance_reconciled_total", amount),
     recordManagedSignerProviderOperationMaintenancePruned: (amount = 1) => increment("managed_signer_provider_operation_maintenance_pruned_total", amount),
+    recordAgentSessionSigningCapabilityMaintenanceCycle: (amount = 1) => increment("agent_session_signing_capability_maintenance_cycle_total", amount),
+    recordAgentSessionSigningCapabilityMaintenanceSuccess: (amount = 1) => increment("agent_session_signing_capability_maintenance_success_total", amount),
+    recordAgentSessionSigningCapabilityMaintenanceFailure: (amount = 1) => increment("agent_session_signing_capability_maintenance_failure_total", amount),
+    recordAgentSessionSigningCapabilityMaintenanceExpired: (amount = 1) => increment("agent_session_signing_capability_maintenance_expired_total", amount),
+    recordAgentSessionSigningCapabilityMaintenanceUncertain: (amount = 1) => increment("agent_session_signing_capability_maintenance_uncertain_total", amount),
     recordOwnerRecoveryOutboxClaim: (amount = 1) => increment("owner_recovery_outbox_claim_total", amount),
     recordOwnerRecoveryOutboxPublish: (amount = 1) => increment("owner_recovery_outbox_publish_total", amount),
     recordOwnerRecoveryOutboxRetry: (amount = 1) => increment("owner_recovery_outbox_retry_total", amount),
@@ -313,6 +327,16 @@ export function createDrainController({
     return snapshot();
   }
 
+  // Signing boundaries use the same deployment-wide admission state as HTTP
+  // work.  A checkpoint is intentionally synchronous so a caller can place it
+  // immediately before a durable reservation or an external provider call.
+  // The state can change while an awaited database operation is in flight;
+  // callers must checkpoint again after every such boundary.
+  function assertAccepting() {
+    if (state !== "running") throw new DrainRejectedError();
+    return snapshot();
+  }
+
   async function waitForInFlight(timeoutMs) {
     if (inFlight === 0) return true;
     const startedAt = safeClock(clock);
@@ -383,6 +407,7 @@ export function createDrainController({
     acquire,
     track,
     beginDrain,
+    assertAccepting,
     drain,
     close: closeImmediately,
     snapshot
@@ -398,7 +423,8 @@ export function createDrainController({
 export function createOperationalHealth({
   pool,
   migrationStatus,
-  expectedSchemaVersion = EXPECTED_POSTGRES_SCHEMA_VERSION,
+  schemaHead = POSTGRES_SCHEMA_HEAD,
+  expectedSchemaVersion = schemaHead?.version,
   maxConnections,
   metrics = createOperationalMetrics(),
   drainController,
@@ -415,7 +441,11 @@ export function createOperationalHealth({
 } = {}) {
   if (!pool || typeof pool !== "object") throw invalidOperationalInput();
   if (typeof migrationStatus !== "function" || typeof probe !== "function") throw invalidOperationalInput();
-  if (!Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion < 1) throw invalidOperationalInput();
+  if (!schemaHead || typeof schemaHead !== "object" || Array.isArray(schemaHead)
+    || schemaHead.schema_version !== POSTGRES_SCHEMA_HEAD_SOURCE_VERSION
+    || !Number.isSafeInteger(schemaHead.version) || schemaHead.version < 1
+    || !Number.isSafeInteger(schemaHead.migration_count) || schemaHead.migration_count !== schemaHead.version
+    || !Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion !== schemaHead.version) throw invalidOperationalInput();
   if (!metrics || typeof metrics.snapshot !== "function") throw invalidOperationalInput();
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
   if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();

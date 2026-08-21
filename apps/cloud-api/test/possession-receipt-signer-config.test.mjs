@@ -12,6 +12,8 @@ import {
 import { POSSESSION_RECEIPT_PURPOSE, possessionReceiptSigningData } from "../src/possession-receipt-signer.mjs";
 
 const NOW = Date.parse("2026-08-14T00:00:00.000Z");
+const CONTROL_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const REFRESH_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
 const STATEMENT = Object.freeze({
   version: 1,
   enrollment_id: "11111111-1111-4111-8111-111111111111",
@@ -24,6 +26,14 @@ const STATEMENT = Object.freeze({
   device_key_fingerprint: `SHA256:${"C".repeat(43)}`,
   device_key_epoch: 3,
   challenge_nonce_digest: "d".repeat(64),
+  control: {
+    format_epoch: 2,
+    issuer: "agentpass-cloud",
+    key_id: "control-v1",
+    public_key: publicPem(CONTROL_TEST_KEYS.publicKey),
+    bundle_path: "/v1/organizations/22222222-2222-4222-8222-222222222222/bundles/33333333-3333-4333-8333-333333333333",
+    refresh_hint: { key_id: "refresh-v1", algorithm: "ed25519", public_key: publicPem(REFRESH_TEST_KEYS.publicKey) }
+  },
   issued_at: "2026-08-14T00:00:00.000Z"
 });
 

@@ -167,7 +167,7 @@ test("M2-A3 lifecycle: expiry preserves rows and exact revocation serializes wit
     revocation_id: crypto.randomUUID(),
     created_at: revocationAt,
     issued_at: revocationAt,
-    expires_at: new Date(Date.now() + 300_000).toISOString()
+    expires_at: new Date(Date.parse(revocationAt) + 300_000).toISOString()
   });
   const hooked = await hookFixture.pool.query(`SELECT s.status,s.revoked_at,r.status AS revocation_status
     FROM agent_sessions s JOIN revocations r

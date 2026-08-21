@@ -5,7 +5,7 @@ import { createPostgresHumanRepository } from "../../src/postgres/human-reposito
 const ids = { session: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222", org: "33333333-3333-4333-8333-333333333333", membership: "55555555-5555-4555-8555-555555555555", challenge: "44444444-4444-4444-8444-444444444444" };
 
 test("stores session digests as bytes and uses exact tenant/member binding", async () => {
-  const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{id:ids.session}],rowCount:1};}};
+  const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash_hex:"a".repeat(64),csrf_token_hash_hex:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z",recent_auth_at:null,revoked_at:null}],rowCount:1};}};
   const repo=createPostgresHumanRepository({client});
   await repo.createSession({session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"});
   assert.equal(Buffer.isBuffer(calls[0].params[4]),true); assert.equal(calls[0].params[4].length,32); assert.match(calls[0].text,/m\.id=\$4/); assert.match(calls[0].text,/m\.status='active'/);
@@ -25,7 +25,7 @@ test("atomically enforces the cross-replica session ceiling before insertion", a
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (text.includes("pg_advisory_xact_lock") && text.includes("agentpass:human:sessions")) return { rows: [{ locked: true }], rowCount: 1 };
     if (text.startsWith("WITH ranked AS")) return { rows: [{ id: "66666666-6666-4666-8666-666666666666" }], rowCount: 1 };
-    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, ...session, token_hash_hex: session.token_hash, csrf_token_hash_hex: session.csrf_token_hash, recent_auth_at: null, revoked_at: null }], rowCount: 1 };
     throw new Error(`unexpected query: ${text}`);
   } };
   const repo = createPostgresHumanRepository({ client });
@@ -49,7 +49,7 @@ test("consumes signed identity replay state inside the session transaction befor
     if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
     if (text.includes("agentpass_consume_human_identity_assertion")) return { rows: [{ consumed: true }], rowCount: 1 };
     if (text.startsWith("WITH ranked AS")) return { rows: [], rowCount: 0 };
-    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, ...session, token_hash_hex: session.token_hash, csrf_token_hash_hex: session.csrf_token_hash, recent_auth_at: null, revoked_at: null }], rowCount: 1 };
     throw new Error(`unexpected query: ${text}`);
   } };
   const repo = createPostgresHumanRepository({ client });
@@ -105,6 +105,7 @@ test("recent authorization consumption is one atomic exact-binding update", asyn
   assert.deepEqual(await repo.consumeRecentAuth({session_id:ids.session,member_id:ids.member,organization_id:ids.org,operation:"device.enrollment.issue",challenge_id:ids.challenge,consumed_at:"2026-08-12T00:01:00.000Z"}),{authenticated_at:"2026-08-12T00:00:00.000Z"});
   assert.match(calls[0].text,/c\.session_id=s\.id/); assert.match(calls[0].text,/c\.member_id=s\.member_id/); assert.match(calls[0].text,/c\.organization_id=s\.organization_id/); assert.match(calls[0].text,/c\.ceremony='authentication'/); assert.match(calls[0].text,/c\.status='consumed'/);
   assert.match(calls[1].text,/s\.id=\$1/); assert.match(calls[1].text,/recent_auth_consumed_at IS NULL/); assert.match(calls[1].text,/INTERVAL '5 minutes'/); assert.deepEqual(calls[1].params.slice(0,5),[ids.session,ids.member,ids.org,"device.enrollment.issue",ids.challenge]);
+  assert.match(calls[1].text,/s\.idle_expires_at IS NULL OR s\.idle_expires_at>\$7/);
 });
 
 test("compares a resource context hash when binding and consuming recent authorization", async () => {
@@ -127,7 +128,7 @@ test("credential lookup and counter update are session and organization scoped",
   assert.equal(await repo.findCredentialForSession({session_id:ids.session,organization_id:ids.org,credential_id:credential}),null);
   assert.equal(await repo.updateCredentialCounter({session_id:ids.session,organization_id:ids.org,credential_id:credential,sign_count:2,expected_sign_count:1}),false);
   assert.match(calls[0].text,/m\.status='active'/); assert.match(calls[1].text,/c\.sign_count=\$5/);
-  assert.match(calls[1].text,/SET sign_count=\$4,backup_eligible=COALESCE\(\$6,c\.backup_eligible\),backup_state=COALESCE\(\$7,c\.backup_state\),last_used_at=clock_timestamp\(\)/);
+  assert.match(calls[1].text,/SET sign_count=\$4,sign_count_state=CASE WHEN \$4=0 THEN 'zero-counter' ELSE 'monotonic' END,backup_eligible=COALESCE\(\$6,c\.backup_eligible\),backup_state=COALESCE\(\$7,c\.backup_state\),last_used_at=clock_timestamp\(\)/);
   assert.deepEqual(calls[1].params.slice(5), [null, null, null, null]);
   assert.doesNotMatch(calls[1].text,/\bversion\s*=/);
 });
@@ -283,7 +284,7 @@ test("credential registration atomically locks, consumes step-up for existing cr
   let activeCount = "0";
   const client = { async query(text, params) {
     calls.push({ text, params });
-    if (text.startsWith("SELECT COUNT(*)")) return { rows: [{ active_count: activeCount }], rowCount: 1 };
+    if (text.startsWith("SELECT COUNT(*)")) return { rows: [{ active_count: activeCount, total_count: activeCount }], rowCount: 1 };
     if (text.startsWith("UPDATE human_sessions")) return { rows: [{ id: ids.session }], rowCount: 1 };
     if (text.startsWith("INSERT INTO webauthn_credentials")) return { rows: [{ id: Buffer.from(credentialId, "base64url") }], rowCount: 1 };
     return { rows: [], rowCount: 0 };
@@ -483,6 +484,46 @@ test("other-session revocation is transaction-bound and returns safe rows", asyn
   assert.equal(Object.hasOwn(result[0], "token_hash"), false);
   assert.match(calls.find(({ text }) => text.startsWith("UPDATE human_sessions target")).text, /target\.id<>\$1/);
   assert.equal(calls.at(-1).text, "COMMIT");
+});
+
+test("other-session revocation excludes the actor, supports an atomic empty no-op, and rolls back propagation failures", async () => {
+  const targetA = { session_id: "66666666-6666-4666-8666-666666666666", member_id: ids.member, organization_id: ids.org, role: "owner", version: 2, created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-13T00:00:00.000Z", last_seen_at: null, idle_expires_at: null, recent_auth_at: null, revoked_at: "2026-08-12T00:03:00.000Z", revoke_reason: "logout_all" };
+  const targetB = { ...targetA, session_id: "77777777-7777-4777-8777-777777777777" };
+  const calls = [];
+  const reductions = [];
+  let updateRows = [targetA, targetB];
+  const client = {
+    async query(text, params) {
+      calls.push({ text, params });
+      if (text.startsWith("UPDATE human_sessions target")) return { rows: updateRows, rowCount: updateRows.length };
+      return { rows: [], rowCount: 0 };
+    }
+  };
+  const repo = createPostgresHumanRepository({
+    client,
+    onAuthorityReduction: async (input) => {
+      reductions.push(input);
+      if (reductions.length === 2) throw new Error("audit publication failed");
+      return { generation: 9 };
+    }
+  });
+  await assert.rejects(() => repo.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, revoked_at: "2026-08-12T00:03:00.000Z", reason: "logout_all", authority_reduction: true }), /audit publication failed/);
+  assert.equal(calls.some(({ text }) => text === "COMMIT"), false);
+  assert.equal(calls.at(-1).text, "ROLLBACK");
+  assert.deepEqual(reductions.map(({ tx, actor_session_id, target_id, resource }) => ({ tx, actor_session_id, target_id, resource })), [
+    { tx: client, actor_session_id: ids.session, target_id: targetA.session_id, resource: "session" },
+    { tx: client, actor_session_id: ids.session, target_id: targetB.session_id, resource: "session" }
+  ]);
+  const update = calls.find(({ text }) => text.startsWith("UPDATE human_sessions target"));
+  assert.match(update.text, /target\.id<>\$1/);
+  assert.match(update.text, /target\.expires_at>clock_timestamp\(\)/);
+  assert.match(update.text, /version=target\.version\+1/);
+
+  updateRows = [];
+  const emptyCalls = [];
+  const emptyRepo = createPostgresHumanRepository({ client: { async query(text, params) { emptyCalls.push({ text, params }); if (text.startsWith("UPDATE human_sessions target")) return { rows: [], rowCount: 0 }; return { rows: [], rowCount: 0 }; } } });
+  assert.deepEqual(await emptyRepo.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, revoked_at: "2026-08-12T00:04:00.000Z", authority_reduction: true }), []);
+  assert.equal(emptyCalls.some(({ text }) => text === "COMMIT"), true);
 });
 
 test("serializes concurrent revocations so exactly one caller can revoke from two active credentials", async () => {

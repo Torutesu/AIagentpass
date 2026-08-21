@@ -41,6 +41,12 @@ private let n3eToken = String(repeating: "a", count: 64)
 private let n3eOtherToken = String(repeating: "b", count: 64)
 private let n3eWall = Int64(1_786_615_200_000)
 private let n3eProof = Data(repeating: 0xee, count: 32)
+private let n3eCapabilityPublicKeyPEM = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=
+-----END PUBLIC KEY-----
+"""
+private let n3eCapabilityKeyID = "capability-v1"
 
 private struct N3ERandom: NativeAgentRandomBytesGenerating {
   let byte: UInt8
@@ -665,7 +671,9 @@ private func n3eAuthority(
     perAgentSessionLimit: min(perAgentLimit, globalLimit),
     perWorktreeSessionLimit: min(perWorktreeLimit, globalLimit),
     bootstrapAttemptLimit: 3,
-    worktreeObservationPolicyVersion: 2
+    worktreeObservationPolicyVersion: 2,
+    capabilityPublicKeyPEM: n3eCapabilityPublicKeyPEM,
+    capabilityKeyID: n3eCapabilityKeyID
   )
   guard let authority = configuration.authority else { throw N3EFault.injected }
   return authority

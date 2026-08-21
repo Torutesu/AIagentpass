@@ -2,12 +2,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
 const TABLES = new Set([
   "memberships", "devices", "device_enrollments", "agents", "policies", "revocations",
-  "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events",
+  "bundle_heads", "bundle_acknowledgements", "device_audit_events",
   "idempotency_records", "admin_audit_events", "webauthn_challenges"
 ]);
 const PRIMARY_KEYS = new Map([
   ["memberships", "id"], ["devices", "id"], ["device_enrollments", "id"], ["agents", "id"],
-  ["policies", "id"], ["revocations", "id"], ["capabilities", "id"], ["bundle_heads", "device_id"],
+  ["policies", "id"], ["revocations", "id"], ["bundle_heads", "device_id"],
   ["bundle_acknowledgements", "device_id"], ["device_audit_events", "event_id"], ["idempotency_records", "idempotency_key"],
   ["admin_audit_events", "id"], ["webauthn_challenges", "id"]
 ]);

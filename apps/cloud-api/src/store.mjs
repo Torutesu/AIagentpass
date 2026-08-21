@@ -10,6 +10,7 @@ import {
 } from "../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "./audit-pagination.mjs";
 import { normalizeDeviceReadModel } from "./device-read-model.mjs";
+import { assertDeviceAuditChainOrdered } from "./device-audit-ingestion.mjs";
 import {
   POSSESSION_RECEIPT_PURPOSE,
   POSSESSION_RECEIPT_VERSION,
@@ -26,7 +27,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA256 = /^[0-9a-f]{64}$/;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
-const SENSITIVE_KEY = /(?:private(?:[_-]?key)?|bearer(?:[_-]?token)?|(?<!s)session(?:[_-]?token)?|access(?:[_-]?token)?|refresh(?:[_-]?token)?|secret|password|token)/i;
+const SENSITIVE_KEY = /(?:private(?:[_-]?key)?|bearer(?:[_-]?token)?|(?<!s)session(?:[_-]?token)?|access(?:[_-]?token)?|refresh(?![_-]?hint)(?:[_-]?token)?|secret|password|token)/i;
 const RELEASE_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SOURCE_COMMIT = /^[0-9a-f]{40}$/;
 const TEAM_ID = /^[A-Z0-9]{10}$/;
@@ -683,6 +684,8 @@ export async function createCloudStore(options = {}) {
     assertUuid(deviceId, "device_id");
     tenantRecord("devices", organizationId, deviceId, "device");
     const normalizedEvents = events.map((event) => normalizeAuditEvent(event));
+    try { assertDeviceAuditChainOrdered(normalizedEvents); }
+    catch (error) { throw new CloudStoreError(error.code, error.message, error.details); }
     for (const event of normalizedEvents) {
       const expectedHash = computeAuditEventHash(event);
       if (event.event_hash !== expectedHash) {
@@ -1224,7 +1227,7 @@ function buildPossessionReceiptRecord(state, organizationId, deviceId, normalize
   if (!enrollment || enrollment.organization_id !== organizationId || enrollment.device_id !== deviceId || enrollment.proof_version !== 2 || enrollment.consumed_at === null) throw new CloudStoreError("ERR_RECEIPT_BINDING", "possession receipt enrollment binding is invalid");
   const candidate = state.release_candidates[statement.candidate_id];
   if (!candidate || candidate.source_commit !== statement.source_commit || candidate.artifact_sha256 !== statement.artifact_sha256 || candidate.team_id !== statement.team_id) throw new CloudStoreError("ERR_RECEIPT_BINDING", "possession receipt release binding is invalid");
-  if (statement.enrollment_id !== enrollment.enrollment_id || statement.candidate_id !== enrollment.candidate_id || statement.device_key_fingerprint !== enrollment.device_key_fingerprint || statement.challenge_nonce_digest !== enrollment.challenge_nonce_digest || statement.device_key_epoch !== enrollment.device_key_epoch) throw new CloudStoreError("ERR_RECEIPT_BINDING", "possession receipt does not match the completed enrollment");
+  if (statement.enrollment_id !== enrollment.enrollment_id || statement.candidate_id !== enrollment.candidate_id || statement.device_key_fingerprint !== enrollment.device_key_fingerprint || statement.challenge_nonce_digest !== enrollment.challenge_nonce_digest || statement.device_key_epoch !== enrollment.device_key_epoch || statement.control.bundle_path !== `/v1/organizations/${organizationId}/bundles/${deviceId}`) throw new CloudStoreError("ERR_RECEIPT_BINDING", "possession receipt does not match the completed enrollment");
   return {
     organization_id: organizationId, enrollment_id: statement.enrollment_id, device_id: deviceId,
     candidate_id: statement.candidate_id, artifact_sha256: statement.artifact_sha256, source_commit: statement.source_commit,

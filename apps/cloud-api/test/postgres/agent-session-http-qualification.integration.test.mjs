@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 /*
  * M2-A2Q real-PostgreSQL HTTP qualification lane.
  *
@@ -206,7 +207,7 @@ async function createFixture(t) {
       client: migrationClient,
       applicationVersion: "m2-a2q-agent-session-http"
     }).run();
-    assert.equal(migration.currentVersion , 47);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

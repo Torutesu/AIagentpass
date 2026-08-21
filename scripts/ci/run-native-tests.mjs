@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import os from "node:os";
+import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,7 @@ export const TEARDOWN_SETTLE_MS = 50;
 export const TIMEOUT_EXIT_CODE = 124;
 export const ARGUMENT_EXIT_CODE = 64;
 export const SPAWN_EXIT_CODE = 127;
+export const ENVIRONMENT_EXIT_CODE = 78;
 
 export const DIAGNOSTIC_CODES = Object.freeze({
   arguments: "native_test_invalid_arguments",
@@ -23,7 +25,9 @@ export const DIAGNOSTIC_CODES = Object.freeze({
   passed: "native_test_passed",
   nonzero: "native_test_exit_nonzero",
   unknown: "native_test_exit_unknown",
-  spawnFailed: "native_test_spawn_failed"
+  spawnFailed: "native_test_spawn_failed",
+  environment: "native_test_environment",
+  noTests: "native_test_no_tests"
 });
 
 const SIGNAL_NUMBERS = Object.freeze(os.constants.signals ?? {});
@@ -112,12 +116,50 @@ function normalizeOptions(options = {}) {
   if (options.onDiagnostic !== undefined && typeof options.onDiagnostic !== "function") {
     throw new TypeError("onDiagnostic must be a function");
   }
+  if (options.expectTests !== undefined && typeof options.expectTests !== "boolean") {
+    throw new TypeError("expectTests must be a boolean");
+  }
   return {
     timeoutMs,
     cwd: options.cwd,
     env: options.env,
-    onDiagnostic: options.onDiagnostic
+    onDiagnostic: options.onDiagnostic,
+    expectTests: options.expectTests === true
   };
+}
+
+/**
+ * Give a native test process a private temporary directory. macOS file
+ * protection and runner sandboxes can reject writes through a shared system
+ * TMPDIR; the runner must own the directory lifecycle instead of weakening
+ * file permissions in individual tests.
+ */
+export async function prepareNativeTestEnvironment(environment = process.env) {
+  if (environment === null || typeof environment !== "object" || Array.isArray(environment)) {
+    throw new TypeError("environment is invalid");
+  }
+  const requested = environment.NATIVE_TEST_TMPDIR;
+  const directory = requested === undefined
+    ? await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-native-suite-"))
+    : requested;
+  if (typeof directory !== "string" || directory.length === 0 || !path.isAbsolute(directory) || directory.includes("\u0000")) {
+    throw new TypeError("NATIVE_TEST_TMPDIR must be an absolute path");
+  }
+  if (requested !== undefined) {
+    try { await fs.stat(directory); }
+    catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+  }
+  const stat = await fs.stat(directory);
+  if (!stat.isDirectory() || (stat.mode & 0o077) !== 0) throw new Error("native test temporary directory is unsafe");
+  const ownsDirectory = requested === undefined;
+  return Object.freeze({
+    environment: Object.freeze({ ...environment, TMPDIR: directory }),
+    directory,
+    async cleanup() { if (ownsDirectory) await fs.rm(directory, { recursive: true, force: true }); }
+  });
 }
 
 function isRunning(child) {
@@ -152,11 +194,12 @@ function signalExitCode(signal) {
   return Number.isInteger(number) ? 128 + number : 1;
 }
 
-function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed }) {
+function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed, noTests }) {
   if (spawnFailed) return DIAGNOSTIC_CODES.spawnFailed;
   if (timedOut) return DIAGNOSTIC_CODES.timeout;
   if (teardownFailed) return DIAGNOSTIC_CODES.teardown;
   if (signal) return DIAGNOSTIC_CODES.signal;
+  if (noTests) return DIAGNOSTIC_CODES.noTests;
   if (exitCode === 0) return DIAGNOSTIC_CODES.passed;
   if (Number.isInteger(exitCode)) return DIAGNOSTIC_CODES.nonzero;
   return DIAGNOSTIC_CODES.unknown;
@@ -171,7 +214,7 @@ function resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed 
  */
 export function runNativeTest(command, args = [], options = {}) {
   assertCommand(command, args);
-  const { cwd, env, onDiagnostic, timeoutMs } = normalizeOptions(options);
+  const { cwd, env, onDiagnostic, timeoutMs, expectTests } = normalizeOptions(options);
   const startedAt = process.hrtime.bigint();
 
   return new Promise((resolve) => {
@@ -184,6 +227,8 @@ export function runNativeTest(command, args = [], options = {}) {
     let timedOut = false;
     let interruptedSignal = null;
     let teardownFailed = false;
+    let testCasesObserved = 0;
+    let outputWindow = "";
     let timeoutHandle;
     let graceHandle;
     let settleHandle;
@@ -207,15 +252,24 @@ export function runNativeTest(command, args = [], options = {}) {
           ? signalExitCode(interruptedSignal)
           : (timedOut ? TIMEOUT_EXIT_CODE : (closeSignal ? signalExitCode(closeSignal) : null)));
       const signal = closeSignal ?? interruptedSignal;
+      const noTests = expectTests && exitCode === 0 && testCasesObserved === 0;
       resolve(Object.freeze({
-        exitCode,
+        exitCode: noTests ? ENVIRONMENT_EXIT_CODE : exitCode,
         signal,
         timedOut,
         interrupted: interruptedSignal !== null,
         teardownFailed,
+        testCasesObserved,
         durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
-        reason: resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed })
+        reason: resultReason({ exitCode, signal, timedOut, spawnFailed, teardownFailed, noTests })
       }));
+    };
+
+    const forwardAndInspect = (stream, chunk) => {
+      const text = chunk.toString();
+      outputWindow = `${outputWindow}${text}`.slice(-512);
+      if (/(?:◇ Test (?!run started\.)(?:.*) started\.|Test Case .* started)/u.test(outputWindow)) testCasesObserved = 1;
+      stream.write(chunk);
     };
 
     const finishAfterTeardown = () => {
@@ -259,8 +313,12 @@ export function runNativeTest(command, args = [], options = {}) {
         env,
         shell: false,
         detached: process.platform !== "win32",
-        stdio: "inherit"
+        stdio: expectTests ? ["ignore", "pipe", "pipe"] : "inherit"
       });
+      if (expectTests) {
+        child.stdout.on("data", (chunk) => forwardAndInspect(process.stdout, chunk));
+        child.stderr.on("data", (chunk) => forwardAndInspect(process.stderr, chunk));
+      }
     } catch {
       spawnFailed = true;
       emit(onDiagnostic, { phase: "spawn", code: DIAGNOSTIC_CODES.spawnFailed });
@@ -314,14 +372,26 @@ export async function main(argv = process.argv.slice(2), environment = process.e
     return 0;
   }
 
-  const result = await runNativeTest(options.command, options.args, {
-    cwd: process.cwd(),
-    env: environment,
-    timeoutMs: options.timeoutMs,
-    onDiagnostic(diagnostic) {
-      process.stderr.write(formatDiagnostic(diagnostic));
-    }
-  });
+  let isolated;
+  try {
+    isolated = await prepareNativeTestEnvironment(environment);
+  } catch {
+    process.stderr.write(formatDiagnostic({ phase: "environment", code: DIAGNOSTIC_CODES.environment }));
+    return ENVIRONMENT_EXIT_CODE;
+  }
+  let result;
+  try {
+    result = await runNativeTest(options.command, options.args, {
+      cwd: process.cwd(),
+      env: isolated.environment,
+      timeoutMs: options.timeoutMs,
+      onDiagnostic(diagnostic) {
+        process.stderr.write(formatDiagnostic(diagnostic));
+      }
+    });
+  } finally {
+    await isolated.cleanup().catch(() => {});
+  }
   if (result.reason === DIAGNOSTIC_CODES.timeout) return TIMEOUT_EXIT_CODE;
   if (result.reason === DIAGNOSTIC_CODES.spawnFailed) return SPAWN_EXIT_CODE;
   if (result.interrupted) return result.exitCode ?? 1;

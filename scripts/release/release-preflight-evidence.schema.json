@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/schemas/release-preflight-evidence-v1.json",
+  "title": "AgentPass offline release preflight evidence",
+  "description": "Closed, candidate-bound evidence for an offline preflight. This schema is evidence validation, not an Apple service or Gatekeeper assertion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "verification_mode", "candidate", "signature", "notarization", "staple", "gatekeeper"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "agentpass-release-preflight-evidence" },
+    "verification_mode": { "const": "offline_evidence" },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "signature": { "$ref": "#/$defs/signature" },
+    "notarization": { "$ref": "#/$defs/notarization" },
+    "staple": { "$ref": "#/$defs/staple" },
+    "gatekeeper": { "$ref": "#/$defs/gatekeeper" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "safe_name": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]*$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "evidence_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "bytes", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 17179869184 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "artifact_name", "artifact_bytes", "artifact_sha256", "candidate_id"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+        "artifact_name": { "type": "string", "pattern": "^AgentPass-[0-9A-Za-z.-]+-macos-universal\\.pkg$" },
+        "artifact_bytes": { "type": "integer", "minimum": 1, "maximum": 17179869184 },
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "detached_signature", "public_key", "public_key_fingerprint"],
+      "properties": {
+        "manifest": { "$ref": "#/$defs/evidence_file" },
+        "detached_signature": { "$ref": "#/$defs/evidence_file" },
+        "public_key": { "$ref": "#/$defs/evidence_file" },
+        "public_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" }
+      }
+    },
+    "notarization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["submission_id", "notary_result", "ticket"],
+      "properties": {
+        "submission_id": { "$ref": "#/$defs/uuid" },
+        "notary_result": { "$ref": "#/$defs/evidence_file" },
+        "ticket": { "$ref": "#/$defs/evidence_file" }
+      }
+    },
+    "staple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validation"],
+      "properties": { "validation": { "$ref": "#/$defs/evidence_file" } }
+    },
+    "gatekeeper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assessment"],
+      "properties": { "assessment": { "$ref": "#/$defs/evidence_file" } }
+    }
+  }
+}

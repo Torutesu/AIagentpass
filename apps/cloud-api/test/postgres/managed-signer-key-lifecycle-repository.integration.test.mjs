@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -12,7 +13,7 @@ import { createDurableManagedSignerProvider } from "../../src/durable-managed-si
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
-test("0038 fences signing leases across PostgreSQL pools and lifecycle races", {
+test("0051 fences signing leases across PostgreSQL pools and lifecycle races", {
   skip: !DATABASE_URL,
   timeout: 60_000
 }, async (t) => {
@@ -30,7 +31,7 @@ test("0038 fences signing leases across PostgreSQL pools and lifecycle races", {
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "managed-signer-lifecycle-integration" }).run();
-    assert.equal(migrated.currentVersion , 47);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

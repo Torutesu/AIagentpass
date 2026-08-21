@@ -9,13 +9,20 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
 
   assert.match(source, /import \{ authenticateRecentAuth, registerPasskey, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
   assert.match(source, /const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session"/);
-  assert.match(source, /fetch\(SESSION_BOOTSTRAP_PATH, \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
+  assert.match(source, /fetch\(path, \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /requestConsoleSession\(SESSION_RESUME_PATH, signal\)/);
+  assert.match(source, /requestConsoleSession\(SESSION_BOOTSTRAP_PATH, signal\)/);
   assert.match(source, /hasExactKeys\(value, \["session", "csrf_token"\]\)/);
   assert.match(source, /UUID\.test\(session\.organization_id\)/);
   assert.match(source, /BASE64URL_CSRF = \/\^\[A-Za-z0-9_-\]\{43\}\$\//);
   assert.match(source, /authenticateRecentAuth\(\{[\s\S]*?operation: RECENT_AUTH_OPERATION[\s\S]*?organizationId[\s\S]*?csrfToken/);
   assert.match(source, /"agentpass-recent-auth": authorization_id/);
   assert.match(source, /enrollmentInFlight\.current/);
+  assert.match(source, /enrollmentOutcomeUnknown/);
+  assert.match(source, /data-enrollment-state="outcome-unknown"/);
+  assert.match(source, /発行操作も再送していません/);
+  assert.match(source, /void refresh\(\)/);
   assert.match(source, /Touch ID\/パスキー確認して発行/);
   assert.match(source, /registerPasskey\(\{ organizationId, csrfToken \}\)/);
   assert.match(source, /Touch ID \/ パスキーを登録/);

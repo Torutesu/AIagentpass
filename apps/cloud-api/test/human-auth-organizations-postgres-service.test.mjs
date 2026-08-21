@@ -15,7 +15,8 @@ const ids = {
   owner: "33333333-3333-4333-8333-333333333333",
   member: "44444444-4444-4444-8444-444444444444",
   invitation: "55555555-5555-4555-8555-555555555555",
-  invitation2: "66666666-6666-4666-8666-666666666666"
+  invitation2: "66666666-6666-4666-8666-666666666666",
+  invitation3: "88888888-8888-4888-8888-888888888888"
 };
 const NOW = "2026-08-12T00:00:00.000Z";
 const EXPIRES = "2026-08-19T00:00:00.000Z";
@@ -32,7 +33,7 @@ function member(overrides = {}) {
 }
 
 function invitation(overrides = {}) {
-  return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.owner, created_at: NOW, expires_at: EXPIRES, consumed_at: null, revoked_at: null, status: "pending", version: 1, token_hash: "secret", ...overrides };
+  return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.owner, created_at: NOW, expires_at: EXPIRES, consumed_at: null, accepted_at: null, accepted_member_id: null, revoked_at: null, status: "pending", version: 1, token_hash: "secret", ...overrides };
 }
 
 function fixture(overrides = {}) {
@@ -46,8 +47,9 @@ function fixture(overrides = {}) {
     removeMember: () => member({ status: "revoked", version: 2 }),
     listInvitations: () => [invitation()],
     createInvitation: () => invitation(),
+    reissueInvitation: () => invitation({ version: 2 }),
     revokeInvitation: () => invitation({ revoked_at: NOW, status: "revoked", version: 2 }),
-    acceptInvitation: () => member({ member_id: ids.owner, role: "viewer" })
+    acceptInvitation: () => ({ invitation: invitation({ status: "accepted", consumed_at: NOW, accepted_at: NOW, accepted_member_id: ids.owner }), member: member({ member_id: ids.owner, role: "viewer" }) })
   };
   const repository = {};
   for (const method of Object.keys(defaults)) {
@@ -64,7 +66,7 @@ function fixture(overrides = {}) {
 
 function serviceFixture(overrides = {}) {
   const fixtureValue = fixture(overrides.repository);
-  const uuidValues = [ids.invitation2];
+  const uuidValues = [ids.invitation2, ids.invitation3];
   const service = createPostgresOrganizationService({
     repository: fixtureValue.repository,
     now: () => NOW,
@@ -75,12 +77,12 @@ function serviceFixture(overrides = {}) {
   return { service, ...fixtureValue };
 }
 
-test("exposes exactly the ten organization service methods", () => {
+test("exposes exactly the eleven organization service methods", () => {
   const { service } = serviceFixture();
   assert.equal(Object.isFrozen(service), true);
   assert.deepEqual(Object.keys(service).sort(), [
     "acceptInvitation", "createInvitation", "createOrganization", "listInvitations", "listMembers",
-    "listOrganizations", "removeMember", "renameOrganization", "revokeInvitation", "updateMemberRole"
+    "listOrganizations", "removeMember", "renameOrganization", "reissueInvitation", "revokeInvitation", "updateMemberRole"
   ].sort());
   assert.throws(() => createPostgresOrganizationService({ repository: {} }), /missing/);
   assert.throws(() => createPostgresOrganizationService({ repository: serviceFixture().repository, now: "not-a-function" }), /now must be a function/);
@@ -159,6 +161,15 @@ test("forwards mutation idempotency keys and injected timestamps and UUIDs", asy
   await service.updateMemberRole({ actor: ACTOR, organization_id: ids.organization, member_id: ids.member, role: "admin", expected_version: 1, idempotency_key: key });
   await service.removeMember({ actor: ACTOR, organization_id: ids.organization, member_id: ids.member, expected_version: 1, idempotency_key: key });
   await service.createInvitation({ actor: ACTOR, organization_id: ids.organization, role: "viewer", expires_at: EXPIRES, idempotency_key: key });
+  await service.reissueInvitation({
+    actor: ACTOR,
+    organization_id: ids.organization,
+    invitation_id: ids.invitation,
+    expires_at: EXPIRES,
+    expected_version: 1,
+    recent_authorization: { session_id: ACTOR.session_id, challenge_id: "88888888-8888-4888-8888-888888888888", operation: "human.organizations.invitation.reissue", authenticated_at: 1_800_000_000_000 },
+    idempotency_key: key
+  });
   await service.revokeInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, idempotency_key: key });
   await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: key });
 
@@ -174,7 +185,10 @@ test("forwards mutation idempotency keys and injected timestamps and UUIDs", asy
   assert.equal(calls.createInvitation[0].invitation_id, ids.invitation2);
   assert.equal(calls.createInvitation[0].created_at, NOW);
   assert.equal(calls.createInvitation[0].idempotency_key, key);
-  assert.equal(calls.createInvitation[0].actor_session_id, ACTOR.session_id);
+  assert.equal(calls.reissueInvitation[0].token_hash, createHash("sha256").update(RAW_TOKEN).digest("hex"));
+  assert.equal(calls.reissueInvitation[0].reissued_at, NOW);
+  assert.equal(calls.reissueInvitation[0].recent_auth_operation, "human.organizations.invitation.reissue");
+  assert.equal(calls.reissueInvitation[0].idempotency_key, key);
   assert.equal(calls.revokeInvitation[0].revoked_at, NOW);
   assert.equal(calls.revokeInvitation[0].idempotency_key, key);
   assert.equal(calls.revokeInvitation[0].actor_session_id, ACTOR.session_id);
@@ -200,11 +214,59 @@ test("stores only the SHA-256 hex invitation digest and returns raw token once",
   assert.equal(Object.hasOwn(replayed, "raw_token"), false);
 });
 
+test("reissues an invitation with a fresh token, future expiry, and no token on replay", async () => {
+  const recentAuthorization = { session_id: ACTOR.session_id, challenge_id: "88888888-8888-4888-8888-888888888888", operation: "human.organizations.invitation.reissue", authenticated_at: 1_800_000_000_000 };
+  const { service, calls } = serviceFixture({ repository: { reissueInvitation: () => invitation({ version: 2 }) } });
+  const result = await service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, recent_authorization: recentAuthorization, idempotency_key: "invite-reissue-1" });
+  assert.equal(result.raw_token, RAW_TOKEN);
+  assert.equal(calls.reissueInvitation[0].token_hash, createHash("sha256").update(RAW_TOKEN).digest("hex"));
+  assert.equal(Object.hasOwn(result.invitation, "token_hash"), false);
+
+  const replayFixture = serviceFixture({ repository: { reissueInvitation: () => ({ ...invitation({ version: 2 }), replayed: true }) }, options: { randomBytes: () => Buffer.alloc(32, 0xcd) } });
+  const replayed = await replayFixture.service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, recent_authorization: recentAuthorization, idempotency_key: "invite-reissue-1" });
+  assert.equal(replayed.replayed, true);
+  assert.equal(Object.hasOwn(replayed, "raw_token"), false);
+
+  await assert.rejects(() => service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: NOW, recent_authorization: recentAuthorization, idempotency_key: "invite-reissue-2" }), { code: "invalid_input" });
+  await assert.rejects(() => service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, idempotency_key: "invite-reissue-3" }), { code: "invalid_input" });
+});
+
+test("reconciles replayed create/reissue status at the current expiry boundary", async () => {
+  const recentAuthorization = { session_id: ACTOR.session_id, challenge_id: "88888888-8888-4888-8888-888888888888", operation: "human.organizations.invitation.reissue", authenticated_at: 1_800_000_000_000 };
+  for (const method of ["createInvitation", "reissueInvitation"]) {
+    const replayFixture = serviceFixture({ repository: {
+      [method]: () => ({ invitation: invitation({ status: "pending", expires_at: NOW }), replayed: true })
+    } });
+    const result = method === "createInvitation"
+      ? await replayFixture.service.createInvitation({ actor: ACTOR, organization_id: ids.organization, role: "viewer", expires_at: EXPIRES, idempotency_key: `expiry-replay-${method}` })
+      : await replayFixture.service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, recent_authorization: recentAuthorization, idempotency_key: `expiry-replay-${method}` });
+    assert.equal(result.invitation.status, "expired");
+    assert.equal(Object.hasOwn(result, "raw_token"), false);
+  }
+
+  for (const status of ["accepted", "revoked"]) {
+    const replayFixture = serviceFixture({ repository: { createInvitation: () => ({ invitation: invitation({ status, expires_at: NOW }), replayed: true }) } });
+    const result = await replayFixture.service.createInvitation({ actor: ACTOR, organization_id: ids.organization, role: "viewer", expires_at: EXPIRES, idempotency_key: `terminal-replay-${status}` });
+    assert.equal(result.invitation.status, status);
+  }
+});
+
 test("hashes one-time tokens before acceptance and never returns token hashes", async () => {
-  const { service, calls } = serviceFixture({ repository: { acceptInvitation: member({ token_hash: "secret" }) } });
+  const { service, calls } = serviceFixture({ repository: { acceptInvitation: { invitation: invitation({ token_hash: "secret" }), member: member() } } });
   const result = await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: "accept-1" });
   assert.equal(calls.acceptInvitation[0].token_hash, createHash("sha256").update(RAW_TOKEN).digest("hex"));
-  assert.equal(Object.hasOwn(result, "token_hash"), false);
+  assert.equal(Object.hasOwn(result.invitation, "token_hash"), false);
+  assert.equal(JSON.stringify(result).includes("secret"), false);
+});
+
+test("returns the sanitized invitation/member composite and preserves replay shape", async () => {
+  const acceptedInvitation = invitation({ status: "accepted", consumed_at: NOW, accepted_at: NOW, accepted_member_id: ids.member });
+  delete acceptedInvitation.token_hash;
+  const accepted = { invitation: acceptedInvitation, member: member({ member_id: ids.member }) };
+  const { service } = serviceFixture({ repository: { acceptInvitation: { ...accepted, token_hash: "secret" } } });
+  const result = await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: "accept-composite-1" });
+  assert.deepEqual(result, accepted);
+  assert.equal(Object.hasOwn(result.invitation, "token_hash"), false);
   assert.equal(JSON.stringify(result).includes("secret"), false);
 });
 

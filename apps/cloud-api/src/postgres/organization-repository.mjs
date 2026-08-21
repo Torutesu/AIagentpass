@@ -16,7 +16,7 @@ const MAX_PAGE_SIZE = 100;
 const READ_MEMBER_COLUMNS = `m.id AS member_id,m.github_subject,m.display_name,m.created_at AS member_created_at,
   ms.organization_id,ms.id AS membership_id,ms.role,ms.status,ms.version,ms.created_at,ms.updated_at`;
 const SAFE_INVITATION_COLUMNS = `i.organization_id,i.id AS invitation_id,i.role,i.created_at,i.expires_at,
-  i.consumed_at,i.revoked_at,i.version,i.created_by`;
+  i.consumed_by AS accepted_member_id,i.consumed_at,i.revoked_at,i.version,i.created_by`;
 
 export class OrganizationRepositoryError extends Error {
   constructor(code, message, details = undefined) {
@@ -306,6 +306,46 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     }, 200, mutationAuthorization(input));
   }
 
+  async function reissueInvitation(input = {}) {
+    const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
+    const actorId = actorMemberId(input);
+    const invitationId = uuid(input.invitation_id ?? input.invitationId);
+    const tokenHash = digest(input.token_hash ?? input.tokenHash);
+    const expiresAt = timestamp(input.expires_at ?? input.expiresAt, "expires_at");
+    const reissuedAt = input.reissued_at ?? input.reissuedAt ?? now();
+    timestamp(reissuedAt, "reissued_at");
+    const expectedVersion = version(input.expected_version ?? input.expectedVersion);
+    if (Date.parse(expiresAt) <= Date.parse(reissuedAt)) throw new TypeError("expires_at must be after reissued_at");
+    return mutate(organizationId, input, "invitation.reissue", { organization_id: organizationId, actor_id: actorId, invitation_id: invitationId, expected_version: expectedVersion, expires_at: expiresAt }, async (tx) => {
+      const target = await tx.query(`SELECT i.version,i.expires_at,i.consumed_at,i.revoked_at
+        FROM organization_invitations i
+        WHERE i.organization_id=$1 AND i.id=$2
+          AND EXISTS (SELECT 1 FROM memberships actor
+            WHERE actor.organization_id=$1 AND actor.member_id=$3 AND actor.status='active' AND actor.role IN ('owner','admin'))
+        FOR UPDATE OF i`, [organizationId, invitationId, actorId]);
+      if ((target.rowCount ?? target.rows?.length ?? 0) !== 1) return null;
+      const targetRow = target.rows[0];
+      if (returnedVersion(targetRow.version) !== expectedVersion) {
+        throw new OrganizationRepositoryError("ERR_VERSION_CONFLICT", "invitation version is stale");
+      }
+      if (targetRow.consumed_at !== null && targetRow.consumed_at !== undefined) {
+        throw new OrganizationRepositoryError("ERR_INVITATION_REPLAYED", "accepted invitation cannot be reissued");
+      }
+      if (targetRow.revoked_at !== null && targetRow.revoked_at !== undefined) {
+        throw new OrganizationRepositoryError("ERR_INVITATION_REPLAYED", "revoked invitation cannot be reissued");
+      }
+      const result = await tx.query(`UPDATE organization_invitations i SET token_hash=$3,expires_at=$4,version=i.version+1,updated_at=clock_timestamp()
+        WHERE i.organization_id=$1 AND i.id=$2 AND i.version=$5 AND i.revoked_at IS NULL AND i.consumed_at IS NULL
+          AND EXISTS (SELECT 1 FROM memberships actor
+            WHERE actor.organization_id=$1 AND actor.member_id=$6 AND actor.status='active' AND actor.role IN ('owner','admin'))
+        RETURNING ${SAFE_INVITATION_COLUMNS}`, [organizationId, invitationId, tokenHash, expiresAt, expectedVersion, actorId]);
+      if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
+      const row = safeInvitationRow(result.rows[0], reissuedAt);
+      await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.reissued", targetType: "invitation", targetId: invitationId, details: { role: row.role, expires_at: expiresAt, version: row.version } });
+      return row;
+    }, 201, mutationAuthorization(input));
+  }
+
   async function acceptInvitation(input = {}) {
     const tokenHash = digest(input.token_hash ?? input.tokenHash);
     const actorId = actorMemberId(input);
@@ -356,9 +396,11 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
         return null;
       }
+      const acceptedInvitation = safeInvitationRow(consumed.rows[0], acceptedAt);
+      const result = { invitation: acceptedInvitation, member: row };
       await appendMutationEvents(tx, { organizationId, actorId: invitedMemberId, action: "invitation.accepted", targetType: "invitation", targetId: uuid(stored.invitation_id ?? stored.id), details: { member_id: row.member_id, role: row.role, membership_id: row.membership_id, accepted_at: acceptedAt } });
-      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: row, responseStatus: 200 });
-      return row;
+      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: result, responseStatus: 201 });
+      return result;
     });
   }
 
@@ -457,9 +499,17 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         recent_auth_organization_id=NULL,recent_auth_operation=NULL,
         recent_auth_context_hash=NULL,recent_auth_consumed_at=NULL
       WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt, reason]);
-    await tx.query(`UPDATE capabilities
-      SET revoked_at=$3
-      WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt]);
+    const tenant = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+    if ((tenant.rowCount ?? tenant.rows?.length ?? 0) !== 1 || tenant.rows?.[0]?.organization_id !== organizationId) {
+      throw new OrganizationRepositoryError("ERR_DATABASE", "capability tenant context is unavailable");
+    }
+    const revoked = await tx.query(
+      "SELECT public.agentpass_capability_authority_revoke_member($1,$2,$3::timestamptz) AS result",
+      [organizationId, memberId, revokedAt]
+    );
+    if ((revoked.rowCount ?? revoked.rows?.length ?? 0) !== 1 || revoked.rows?.[0]?.result?.state !== "revoked") {
+      throw new OrganizationRepositoryError("ERR_DATABASE", "capability revocation is unavailable");
+    }
   }
 
   async function notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType, occurredAt }) {
@@ -547,6 +597,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     createInvitation,
     listInvitations,
     revokeInvitation,
+    reissueInvitation,
     acceptInvitation
   });
 
@@ -674,7 +725,8 @@ function safeInvitationRow(row = {}, evaluatedAt) {
   const consumedAt = nullableReturnedTimestamp(row.consumed_at);
   const revokedAt = nullableReturnedTimestamp(row.revoked_at);
   const statusAt = timestamp(evaluatedAt, "evaluated_at");
-  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, statusAt), version: returnedVersion(row.version) };
+  const acceptedMemberId = row.accepted_member_id ?? row.consumed_by ?? null;
+  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, accepted_at: consumedAt, accepted_member_id: acceptedMemberId === null ? null : uuid(String(acceptedMemberId)), revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, statusAt), version: returnedVersion(row.version) };
 }
 
 function membershipStatus(value) { if (value !== "active" && value !== "revoked") throw new TypeError("membership status is invalid"); return value; }

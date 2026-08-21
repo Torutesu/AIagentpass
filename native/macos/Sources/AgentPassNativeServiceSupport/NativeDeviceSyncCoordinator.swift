@@ -73,6 +73,7 @@ public actor NativeDeviceSyncCoordinator {
     private let snapshotStore: any NativeDeviceRefreshSnapshotStore
     private let bundleStore: any NativeDeviceSyncBundleInstalling
     private let activator: any NativeDeviceSyncBundleActivating
+    private let evidenceStore: (any NativeControlRefreshEvidenceStoring)?
     private let acknowledgementSigner: any P256MessageSigner
     private let nowMilliseconds: @Sendable () -> Int64
     private var machine: NativeDeviceRefreshStateMachine
@@ -89,6 +90,7 @@ public actor NativeDeviceSyncCoordinator {
         bundleStore: any NativeDeviceSyncBundleInstalling,
         activator: any NativeDeviceSyncBundleActivating,
         acknowledgementSigner: any P256MessageSigner,
+        evidenceStore: (any NativeControlRefreshEvidenceStoring)? = nil,
         nowMilliseconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1_000) }
     ) throws {
         guard deviceKeyEpoch > 0, deviceKeyEpoch <= 9_007_199_254_740_991,
@@ -107,6 +109,7 @@ public actor NativeDeviceSyncCoordinator {
         self.snapshotStore = snapshotStore
         self.bundleStore = bundleStore
         self.activator = activator
+        self.evidenceStore = evidenceStore
         self.acknowledgementSigner = acknowledgementSigner
         self.nowMilliseconds = nowMilliseconds
         self.machine = try NativeDeviceRefreshStateMachine.load(
@@ -352,6 +355,39 @@ public actor NativeDeviceSyncCoordinator {
         }
         let result: NativeBundleAcknowledgementResult = machine.state == .applied ? .applied : .blocked
         let reason = result == .blocked ? Self.ackReason(machine.blockedReason) : nil
+
+        // A management response can be lost after Cloud has accepted the
+        // signed ACK. Reuse the exact durable public ACK and acceptance
+        // evidence before considering any new signature or network request.
+        if let evidenceStore {
+            do {
+                if let evidence = try evidenceStore.load(),
+                   evidence.matches(
+                       organizationID: organizationID,
+                       deviceID: deviceID,
+                       deviceKeyEpoch: deviceKeyEpoch,
+                       formatEpoch: 2,
+                       generation: machine.binding.generation,
+                       sequence: sequence,
+                       statementHash: statementHash,
+                       refreshState: result == .applied ? .applied : .blocked,
+                       refreshNonce: nonce
+                   ),
+                   evidence.acknowledgement.result == result,
+                   Self.isValidSignature(evidence.acknowledgement, signer: acknowledgementSigner) {
+                    let generation = machine.binding.generation
+                    _ = try machine.apply(.acknowledgementDurablyRecorded, persistingTo: snapshotStore)
+                    _ = try machine.apply(.resetForNextPoll, persistingTo: snapshotStore)
+                    if let reason { return .blocked(generation: generation, sequence: sequence, reason: reason) }
+                    return .applied(generation: generation, sequence: sequence)
+                }
+            } catch let error as NativeDeviceRefreshStateMachineError {
+                throw error
+            } catch {
+                throw NativeDeviceSyncCoordinatorError.storageUnavailable
+            }
+        }
+
         let acknowledgement = try NativeBundleAcknowledgementSigner.create(
             organizationID: organizationID,
             deviceID: deviceID,
@@ -373,6 +409,21 @@ public actor NativeDeviceSyncCoordinator {
             throw NativeDeviceSyncCoordinatorError.acknowledgementRejected
         }
         let generation = machine.binding.generation
+
+        if let evidenceStore {
+            let evidence = NativeControlRefreshEvidence(
+                acknowledgement: acknowledgement,
+                serverAccepted: response.accepted,
+                observedGeneration: response.observedGeneration,
+                refreshState: response.refreshState,
+                refreshGeneration: generation,
+                refreshSequence: sequence,
+                controlStatementHash: statementHash
+            )
+            do { try evidenceStore.save(evidence) }
+            catch { throw NativeDeviceSyncCoordinatorError.storageUnavailable }
+        }
+
         _ = try machine.apply(.acknowledgementDurablyRecorded, persistingTo: snapshotStore)
         _ = try machine.apply(.resetForNextPoll, persistingTo: snapshotStore)
         if let reason { return .blocked(generation: generation, sequence: sequence, reason: reason) }
@@ -394,6 +445,19 @@ public actor NativeDeviceSyncCoordinator {
         }
     }
 
+    private static func isValidSignature(
+        _ acknowledgement: NativeBundleAcknowledgement,
+        signer: any P256MessageSigner
+    ) -> Bool {
+        guard let signatureData = Data(base64URLEncoded: acknowledgement.signature),
+              let publicKey = try? P256.Signing.PublicKey(x963Representation: signer.publicKeyX963),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: signatureData),
+              let signingData = try? NativeBundleAcknowledgementCodec.signingData(acknowledgement) else {
+            return false
+        }
+        return publicKey.isValidSignature(signature, for: signingData)
+    }
+
     private static func ackReason(_ reason: NativeDeviceRefreshStateMachineReasonCode?) -> NativeBundleAcknowledgementReasonCode {
         switch reason {
         case .bundleExpired: return .bundleExpired
@@ -408,5 +472,14 @@ public actor NativeDeviceSyncCoordinator {
         case .emergencyStop: return .emergencyStop
         default: return .internalError
         }
+    }
+}
+
+private extension Data {
+    init?(base64URLEncoded value: String) {
+        var value = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let remainder = value.utf8.count % 4
+        if remainder != 0 { value += String(repeating: "=", count: 4 - remainder) }
+        self.init(base64Encoded: value)
     }
 }

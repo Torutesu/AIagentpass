@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-signing-capability-v1.schema.json",
+  "title": "AgentPass one-use Agent signing capability v1",
+  "description": "A Cloud-signed, canonical, one-use capability envelope. The operation, scope, signer purpose, key, lifetime, budget, and authority generations are server-derived and are never accepted from the Device caller.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "$comment": "Runtime invariants: statement.issued_at is not after statement.not_before, statement.expires_at is after statement.not_before and within the server TTL; organization, session, device, agent, scope, key, budget, control sequence, and authority generation are checked against authenticated server state; the capability is atomically consumed exactly once.",
+  "required": ["version", "type", "statement", "statement_hash", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.agent-signing-capability" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "statement_hash": { "$ref": "#/$defs/sha256Hex" },
+    "signature": { "$ref": "#/$defs/ed25519Signature" }
+  },
+  "$defs": {
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 21,
+      "required": [
+        "version",
+        "type",
+        "capability_id",
+        "organization_id",
+        "session_id",
+        "device_id",
+        "agent_id",
+        "one_use",
+        "operation",
+        "scope",
+        "key_purpose",
+        "key_id",
+        "algorithm",
+        "max_signatures",
+        "issued_at",
+        "not_before",
+        "expires_at",
+        "sequence",
+        "control_sequence",
+        "authority_generation",
+        "issuer"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "type": { "const": "agentpass.agent-signing-capability" },
+        "capability_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "session_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "one_use": { "const": true },
+        "operation": { "const": "git.commit.sign" },
+        "scope": { "$ref": "https://agentpass.dev/contracts/scope-v1.schema.json" },
+        "key_purpose": { "const": "git.commit.sign" },
+        "key_id": { "$ref": "#/$defs/safeIdentifier" },
+        "algorithm": { "const": "ed25519" },
+        "max_signatures": { "const": 1 },
+        "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "not_before": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+        "control_sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+        "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
+        "issuer": { "const": "agentpass-cloud" }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256Hex": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "ed25519Signature": {
+      "description": "Canonical unpadded base64url Ed25519 signature over UTF-8 bytes: AgentPass-Agent-Signing-Capability-v1\\u0000 followed by the canonical JSON statement.",
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$"
+    }
+  }
+}

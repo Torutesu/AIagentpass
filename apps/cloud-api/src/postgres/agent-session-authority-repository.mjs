@@ -99,29 +99,14 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     const values = input.values ?? normalizeIssueInput(input, currentClock);
     try {
       await setTenantContext(tx, values.organizationId);
-      await lockGrant(tx, values.organizationId, values.grantId);
-
-      const inserted = await tx.query(`INSERT INTO agent_session_grants
-        (${IMMUTABLE_GRANT_COLUMNS.join(",")})
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::timestamptz,$13::timestamptz,
-          $14,$15,$16,$17,$18,$19,$20,$21,$22::timestamptz,$23)
-        ON CONFLICT (organization_id,grant_id) DO NOTHING
-        RETURNING ${GRANT_RETURNING}`, issueGrantParameters(values));
-
-      if (rowCount(inserted) === 1) {
-        const row = validateGrantRow(inserted.rows[0], values.organizationId);
-        if (!sameImmutableGrant(row, values)) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
-        return publicGrantResult(publicGrant(row), false);
-      }
-
-      const existing = await tx.query(`SELECT ${GRANT_RETURNING}
-        FROM agent_session_grants
-        WHERE organization_id=$1 AND grant_id=$2
-        FOR UPDATE`, [values.organizationId, values.grantId]);
-      if (rowCount(existing) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_CONFLICT");
-      const row = validateGrantRow(existing.rows[0], values.organizationId);
+      const result = await tx.query(`SELECT * FROM public.agentpass_agent_session_grant_issue(
+        $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text,$6::uuid,$7::text,$8::text,$9::text,
+        $10::jsonb,$11::integer,$12::timestamptz,$13::timestamptz,$14::bigint,$15::bigint,
+        $16::text,$17::text,$18::text,$19::text,$20::text,$21::timestamptz,$22::uuid)`, issueGrantParameters(values).filter((_, index) => index !== 20));
+      if (rowCount(result) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
+      const row = validateGrantRow(result.rows[0], values.organizationId);
       if (!sameImmutableGrant(row, values)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_CONFLICT");
-      return publicGrantResult(publicGrant(row), true);
+      return publicGrantResult(publicGrant(row), result.rows[0].inserted !== true);
     } catch (error) {
       throw mapError(error);
     }
@@ -153,10 +138,10 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     const grantId = uuidValue(input.grant_id ?? input.grantId, "grant_id");
     try {
       await setTenantContext(tx, organizationId);
-      const result = await tx.query(`SELECT ${GRANT_RETURNING}
-        FROM agent_session_grants
-        WHERE organization_id=$1 AND grant_id=$2
-        FOR SHARE`, [organizationId, grantId]);
+      const result = await tx.query(
+        "SELECT * FROM public.agentpass_agent_session_grant_get($1::uuid,$2::uuid)",
+        [organizationId, grantId]
+      );
       if (rowCount(result) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_NOT_FOUND");
       return publicGrantResult(publicGrant(validateGrantRow(result.rows[0], organizationId)), true);
     } catch (error) {
@@ -170,42 +155,24 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     const values = input.values ?? normalizeConsumeInput(input, currentClock);
     try {
       await setTenantContext(tx, values.organizationId);
-      await lockGrant(tx, values.organizationId, values.grantId);
-
-      const grantResult = await tx.query(`SELECT ${GRANT_RETURNING}
-        FROM agent_session_grants
-        WHERE organization_id=$1 AND grant_id=$2 AND device_id=$3
-        FOR UPDATE`, [values.organizationId, values.grantId, values.deviceId]);
-      if (rowCount(grantResult) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_NOT_FOUND");
-      const grant = validateGrantRow(grantResult.rows[0], values.organizationId);
-      if (grant.device_id !== values.deviceId) throw new AgentSessionAuthorityRepositoryError("ERR_TENANT_DRIFT");
-      if (!sameGrantEnvelope(grant, values)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_CONFLICT");
-      await assertCurrentGrantAuthority(tx, grant);
-
-      if (grant.status === "consumed") {
-        return consumeExistingSession(tx, grant, values);
-      }
-      if (grant.status !== "issued") throw grantAvailabilityError(grant.status);
-      if (values.nowMs < Date.parse(grant.not_before)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_NOT_YET_VALID");
-      if (values.nowMs >= Date.parse(grant.expires_at)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_EXPIRED");
-
       const sessionId = values.sessionId ?? generatedUuid(makeUuid);
-      const inserted = await tx.query(`INSERT INTO agent_sessions
-        (organization_id,session_id,grant_id,device_id,agent_id,agent_kind,adapter_id,adapter_version,
-         process_binding_policy_id,grant_hash,process_binding_sha256,ancestry_binding_sha256,
-         worktree_binding_sha256,control_sequence,authority_generation,max_signatures,used_signatures,reserved_signatures,
-         status,created_at,not_before,expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,0,0,'challenge_pending',$17::timestamptz,$18::timestamptz,$19::timestamptz)
-        RETURNING ${SESSION_RETURNING}`, [
-        values.organizationId, sessionId, grant.grant_id, grant.device_id, grant.agent_id, grant.agent_kind,
-        grant.adapter_id, grant.adapter_version, grant.process_binding_policy_id, grant.grant_hash,
-        values.processBindingSha256, values.ancestryBindingSha256, grant.worktree_binding_sha256,
-        grant.control_sequence, grant.authority_generation, grant.max_signatures, values.now, grant.not_before, grant.expires_at
+      const statement = values.envelope.statement;
+      const result = await tx.query(`SELECT * FROM public.agentpass_agent_session_consume(
+        $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text,$6::uuid,$7::text,$8::text,$9::text,
+        $10::jsonb,$11::integer,$12::timestamptz,$13::timestamptz,$14::bigint,$15::bigint,
+        $16::text,$17::text,$18::text,$19::text,$20::text,$21::text,$22::text,$23::uuid,$24::boolean)`, [
+        values.organizationId, values.grantId, values.deviceId, statement.agent_id,
+        statement.agent_kind, statement.adapter_id, statement.adapter_version,
+        statement.worktree_binding_sha256, statement.process_binding_policy_id,
+        JSON.stringify(statement.scope), statement.max_signatures, statement.not_before,
+        statement.expires_at, statement.control_sequence, statement.authority_generation,
+        statement.issuer, statement.key_id, values.statementHash, values.grantHash,
+        values.envelope.signature, values.processBindingSha256, values.ancestryBindingSha256,
+        sessionId, values.sessionId !== undefined
       ]);
-      if (rowCount(inserted) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
-      const session = validateSessionRow(inserted.rows[0], values.organizationId);
-      if (!sameNewSession(session, grant, values)) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
-      return publicLeaseResult(publicLease(session), false);
+      if (rowCount(result) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
+      const session = validateSessionRow(result.rows[0], values.organizationId);
+      return publicLeaseResult(publicLease(session), result.rows[0].replayed === true);
     } catch (error) {
       throw mapError(error);
     }
@@ -646,6 +613,22 @@ async function assertCurrentGrantAuthority(tx, grant) {
 
 function mapError(error) {
   if (error instanceof AgentSessionAuthorityRepositoryError) return error;
+  const constraint = typeof error?.constraint === "string" ? error.constraint : "";
+  const constraintCodes = Object.freeze({
+    agent_session_authority_tenant: "ERR_TENANT_SCOPE",
+    agent_session_authority_grant_conflict: "ERR_GRANT_CONFLICT",
+    agent_session_authority_grant_not_found: "ERR_GRANT_NOT_FOUND",
+    agent_session_authority_grant_unavailable: "ERR_GRANT_UNAVAILABLE",
+    agent_session_authority_grant_not_yet_valid: "ERR_GRANT_NOT_YET_VALID",
+    agent_session_authority_grant_expired: "ERR_GRANT_EXPIRED",
+    agent_session_authority_binding_conflict: "ERR_BINDING_CONFLICT",
+    agent_session_authority_session_conflict: "ERR_SESSION_CONFLICT",
+    agent_session_authority_session_unavailable: "ERR_GRANT_UNAVAILABLE",
+    agent_session_authority_session_expired: "ERR_GRANT_EXPIRED",
+    agent_session_authority_session_id_required: "ERR_INPUT"
+  });
+  const code = constraintCodes[constraint];
+  if (code) return new AgentSessionAuthorityRepositoryError(code);
   return new AgentSessionAuthorityRepositoryError("ERR_DATABASE", error);
 }
 

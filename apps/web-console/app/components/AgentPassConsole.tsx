@@ -1,17 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
-import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { parseDeploymentReadiness, type DeploymentReadiness } from "../deployment-readiness";
 import { deriveAccessPosture, type AccessPostureInput, type PostureItem } from "../access-posture";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
-import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
+import { BROWSER_CLI_HANDOFF_EVENTS, BROWSER_CLI_HANDOFF_LIMITS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
-import type { OrganizationSession } from "../organization-client";
+import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
+import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
+import { SecurityPanel } from "./SecurityPanel";
+import { createSecurityClient, type SecurityClient } from "../security-client";
+import { createSessionAuthority } from "../session-authority";
 
 export type ConsoleView =
   | "overview"
@@ -168,6 +171,7 @@ const DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device.revoke";
 const DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device.refresh.request";
 const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
 const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
+const SESSION_RESUME_PATH = "/api/auth/session/resume";
 const CSRF_HEADER = "agentpass-csrf";
 const CONSOLE_SESSION_ENDED_EVENT = "agentpass:session-ended";
 const MAX_ERROR_BODY_BYTES = 16_384;
@@ -175,7 +179,69 @@ const MAX_ERROR_BODY_BYTES = 16_384;
 type DeviceRefreshRequestStatus = "accepted" | "coalesced" | "no_pending_refresh";
 
 type ConsoleRole = "owner" | "admin" | "auditor" | "viewer";
-type ConsoleSession = Readonly<{ organizationId: string; role: ConsoleRole; expiresAt: string; recentAuthAt: string | null; csrfToken: string }>;
+type ConsoleSession = Readonly<{
+  version: number;
+  sessionId: string;
+  memberId: string;
+  organizationId: string;
+  role: ConsoleRole;
+  createdAt: string;
+  expiresAt: string;
+  recentAuthAt: string | null;
+  csrfToken: string;
+}>;
+type OrganizationSwitcherState = "closed" | "loading" | "ready" | "error";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[contenteditable=\"true\"]",
+  "[tabindex]:not([tabindex=\"-1\"])",
+].join(",");
+
+function getFocusableElements(container: HTMLElement | null): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true" && !element.closest("[hidden]"));
+}
+
+function focusFirstElement(container: HTMLElement | null): void {
+  getFocusableElements(container)[0]?.focus();
+}
+
+function scrollConsoleToTop(): void {
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
+}
+
+function useDeterministicDialogFocus(
+  open: boolean,
+  containerRef: RefObject<HTMLElement | null>,
+  restoreRef: RefObject<HTMLElement | null>,
+): void {
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const restoreTarget = restoreRef.current;
+    const timer = window.setTimeout(() => {
+      const initial = containerRef.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");
+      if (initial) initial.focus();
+      else focusFirstElement(containerRef.current);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      const target = restoreTarget ?? previousFocusRef.current;
+      if (target?.isConnected) target.focus();
+      previousFocusRef.current = null;
+    };
+  }, [containerRef, open, restoreRef]);
+}
 
 class ConsoleSessionError extends Error {
   readonly status?: number;
@@ -187,10 +253,16 @@ class ConsoleSessionError extends Error {
   }
 }
 
-class EnrollmentFlowError extends Error {
-  readonly code: "session" | "enrollment" | "unsupported";
+function organizationSwitcherMessage(error: unknown): string {
+  if (error instanceof OrganizationClientError && error.code === "forbidden") return "このセッションでは組織の一覧を確認できません。管理者にアクセス権を確認してもらってください。";
+  if (error instanceof OrganizationClientError && error.code === "unauthorized") return "セッションの有効期限が切れています。この画面の再認証から続けてください。";
+  return "組織の一覧を読み込めませんでした。下の「もう一度試す」を押して再読み込みしてください。";
+}
 
-  constructor(code: "session" | "enrollment" | "unsupported", message: string) {
+class EnrollmentFlowError extends Error {
+  readonly code: "session" | "enrollment" | "unsupported" | "outcome-unknown";
+
+  constructor(code: "session" | "enrollment" | "unsupported" | "outcome-unknown", message: string) {
     super(message);
     this.name = "EnrollmentFlowError";
     this.code = code;
@@ -212,7 +284,8 @@ type PublicEnrollmentPreflight = Readonly<{
   device_key_fingerprint: string;
 }>;
 
-type LiveHandoffStatus = "none" | "loading" | "ready" | "delivered" | "failed";
+type LiveHandoffStatus = "none" | "loading" | "connected" | "delivered" | "failed";
+type LiveHandoffEvent = "launch" | "launch_failed" | "preflight_succeeded" | "preflight_failed" | "delivery_succeeded" | "delivery_failed";
 type LiveHandoffPreflight = Readonly<{
   version: 1;
   correlation_id: string;
@@ -221,13 +294,23 @@ type LiveHandoffPreflight = Readonly<{
   candidate_id: string;
   device_key_fingerprint: string;
 }>;
+type LiveHandoffDescriptor = Readonly<{
+  url: string;
+  preflight_url: string;
+  correlation_id: string;
+}>;
 type LiveHandoffSession = Readonly<{
   url: string;
   preflight_url: string;
   correlation_id: string;
   preflight: LiveHandoffPreflight;
+  delivery: Readonly<{
+    deliver: (invitation: Record<string, unknown>) => Promise<true>;
+  }>;
 }>;
 type LiveHandoffRef = { current: LiveHandoffSession | null };
+type LiveHandoffDelivery = LiveHandoffSession["delivery"];
+const createLiveHandoffDelivery = createBrowserCliHandoffDelivery as unknown as (options: { handoff: LiveHandoffDescriptor; preflight: LiveHandoffPreflight }) => LiveHandoffDelivery;
 
 function parseV2EnrollmentInvitation(payload: unknown, organizationId: string, expectedPreflight: PublicEnrollmentPreflight): Record<string, unknown> {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
@@ -385,7 +468,17 @@ function parseSessionBootstrap(value: unknown): ConsoleSession {
     || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
-  return { organizationId: session.organization_id, role: session.role as ConsoleRole, expiresAt: session.expires_at, recentAuthAt: session.recent_auth_at as string | null, csrfToken };
+  return {
+    version: session.version,
+    sessionId: session.session_id,
+    memberId: session.member_id,
+    organizationId: session.organization_id,
+    role: session.role as ConsoleRole,
+    createdAt: session.created_at,
+    expiresAt: session.expires_at,
+    recentAuthAt: session.recent_auth_at as string | null,
+    csrfToken,
+  };
 }
 
 function abortError(): DOMException {
@@ -404,27 +497,11 @@ function clearConsoleSessionOnUnauthorized(error: unknown): void {
   if (error instanceof WebAuthnClientError && (error.status === 401 || error.status === 403)) consoleSessionContext.clear();
 }
 
-function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  throwIfAborted(signal);
-  if (!signal) return promise;
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then((value) => {
-      signal.removeEventListener("abort", onAbort);
-      resolve(value);
-    }, (error: unknown) => {
-      signal.removeEventListener("abort", onAbort);
-      reject(error);
-    });
-  });
-}
-
-async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSession> {
+async function requestConsoleSession(path: string, signal?: AbortSignal): Promise<{ response: Response; payload: unknown }> {
   throwIfAborted(signal);
   let response: Response;
   try {
-    response = await fetch(SESSION_BOOTSTRAP_PATH, {
+    response = await fetch(path, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: "{}",
@@ -437,7 +514,7 @@ async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSes
     if (signal?.aborted || isAbortError(error)) throw abortError();
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
-  if (!response.ok || !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
+  if (!/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
   let payload: unknown;
@@ -446,48 +523,35 @@ async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSes
   } catch {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
-  return parseSessionBootstrap(payload);
+  return { response, payload };
 }
 
-function createConsoleSessionContext() {
-  let result: ConsoleSession | undefined;
-  let pending: Promise<ConsoleSession> | undefined;
+function isSessionResumeRequired(response: Response, payload: unknown): boolean {
+  return response.status === 401
+    && isPlainRecord(payload)
+    && hasExactKeys(payload, ["error"])
+    && isPlainRecord(payload.error)
+    && hasExactKeys(payload.error, ["code", "message"])
+    && payload.error.code === "human_session_session_required"
+    && typeof payload.error.message === "string";
+}
 
-  const get = (signal?: AbortSignal): Promise<ConsoleSession> => {
-    throwIfAborted(signal);
-    if (result) return Promise.resolve(result);
-    if (!pending) {
-      const current = bootstrapConsoleSession(signal);
-      const shared = current.then((value) => {
-        // A session switch can replace the cached result while this bootstrap
-        // request is still in flight. Never let the stale response win the
-        // cache race when it settles after that replacement.
-        if (pending !== shared) return value;
-        result = Object.freeze(value);
-        pending = undefined;
-        return result;
-      });
-      pending = shared;
-      void shared.catch(() => {
-        if (pending === shared) pending = undefined;
-      });
+async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSession> {
+  const resumed = await requestConsoleSession(SESSION_RESUME_PATH, signal);
+  if (isSessionResumeRequired(resumed.response, resumed.payload)) {
+    const bootstrapped = await requestConsoleSession(SESSION_BOOTSTRAP_PATH, signal);
+    if (!bootstrapped.response.ok) {
+      throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", bootstrapped.response.status);
     }
-    return withAbort(pending, signal);
-  };
-
-  const clear = (session?: ConsoleSession): void => {
-    if (!session || result === session) result = undefined;
-  };
-
-  const replace = (session: ConsoleSession): void => {
-    result = Object.freeze(session);
-    pending = undefined;
-  };
-
-  return Object.freeze({ get, clear, replace });
+    return parseSessionBootstrap(bootstrapped.payload);
+  }
+  if (!resumed.response.ok) {
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", resumed.response.status);
+  }
+  return parseSessionBootstrap(resumed.payload);
 }
 
-const consoleSessionContext = createConsoleSessionContext();
+const consoleSessionContext = createSessionAuthority<ConsoleSession>(bootstrapConsoleSession);
 
 function isMutationMethod(method: string): boolean {
   return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
@@ -511,8 +575,14 @@ async function responseEndsConsoleSession(response: Response): Promise<boolean> 
   return ["authentication_required", "human_session_invalid", "session_expired", "session_revoked", "session_not_found", "invalid_session_cookie"].includes(code);
 }
 
-async function fetchConsole(path: string, init: RequestInit = {}): Promise<Response> {
-  const session = await consoleSessionContext.get(init.signal ?? undefined);
+async function fetchConsole(path: string, init: RequestInit = {}, sessionOverride?: ConsoleSession): Promise<Response> {
+  // A recent-authenticated mutation must use the exact session snapshot that
+  // was supplied to the WebAuthn ceremony. Re-reading the authority after
+  // that ceremony creates a race with session invalidation/rotation: the
+  // proof can belong to one session while the CSRF-bound mutation belongs to
+  // another. Callers that do not own a ceremony continue to use the shared
+  // authority as before.
+  const session = sessionOverride ?? await consoleSessionContext.get(init.signal ?? undefined);
   const method = String(init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
@@ -577,6 +647,10 @@ function enrollmentErrorMessage(error: unknown): string {
   }
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) return "Touch ID/パスキー確認を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
   return "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。";
+}
+
+function isEnrollmentOutcomeUnknown(error: unknown): boolean {
+  return error instanceof EnrollmentFlowError && error.code === "outcome-unknown";
 }
 
 function passkeyErrorMessage(error: unknown): string {
@@ -669,7 +743,7 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
       const status = await onRequestRefresh(device.deviceId);
       setWakeOutcome(deviceRefreshOutcome(status));
     } catch {
-      setWakeError("Wake requestを送信できませんでした。接続と権限を確認して、もう一度お試しください。");
+      setWakeError("Wake requestを送信できませんでした。接続と権限を確認し、この端末カードのボタンからもう一度お試しください。");
     } finally {
       wakeInFlight.current = false;
       setWakePending(false);
@@ -714,7 +788,7 @@ function Overview({ data, session, goTo, onRequestRefresh, onRefresh, onSessionE
     <>
       <header>
         <p className="eyebrow">運用コンソール / LIVE STATUS</p>
-        <h1 className="page-heading">{summaryState === "ready" ? <>Agentの状態を、<br />確認できました。</> : <>Agentの状態を、<br />確認しています。</>}</h1>
+        <h1 className="page-heading" id="console-page-heading">{summaryState === "ready" ? <>Agentの状態を、<br />確認できました。</> : <>Agentの状態を、<br />確認しています。</>}</h1>
         <p className="page-intro">
           Cloudから取得した端末、権限、監査状態だけを表示します。未検証の情報を安全状態として扱いません。
         </p>
@@ -809,58 +883,8 @@ function ActivityList({ activities }: { activities: AgentPassInitialData["activi
   );
 }
 
-function PostureItemView({ item }: { item: PostureItem }) {
-  return <article className={`posture-item posture-${item.tone}`} data-posture-state={item.state}>
-    <div className="posture-item-head"><span className="posture-item-label">{item.label}</span><span className={`posture-state posture-state-${item.tone}`}><span className="status-dot" aria-hidden="true" />{item.status}</span></div>
-    <p className="posture-item-detail">{item.detail}</p>
-  </article>;
-}
-
-function OperationalPosture({ data, session, summaryState, stopped, goTo, onRefresh, onSessionEnded }: { data: AgentPassInitialData; session: ConsoleSession | null; summaryState: "loading" | "ready" | "error"; stopped: boolean; goTo: (view: ConsoleView) => void; onRefresh: () => void; onSessionEnded: () => void }) {
-  const securityClientRef = useRef<SecurityClient | null>(null);
-  if (securityClientRef.current === null) securityClientRef.current = createSecurityClient();
-  const [platformAuth, setPlatformAuth] = useState<AccessPostureInput["platformAuth"]>({ loadState: "loading", browserSupported: supportsWebAuthn(), passkeyCount: 0 });
-
-  useEffect(() => {
-    if (summaryState !== "ready") return;
-    const controller = new AbortController();
-    void securityClientRef.current?.getSnapshot({ signal: controller.signal }).then((snapshot) => {
-      if (controller.signal.aborted) return;
-      setPlatformAuth({ loadState: "ready", browserSupported: supportsWebAuthn(), passkeyCount: snapshot.passkeys.length });
-    }).catch((error: unknown) => {
-      if (controller.signal.aborted) return;
-      if (error instanceof SecurityClientError && (error.status === 401 || error.status === 403)) onSessionEnded();
-      setPlatformAuth((current) => ({ ...current, loadState: "error" }));
-    });
-    return () => controller.abort();
-  }, [summaryState, onSessionEnded]);
-
-  const posture = deriveAccessPosture({
-    summaryState,
-    session,
-    platformAuth,
-    agents: data.agents.map((agent) => ({ status: agent.state === "停止" ? "revoked" : "active" as const })),
-    devices: data.devices.map((device) => ({ status: device.lifecycleStatus ?? "active", refreshState: device.refreshState ?? null, blockedReason: device.blockedReason ?? null })),
-    capabilities: (data.capabilityRecords ?? []).map((capability) => ({ expiresAt: capability.expiresAt })),
-    auditHealth: data.audit,
-    stopped,
-  });
-  const nextAction = posture.nextAction;
-  const action = nextAction?.action === "retry" ? onRefresh : nextAction?.action === "security" ? () => goTo("security") : nextAction?.action === "setup" ? () => goTo("setup") : nextAction?.action === "activity" ? () => goTo("activity") : nextAction?.action === "emergency" ? () => goTo("emergency") : undefined;
-
-  return <section className="access-posture" aria-labelledby="access-posture-title" data-summary-state={summaryState}>
-    <div className="access-posture-header"><div><span className="section-kicker">AGENT READINESS</span><h2 className="section-heading" id="access-posture-title">Agentを開始できる状態か</h2></div><span className="access-posture-note">秘密値・tokenは表示しません</span></div>
-    <p className="access-posture-copy">Platform auth、Human session、Agentの短期権限、監査、停止状態を一つの判断面にまとめています。Cloudで確認できない状態は、正常とは扱いません。</p>
-    <div className="posture-grid">{posture.items.map((item) => <PostureItemView item={item} key={item.key} />)}</div>
-    {nextAction ? <div className={`next-action next-action-${nextAction.action}`} role={nextAction.action === "retry" ? "alert" : "status"}>
-      <div><span className="section-kicker">NEXT ACTION</span><h3>{nextAction.title}</h3><p>{nextAction.detail}</p></div>
-      {action ? <button className={nextAction.action === "emergency" ? "danger-button" : "secondary-button"} type="button" onClick={action}>{nextAction.actionLabel} <span aria-hidden="true">→</span></button> : null}
-    </div> : null}
-  </section>;
-}
-
-function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }) {
-  return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
+function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: React.ReactNode; copy: string }) {
+  return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading" id="console-page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
 }
 
 function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
@@ -870,11 +894,13 @@ function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
 
 type IssuedEnrollmentSummary = Readonly<{ enrollmentId: string; deviceId: string; label: string; candidateId: string; deviceKeyFingerprint: string; expiresAt: string }>;
 
-type EnrollmentProgress = "pending" | "enrolled" | "recovery-proven" | "revoked" | "expired";
+type SummaryRefreshResult = "ready" | "unavailable";
+type EnrollmentReconciliationState = "checking" | "pending" | "enrolled" | "response-loss" | "timed-out";
+const ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS = 5;
+const ENROLLMENT_RECONCILIATION_INITIAL_DELAY_MS = 250;
+const ENROLLMENT_RECONCILIATION_RETRY_DELAY_MS = 2_500;
 
-function enrollmentProgress(device: AgentPassInitialData["devices"][number] | undefined, expiresAt?: string, now = Date.now()): EnrollmentProgress {
-  if (device?.lifecycleStatus === "revoked") return "revoked";
-  if (expiresAt && Date.parse(expiresAt) <= now && (!device || device.lifecycleStatus === "pending")) return "expired";
+function enrollmentProgress(device: AgentPassInitialData["devices"][number] | undefined): "pending" | "enrolled" | "recovery-proven" {
   if (!device || device.lifecycleStatus === "pending") return "pending";
   // A signed device ACK proves that the enrolled device observed control state,
   // but it is not the v2 possession receipt. The Console must not promote this
@@ -882,11 +908,140 @@ function enrollmentProgress(device: AgentPassInitialData["devices"][number] | un
   return device.lifecycleStatus === "active" && device.lastAckAt ? "enrolled" : "enrolled";
 }
 
-function enrollmentProgressLabel(progress: EnrollmentProgress): string {
-  return progress === "pending" ? "登録待ち" : progress === "enrolled" ? "登録完了" : progress === "revoked" ? "停止" : progress === "expired" ? "期限切れ" : "recovery-proven";
+function progressLabel(progress: "pending" | "enrolled" | "recovery-proven"): string {
+  return ({
+    pending: "受け入れ待ち",
+    enrolled: "登録済み",
+    "recovery-proven": "復旧確認済み",
+  } as const)[progress];
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffStatus }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffStatus: (status: LiveHandoffStatus) => void }) {
+function EnrollmentReconciliationCard({ progress, refresh }: { progress: "pending" | "enrolled" | "recovery-proven"; refresh: () => Promise<SummaryRefreshResult> }) {
+  const [state, setState] = useState<EnrollmentReconciliationState>(progress === "pending" ? "checking" : "enrolled");
+  const [cycle, setCycle] = useState(0);
+  const [attempts, setAttempts] = useState(0);
+  const attemptRef = useRef(0);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (progress !== "pending") return;
+    if (attemptRef.current >= ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS) return;
+
+    let cancelled = false;
+    const delay = attemptRef.current === 0 ? ENROLLMENT_RECONCILIATION_INITIAL_DELAY_MS : ENROLLMENT_RECONCILIATION_RETRY_DELAY_MS;
+    const timer = window.setTimeout(() => {
+      if (cancelled || inFlightRef.current) return;
+      inFlightRef.current = true;
+      attemptRef.current += 1;
+      setAttempts(attemptRef.current);
+      setState("checking");
+      void refresh().then((result) => {
+        if (cancelled) return;
+        if (result !== "ready") {
+          setState("response-loss");
+          return;
+        }
+        setState("pending");
+        setCycle((value) => value + 1);
+      }).finally(() => {
+        inFlightRef.current = false;
+      });
+    }, delay);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [cycle, progress, refresh]);
+
+  const retry = () => {
+    if (inFlightRef.current) return;
+    attemptRef.current = 0;
+    setAttempts(0);
+    setState("checking");
+    setCycle((value) => value + 1);
+  };
+
+  const effectiveState: EnrollmentReconciliationState = progress !== "pending"
+    ? "enrolled"
+    : attempts >= ENROLLMENT_RECONCILIATION_MAX_ATTEMPTS && state === "pending"
+      ? "timed-out"
+      : state;
+  const failure = effectiveState === "response-loss" || effectiveState === "timed-out";
+  const message = effectiveState === "enrolled"
+    ? "Cloudで端末登録の完了を確認しました。"
+    : effectiveState === "checking"
+      ? "Cloudで端末登録の完了を確認しています。"
+      : effectiveState === "response-loss"
+        ? "最新状態の応答を確認できませんでした。操作は再送していません。"
+        : effectiveState === "timed-out"
+          ? "一定時間内に端末登録を確認できませんでした。操作は再送していません。"
+          : "まだCloudで端末登録の完了を確認できません。";
+
+  return <div className="enrollment-reconciliation" data-reconciliation-state={effectiveState} role={failure ? "alert" : "status"} aria-live={failure ? "assertive" : "polite"} aria-atomic="true">
+    <p className="row-title">{message}</p>
+    {effectiveState === "pending" ? <p className="row-description">端末が受け入れを完了するまで待機します。短期招待の再発行は行いません。</p> : null}
+    {effectiveState === "checking" ? <p className="row-description">最新のsummaryを読み込んでいます。登録操作そのものは再送しません。</p> : null}
+    {effectiveState === "enrolled" ? <p className="row-description">この表示はCloudの端末状態に基づく確認です。署名済みpossession receiptをConsole側で推測しません。</p> : null}
+    {failure ? <button className="text-button" type="button" onClick={retry}>状態を再確認</button> : null}
+  </div>;
+}
+
+type InstallGuidanceState = "not-detected" | "checking" | "connected" | "delivered" | "failed";
+type InstallGuidance = Readonly<{
+  state: InstallGuidanceState;
+  tone: "green" | "amber" | "red";
+  label: string;
+  title: string;
+  copy: string;
+}>;
+
+function installGuidance(status: LiveHandoffStatus): InstallGuidance {
+  switch (status) {
+    case "loading":
+      return { state: "checking", tone: "amber", label: "確認中", title: "Macヘルパーの接続を確認しています", copy: "Macで起動したセットアップ接続から、公開情報だけを読み込んでいます。" };
+    case "connected":
+      return { state: "connected", tone: "green", label: "接続済み", title: "Macヘルパーが接続されています", copy: "公開preflightを読み込みました。端末名を入力して、Touch ID / パスキーで発行を承認してください。" };
+    case "delivered":
+      return { state: "delivered", tone: "green", label: "受け渡し済み", title: "セットアップ情報をMacへ渡しました", copy: "Mac側のセットアップ完了を待っています。招待情報をコピーしたり、もう一度発行したりする必要はありません。" };
+    case "failed":
+      return { state: "failed", tone: "red", label: "接続できません", title: "Macヘルパーへ自動接続できませんでした", copy: "CLIを終了して、管理者から案内されたセットアップコマンドを新しく実行してください。期限切れの接続は再利用できません。" };
+    case "none":
+    default:
+      return { state: "not-detected", tone: "amber", label: "未接続", title: "Macヘルパーの接続を待っています", copy: "署名済みAgentPassパッケージをMacへインストールし、管理者から案内されたセットアップコマンドを実行すると自動で接続されます。" };
+  }
+}
+
+function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
+  const guidance = installGuidance(status);
+  return (
+    <article className="surface-card" data-install-state={guidance.state}>
+      <div className="stop-title-row">
+        <div>
+          <span className="section-kicker">INSTALL / 00</span>
+          <h2 className="surface-card-title">Macヘルパーを準備する</h2>
+          <p className="surface-card-copy">秘密鍵やCloud資格情報をこの画面へ入力する必要はありません。接続状態と次にすることだけを表示します。</p>
+        </div>
+        <StatusTag tone={guidance.tone}>{guidance.label}</StatusTag>
+      </div>
+      <div className="device-wake-action" role="status" aria-live="polite">
+        <p className="row-title">{guidance.title}</p>
+        <p className="device-state-description">{guidance.copy}</p>
+      </div>
+      {guidance.state === "not-detected" ? <ol className="row-list" aria-label="Macセットアップの手順">
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">1</span><div><p className="row-title">署名済みAgentPassパッケージをインストール</p><p className="row-description">管理者が指定した配布元のパッケージだけを使用してください。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">セットアップコマンドを実行</p><p className="row-description">管理者から案内されたコマンドをそのまま実行します。候補ID、指紋、招待JSONを自分で入力する必要はありません。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">3</span><div><p className="row-title">この画面で接続を確認</p><p className="row-description">接続されると、公開preflightが自動で表示されます。</p></div></div></li>
+      </ol> : null}
+      {guidance.state === "failed" ? <details className="advanced-enrollment">
+        <summary>自動接続できない場合の復旧</summary>
+        <p className="field-help">古いloopback接続や期限切れの接続は使い回さず、CLIを終了して新しいセットアップコマンドを実行してください。招待を発行した後に自動受け渡しが失敗した場合だけ、画面に表示される一度きりの標準入力手順を使います。</p>
+      </details> : null}
+    </article>
+  );
+}
+
+function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<SummaryRefreshResult>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [preflightText, setPreflightText] = useState("");
   const [preflight, setPreflight] = useState<PublicEnrollmentPreflight | null>(null);
@@ -898,7 +1053,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   const [issuedEnrollment, setIssuedEnrollment] = useState<IssuedEnrollmentSummary | null>(null);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
-  const [enrollmentWatchError, setEnrollmentWatchError] = useState("");
+  const [enrollmentOutcomeUnknown, setEnrollmentOutcomeUnknown] = useState(false);
   const enrollmentInFlight = useRef(false);
   const [passkeyPending, setPasskeyPending] = useState(false);
   const [passkeyRegistered, setPasskeyRegistered] = useState(false);
@@ -929,10 +1084,11 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
     try { await operate("issue-capability", { agent_id: selectedAgent.agentId, device_id: selectedDevice.deviceId, scope: defaultScope, ttl_ms: 15 * 60 * 1000 }, "短期Capabilityを発行しました"); } finally { setCapabilityPending(false); }
   };
   const issueEnrollment = async () => {
-    if (enrollmentInFlight.current) return;
+    if (enrollmentInFlight.current || enrollmentOutcomeUnknown) return;
     enrollmentInFlight.current = true;
     setEnrollmentPending(true);
     setEnrollmentError("");
+    let mutationAttempted = false;
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
       const activePreflight = activeGuidedPreflight ?? parsePublicEnrollmentPreflight(JSON.stringify({
@@ -948,14 +1104,18 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
         organizationId,
         csrfToken,
       });
+      mutationAttempted = true;
       const response = await fetchConsole("/api/console?operation=issue-device-enrollment", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
         body: JSON.stringify({ proof_version: 2, candidate_id: activePreflight.candidate_id, device_key_fingerprint: activePreflight.device_key_fingerprint, label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
       let payload: unknown;
-      try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
-      if (!response.ok) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      try { payload = await response.json(); } catch { throw new EnrollmentFlowError("outcome-unknown", "発行結果を確認できませんでした。"); }
+      if (!response.ok) {
+        if (response.status >= 500) throw new EnrollmentFlowError("outcome-unknown", "発行結果を確認できませんでした。");
+        throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      }
       const invitation = parseV2EnrollmentInvitation(payload, organizationId, activePreflight);
       setIssuedEnrollment({
         enrollmentId: String(invitation.enrollment_id),
@@ -971,20 +1131,17 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           && liveHandoff.preflight.device_key_fingerprint === activePreflight.device_key_fingerprint;
         liveHandoffRef.current = null;
         if (!sameBinding) {
-          onLiveHandoffStatus("failed");
-          setEnrollmentError("発行済みcredentialは安全のため表示しません。Mac側のセットアップ接続を確認してから、もう一度発行してください。");
+          onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
+          setEnrollmentVisible(true);
         } else {
           try {
-            await postBrowserCliHandoff({
-              handoff: liveHandoff,
-              correlation_id: liveHandoff.correlation_id,
-              nonce: liveHandoff.preflight.nonce,
-              invitation,
-            });
-            onLiveHandoffStatus("delivered");
+            await liveHandoff.delivery.deliver(invitation);
+            clearEnrollmentStore(enrollmentStoreId);
+            setEnrollmentVisible(false);
+            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED);
           } catch {
-            setEnrollmentError("Macへの安全な受け渡しに失敗しました。credentialは表示せず破棄しました。接続を確認してもう一度発行してください。");
-            onLiveHandoffStatus("failed");
+            setEnrollmentVisible(true);
+            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
           }
         }
       } else {
@@ -992,7 +1149,18 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
       }
     } catch (error) {
       clearConsoleSessionOnUnauthorized(error);
-      setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
+      if (mutationAttempted && (isEnrollmentOutcomeUnknown(error) || !(error instanceof EnrollmentFlowError))) {
+        const hadLiveHandoff = liveHandoffRef.current !== null;
+        liveHandoffRef.current = null;
+        if (hadLiveHandoff) onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
+        setEnrollmentOutcomeUnknown(true);
+        setEnrollmentError("");
+        // The request may have committed before its response was lost. Read
+        // the authoritative summary once, but never issue a second invitation.
+        void refresh();
+      } else {
+        setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
+      }
     } finally {
       enrollmentInFlight.current = false;
       setEnrollmentPending(false);
@@ -1018,8 +1186,8 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
     }
   };
   const issuedDevice = issuedEnrollment ? data.devices.find((device) => device.deviceId === issuedEnrollment.deviceId) : undefined;
-  const progress = enrollmentProgress(issuedDevice, issuedEnrollment?.expiresAt);
-  const progressLabel = enrollmentProgressLabel(progress);
+  const progress = enrollmentProgress(issuedDevice);
+  useEffect(() => () => clearEnrollmentStore(enrollmentStoreId), [enrollmentStoreId]);
   useEffect(() => {
     if (!issuedEnrollment || progress !== "pending") return;
     let stopped = false;
@@ -1048,10 +1216,11 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
       <div className="surface-content">
         {liveHandoffStatus !== "none" ? <div className={`handoff-notice handoff-${liveHandoffStatus}`} role={liveHandoffStatus === "failed" ? "alert" : "status"} data-live-handoff-state={liveHandoffStatus}>
           {liveHandoffStatus === "loading" ? "Macのセットアップ接続を確認しています。" : null}
-          {liveHandoffStatus === "ready" ? "公開preflightを読み込みました。招待を発行すると、Macへ自動で渡します。" : null}
+          {liveHandoffStatus === "connected" ? "公開preflightを読み込みました。招待を発行すると、Macへ自動で渡します。" : null}
           {liveHandoffStatus === "delivered" ? "招待をMacへ安全に渡しました。Mac側のセットアップ完了を待っています。" : null}
           {liveHandoffStatus === "failed" ? "自動受け渡しに失敗しました。発行済みcredentialは表示せず破棄しました。Macの接続を確認してから、もう一度発行してください。" : null}
         </div> : null}
+        <InstallStatusCard status={liveHandoffStatus} />
         {!canManage ? <article className="surface-card" role="status"><span className="section-kicker">READ ONLY</span><h2 className="surface-card-title">閲覧権限で表示しています</h2><p className="surface-card-copy">このロールでは端末・Agent・Capabilityを変更できません。変更が必要な場合はOwnerまたはAdminへ依頼してください。</p></article> : null}
         <article className="surface-card">
           <span className="section-kicker">CURRENT SESSION</span>
@@ -1083,11 +1252,17 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           <div className="guided-enrollment-steps">
             <div className="guided-enrollment-step"><span className="setup-step-number">01</span><div><h3 className="setup-step-title">公開preflightを読み込む</h3><p className="field-help">macOS用の候補IDとP-256公開キーの指紋、バージョンだけを受け付けます。</p><textarea aria-label="公開preflight JSON" className="preflight-input" rows={5} autoComplete="off" spellCheck={false} placeholder={'{"version":1,"platform":"macos","candidate_id":"…","device_key_fingerprint":"SHA256:…"}'} value={preflightText} onChange={(event) => { setPreflightText(event.target.value); setPreflight(null); setPreflightSource("manual"); setPreflightError(""); }} /><button className="secondary-button" type="button" disabled={!preflightText.trim() || enrollmentPending} onClick={importPreflight}>公開preflightを確認</button>{preflightError ? <p className="form-error" role="alert">{preflightError}</p> : null}</div></div>
             {activeGuidedPreflight ? <div className="preflight-preview" role="status"><div className="stop-title-row"><div><p className="row-title">公開preflightを確認しました</p><p className="row-description">macOS · 候補 {activeGuidedPreflight.candidate_id} · P-256 {activeGuidedPreflight.device_key_fingerprint}</p></div><StatusTag tone="green">PUBLIC ONLY</StatusTag></div></div> : null}
-            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
+            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || enrollmentOutcomeUnknown || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
           </div>
           <details className="advanced-enrollment"><summary>上級者向け：preflight JSONを使えない場合の手入力</summary><p className="field-help">互換性のためのfallbackです。値は同じ厳格な形式で検証し、公開キー指紋以外は受け付けません。</p><div className="form-grid"><label>リリース候補ID<input maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /></label><label>端末キーのフィンガープリント<input maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">秘密鍵ではなく、P-256公開キーのSHA-256指紋。</span></label></div><button className="text-button" type="button" onClick={() => { setAdvancedEnrollment(true); setPreflight(null); setPreflightSource("manual"); setPreflightText(""); setPreflightError(""); }}>手入力を使う</button></details>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
-          {issuedEnrollment ? <div className="enrollment-progress" aria-live="polite" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : progress === "revoked" || progress === "expired" ? "red" : "green"}>{progressLabel}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>{progress === "pending" ? "Macで agentpass setup を実行してください。登録完了を自動で確認します。" : "招待を発行しました。"}</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : progress === "revoked" ? "この端末は停止されました。新しい招待を発行してください。" : progress === "expired" ? "招待の有効期限が切れました。新しい招待を発行してください。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol>{enrollmentWatchError ? <p className="form-error" role="alert">{enrollmentWatchError}</p> : null}<button className="text-button" type="button" disabled={enrollmentPending} onClick={() => void refresh()}>状態を再確認</button></div> : null}
+          {enrollmentOutcomeUnknown ? <div className="enrollment-outcome-unknown" data-enrollment-state="outcome-unknown" role="alert" aria-live="assertive">
+            <p className="row-title">発行結果を確認できませんでした</p>
+            <p className="row-description">Cloudへの依頼後に応答を受け取れませんでした。招待JSONは表示せず、発行操作も再送していません。下の登録済み端末で状態を確認し、意図しない端末があれば「停止」を選んでください。</p>
+            <button className="text-button" type="button" onClick={() => void refresh()}>状態を再確認</button>
+          </div> : null}
+          {issuedEnrollment ? <div className="enrollment-progress" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel(progress)}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><EnrollmentReconciliationCard key={`${issuedEnrollment.enrollmentId}:${progress}`} progress={progress} refresh={refresh} /></div> : null}
+          {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
         </article> : null}
         {canManage ? <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
@@ -1120,104 +1295,6 @@ function ActivitySurface({ data }: { data: AgentPassInitialData }) {
   return <><SurfaceHeader eyebrow="ACTIVITY / 05" title="何が起きたか" copy="AgentPassが確認・許可・ブロックした操作を、時系列で記録しています。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">AUDIT LOG · TODAY</span><h2 className="surface-card-title">きょうの記録</h2><ActivityList activities={data.activities} /></article></div></>;
 }
 
-type SecurityLoadState = "loading" | "ready" | "error";
-
-function securityErrorMessage(error: unknown): string {
-  if (error instanceof DOMException && error.name === "AbortError") return "";
-  if (error instanceof SecurityClientError && (error.status === 401 || error.status === 403)) return "セッションの有効期限が切れています。ページを再読み込みして、もう一度お試しください。";
-  return "セキュリティ情報を取得できませんでした。接続と権限を確認して、もう一度お試しください。";
-}
-
-function securityDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "日時不明";
-  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" }).format(date);
-}
-
-function PasskeyRow({ passkey, actionKey, confirmKey, onRename, onRevoke, onCancelRevoke, onConfirmRevoke }: { passkey: SecurityPasskey; actionKey: string; confirmKey: string | null; onRename: () => void; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {
-  const busy = actionKey === `passkey:${passkey.id}`;
-  const confirming = confirmKey === `passkey:${passkey.id}`;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">⌁</span><div><p className="row-title">{passkey.label}</p><p className="row-description">登録：{securityDate(passkey.createdAt)} · 最終使用：{passkey.lastUsedAt ? securityDate(passkey.lastUsedAt) : "まだ使用されていません"}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>取り消す</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <><button className="text-button" type="button" disabled={busy} onClick={onRename}>名前を変更</button><button className="text-button" type="button" disabled={busy} onClick={onRevoke}>無効化</button></>}</span></li>;
-}
-
-function SessionRow({ session, actionKey, confirmKey, onRevoke, onCancelRevoke, onConfirmRevoke }: { session: SecuritySession; actionKey: string; confirmKey: string | null; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {
-  const busy = actionKey === `session:${session.id}`;
-  const confirming = confirmKey === `session:${session.id}`;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">◌</span><div><p className="row-title">{session.label}{session.current ? "（この端末）" : ""}</p><p className="row-description">{session.platform} · 最終確認：{securityDate(session.lastSeenAt)} · 有効期限：{securityDate(session.expiresAt)}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>{session.current ? "サインアウト" : "取り消す"}</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <>{session.current ? <StatusTag tone="green">現在のセッション</StatusTag> : null}<button className="text-button" type="button" disabled={busy} onClick={onRevoke}>{session.current ? "サインアウト" : "無効化"}</button></>}</span></li>;
-}
-
-function SecuritySurface({ onSessionEnded }: { onSessionEnded: () => void }) {
-  const securityClientRef = useRef<SecurityClient | null>(null);
-  if (securityClientRef.current === null) securityClientRef.current = createSecurityClient();
-  const securityClient = securityClientRef.current;
-  const [snapshot, setSnapshot] = useState<SecuritySnapshot | null>(null);
-  const [loadState, setLoadState] = useState<SecurityLoadState>("loading");
-  const [error, setError] = useState("");
-  const [actionKey, setActionKey] = useState("");
-  const [confirmKey, setConfirmKey] = useState<string | null>(null);
-  const [renameTarget, setRenameTarget] = useState<string | null>(null);
-  const [renameLabel, setRenameLabel] = useState("");
-  const [notice, setNotice] = useState("");
-  const [signedOut, setSignedOut] = useState(false);
-
-  const load = useCallback(async (signal?: AbortSignal) => {
-    setLoadState("loading");
-    setError("");
-    try {
-      setSnapshot(await securityClient.getSnapshot({ signal }));
-      setLoadState("ready");
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return;
-      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
-      setLoadState("error");
-      setError(securityErrorMessage(caught));
-    }
-  }, [securityClient, onSessionEnded]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => void load(controller.signal), 0);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [load]);
-
-  const finishAction = async (key: string, action: () => Promise<void>, message: string, reload = true) => {
-    if (actionKey) return;
-    setActionKey(key);
-    setError("");
-    setNotice("");
-    try {
-      await action();
-      setConfirmKey(null);
-      setRenameTarget(null);
-      setRenameLabel("");
-      setNotice(message);
-      if (reload) await load();
-      else {
-        setSignedOut(true);
-        setSnapshot(null);
-        setLoadState("ready");
-      }
-    } catch (caught) {
-      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
-      setError(securityErrorMessage(caught));
-    } finally {
-      setActionKey("");
-    }
-  };
-
-  const startRename = (passkey: SecurityPasskey) => {
-    setConfirmKey(null);
-    setRenameTarget(passkey.id);
-    setRenameLabel(passkey.label);
-    setNotice("");
-  };
-
-  const passkeys = snapshot?.passkeys ?? [];
-  const sessions = snapshot?.sessions ?? [];
-  const otherSessions = sessions.filter((session) => !session.current);
-  return <><SurfaceHeader eyebrow="SECURITY / 06" title="アカウントを守る" copy="登録済みのパスキーと、AgentPassへ接続中のセッションを管理します。秘密鍵や認証器の内部データは、この画面には表示されません。" /><div className="surface-content">{signedOut ? <article className="surface-card"><span className="section-kicker">SIGNED OUT</span><h2 className="surface-card-title">このセッションを終了しました</h2><p className="surface-card-copy">現在のブラウザセッションを無効化し、セッション情報を画面から消去しました。続けるにはページを再読み込みしてください。</p></article> : <><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">REGISTERED PASSKEYS</span><h2 className="surface-card-title">登録済みのパスキー</h2><p className="surface-card-copy">名前の変更や無効化ができます。無効化したパスキーは、以後の再認証に使えません。</p></div><button className="secondary-button" type="button" disabled={loadState === "loading"} onClick={() => void load()}>再読み込み</button></div>{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <div role="alert"><p className="section-note">{error}</p><button className="text-button" type="button" onClick={() => void load()}>もう一度試す</button></div> : passkeys.length ? <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => startRename(passkey)} onRevoke={() => setConfirmKey(`passkey:${passkey.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`passkey:${passkey.id}`, () => securityClient.revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました")} />)}</ul> : <EmptyState title="登録済みのパスキーはありません" copy="セットアップからTouch IDまたはパスキーを登録してください。" />}{renameTarget ? <form className="form-grid" onSubmit={(event) => { event.preventDefault(); const target = renameTarget; const passkey = passkeys.find((item) => item.id === target); if (!passkey) return; void finishAction(`passkey:${target}`, () => securityClient.renamePasskey(target, renameLabel, passkey.version), "パスキーの名前を変更しました"); }}><label>パスキーの表示名<input required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} autoComplete="off" /></label><div><button className="primary-button" type="submit" disabled={!renameLabel.trim() || Boolean(actionKey)}>保存</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => { setRenameTarget(null); setRenameLabel(""); }}>キャンセル</button></div></form> : null}</article><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">ACTIVE SESSIONS</span><h2 className="surface-card-title">アクティブなセッション</h2></div><button className="secondary-button" type="button" disabled={loadState === "loading" || Boolean(actionKey) || otherSessions.length === 0} onClick={() => setConfirmKey("other-sessions")}>他のセッションをすべて無効化</button></div><p className="surface-card-copy">使っていないブラウザや端末のセッションは無効化してください。現在のセッションからサインアウトすることもできます。</p>{confirmKey === "other-sessions" ? <div className="stop-action-row"><span className="section-note">{otherSessions.length}件の他セッションを無効化します。</span><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => void finishAction("other-sessions", () => securityClient.revokeOtherSessions(sessions).then(() => undefined), "他のセッションをすべて無効化しました")}>確認</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => setConfirmKey(null)}>キャンセル</button></div> : null}{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <p className="section-note">セッション情報を取得できませんでした。</p> : sessions.length ? <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`session:${session.id}`, session.current ? () => securityClient.revokeCurrentSession(session.id, session.version) : () => securityClient.revokeSession(session.id, session.version), session.current ? "サインアウトしました" : "セッションを無効化しました", session.current ? false : true)} />)}</ul> : <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" />}</article>{notice ? <p className="section-note" role="status">✓ {notice}</p> : null}{error && loadState === "ready" ? <p className="section-note" role="alert">{error}</p> : null}</>}</div></>;
-}
-
 function EmergencySurface({ data, onOpenConfirm, stopped }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean }) {
   const activeCount = data.agents.filter((agent) => agent.state !== "停止").length;
   return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、有効なAgent登録に対する作業・セッション・キューを一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div><div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}件の有効なAgent登録があります</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
@@ -1228,6 +1305,10 @@ export function AgentPassConsole() {
   const [activeView, setActiveView] = useState<ConsoleView>("overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [organizationSwitcherState, setOrganizationSwitcherState] = useState<OrganizationSwitcherState>("closed");
+  const [organizationOptions, setOrganizationOptions] = useState<readonly Organization[]>([]);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState<string | null>(null);
+  const [organizationSwitcherError, setOrganizationSwitcherError] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmChecked, setConfirmChecked] = useState(false);
@@ -1242,33 +1323,73 @@ export function AgentPassConsole() {
   const [auditSession, setAuditSession] = useState<ConsoleSession | null>(null);
   const [signOutPending, setSignOutPending] = useState(false);
   const [lastSynced, setLastSynced] = useState("未同期");
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLElement | null>(null);
+  const mobileTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const helpModalRef = useRef<HTMLElement | null>(null);
+  const confirmTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modalRef = useRef<HTMLElement | null>(null);
   const helpModalRef = useRef<HTMLElement | null>(null);
   const previousModalFocusRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
+  const organizationOptionsEpoch = useRef(0);
   const organizationIdRef = useRef<string | null>(null);
+  const organizationClient = useMemo<OrganizationClient>(() => createOrganizationClient({ sessionProvider: consoleSessionContext }), []);
+  const securityClient = useMemo<SecurityClient>(() => createSecurityClient({ sessionProvider: consoleSessionContext }), []);
   const liveHandoffRef = useRef<LiveHandoffSession | null>(null);
   const liveHandoffReadRef = useRef(false);
   const liveHandoffMountedRef = useRef(false);
   const [liveHandoffStatus, setLiveHandoffStatus] = useState<LiveHandoffStatus>("none");
   const [livePreflight, setLivePreflight] = useState<PublicEnrollmentPreflight | null>(null);
 
-  const expireSession = useCallback(() => {
+  const advanceLiveHandoff = useCallback((event: LiveHandoffEvent) => {
+    if (!liveHandoffMountedRef.current) return;
+    setLiveHandoffStatus((current) => {
+      try {
+        return transitionBrowserCliHandoffState(current, event) as LiveHandoffStatus;
+      } catch {
+        return "failed";
+      }
+    });
+  }, []);
+
+  useDeterministicDialogFocus(mobileOpen, sidebarRef, mobileTriggerRef);
+  useDeterministicDialogFocus(workspaceOpen, workspaceMenuRef, workspaceTriggerRef);
+  useDeterministicDialogFocus(helpOpen, helpModalRef, helpTriggerRef);
+  useDeterministicDialogFocus(confirmOpen, modalRef, confirmTriggerRef);
+
+  useEffect(() => {
+    if (!workspaceOpen || organizationSwitcherState === "loading") return;
+    const timer = window.setTimeout(() => focusFirstElement(workspaceMenuRef.current), 0);
+    return () => window.clearTimeout(timer);
+  }, [organizationSwitcherState, workspaceOpen]);
+
+  const endSession = useCallback((nextState: "expired" | "signed-out") => {
     summaryEpoch.current += 1;
     capabilityEpoch.current += 1;
     adminAuditEpoch.current += 1;
     consoleSessionContext.clear();
     organizationIdRef.current = null;
+    organizationOptionsEpoch.current += 1;
+    setOrganizationOptions([]);
+    setSelectedOrganizationId(null);
+    setOrganizationSwitcherState("closed");
+    setOrganizationSwitcherError(null);
     setSessionRole(null);
     setAuditSession(null);
     setData(emptyConsoleData());
-    setSessionState("expired");
+    setSessionState(nextState);
     setSummaryState("error");
     setConfirmOpen(false);
     setConfirmChecked(false);
   }, []);
+
+  const expireSession = useCallback(() => endSession("expired"), [endSession]);
+  const markSessionSignedOut = useCallback(() => endSession("signed-out"), [endSession]);
 
   const showToast = (message: string, tone: ToastTone = "success") => {
     setToast(message);
@@ -1276,23 +1397,67 @@ export function AgentPassConsole() {
     window.setTimeout(() => setToast(""), 4200);
   };
 
-  const refreshSummary = useCallback(async (signal?: AbortSignal) => {
+  const loadOrganizationOptions = useCallback(async () => {
+    const epoch = ++organizationOptionsEpoch.current;
+    setOrganizationSwitcherState("loading");
+    setOrganizationSwitcherError(null);
+    try {
+      const [organizations, session] = await Promise.all([
+        loadOrganizationSwitcherOrganizations(organizationClient),
+        organizationClient.getSession(),
+      ]);
+      if (epoch !== organizationOptionsEpoch.current) return;
+      const currentOrganizationId = organizationIdRef.current ?? session.organizationId;
+      setOrganizationOptions(organizations);
+      setSelectedOrganizationId((current) => {
+        if (current !== null && organizations.some((organization) => organization.id === current)) return current;
+        return organizations.some((organization) => organization.id === currentOrganizationId) ? currentOrganizationId : null;
+      });
+      setOrganizationSwitcherState("ready");
+    } catch (error) {
+      if (epoch !== organizationOptionsEpoch.current) return;
+      if (error instanceof OrganizationClientError && error.code === "unauthorized") {
+        expireSession();
+        return;
+      }
+      setOrganizationSwitcherState("error");
+      setOrganizationSwitcherError(organizationSwitcherMessage(error));
+    }
+  }, [expireSession, organizationClient]);
+
+  const toggleOrganizationSwitcher = () => {
+    if (workspaceOpen) {
+      setWorkspaceOpen(false);
+      return;
+    }
+    setWorkspaceOpen(true);
+    if (organizationSwitcherState === "closed" || organizationSwitcherState === "error") void loadOrganizationOptions();
+  };
+
+  const selectOrganizationFromSwitcher = (organization: Organization) => {
+    if (resolveOrganizationSelection(organizationOptions, organization.id) === undefined) {
+      setOrganizationSwitcherState("error");
+      setOrganizationSwitcherError("選択した組織を確認できないため、操作を中止しました。");
+      return;
+    }
+    setSelectedOrganizationId(organization.id);
+    setWorkspaceOpen(false);
+    setActiveView("organizations");
+    setMobileOpen(false);
+    scrollConsoleToTop();
+  };
+
+  const refreshSummary = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
       const session = await consoleSessionContext.get(signal);
       const { organizationId } = session;
-      const [summaryResponse, deploymentResponse] = await Promise.all([
-        fetchConsole("/api/console?resource=summary", { signal }),
-        fetchConsole("/api/console?resource=deployment-readiness", { signal }),
-      ]);
-      for (const response of [summaryResponse, deploymentResponse]) {
-        if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
-        if (!response.ok) throw new Error("Cloud readiness unavailable");
-      }
-      const [summaryBody, deploymentBody] = await Promise.all([summaryResponse.json(), deploymentResponse.json()]);
-      const next = summaryViewData(parseConsoleSummary(summaryBody, { organizationId }), parseDeploymentReadiness(deploymentBody), session);
-      if (epoch !== summaryEpoch.current) return;
+      const response = await fetchConsole("/api/console?resource=summary", { signal });
+      if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
+      if (!response.ok) throw new Error("summary unavailable");
+      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }), session);
+      if (epoch !== summaryEpoch.current) return "unavailable";
       organizationIdRef.current = organizationId;
       setSessionRole(session.role);
       setAuditSession(session);
@@ -1300,9 +1465,10 @@ export function AgentPassConsole() {
       setSessionState("active");
       setSummaryState("ready");
       setLastSynced("たった今");
+      return "ready";
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      if (epoch !== summaryEpoch.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
+      if (epoch !== summaryEpoch.current) return "unavailable";
       organizationIdRef.current = null;
       setSessionRole(null);
       setAuditSession(null);
@@ -1312,6 +1478,7 @@ export function AgentPassConsole() {
       }
       setSummaryState("error");
       setData(emptyConsoleData());
+      return "unavailable";
     } finally {
       if (!signal?.aborted && epoch === summaryEpoch.current) setRefreshing(false);
     }
@@ -1346,15 +1513,15 @@ export function AgentPassConsole() {
     liveHandoffReadRef.current = true;
     const launchFragment = window.location.hash;
     if (launchFragment === "") return;
-    const failLiveHandoff = () => window.setTimeout(() => {
-      if (liveHandoffMountedRef.current) setLiveHandoffStatus("failed");
+    const failLiveHandoff = (event: "launch_failed" | "preflight_failed") => window.setTimeout(() => {
+      advanceLiveHandoff(event);
     }, 0);
     try {
       const pageUrl = new URL(window.location.href);
       pageUrl.hash = "";
       window.history.replaceState(window.history.state, "", `${pageUrl.pathname}${pageUrl.search}`);
     } catch {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH_FAILED);
       return;
     }
     let handoff: ReturnType<typeof parseBrowserCliHandoffLaunchFragment>;
@@ -1362,58 +1529,72 @@ export function AgentPassConsole() {
       handoff = parseBrowserCliHandoffLaunchFragment(launchFragment);
       if (!handoff) return;
     } catch {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH_FAILED);
       return;
     }
     queueMicrotask(() => {
-      if (liveHandoffMountedRef.current) setLiveHandoffStatus("loading");
+      advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH);
     });
-    void fetchBrowserCliHandoffPreflight({ handoff }).then((preflight) => {
+    void fetchBrowserCliHandoffPreflight({ handoff, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs }).then((preflight) => {
       if (!liveHandoffMountedRef.current) return;
-      liveHandoffRef.current = { ...handoff, preflight };
+      liveHandoffRef.current = {
+        ...handoff,
+        preflight,
+        delivery: createLiveHandoffDelivery({ handoff, preflight }),
+      };
       setLivePreflight(publicBrowserCliEnrollmentPreflight(preflight));
-      setLiveHandoffStatus("ready");
+      advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_SUCCEEDED);
     }).catch(() => {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_FAILED);
     });
-  }, []);
+  }, [advanceLiveHandoff]);
 
   useEffect(() => {
-    if (!helpOpen && !confirmOpen) return;
-    previousModalFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const modal = (helpOpen ? helpModalRef : modalRef).current;
-    const focusable = () => Array.from(modal?.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])") ?? []).filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
-    const first = focusable()[0];
-    first?.focus();
+    const activeDialog = confirmOpen ? modalRef.current : helpOpen ? helpModalRef.current : workspaceOpen ? workspaceMenuRef.current : mobileOpen ? sidebarRef.current : null;
+    if (!activeDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setHelpOpen(false);
-        setConfirmOpen(false);
+        event.preventDefault();
+        if (confirmOpen) setConfirmOpen(false);
+        else if (helpOpen) setHelpOpen(false);
+        else if (workspaceOpen) setWorkspaceOpen(false);
+        else setMobileOpen(false);
         return;
       }
-      if (event.key !== "Tab") return;
-      const elements = focusable();
-      if (elements.length === 0) { event.preventDefault(); return; }
-      const firstElement = elements[0];
-      const lastElement = elements[elements.length - 1];
-      if (event.shiftKey && document.activeElement === firstElement) {
+      if (event.key === "Tab") {
+        const focusable = getFocusableElements(activeDialog);
+        if (focusable.length === 0) {
+          event.preventDefault();
+          activeDialog.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      if (workspaceOpen && (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End")) {
+        const options = Array.from(activeDialog.querySelectorAll<HTMLElement>("[role=\"option\"]"));
+        if (options.length === 0) return;
+        const currentIndex = Math.max(0, options.indexOf(document.activeElement as HTMLElement));
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? options.length - 1
+            : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
         event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
+        options[nextIndex]?.focus();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [helpOpen, confirmOpen]);
-
-  useEffect(() => {
-    if (helpOpen || confirmOpen) return;
-    const previous = previousModalFocusRef.current;
-    previousModalFocusRef.current = null;
-    previous?.focus();
-  }, [helpOpen, confirmOpen]);
+  }, [confirmOpen, helpOpen, mobileOpen, workspaceOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1465,7 +1646,7 @@ export function AgentPassConsole() {
     setActiveView(view);
     setMobileOpen(false);
     setWorkspaceOpen(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollConsoleToTop();
   };
 
   const signOut = async () => {
@@ -1473,19 +1654,14 @@ export function AgentPassConsole() {
     setSignOutPending(true);
     try {
       await logoutConsoleSession();
-      organizationIdRef.current = null;
-      setSessionRole(null);
-      setAuditSession(null);
-      setData(emptyConsoleData());
-      setSessionState("signed-out");
-      setSummaryState("error");
+      markSessionSignedOut();
     } catch (error) {
       if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
         setData(emptyConsoleData());
         setSessionState("expired");
         setSummaryState("error");
       } else {
-        showToast("サインアウトを完了できませんでした。もう一度お試しください", "error");
+        showToast("サインアウトを完了できませんでした。画面を再読み込みしてから、もう一度サインアウトしてください。", "error");
       }
     } finally {
       setSignOutPending(false);
@@ -1513,7 +1689,7 @@ export function AgentPassConsole() {
       setStopped(true);
       showToast("すべてのAgentを停止しました");
     } catch {
-      showToast("停止を確認できませんでした。接続を確認して再試行してください", "error");
+      showToast("停止を確認できませんでした。接続を確認し、緊急停止画面のボタンからもう一度お試しください。", "error");
     } finally {
       setStopPending(false);
     }
@@ -1539,21 +1715,22 @@ export function AgentPassConsole() {
       await refreshSummary();
       return true;
     } catch {
-      showToast("操作を確認できませんでした。権限と接続を確認してください", "error");
+      showToast("操作を確認できませんでした。権限と接続を確認し、この画面からもう一度お試しください。", "error");
       return false;
     }
   };
 
   const requestDeviceRefresh = async (deviceId: string): Promise<DeviceRefreshRequestStatus> => {
     if (sessionRole !== "owner" && sessionRole !== "admin") throw new Error("role denied");
-    const { organizationId, csrfToken } = await consoleSessionContext.get();
+    const session = await consoleSessionContext.get();
+    const { organizationId, csrfToken } = session;
     if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
     const { authorization_id } = await authenticateRecentAuth({ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION, organizationId, csrfToken });
     const response = await fetchConsole("/api/console?operation=device.refresh.request", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
       body: JSON.stringify({ target_id: deviceId }),
-    });
+    }, session);
     let payload: unknown;
     try {
       payload = await response.json();
@@ -1566,6 +1743,11 @@ export function AgentPassConsole() {
 
   const liveSetupActive = activeView === "overview" && liveHandoffStatus !== "none";
   const currentLabel = liveSetupActive ? "セットアップ" : navItems.find((item) => item.id === activeView)?.label ?? "概要";
+  const selectedOrganization = organizationOptions.find((organization) => organization.id === selectedOrganizationId);
+  // A Human Session is still bound to one organization. Until the Cloud
+  // exposes an atomic tenant-rotation endpoint, another organization is only
+  // an administration-panel context and must not relabel operational views.
+  const workspaceName = activeView === "organizations" ? selectedOrganization?.name ?? data.workspace : data.workspace;
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const canManage = sessionRole === "owner" || sessionRole === "admin";
   const canEmergencyStop = sessionRole === "owner";
@@ -1573,15 +1755,24 @@ export function AgentPassConsole() {
 
   return (
     <div className="console-shell">
-      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} aria-label="メインナビゲーション">
+      <a className="skip-link" href="#main-content">メインコンテンツへ移動</a>
+      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} ref={sidebarRef} role={mobileOpen ? "dialog" : undefined} aria-modal={mobileOpen ? "true" : undefined} aria-label="AgentPass Consoleサイドバー">
         <a className="brand" href="#top" onClick={(event) => { event.preventDefault(); goTo("overview"); }}>
           <span className="brand-mark" aria-hidden="true">A</span>
           <span><span className="brand-name">AgentPass</span><span className="brand-note">CONSOLE</span></span>
         </a>
-        <button className="workspace-switcher" type="button" aria-label={`${data.workspace}ワークスペースを選択`} aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen((open) => !open)}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{data.workspace}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
-        {workspaceOpen ? <div className="workspace-menu" role="status"><strong>{data.workspace}</strong><span>現在のワークスペース</span><small>ワークスペースの切り替えは管理者設定から行います</small></div> : null}
+        <button className="workspace-switcher" ref={workspaceTriggerRef} type="button" aria-label={`${workspaceName}ワークスペースを選択`} aria-expanded={workspaceOpen} aria-controls="workspace-menu" data-dialog-initial-focus onClick={toggleOrganizationSwitcher}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{workspaceName}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
+        {workspaceOpen ? <div className="workspace-menu" ref={workspaceMenuRef} id="workspace-menu" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title" aria-busy={organizationSwitcherState === "loading"} tabIndex={-1}>
+          <strong id="workspace-dialog-title">組織を選択</strong>
+          <span>アクセス可能な組織だけを表示しています</span>
+          {organizationSwitcherState === "loading" ? <small role="status">組織を確認中です…</small> : null}
+          {organizationSwitcherState === "error" ? <div role="alert"><small>{organizationSwitcherError}</small><button className="text-button" type="button" onClick={() => void loadOrganizationOptions()}>もう一度試す</button></div> : null}
+          {organizationSwitcherState === "ready" && organizationOptions.length === 0 ? <small role="status">利用可能な組織がありません。</small> : null}
+          {organizationSwitcherState === "ready" && organizationOptions.length > 0 ? <ul className="workspace-options" role="listbox" aria-label="利用可能な組織">{organizationOptions.map((organization) => <li key={organization.id}><button className={`workspace-option${organization.id === selectedOrganizationId ? " is-selected" : ""}`} type="button" role="option" aria-selected={organization.id === selectedOrganizationId} onClick={() => selectOrganizationFromSwitcher(organization)}><span>{organization.name}</span><small>{organization.id === selectedOrganizationId ? "選択済み" : "組織管理を開く"}</small></button></li>)}</ul> : null}
+          <small>選択後も権限とテナントはCloudで再検証されます。確認できない組織の操作は実行しません。</small>
+        </div> : null}
         <p className="nav-label">MANAGE</p>
-        <nav>
+        <nav id="main-navigation" aria-label="メインナビゲーション">
           <ul className="nav-list">
             {visibleNavItems.map((item) => <li key={item.id}><button className={`nav-item${activeView === item.id ? " active" : ""}${item.id === "emergency" ? " danger" : ""}`} type="button" onClick={() => goTo(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span className="nav-copy">{item.label}</span>{item.id === "agents" && data.agents.length > 0 ? <span className="nav-badge">{data.agents.length}</span> : null}</button></li>)}
           </ul>
@@ -1590,29 +1781,30 @@ export function AgentPassConsole() {
       </aside>
 
       <div className="main-column" id="top">
-        <div className="topbar">
-          <div className="breadcrumbs"><button className="mobile-menu" type="button" aria-label="メニューを開く" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current">{currentLabel}</span></div>
-          <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} aria-controls="help-modal" onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
-        </div>
-        <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
+        <header className="topbar" aria-label="Console操作">
+          <nav className="breadcrumbs" aria-label="パンくず"><button className="mobile-menu" ref={mobileTriggerRef} type="button" aria-label={mobileOpen ? "メニューを閉じる" : "メニューを開く"} aria-expanded={mobileOpen} aria-controls="main-navigation" onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current" aria-current="page">{currentLabel}</span></nav>
+          <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`} role={summaryState === "error" ? "alert" : refreshing || summaryState === "loading" ? "status" : undefined} aria-live={summaryState === "error" ? "assertive" : refreshing || summaryState === "loading" ? "polite" : undefined}><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー。最終同期ボタンから再試行してください" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" ref={helpTriggerRef} type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} aria-controls="help-dialog" onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
+        </header>
+        <main id="main-content" tabIndex={-1} aria-labelledby="console-page-heading" className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
-        {sessionState === "active" && activeView === "overview" ? <Overview data={data} session={auditSession} goTo={goTo} onRequestRefresh={requestDeviceRefresh} onRefresh={() => void refreshSummary()} onSessionEnded={expireSession} summaryState={summaryState} canManage={canManage} stopped={stopped} /> : null}
-          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffStatus={setLiveHandoffStatus} /> : null}
+          {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
+          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={refreshSummary} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffEvent={advanceLiveHandoff} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
-          {sessionState === "active" && activeView === "security" ? <SecuritySurface onSessionEnded={expireSession} /> : null}
-          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel onOrganizationSwitched={handleOrganizationSwitched} /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecurityPanel securityClient={securityClient} onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
+          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
-        </div>
+        </main>
       </div>
 
-      {mobileOpen ? <button className="mobile-scrim" type="button" aria-label="メニューを閉じる" onClick={() => setMobileOpen(false)} /> : null}
-      {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section id="help-modal" ref={helpModalRef} className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy"><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy" id="help-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
-      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">Cloud上で有効な{activeAgents}件のAgent登録を停止対象にします。現在の接続数を示すものではありません。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
-      {toast ? <div className={`toast ${toastTone}`} role="status" aria-live="polite">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
+      {mobileOpen ? <button className="mobile-scrim" type="button" aria-label="メニューを閉じる（背景）" onClick={() => setMobileOpen(false)} /> : null}
+      {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section className="help-modal" ref={helpModalRef} id="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy" tabIndex={-1}><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" data-dialog-initial-focus type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy" id="help-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
+      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy" tabIndex={-1}><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">Cloud上で有効な{activeAgents}件のAgent登録を停止対象にします。現在の接続数を示すものではありません。</p><label className="confirm-check"><input data-dialog-initial-focus type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
+      {toast ? <div className={`toast ${toastTone}`} role={toastTone === "error" ? "alert" : "status"} aria-live={toastTone === "error" ? "assertive" : "polite"} aria-atomic="true">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{summaryState === "error" ? "同期に失敗しました。最終同期ボタンから再試行してください。" : ""}</div>
     </div>
   );
 }

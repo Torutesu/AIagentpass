@@ -507,6 +507,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     "maxRequestBytes",
     "waitTimeoutMs",
     "maxRecoveryAttempts",
+    "operationGate",
   ];
   onlyKeys(options, optionKeys, CONFIG);
   const {
@@ -520,6 +521,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     maxRequestBytes = DEFAULT_PROVIDER_OPERATION_MAX_REQUEST_BYTES,
     waitTimeoutMs = DEFAULT_PROVIDER_OPERATION_WAIT_TIMEOUT_MS,
     maxRecoveryAttempts = DEFAULT_PROVIDER_OPERATION_MAX_RECOVERY_ATTEMPTS,
+    operationGate,
   } = options;
   string(purpose, PURPOSE, CONFIG);
   string(keyId, KEY_ID, CONFIG);
@@ -534,6 +536,10 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   if (waitTimeoutMs > 30_000) fail(CONFIG, "wait timeout is too large");
   positiveInteger(maxRecoveryAttempts, CONFIG);
   if (maxRecoveryAttempts > 8) fail(CONFIG, "recovery attempts are too large");
+  if (operationGate !== undefined
+    && (!operationGate || typeof operationGate.track !== "function" || typeof operationGate.assertAccepting !== "function")) {
+    fail(CONFIG, "operation gate is invalid");
+  }
 
   const expectedProviderBinding = Object.freeze({ purpose, key_id: keyId });
   validateDirectProvider(provider, { purpose, key_id: keyId, key_version: keyVersion });
@@ -547,6 +553,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
 
   async function loadPublicKey() {
     if (pinnedMetadata) return pinnedMetadata;
+    assertOperationGate(operationGate);
     let value;
     try {
       value = await provider.publicKeyMetadata({
@@ -564,7 +571,9 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   }
 
   async function callProvider(operation, signingBytes) {
+    assertOperationGate(operationGate);
     const metadata = await loadPublicKey();
+    assertOperationGate(operationGate);
     let output;
     try {
       output = await provider.sign({
@@ -634,8 +643,14 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   }
 
   async function claimAndRecover(operation, signingBytes) {
+    assertOperationGate(operationGate);
     const claimed = await readRecord("claimOperation", operation);
     if (!claimed) fail(REPOSITORY, "repository returned no operation while claiming recovery");
+
+    // A concurrent worker may have durably accepted or committed the exact
+    // provider result between the initial read and this claim. Reconcile that
+    // persisted result; it is the only safe recovery path after the provider
+    // boundary.
     if (claimed.state === "committed") {
       const metadata = await loadPublicKey();
       return committedResult(claimed, operation, metadata.key, signingBytes, providerId);
@@ -650,13 +665,23 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     // prove that the previous direct provider call was rejected. Since this
     // adapter has no provider-side lookup, quarantine the operation instead
     // of issuing a second provider sign with the same canonical bytes.
-    const quarantined = await markUncertainBestEffort(operation, claimed.claim_token, "provider_response_lost");
+    const quarantined = await markUncertainBestEffort(
+      operation,
+      claimed.claim_token,
+      "provider_response_lost",
+    );
     if (!quarantined) fail(REPOSITORY, "repository did not durably quarantine the ambiguous provider operation");
+    if (quarantined.state === "committed") {
+      const metadata = await loadPublicKey();
+      return committedResult(quarantined, operation, metadata.key, signingBytes, providerId);
+    }
     if ((quarantined.state === "accepted" || quarantined.state === "uncertain")
       && quarantined.signature !== undefined && quarantined.provider_receipt !== undefined) {
       return reconcilePersistedResult(operation, signingBytes);
     }
-    if (quarantined.state !== "uncertain") fail(REPOSITORY, "repository did not return a durable uncertain operation");
+    if (quarantined.state !== "uncertain") {
+      fail(REPOSITORY, "repository did not return a durable uncertain operation");
+    }
     fail(UNCERTAIN, "provider outcome is ambiguous and direct provider lookup is unavailable");
   }
 
@@ -674,10 +699,12 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   }
 
   async function performInitialSign(operation, claimToken, signingBytes) {
+    assertOperationGate(operationGate);
     const started = await readRecord("startOperation", operationInput(operation, claimToken));
     if (!started || (started.state !== "pending" && started.state !== "started")) {
       fail(REPOSITORY, "repository did not persist the provider boundary");
     }
+    await fenceProviderBoundary(operationGate, operation, claimToken, markUncertainBestEffort);
     let result;
     try {
       result = await callProvider(operation, signingBytes);
@@ -722,6 +749,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   }
 
   async function executeSign(operation, signingBytes) {
+    assertOperationGate(operationGate);
     let record = await readRecord("reserveOperation", operation);
     for (let attempt = 0; attempt <= maxRecoveryAttempts; attempt += 1) {
       if (record === null) fail(REPOSITORY, "reserveOperation returned no operation");
@@ -745,6 +773,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   }
 
   async function executeLookup(operation, signingBytes) {
+    assertOperationGate(operationGate);
     let record = await readRecord("getOperation", operation);
     if (record === null) return Object.freeze({ state: "unknown" });
     for (let attempt = 0; attempt <= maxRecoveryAttempts; attempt += 1) {
@@ -792,7 +821,9 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     const request = normalizeCall(binding, signingBytes);
     const existing = inFlight.get(request.operation.operation_id);
     if (existing) return existing;
-    const operation = executeSign(request.operation, request.signingBytes);
+    const operation = operationGate
+      ? trackProviderOperation(operationGate, () => executeSign(request.operation, request.signingBytes))
+      : executeSign(request.operation, request.signingBytes);
     inFlight.set(request.operation.operation_id, operation);
     operation.finally(() => {
       if (inFlight.get(request.operation.operation_id) === operation) inFlight.delete(request.operation.operation_id);
@@ -802,11 +833,40 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
 
   async function lookup(binding, signingBytes) {
     const request = normalizeCall(binding, signingBytes);
-    return executeLookup(request.operation, request.signingBytes);
+    return operationGate
+      ? trackProviderOperation(operationGate, () => executeLookup(request.operation, request.signingBytes))
+      : executeLookup(request.operation, request.signingBytes);
   }
 
   return Object.freeze({
     signOnce,
     lookup,
   });
+}
+
+function assertOperationGate(operationGate) {
+  if (operationGate === undefined) return;
+  try { operationGate.assertAccepting(); }
+  catch { fail(UNCERTAIN, "managed signer operation was fenced by shutdown"); }
+}
+
+function trackProviderOperation(operationGate, operation) {
+  try {
+    return Promise.resolve(operationGate.track(operation)).catch((error) => {
+      if (error?.code === "draining") throw new ProviderOperationReconciliationError(UNCERTAIN);
+      throw error;
+    });
+  } catch (error) {
+    if (error?.code === "draining") return Promise.reject(new ProviderOperationReconciliationError(UNCERTAIN));
+    return Promise.reject(error);
+  }
+}
+
+async function fenceProviderBoundary(operationGate, operation, claimToken, markUncertain) {
+  try {
+    assertOperationGate(operationGate);
+  } catch (error) {
+    await markUncertain(operation, claimToken, "lifecycle_fenced");
+    throw error;
+  }
 }

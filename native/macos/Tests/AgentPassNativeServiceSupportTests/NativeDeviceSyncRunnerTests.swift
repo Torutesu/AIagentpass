@@ -26,48 +26,162 @@ private final class RunnerRandom: NativeDeviceSyncRunnerRandomizing, @unchecked 
 }
 
 private final class RunnerGate: @unchecked Sendable {
+    private enum WaiterState {
+        case reserved
+        case waiting(CheckedContinuation<Void, Error>)
+        case cancelled
+    }
+
     private let lock = NSLock()
+    private let beforeRegistration: (@Sendable () async -> Void)?
     private var permits = 0
-    private var waiters: [CheckedContinuation<Void, Error>] = []
+    private var nextWaiterID: UInt64 = 0
+    private var waiterOrder: [UInt64] = []
+    private var waiterStates: [UInt64: WaiterState] = [:]
+
+    init(beforeRegistration: (@Sendable () async -> Void)? = nil) {
+        self.beforeRegistration = beforeRegistration
+    }
 
     func wait() async throws {
+        let waiterID = reserveWaiter()
         try await withTaskCancellationHandler(operation: {
+            await beforeRegistration?()
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                var resumeNow = false
-                lock.lock()
-                if permits > 0 {
-                    permits -= 1
-                    resumeNow = true
-                } else {
-                    waiters.append(continuation)
-                }
-                lock.unlock()
-                if resumeNow { continuation.resume() }
+                register(continuation, waiterID: waiterID)
             }
         }, onCancel: {
-            self.cancelOne()
+            self.cancel(waiterID: waiterID)
         })
     }
 
     func releaseOne() {
-        let continuation: CheckedContinuation<Void, Error>?
+        var continuation: CheckedContinuation<Void, Error>?
         lock.lock()
-        if waiters.isEmpty {
+        while !waiterOrder.isEmpty, continuation == nil {
+            let waiterID = waiterOrder.removeFirst()
+            guard case let .waiting(waiter)? = waiterStates.removeValue(forKey: waiterID) else {
+                continue
+            }
+            continuation = waiter
+        }
+        if continuation == nil {
             permits += 1
-            continuation = nil
-        } else {
-            continuation = waiters.removeFirst()
         }
         lock.unlock()
         continuation?.resume()
     }
 
-    private func cancelOne() {
+    func pendingWaiterCountForTesting() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiterStates.values.reduce(into: 0) { count, state in
+            if case .waiting = state { count += 1 }
+        }
+    }
+
+    private func reserveWaiter() -> UInt64 {
+        lock.lock()
+        let waiterID = nextWaiterID
+        nextWaiterID &+= 1
+        waiterStates[waiterID] = .reserved
+        lock.unlock()
+        return waiterID
+    }
+
+    private func register(_ continuation: CheckedContinuation<Void, Error>, waiterID: UInt64) {
+        enum Resume {
+            case none
+            case success
+            case cancelled
+        }
+
+        let resume: Resume
+        lock.lock()
+        switch waiterStates[waiterID] {
+        case .cancelled:
+            waiterStates.removeValue(forKey: waiterID)
+            resume = .cancelled
+        case .reserved:
+            if Task.isCancelled {
+                waiterStates.removeValue(forKey: waiterID)
+                resume = .cancelled
+            } else if permits > 0 {
+                permits -= 1
+                waiterStates.removeValue(forKey: waiterID)
+                resume = .success
+            } else {
+                waiterStates[waiterID] = .waiting(continuation)
+                waiterOrder.append(waiterID)
+                resume = .none
+            }
+        case .waiting, nil:
+            waiterStates.removeValue(forKey: waiterID)
+            resume = .cancelled
+        }
+        lock.unlock()
+
+        switch resume {
+        case .none:
+            break
+        case .success:
+            continuation.resume()
+        case .cancelled:
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func cancel(waiterID: UInt64) {
         let continuation: CheckedContinuation<Void, Error>?
         lock.lock()
-        continuation = waiters.isEmpty ? nil : waiters.removeFirst()
+        switch waiterStates[waiterID] {
+        case .reserved:
+            waiterStates[waiterID] = .cancelled
+            continuation = nil
+        case let .waiting(waiter):
+            waiterStates.removeValue(forKey: waiterID)
+            waiterOrder.removeAll { $0 == waiterID }
+            continuation = waiter
+        case .cancelled, nil:
+            continuation = nil
+        }
         lock.unlock()
         continuation?.resume(throwing: CancellationError())
+    }
+}
+
+private actor RunnerRegistrationBarrier {
+    private var entered = false
+    private var released = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func pause() async {
+        entered = true
+        let observers = entryWaiters
+        entryWaiters.removeAll(keepingCapacity: true)
+        for observer in observers { observer.resume() }
+
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            if released {
+                continuation.resume()
+            } else {
+                releaseWaiters.append(continuation)
+            }
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters { waiter.resume() }
     }
 }
 
@@ -108,6 +222,7 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
     private var snapshotValue: NativeDeviceRefreshSnapshot
     private var outcomes: [Outcome]
     private var gate: RunnerGate?
+    private var completionGate: RunnerGate?
     private var activeCount = 0
     private var maximumActiveCount = 0
     private var callCount = 0
@@ -129,6 +244,7 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
     }
 
     func setGate(_ gate: RunnerGate?) { self.gate = gate }
+    func setCompletionGate(_ gate: RunnerGate?) { self.completionGate = gate }
 
     func synchronize(waitMilliseconds: Int) async throws -> NativeDeviceSyncRunResult {
         callCount += 1
@@ -141,13 +257,14 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
         if let currentGate { try await currentGate.wait() }
 
         let outcome = outcomes.isEmpty ? .noChange(snapshotValue.generation) : outcomes.removeFirst()
+        let result: NativeDeviceSyncRunResult
         switch outcome {
         case let .noChange(generation):
             snapshotValue = idleSnapshot(generation: generation, sequence: nil)
-            return .noChange(generation: generation)
+            result = .noChange(generation: generation)
         case let .applied(generation, sequence):
             snapshotValue = idleSnapshot(generation: generation, sequence: sequence)
-            return .applied(generation: generation, sequence: sequence)
+            result = .applied(generation: generation, sequence: sequence)
         case let .blocked(generation, sequence):
             snapshotValue = NativeDeviceRefreshSnapshot(
                 state: .idle,
@@ -159,12 +276,17 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
                 sequenceWatermark: sequence,
                 revision: 0
             )
-            return .blocked(generation: generation, sequence: sequence, reason: .internalError)
+            result = .blocked(generation: generation, sequence: sequence, reason: .internalError)
         case .transportFailure:
             throw NativeDeviceSyncCoordinatorError.transportUnavailable
         case .unknownFailure:
             throw RunnerUnknownError.secretPathAndMessage
         }
+        if let completionGate {
+            self.completionGate = nil
+            try await completionGate.wait()
+        }
+        return result
     }
 
     func snapshot() async -> NativeDeviceRefreshSnapshot { snapshotValue }
@@ -188,6 +310,81 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
 
 private enum RunnerUnknownError: Error, Sendable {
     case secretPathAndMessage
+}
+
+@Test func wakeSignalCancellationBeforeRegistrationCannotHangOrStealNextWake() async {
+    let barrier = RunnerRegistrationBarrier()
+    let wakeSignal = NativeDeviceSyncRunner.WakeSignal(
+        beforeWaiterRegistration: { await barrier.pause() }
+    )
+    let cancelledWaiter = Task { await wakeSignal.wait() }
+
+    await barrier.waitUntilEntered()
+    cancelledWaiter.cancel()
+    wakeSignal.signal()
+    await barrier.release()
+
+    #expect(await cancelledWaiter.value == false)
+    // The signal belongs to the next live waiter because the cancelled
+    // generation never installed a continuation.
+    #expect(await wakeSignal.wait() == true)
+    wakeSignal.close()
+    #expect(await wakeSignal.wait() == false)
+}
+
+@Test func runnerGateCancellationBeforeRegistrationCannotLeakOrResumeTwice() async throws {
+    let barrier = RunnerRegistrationBarrier()
+    let gate = RunnerGate(beforeRegistration: { await barrier.pause() })
+    let waiter = Task {
+        do {
+            try await gate.wait()
+            return false
+        } catch is CancellationError {
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    await barrier.waitUntilEntered()
+    waiter.cancel()
+    gate.releaseOne()
+    await barrier.release()
+
+    #expect(await waiter.value)
+    #expect(gate.pendingWaiterCountForTesting() == 0)
+    // The release raced with a reserved-but-cancelled waiter and must remain
+    // available for a genuinely new waiter, not revive the cancelled one.
+    try await gate.wait()
+    #expect(gate.pendingWaiterCountForTesting() == 0)
+}
+
+@Test func runnerGateCancellationTargetsOnlyItsOwnContinuation() async throws {
+    let gate = RunnerGate()
+    let first = Task {
+        do {
+            try await gate.wait()
+            return true
+        } catch {
+            return false
+        }
+    }
+    try await waitUntil { gate.pendingWaiterCountForTesting() == 1 }
+    let second = Task {
+        do {
+            try await gate.wait()
+            return true
+        } catch {
+            return false
+        }
+    }
+    try await waitUntil { gate.pendingWaiterCountForTesting() == 2 }
+
+    second.cancel()
+    #expect(await second.value == false)
+    gate.releaseOne()
+    #expect(await first.value == true)
+    #expect(gate.pendingWaiterCountForTesting() == 0)
 }
 
 @Test func runnerImmediatelyResumesDurableStateAndUsesOneBoundedLongPoll() async throws {
@@ -244,7 +441,7 @@ private enum RunnerUnknownError: Error, Sendable {
     }
     let first = Task { await runner.requestRefresh() }
     let second = Task { await runner.requestRefresh() }
-    for _ in 0..<20 { await Task.yield() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
     activeGate.releaseOne()
     let firstStatus = await first.value
     let secondStatus = await second.value
@@ -273,7 +470,7 @@ private enum RunnerUnknownError: Error, Sendable {
     let first = Task { await runner.requestRefresh() }
     let second = Task { await runner.requestRefresh() }
     let third = Task { await runner.requestRefresh() }
-    for _ in 0..<20 { await Task.yield() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 3 }
     try await waitUntil { await coordinator.calls() == 2 }
     // The second cycle is deliberately allowed to finish only after all
     // callers have had an opportunity to join it.
@@ -282,6 +479,91 @@ private enum RunnerUnknownError: Error, Sendable {
     _ = await first.value
     _ = await second.value
     _ = await third.value
+    #expect(await coordinator.calls() == 2)
+    #expect(await coordinator.maximumActive() == 1)
+    await runner.stop()
+}
+
+@Test func runnerCoalescesManualRefreshesDuringCoordinatorCompletion() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1)])
+    let completionGate = RunnerGate()
+    await coordinator.setCompletionGate(completionGate)
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: RunnerScheduler(),
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        let active = await coordinator.maximumActive()
+        return calls == 1 && active == 1
+    }
+    let first = Task { await runner.requestRefresh() }
+    let second = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
+    completionGate.releaseOne()
+
+    #expect((await first.value).reason == .noChange)
+    #expect((await second.value).reason == .noChange)
+    #expect(await coordinator.calls() == 1)
+    await runner.stop()
+}
+
+@Test func runnerSchedulesOneNewCycleForRefreshAfterCompletion() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1), .noChange(2)])
+    let scheduler = RunnerScheduler()
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: scheduler,
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        await coordinator.calls() == 1 && scheduler.sleeps().count == 1 && !runner.status().inFlight
+    }
+    let secondGate = RunnerGate()
+    await coordinator.setGate(secondGate)
+    let waiter = Task { await runner.requestRefresh() }
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        return runner.pendingManualRequestCountForTesting() == 1 && calls == 2
+    }
+    secondGate.releaseOne()
+
+    #expect((await waiter.value).reason == .noChange)
+    #expect(await coordinator.calls() == 2)
+    await runner.stop()
+}
+
+@Test func runnerCoalescesRefreshWithTimerWithoutLosingTheWake() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1), .noChange(2)])
+    let scheduler = RunnerScheduler()
+    let secondGate = RunnerGate()
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: scheduler,
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil { await coordinator.calls() == 1 && scheduler.sleeps().count == 1 }
+    await coordinator.setGate(secondGate)
+    let waiter = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 1 }
+    scheduler.releaseNext()
+    try await waitUntil { await coordinator.calls() == 2 }
+    secondGate.releaseOne()
+
+    #expect((await waiter.value).reason == .noChange)
     #expect(await coordinator.calls() == 2)
     #expect(await coordinator.maximumActive() == 1)
     await runner.stop()
@@ -333,6 +615,37 @@ private enum RunnerUnknownError: Error, Sendable {
     #expect(waiterStatus.reason == .cancelled)
     #expect(!String(describing: status).contains("secret"))
     #expect(!String(describing: status).contains("path"))
+}
+
+@Test func runnerStopResolvesRefreshWaitersDuringAnActiveCycle() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1)])
+    let activeGate = RunnerGate()
+    await coordinator.setGate(activeGate)
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: RunnerScheduler(),
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        let active = await coordinator.maximumActive()
+        return calls == 1 && active == 1
+    }
+    let first = Task { await runner.requestRefresh() }
+    let second = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
+
+    await runner.stop()
+    let firstStatus = await first.value
+    let secondStatus = await second.value
+    #expect(firstStatus.lifecycle == .stopped)
+    #expect(secondStatus.lifecycle == .stopped)
+    #expect(runner.status().lifecycle == .stopped)
+    #expect(await coordinator.maximumActive() == 1)
 }
 
 @Test func stoppedRunnerCannotRestartItsClosedWakeBoundary() async throws {

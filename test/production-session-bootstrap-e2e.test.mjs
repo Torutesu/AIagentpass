@@ -437,6 +437,7 @@ function createMemoryPostgresState() {
     async revokeCredential() { return null; },
     async listSafeSessions() { return []; },
     async revokeManagedSession() { return null; },
+    async revokeOtherSessions() { return []; },
   };
   const organizationRepository = {
     async listOrganizationsForMember() { return []; },
@@ -448,6 +449,7 @@ function createMemoryPostgresState() {
     async listInvitations() { return []; },
     async createInvitation() { return null; },
     async revokeInvitation() { return null; },
+    async reissueInvitation() { return null; },
     async acceptInvitation() { return null; },
   };
   const pool = {

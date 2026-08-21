@@ -89,6 +89,7 @@ async function installRoutes(page: Page, mode: HandoffMode): Promise<HandoffStat
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/auth/session/resume") return json(route, session("owner"));
     if (url.pathname === "/api/auth/session") return json(route, session("owner"));
     if (url.pathname === "/api/auth/webauthn/options") return json(route, { challenge_id: "57777777-7777-4777-8777-777777777777", options: authenticationOptions() });
     if (url.pathname === "/api/auth/webauthn/verify") return json(route, { authorization_id: AUTHORIZATION_ID });
@@ -156,6 +157,8 @@ async function openLiveSetup(page: Page, mode: HandoffMode): Promise<HandoffStat
   await page.goto(`/#${HANDOFF_URL}`);
   await expect(page).toHaveURL(/\/$/u);
   await expect.poll(() => state.preflightCalls).toBe(1);
+  await expect(page.locator('[data-install-state="connected"]')).toBeVisible();
+  await expect(page.locator('[data-live-handoff-state="connected"]')).toBeVisible();
   await expect(page.getByText("公開preflightを確認しました")).toBeVisible();
   return state;
 }
@@ -164,6 +167,7 @@ test("clears malformed launch fragments immediately and shows a safe error", asy
   const state = await installRoutes(page, HandoffMode.success);
   await page.goto("/#not-a-loopback-handoff");
   await expect(page).toHaveURL(/\/$/u);
+  await expect(page.locator('[data-install-state="failed"]')).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
   expect(state.preflightCalls).toBe(0);
   await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
@@ -172,12 +176,14 @@ test("clears malformed launch fragments immediately and shows a safe error", asy
 test("fails closed on unavailable or substituted-preflight responses without rendering handoff secrets", async ({ page }) => {
   const corsFailureState = await installRoutes(page, HandoffMode.corsFailure);
   await page.goto(`/#${HANDOFF_URL}`);
+  await expect(page.locator('[data-install-state="failed"]')).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
   await assertNoHandoffSecret(page, corsFailureState, NONCE, ENROLLMENT_SECRET);
 
   await page.unrouteAll({ behavior: "ignoreErrors" });
   const substitutedState = await installRoutes(page, HandoffMode.substitutedCorrelation);
   await page.goto(`/#${HANDOFF_URL}`);
+  await expect(page.locator('[data-install-state="failed"]')).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
   await assertNoHandoffSecret(page, substitutedState, NONCE, ENROLLMENT_SECRET);
 });
@@ -187,20 +193,24 @@ test("posts the exact bound envelope and marks delivery only after the exact ACK
   await page.getByLabel("端末名").fill("Live handoff Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
   await expect(page.locator('[data-live-handoff-state="delivered"]')).toBeVisible();
+  await expect(page.locator('[data-install-state="delivered"]')).toBeVisible();
   expect(state.postBodies).toHaveLength(1);
-  expect(state.postBodies[0]).toEqual({ version: 1, correlation_id: CORRELATION_ID, nonce: NONCE, invitation: enrollment() });
+  expect(state.postBodies[0]).toEqual({ version: 1, type: "agentpass.browser-onboarding.invitation", correlation_id: CORRELATION_ID, nonce: NONCE, invitation: enrollment() });
   const rendered = (await page.locator("body").textContent()) ?? "";
   expect(rendered).not.toContain(NONCE);
   expect(rendered).not.toContain(ENROLLMENT_SECRET);
   await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
 });
 
-test("discards the invitation when the ACK is not exact and never renders a manual secret fallback", async ({ page }) => {
+test("keeps the one-time manual fallback when the ACK is not exact", async ({ page }) => {
   const state = await openLiveSetup(page, HandoffMode.invalidAck);
   await page.getByLabel("端末名").fill("Fallback handoff Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("表示せず破棄しました");
-  await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
+  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("標準入力");
+  await expect(page.locator(".secret-output")).toContainText(ENROLLMENT_SECRET);
+  expect(state.postBodies).toHaveLength(1);
+  expect((await browserStorageSnapshot(page)).local).toEqual({});
+  expect((await browserStorageSnapshot(page)).session).toEqual({});
 });
 
 test.afterEach(async ({ page }) => {

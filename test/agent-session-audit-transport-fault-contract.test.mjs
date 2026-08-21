@@ -164,7 +164,7 @@ test("transport loss is consumed after successful response encoding and drops on
   const disposition = start.slice(dropGuardOffset, replyOffset);
   assert.match(
     disposition,
-    /guard\s+!transportReplyFaultConsumer\.shouldDropEncodedResult\(\)\s+else\s*\{\s*return\s*\}/u,
+    /guard\s+!(?:self\.)?transportReplyFaultConsumer\.shouldDropEncodedResult\(\)\s+else\s*\{\s*return\s*\}/u,
     "an injected transport loss must return without invoking the XPC reply closure",
   );
   assert.doesNotMatch(

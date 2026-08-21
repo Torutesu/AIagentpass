@@ -394,6 +394,9 @@ test("v2 enrollment is candidate-bound, digest-only, and stores append-only poss
     challenge: { nonce: "raw-challenge-never-accepted" },
     deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey }
   }), { code: "ERR_INVALID_INPUT" });
+  const controlKeys = crypto.generateKeyPairSync("ed25519");
+  const refreshKeys = crypto.generateKeyPairSync("ed25519");
+  const publicPem = (key) => key.export({ type: "spki", format: "pem" }).toString();
   const statement = {
     version: 1,
     enrollment_id: enrollment.enrollment_id,
@@ -406,6 +409,14 @@ test("v2 enrollment is candidate-bound, digest-only, and stores append-only poss
     device_key_fingerprint: fingerprint,
     device_key_epoch: 1,
     challenge_nonce_digest: challengeNonceDigest,
+    control: {
+      format_epoch: 2,
+      issuer: "agentpass-cloud",
+      key_id: "control-v1",
+      public_key: publicPem(controlKeys.publicKey),
+      bundle_path: `/v1/organizations/${ids.org}/bundles/${enrollment.device_id}`,
+      refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: publicPem(refreshKeys.publicKey) }
+    },
     issued_at: "2026-08-13T10:01:00.000Z"
   };
   const possessionReceipt = {

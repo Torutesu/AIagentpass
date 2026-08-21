@@ -13,6 +13,10 @@ import {
   verifyPossessionReceiptSignature
 } from "../src/possession-receipt-signer.mjs";
 
+const CONTROL_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const REFRESH_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const publicPem = (key) => key.export({ type: "spki", format: "pem" }).toString();
+
 const STATEMENT = Object.freeze({
   version: 1,
   enrollment_id: "11111111-1111-4111-8111-111111111111",
@@ -25,6 +29,18 @@ const STATEMENT = Object.freeze({
   device_key_fingerprint: `SHA256:${"C".repeat(43)}`,
   device_key_epoch: 7,
   challenge_nonce_digest: "d".repeat(64),
+  control: {
+    format_epoch: 2,
+    issuer: "agentpass-cloud",
+    key_id: "control-v1",
+    public_key: publicPem(CONTROL_TEST_KEYS.publicKey),
+    bundle_path: "/v1/organizations/22222222-2222-4222-8222-222222222222/bundles/33333333-3333-4333-8333-333333333333",
+    refresh_hint: {
+      key_id: "refresh-v1",
+      algorithm: "ed25519",
+      public_key: publicPem(REFRESH_TEST_KEYS.publicKey)
+    }
+  },
   issued_at: "2026-08-13T00:00:00.000Z"
 });
 
@@ -73,7 +89,7 @@ test("rejects unknown fields, aliases, noncanonical timestamps, and malformed st
   ]) {
     assert.throws(() => normalizePossessionReceiptStatement(value), (error) => error.code === POSSESSION_RECEIPT_SIGNER_ERROR_CODES.INPUT);
   }
-  const reordered = JSON.parse(`{"issued_at":"${STATEMENT.issued_at}","challenge_nonce_digest":"${STATEMENT.challenge_nonce_digest}","device_key_epoch":7,"device_key_fingerprint":"${STATEMENT.device_key_fingerprint}","team_id":"${STATEMENT.team_id}","source_commit":"${STATEMENT.source_commit}","artifact_sha256":"${STATEMENT.artifact_sha256}","candidate_id":"${STATEMENT.candidate_id}","device_id":"${STATEMENT.device_id}","organization_id":"${STATEMENT.organization_id}","enrollment_id":"${STATEMENT.enrollment_id}","version":1}`);
+  const reordered = JSON.parse(`{"issued_at":"${STATEMENT.issued_at}","control":${JSON.stringify(STATEMENT.control)},"challenge_nonce_digest":"${STATEMENT.challenge_nonce_digest}","device_key_epoch":7,"device_key_fingerprint":"${STATEMENT.device_key_fingerprint}","team_id":"${STATEMENT.team_id}","source_commit":"${STATEMENT.source_commit}","artifact_sha256":"${STATEMENT.artifact_sha256}","candidate_id":"${STATEMENT.candidate_id}","device_id":"${STATEMENT.device_id}","organization_id":"${STATEMENT.organization_id}","enrollment_id":"${STATEMENT.enrollment_id}","version":1}`);
   assert.equal(possessionReceiptSigningData(reordered).equals(possessionReceiptSigningData(STATEMENT)), true);
 });
 

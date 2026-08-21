@@ -53,10 +53,10 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT
   --scripts "$TEMP_DIR/package-scripts" \
   --ownership recommended \
   --sign "$IDENTITY" \
-  "$OUTPUT"
+"$OUTPUT"
 
-"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT" "$TEAM_ID"
-ARTIFACT_SHA256="$(/usr/bin/shasum -a 256 "$OUTPUT" | /usr/bin/awk '{print $1}')"
-[[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Unable to compute installer artifact SHA-256" >&2; exit 1; }
-echo "artifact_sha256=$ARTIFACT_SHA256" >&2
+"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT"
+INVENTORY_OUTPUT="${OUTPUT}.inventory.json"
+[[ ! -e "$INVENTORY_OUTPUT" && ! -L "$INVENTORY_OUTPUT" ]] || { echo "Installer inventory output already exists or is a symlink" >&2; exit 1; }
+node "$SCRIPT_DIR/generate-artifact-inventory.mjs" "$APP" "$OUTPUT" "$INVENTORY_OUTPUT" >/dev/null
 echo "$OUTPUT"

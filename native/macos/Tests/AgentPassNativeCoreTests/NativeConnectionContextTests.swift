@@ -154,6 +154,22 @@ private func expectConnectionError(
     #expect(!context.description.contains("audit_token"))
 }
 
+@Test func publicNSXPCProjectionRemainsDistinctFromTheFullAuditTokenProjection() throws {
+    let fullAuditTokenContext = NativeConnectionContext(capturing: try adapter())
+    let publicNSXPCContext = try NativeConnectionContext(
+        osProcessID: fullAuditTokenContext.pid,
+        effectiveUserID: fullAuditTokenContext.effectiveUserID,
+        auditSessionID: fullAuditTokenContext.auditSessionID,
+        pidVersion: fullAuditTokenContext.pidVersion
+    )
+
+    #expect(publicNSXPCContext.pid == fullAuditTokenContext.pid)
+    #expect(publicNSXPCContext.effectiveUserID == fullAuditTokenContext.effectiveUserID)
+    #expect(publicNSXPCContext.auditSessionID == fullAuditTokenContext.auditSessionID)
+    #expect(publicNSXPCContext.pidVersion == fullAuditTokenContext.pidVersion)
+    #expect(publicNSXPCContext.tokenIdentity != fullAuditTokenContext.tokenIdentity)
+}
+
 @Test func nativeConnectionContextRejectsForgedSerializedValuesAndUsesStableErrors() throws {
     let invalidVersion = Data(#"{"version":"native_connection_context/v99","peer_identity":{}}"#.utf8)
     try expectConnectionError(.invalidSerializedContext) {

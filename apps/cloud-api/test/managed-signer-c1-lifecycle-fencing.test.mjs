@@ -141,6 +141,14 @@ function createFixture() {
       return publicSigningRecord(row, true);
     },
 
+    async fenceSignature(input) {
+      const row = signingRecords.get(input.operation_id);
+      assertSigningIdentity(row, input);
+      if (row.status !== "pending" || row.claim_token !== input.claim_token) throw error(REPOSITORY_CODES.SIGNING_CLAIM_LOST);
+      assertCurrentLifecycle(row);
+      return publicSigningRecord(row, true);
+    },
+
     async commitSignature(input) {
       const row = signingRecords.get(input.operation_id);
       assertSigningIdentity(row, input);

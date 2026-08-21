@@ -11,6 +11,7 @@ import {
   WEBAUTHN_REGISTRATION_OPERATION,
   WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION
 } from "../src/human-auth/webauthn/registration.mjs";
+import { PostgresWebAuthnRegistrationCeremonyError } from "../src/human-auth/webauthn/postgres-registration-ceremony.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
 const RP_ID = "console.agentpass.test";
@@ -212,6 +213,49 @@ test("registration service persists only verified public credential material and
   assert.equal(Object.hasOwn(stored[0], "client_data_json"), false);
   assert.equal(Object.hasOwn(stored[0], "attestation_object"), false);
   assert.equal(JSON.stringify(stored).includes(wire.client_data_json), false);
+});
+
+test("registration service preserves durable ceremony outages as storage unavailable", async () => {
+  const ceremony = {
+    async begin() { throw new PostgresWebAuthnRegistrationCeremonyError("ERR_WEBAUTHN_REGISTRATION_STORAGE", "database diagnostics must not escape"); },
+    async consume() { throw new PostgresWebAuthnRegistrationCeremonyError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "row diagnostics must not escape"); },
+  };
+  const repository = {
+    async getRegistrationUser() { return user(); },
+    async listCredentialsForSession() { return []; },
+    async createCredential() { throw new Error("must not store"); },
+  };
+  const service = createWebAuthnRegistrationService({
+    ceremony,
+    credentialRepository: repository,
+    registrationVerifier: { async generateOptions() { throw new Error("must not generate"); } },
+    rpId: RP_ID,
+    origin: ORIGIN,
+    now: () => NOW,
+  });
+  const session = { session_id: SESSION_ID, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID };
+
+  await assert.rejects(
+    () => service.begin({ session, organization_id: ORGANIZATION_ID }),
+    (error) => error instanceof WebAuthnRegistrationError
+      && error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE
+      && !error.message.includes("diagnostics"),
+  );
+  await assert.rejects(
+    () => service.verify({
+      session,
+      organization_id: ORGANIZATION_ID,
+      challenge_id: CHALLENGE_ID,
+      credential: {
+        credential_id: CREDENTIAL_ID,
+        client_data_json: clientData(Buffer.alloc(32, 9).toString("base64url")),
+        attestation_object: Buffer.alloc(96, 7).toString("base64url"),
+      },
+    }),
+    (error) => error instanceof WebAuthnRegistrationError
+      && error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE
+      && !error.message.includes("diagnostics"),
+  );
 });
 
 test("registration requires operation-bound recent auth for an existing credential and uses the atomic storage boundary", async () => {

@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import crypto from "node:crypto";
 import { Pool } from "pg";
 
@@ -35,7 +36,7 @@ export async function migrateAgentSessionHumanHttpFixture({
   assertMethod(client, "query");
   try {
     const migration = await createMigrationRunner({ client, applicationVersion }).run();
-    if (migration.currentVersion !== 47) throw fixtureError("unsupported_schema");
+    if (migration.currentVersion !== POSTGRES_SCHEMA_HEAD.version) throw fixtureError("unsupported_schema");
     return Object.freeze(migration);
   } catch (error) {
     if (error?.message === "agent session human HTTP fixture unsupported_schema") throw error;

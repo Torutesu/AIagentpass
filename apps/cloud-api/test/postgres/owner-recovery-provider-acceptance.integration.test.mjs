@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -25,7 +26,7 @@ test("durable fake-provider acceptance converges after lost response and uncerta
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-provider-acceptance" }).run();
-    assert.equal(migration.currentVersion , 47);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally { migrationClient.release(); }
   const fixture = await seed(pool);
   t.after(async () => { await cleanup(pool, fixture); await pool.end(); });

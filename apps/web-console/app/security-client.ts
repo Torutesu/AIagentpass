@@ -24,20 +24,32 @@ export type SecuritySession = Readonly<{
 
 export type SecuritySnapshot = Readonly<{
   passkeys: readonly SecurityPasskey[];
+  passkeysComplete: boolean;
   sessions: readonly SecuritySession[];
 }>;
 
 type FetchLike = typeof fetch;
+export type SecuritySessionContext = Readonly<{ csrfToken: string; organizationId: string }>;
+export type SecuritySessionProvider = Readonly<{
+  get(signal?: AbortSignal): Promise<SecuritySessionContext>;
+  clear(session?: SecuritySessionContext): void;
+}>;
+
 type ClientOptions = Readonly<{
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   authenticateRecentAuthImpl?: (input: WebAuthnClientInput) => Promise<AuthorizationResult>;
+  registerPasskeyImpl?: (input: WebAuthnRegistrationInput) => Promise<RegistrationResult>;
+  sessionProvider?: SecuritySessionProvider;
 }>;
 type SecurityRequestOptions = Readonly<{ signal?: AbortSignal }>;
+type MutationControls = Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string; recentAuthContext?: string }>;
 
 export type SecurityClient = Readonly<{
   getSnapshot(options?: SecurityRequestOptions): Promise<SecuritySnapshot>;
   getSecuritySnapshot(options?: SecurityRequestOptions): Promise<SecuritySnapshot>;
+  addPasskey(options?: SecurityRequestOptions): Promise<void>;
+  registerPasskey(options?: SecurityRequestOptions): Promise<void>;
   renamePasskey(id: string, label: string, version: number, options?: SecurityRequestOptions): Promise<void>;
   revokePasskey(id: string, version: number, options?: SecurityRequestOptions): Promise<void>;
   revokeSession(id: string, version: number, options?: SecurityRequestOptions): Promise<void>;
@@ -49,13 +61,27 @@ export type SecurityClient = Readonly<{
 export class SecurityClientError extends Error {
   readonly code: "http_failed" | "invalid_response" | "transport_failed";
   readonly status?: number;
+  readonly serviceCode?: string;
 
-  constructor(code: "http_failed" | "invalid_response" | "transport_failed", message: string, status?: number) {
+  constructor(code: "http_failed" | "invalid_response" | "transport_failed", message: string, status?: number, serviceCode?: string) {
     super(message);
     this.name = "SecurityClientError";
     this.code = code;
     this.status = status;
+    this.serviceCode = serviceCode;
   }
+}
+
+/**
+ * A mutation may have committed before its response is lost or rejected.
+ * Callers must refresh authoritative state and must not resend automatically.
+ */
+export function isAmbiguousSecurityMutationError(error: unknown): boolean {
+  return error instanceof SecurityClientError && (
+    error.code === "transport_failed"
+    || error.code === "invalid_response"
+    || error.code === "http_failed" && error.status !== undefined && error.status >= 500 && error.status <= 599
+  );
 }
 
 /**
@@ -69,6 +95,10 @@ export async function getSecuritySnapshot(options: ClientOptions = {}): Promise<
 
 export async function renamePasskey(id: string, label: string, version: number, options: ClientOptions = {}): Promise<void> {
   return createSecurityClient(options).renamePasskey(id, label, version, options);
+}
+
+export async function registerPasskey(options: ClientOptions = {}): Promise<void> {
+  return createSecurityClient(options).registerPasskey(options);
 }
 
 export async function revokePasskey(id: string, version: number, options: ClientOptions = {}): Promise<void> {
@@ -90,12 +120,15 @@ export async function signOut(id: string, version: number, options: ClientOption
 export function createSecurityClient(options: ClientOptions = {}): SecurityClient {
   const fetchImpl = options.fetchImpl;
   const authenticateImpl = options.authenticateRecentAuthImpl ?? authenticateRecentAuth;
-  let sessionContext: { csrfToken: string; organizationId: string } | undefined;
-  let bootstrapPromise: Promise<{ csrfToken: string; organizationId: string }> | undefined;
+  const registerImpl = options.registerPasskeyImpl ?? runPasskeyRegistration;
+  const sessionProvider = options.sessionProvider;
+  let sessionContext: SecuritySessionContext | undefined;
+  let bootstrapPromise: Promise<SecuritySessionContext> | undefined;
   let closed = false;
 
-  const ensureSession = async (requestOptions: SecurityRequestOptions = {}): Promise<{ csrfToken: string; organizationId: string }> => {
+  const ensureSession = async (requestOptions: SecurityRequestOptions = {}): Promise<SecuritySessionContext> => {
     if (closed) throw closedSessionError();
+    if (sessionProvider !== undefined) return sessionProvider.get(requestOptions.signal);
     if (sessionContext !== undefined) return sessionContext;
     if (bootstrapPromise === undefined) {
       const pending = bootstrapSession({ fetchImpl, signal: requestOptions.signal }).then((context) => {
@@ -117,27 +150,41 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       requestJson("/api/auth/security/passkeys", "GET", token, undefined, request),
       requestJson("/api/auth/security/sessions", "GET", token, undefined, request),
     ]);
-    return Object.freeze({ passkeys: Object.freeze(parseCredentialPage(credentials)), sessions: Object.freeze(parseSessionPage(sessions)) });
+    const credentialPage = parseCredentialPage(credentials);
+    return Object.freeze({ passkeys: Object.freeze(credentialPage.items), passkeysComplete: credentialPage.complete, sessions: Object.freeze(parseSessionPage(sessions)) });
   };
 
-  const mutatePasskey = async (path: string, method: "POST" | "PATCH", body: Record<string, unknown>, requestOptions: SecurityRequestOptions, recentAuthOperation?: string): Promise<void> => {
+  const mutatePasskey = async (id: string, method: "POST" | "PATCH", body: Record<string, unknown>, version: number, requestOptions: SecurityRequestOptions, recentAuthOperation?: string, label?: string): Promise<void> => {
     const context = await ensureSession(requestOptions);
-    const recentAuth = recentAuthOperation === undefined ? undefined : await authorize(context, recentAuthOperation, requestOptions);
-    const response = await requestJson(path, method, context.csrfToken, body, requestOptionsFor(requestOptions), recentAuth);
-    expectCredentialMutation(response);
+    const idempotencyKey = makeIdempotencyKey();
+    const recentAuthContext = recentAuthOperation === undefined ? undefined : await credentialContextHash(recentAuthOperation, id, version);
+    const recentAuth = recentAuthOperation === undefined ? undefined : await authorize(context, recentAuthOperation, requestOptions, recentAuthContext);
+    const response = await requestJson(`/api/auth/security/passkeys/${encodeURIComponent(id)}${method === "POST" ? "/revoke" : ""}`, method, context.csrfToken, body, requestOptionsFor(requestOptions), { idempotencyKey, expectedVersion: version, recentAuth, recentAuthContext });
+    expectCredentialMutation(response, { id, version, status: method === "POST" ? "revoked" : "active", label });
+  };
+
+  const registerSecurityPasskey = async (requestOptions: SecurityRequestOptions): Promise<void> => {
+    const context = await ensureSession(requestOptions);
+    const result = await registerImpl({
+      organizationId: context.organizationId,
+      csrfToken: context.csrfToken,
+      signal: requestOptions.signal,
+      fetchImpl,
+    });
+    if (!result || result.registered !== true) throw new SecurityClientError("invalid_response", "パスキー登録の結果を確認できませんでした。");
   };
 
   const revokeSessionRecord = async (id: string, version: number, requestOptions: SecurityRequestOptions, current: boolean): Promise<boolean> => {
     const context = await ensureSession(requestOptions);
-    // Revoking another browser session is still a security-sensitive control.
-    // A stolen but otherwise valid console session must not remove the user's
-    // remaining recovery paths without an operation-bound step-up.
-    const recentAuth = await authorize(context, "human.management.session.revoke", requestOptions);
-    const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), recentAuth);
+    const recentAuth = current ? await authorize(context, "human.management.session.revoke", requestOptions) : undefined;
+    const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), { recentAuth });
     const revoked = expectSessionMutation(response);
     if (revoked.current) {
-      sessionContext = undefined;
-      bootstrapPromise = undefined;
+      if (sessionProvider !== undefined) sessionProvider.clear(context);
+      else {
+        sessionContext = undefined;
+        bootstrapPromise = undefined;
+      }
       closed = true;
     }
     return revoked.current;
@@ -146,16 +193,18 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
   const client: SecurityClient = {
     getSnapshot,
     getSecuritySnapshot: getSnapshot,
+    addPasskey: async (requestOptions = {}) => registerSecurityPasskey(requestOptions),
+    registerPasskey: async (requestOptions = {}) => registerSecurityPasskey(requestOptions),
     renamePasskey: async (id, label, version, requestOptions = {}) => {
       assertCredentialId(id);
       assertLabel(label);
       assertVersion(version);
-      await mutatePasskey(`/api/auth/security/passkeys/${encodeURIComponent(id)}`, "PATCH", { label, expected_version: version }, requestOptions);
+      await mutatePasskey(id, "PATCH", { label }, version, requestOptions, undefined, label);
     },
     revokePasskey: async (id, version, requestOptions = {}) => {
       assertCredentialId(id);
       assertVersion(version);
-      await mutatePasskey(`/api/auth/security/passkeys/${encodeURIComponent(id)}/revoke`, "POST", { expected_version: version }, requestOptions, "human.management.credential.revoke");
+      await mutatePasskey(id, "POST", {}, version, requestOptions, "human.management.credential.revoke");
     },
     revokeSession: async (id, version, requestOptions = {}) => {
       assertSessionTarget(id, version);
@@ -173,8 +222,10 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       if (!Array.isArray(sessions)) throw new SecurityClientError("invalid_response", "セッション情報を確認できませんでした。");
       const targets = sessions.filter((session) => !session.current);
       for (const session of targets) assertSessionTarget(session.id, session.version);
-      for (const session of targets) await revokeSessionRecord(session.id, session.version, requestOptions, false);
-      return targets.length;
+      const context = await ensureSession(requestOptions);
+      const recentAuth = await authorize(context, "human.management.sessions.revoke_others", requestOptions);
+      const response = await requestJson("/api/auth/security/sessions/revoke-others", "POST", context.csrfToken, {}, requestOptionsFor(requestOptions), { recentAuth });
+      return expectOtherSessionsMutation(response, context.organizationId);
     },
   };
   return Object.freeze(client);
@@ -183,14 +234,14 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     return { fetchImpl, signal: requestOptions.signal };
   }
 
-  async function authorize(context: { csrfToken: string; organizationId: string }, operation: string, requestOptions: SecurityRequestOptions): Promise<string> {
-    const result = await authenticateImpl({ operation, organizationId: context.organizationId, csrfToken: context.csrfToken, signal: requestOptions.signal, fetchImpl });
+  async function authorize(context: SecuritySessionContext, operation: string, requestOptions: SecurityRequestOptions, contextHash?: string): Promise<string> {
+    const result = await authenticateImpl({ operation, organizationId: context.organizationId, csrfToken: context.csrfToken, signal: requestOptions.signal, fetchImpl, ...(contextHash === undefined ? {} : { contextHash }) });
     if (!isUuid(result?.authorization_id)) throw new SecurityClientError("invalid_response", "再認証の結果を確認できませんでした。");
     return result.authorization_id.toLowerCase();
   }
 }
 
-async function bootstrapSession(options: ClientOptions): Promise<{ csrfToken: string; organizationId: string }> {
+async function bootstrapSession(options: ClientOptions): Promise<SecuritySessionContext> {
   const response = await requestJson("/api/auth/session", "POST", undefined, {}, options);
   if (!isRecord(response) || !hasExactKeys(response, ["session", "csrf_token"]) || !isRecord(response.session) || !isUuid(response.session.organization_id) || typeof response.csrf_token !== "string" || !CSRF.test(response.csrf_token)) {
     throw new SecurityClientError("invalid_response", "セッション応答を確認できませんでした。");
@@ -198,13 +249,16 @@ async function bootstrapSession(options: ClientOptions): Promise<{ csrfToken: st
   return { csrfToken: response.csrf_token, organizationId: response.session.organization_id.toLowerCase() };
 }
 
-async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfToken: string | undefined, body: Record<string, unknown> | undefined, options: ClientOptions, recentAuth?: string): Promise<unknown> {
+async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfToken: string | undefined, body: Record<string, unknown> | undefined, options: ClientOptions, controls: MutationControls = {}): Promise<unknown> {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new SecurityClientError("transport_failed", "セキュリティ情報を取得できませんでした。");
   const headers = new Headers({ accept: "application/json" });
   if (body !== undefined) headers.set("content-type", "application/json");
   if (csrfToken !== undefined) headers.set("agentpass-csrf", csrfToken);
-  if (recentAuth !== undefined) headers.set("agentpass-recent-auth", recentAuth);
+  if (controls.recentAuth !== undefined) headers.set("agentpass-recent-auth", controls.recentAuth);
+  if (controls.recentAuthContext !== undefined) headers.set("agentpass-recent-auth-context", controls.recentAuthContext);
+  if (controls.idempotencyKey !== undefined) headers.set("idempotency-key", controls.idempotencyKey);
+  if (controls.expectedVersion !== undefined) headers.set("if-match", `"${controls.expectedVersion}"`);
   let response: Response;
   try {
     response = await fetchImpl(path, {
@@ -224,15 +278,17 @@ async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfT
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) throw new SecurityClientError("invalid_response", "セキュリティ応答を確認できませんでした。", response.status);
   let value: unknown;
   try { value = await response.json(); } catch { throw new SecurityClientError("invalid_response", "セキュリティ応答を確認できませんでした。", response.status); }
-  if (!response.ok) throw new SecurityClientError("http_failed", "セキュリティ操作を完了できませんでした。", response.status);
+  if (!response.ok) throw new SecurityClientError("http_failed", "セキュリティ操作を完了できませんでした。", response.status, serviceErrorCode(value));
   return value;
 }
 
-function parseCredentialPage(value: unknown): SecurityPasskey[] {
+function parseCredentialPage(value: unknown): { items: SecurityPasskey[]; complete: boolean } {
   if (!isRecord(value) || !hasExactKeys(value, ["credentials", "next_cursor"]) || !Array.isArray(value.credentials) || value.credentials.length > MAX_ITEMS || !isNullableCursor(value.next_cursor)) {
     throw new SecurityClientError("invalid_response", "セキュリティ情報を確認できませんでした。");
   }
-  return value.credentials.map(parsePasskey).filter((item) => item.status === "active").map(toPublicPasskey);
+  const items = value.credentials.map(parsePasskey).filter((item) => item.status === "active").map(toPublicPasskey);
+  if (new Set(items.map((item) => item.id)).size !== items.length) throw new SecurityClientError("invalid_response", "セキュリティ情報を確認できませんでした。");
+  return { items, complete: value.next_cursor === null };
 }
 
 function parseSessionPage(value: unknown): SecuritySession[] {
@@ -256,9 +312,10 @@ function parseSession(value: unknown): SecuritySession & { status: "active" | "r
   return { id: value.session_id, version: value.version, label: value.is_current ? "現在のブラウザ" : "別のブラウザセッション", platform: "Web Console", createdAt: value.created_at, lastSeenAt: value.last_seen_at ?? value.created_at, expiresAt: value.expires_at, current: value.is_current, status: value.status as "active" | "revoked" | "expired" };
 }
 
-function expectCredentialMutation(value: unknown): void {
+function expectCredentialMutation(value: unknown, expected: Readonly<{ id: string; version: number; status: "active" | "revoked"; label?: string }>): void {
   if (!isRecord(value) || !hasExactKeys(value, ["credential"])) throw new SecurityClientError("invalid_response", "セキュリティ操作の応答を確認できませんでした。");
-  parsePasskey(value.credential);
+  const credential = parsePasskey(value.credential);
+  if (credential.id !== expected.id || credential.version !== expected.version + 1 || credential.status !== expected.status || expected.label !== undefined && credential.label !== expected.label) throw new SecurityClientError("invalid_response", "セキュリティ操作の応答を確認できませんでした。");
 }
 
 function expectSessionMutation(value: unknown): SecuritySession {
@@ -266,9 +323,37 @@ function expectSessionMutation(value: unknown): SecuritySession {
   return toPublicSession(parseSession(value.session));
 }
 
+function expectOtherSessionsMutation(value: unknown, organizationId: string): number {
+  if (!isRecord(value) || !hasExactKeys(value, ["revoked_sessions", "revoked_count", "truncated"]) || !Array.isArray(value.revoked_sessions) || value.revoked_sessions.length > MAX_ITEMS || !Number.isSafeInteger(value.revoked_count) || Number(value.revoked_count) < 0 || typeof value.truncated !== "boolean" || value.truncated !== (Number(value.revoked_count) > value.revoked_sessions.length) || (!value.truncated && value.revoked_count !== value.revoked_sessions.length) || (value.truncated && value.revoked_sessions.length !== MAX_ITEMS)) {
+    throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+  }
+  const records = value.revoked_sessions.map((session) => {
+    if (!isRecord(session) || session.organization_id !== organizationId || session.is_current !== false || session.status !== "revoked" || !isInstant(session.revoked_at)) {
+      throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+    }
+    return parseSession(session);
+  });
+  if (new Set(records.map((session) => session.id)).size !== records.length) throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+  return Number(value.revoked_count);
+}
+
 function assertSessionTarget(id: string, version: number): void {
   if (!isUuid(id)) throw new SecurityClientError("invalid_response", "対象を確認できませんでした。");
   assertVersion(version);
+}
+
+function makeIdempotencyKey(): string {
+  const value = globalThis.crypto?.randomUUID?.();
+  if (typeof value === "string") return value;
+  throw new SecurityClientError("transport_failed", "安全な操作IDを生成できませんでした。");
+}
+
+async function credentialContextHash(operation: string, credentialId: string, expectedVersion: number): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new SecurityClientError("transport_failed", "再認証コンテキストを生成できませんでした。");
+  const canonical = `{"credential_id":${JSON.stringify(credentialId)},"expected_version":${expectedVersion},"operation":${JSON.stringify(operation)},"version":1}`;
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("");
 }
 
 function closedSessionError(): SecurityClientError {
@@ -287,7 +372,7 @@ function assertCredentialId(value: string): asserts value is string { if (!isCre
 function assertLabel(value: string): asserts value is string { if (!isLabel(value)) throw new SecurityClientError("invalid_response", "表示名を確認できませんでした。"); }
 function assertVersion(value: number): asserts value is number { if (!isVersion(value)) throw new SecurityClientError("invalid_response", "更新番号を確認できませんでした。"); }
 function isId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
-function isCredentialId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9_-]{16,1024}$/.test(value) && !value.includes("="); }
+function isCredentialId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9_-]{22,1366}$/.test(value) && !value.includes("="); }
 function isUuid(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 function isLabel(value: unknown): value is string { return typeof value === "string" && value.length >= 1 && value.length <= 80 && value.trim() === value && !hasControl(value); }
 function isVersion(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
@@ -296,6 +381,10 @@ function isNullableCursor(value: unknown): value is string | null { return value
 function isInstant(value: unknown): value is string { return typeof value === "string" && ISO_INSTANT.test(value) && !Number.isNaN(Date.parse(value)); }
 function isNullableInstant(value: unknown): value is string | null { return value === null || isInstant(value); }
 function hasControl(value: string): boolean { for (const character of value) { const code = character.codePointAt(0) ?? 0; if (code <= 0x1f || code === 0x7f) return true; } return false; }
+function serviceErrorCode(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.error) || typeof value.error.code !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value.error.code)) return undefined;
+  return value.error.code;
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean { const actual = Object.keys(value).sort(); const keys = [...expected].sort(); return actual.length === keys.length && actual.every((key, index) => key === keys[index]); }
-import { authenticateRecentAuth, type AuthorizationResult, type WebAuthnClientInput } from "./webauthn-client.ts";
+import { authenticateRecentAuth, registerPasskey as runPasskeyRegistration, type AuthorizationResult, type RegistrationResult, type WebAuthnClientInput, type WebAuthnRegistrationInput } from "./webauthn-client.ts";

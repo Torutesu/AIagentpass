@@ -27,7 +27,11 @@ export default defineConfig({
   // and could hide a flaky first execution in the evidence summary.
   retries: 0,
   reporter: process.env.CI ? "line" : "list",
-  outputDir,
+  // Playwright's failure context is a Markdown file that the repository-wide
+  // artifact gate cannot parse. Screenshots, video, and traces are disabled
+  // below, so retaining test output would add no supported diagnostic value.
+  preserveOutput: "never",
+  outputDir: "./e2e/test-results",
   use: {
     baseURL: `http://127.0.0.1:${e2ePort}`,
     ...devices["Desktop Chrome"],
