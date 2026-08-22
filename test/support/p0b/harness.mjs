@@ -332,6 +332,17 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-capability",
       AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-audit-anchor",
       AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-promotion-evidence",
+      // Hosted runtime startup requires a complete deployment identity even
+      // for this disposable qualification tenant. Keep these values fixed and
+      // secret-free; release provenance is bound by the outer report.
+      AGENTPASS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+      AGENTPASS_CLOUD_SOURCE_TREE: "b".repeat(40),
+      AGENTPASS_CLOUD_IMAGE_DIGEST: `sha256:${"c".repeat(64)}`,
+      AGENTPASS_CLOUD_DEPLOYMENT_ID: "p0b-cloud",
+      AGENTPASS_CLOUD_DEPLOYMENT_REVISION: "p0b",
+      AGENTPASS_CLOUD_SCHEMA_DIGEST: "d".repeat(64),
+      AGENTPASS_CLOUD_CATALOG_DIGEST: "e".repeat(64),
+      AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: "f".repeat(64),
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
