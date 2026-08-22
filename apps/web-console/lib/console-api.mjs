@@ -16,7 +16,9 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|access[_-]?token|api[_-]?token)/i;
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+// PostgreSQL timestamptz JSON may use canonical `Z` or explicit UTC
+// `+00:00`; both represent UTC and are accepted at this boundary.
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/;
 const STABLE_REASON = /^[a-z][a-z0-9._-]{0,127}$/;
 const ENROLLMENT_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ENROLLMENT_DEVICE_FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/;
