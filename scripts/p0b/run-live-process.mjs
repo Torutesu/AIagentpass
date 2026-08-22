@@ -254,7 +254,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_STALE_AUTH_HTTP_4XX_FAILED", "stale_auth_http_4xx"],
   [null, "P0B_SAFE_STALE_AUTH_HTTP_5XX_FAILED", "stale_auth_http_5xx"],
   [null, "P0B_SAFE_STALE_AUTH_HTTP_OTHER_FAILED", "stale_auth_http_other"],
-  [7, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial", false],
+  [null, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial", false],
   [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial", false],
   [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial", false],
   [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial", false],
