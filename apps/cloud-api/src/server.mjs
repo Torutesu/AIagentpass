@@ -1028,7 +1028,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
 
 function safeReadinessFailureCode(error) {
   const message = typeof error?.message === "string" ? error.message : "";
-  if (message === "invalid readiness checks") return "health_invalid_readiness_checks";
+  if (/^invalid readiness checks:/u.test(message)) return `health_${message.slice("invalid readiness checks:".length)}`;
   if (message === "invalid deployment identity") return "health_invalid_deployment_identity";
   if (message === "invalid managed signer readiness") return "health_invalid_managed_signers";
   if (message === "invalid readiness report") return "health_invalid_readiness_report";
@@ -1979,52 +1979,52 @@ function publicDeploymentIdentity(value) {
 }
 
 function publicReadinessChecks(value, expectedReady = undefined) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks:shape");
   const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
   const allowedCheckNames = new Set(["database", "schema", "pool", "drain", "platform_session", "platform_promotion", "owner_recovery_outbox", "managed_signer_provider_operations", "device_audit_inbox", "managed_signers", ...hostedSignerCheckNames]);
-  if (Object.keys(value).some((key) => !allowedCheckNames.has(key))) throw new Error("invalid readiness checks");
+  if (Object.keys(value).some((key) => !allowedCheckNames.has(key))) throw new Error("invalid readiness checks:unknown_key");
   const suppliedSignerCheckNames = Object.keys(value).filter((key) => key.endsWith("_signer")).sort();
-  if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks");
+  if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks:signer_set");
   const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, device_audit_inbox: deviceAuditInbox, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
-  if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
+  if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks:database");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
-  if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
-  if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks");
-  if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks");
-  if (platformSession !== undefined && (!platformSession || typeof platformSession.enabled !== "boolean" || typeof platformSession.ok !== "boolean" || typeof platformSession.code !== "string")) throw new Error("invalid readiness checks");
-  if (platformPromotion !== undefined && (!platformPromotion || typeof platformPromotion.enabled !== "boolean" || typeof platformPromotion.ok !== "boolean" || typeof platformPromotion.code !== "string")) throw new Error("invalid readiness checks");
+  if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks:schema");
+  if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks:pool");
+  if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks:drain");
+  if (platformSession !== undefined && (!platformSession || typeof platformSession.enabled !== "boolean" || typeof platformSession.ok !== "boolean" || typeof platformSession.code !== "string")) throw new Error("invalid readiness checks:platform_session");
+  if (platformPromotion !== undefined && (!platformPromotion || typeof platformPromotion.enabled !== "boolean" || typeof platformPromotion.ok !== "boolean" || typeof platformPromotion.code !== "string")) throw new Error("invalid readiness checks:platform_promotion");
   if (ownerRecoveryOutbox !== undefined && (!ownerRecoveryOutbox || typeof ownerRecoveryOutbox.ok !== "boolean" || typeof ownerRecoveryOutbox.code !== "string"
     || !["running", "idle", "draining", "closed", "unavailable"].includes(ownerRecoveryOutbox.worker_state)
     || !integerOrNull(ownerRecoveryOutbox.pending_count) || !integerOrNull(ownerRecoveryOutbox.uncertain_count) || !integerOrNull(ownerRecoveryOutbox.dead_letter_count)
-    || !integerOrNull(ownerRecoveryOutbox.oldest_pending_age_ms) || !integerOrNull(ownerRecoveryOutbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks");
+    || !integerOrNull(ownerRecoveryOutbox.oldest_pending_age_ms) || !integerOrNull(ownerRecoveryOutbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks:owner_recovery_outbox");
   if (managedSignerProviderOperations !== undefined && (!managedSignerProviderOperations || typeof managedSignerProviderOperations.ok !== "boolean"
     || typeof managedSignerProviderOperations.code !== "string"
     || !["running", "idle", "closing", "closed", "unavailable"].includes(managedSignerProviderOperations.worker_state)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.pending_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.started_count)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.accepted_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.uncertain_count)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.stale_started_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.oldest_nonterminal_age_ms)
-    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.last_success_age_ms))) throw new Error("invalid readiness checks");
+    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.last_success_age_ms))) throw new Error("invalid readiness checks:managed_signer_provider_operations");
   if (deviceAuditInbox !== undefined && (!deviceAuditInbox || typeof deviceAuditInbox.ok !== "boolean" || typeof deviceAuditInbox.code !== "string"
     || !["running", "idle", "draining", "closed", "unavailable"].includes(deviceAuditInbox.worker_state)
     || !nonNegativeIntegerOrNull(deviceAuditInbox.pending_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.processing_count)
     || !nonNegativeIntegerOrNull(deviceAuditInbox.accepted_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.uncertain_count)
     || !nonNegativeIntegerOrNull(deviceAuditInbox.dead_letter_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_pending_age_ms)
-    || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks");
+    || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks:device_audit_inbox");
   const publicKeyFingerprint = /^(?:[0-9a-f]{64}|SHA256:[A-Za-z0-9_-]{43})$/u;
   if (managedSigners !== undefined) validateManagedSignerReadiness(managedSigners);
   if (agentSessionSigner !== undefined && (!agentSessionSigner || typeof agentSessionSigner.ok !== "boolean"
     || agentSessionSigner.purpose !== "agentpass.agent-session-grant" || agentSessionSigner.algorithm !== "ed25519"
     || (agentSessionSigner.key_id !== null && typeof agentSessionSigner.key_id !== "string")
-    || (agentSessionSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(agentSessionSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+    || (agentSessionSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(agentSessionSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks:agent_session_signer");
   if (qualificationManifestSigner !== undefined && (!qualificationManifestSigner || typeof qualificationManifestSigner.ok !== "boolean"
     || qualificationManifestSigner.purpose !== "agentpass.qualification-grant-batch-manifest" || qualificationManifestSigner.algorithm !== "ed25519"
     || (qualificationManifestSigner.key_id !== null && typeof qualificationManifestSigner.key_id !== "string")
-    || (qualificationManifestSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(qualificationManifestSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+    || (qualificationManifestSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(qualificationManifestSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks:qualification_manifest_signer");
   if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.ok !== "boolean"
     || possessionReceiptSigner.purpose !== "device-enrollment-possession-receipt" || possessionReceiptSigner.algorithm !== "ed25519"
     || (possessionReceiptSigner.key_id !== null && typeof possessionReceiptSigner.key_id !== "string")
-    || (possessionReceiptSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(possessionReceiptSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+    || (possessionReceiptSigner.public_key_fingerprint !== null && !publicKeyFingerprint.test(possessionReceiptSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks:possession_receipt_signer");
   const signerChecks = [
     [refreshHintSigner, "agentpass.refresh-hint"],
     [capabilitySigner, "agentpass.capability"],
@@ -2035,7 +2035,7 @@ function publicReadinessChecks(value, expectedReady = undefined) {
   for (const [signer, purpose] of signerChecks) {
     if (signer !== undefined && (!signer || typeof signer.ok !== "boolean" || signer.purpose !== purpose || signer.algorithm !== "ed25519"
       || (signer.key_id !== null && typeof signer.key_id !== "string")
-      || (signer.public_key_fingerprint !== null && !publicKeyFingerprint.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+      || (signer.public_key_fingerprint !== null && !publicKeyFingerprint.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks:signer");
   }
   const coreChecksReady = database.ok === true
     && schema.ok === true
