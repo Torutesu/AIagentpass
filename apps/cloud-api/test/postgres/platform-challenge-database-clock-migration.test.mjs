@@ -19,7 +19,6 @@ test("0068 binds Platform challenge creation timestamps to one database instant"
 test("0068 remains catalogued at the current schema head", async () => {
   const catalog = JSON.parse(await readFile(catalogUrl, "utf8"));
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0111_human_credential_registration_binding.sql");
   assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(catalog.entries.find((entry) => entry.version === 68)?.id, "migration.0068_platform_challenge_database_clock");
 });

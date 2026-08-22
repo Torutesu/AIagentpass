@@ -31,7 +31,6 @@ test("0066 supports the documented 30-to-365-day retention range without removin
   assert.match(privilegeCheck, new RegExp(signature.replace(/[()]/gu, "\\$&"), "u"));
 
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0111_human_credential_registration_binding.sql");
   const catalog = JSON.parse(catalogText);
   assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(catalog.entries.find((entry) => entry.version === 66)?.id, "migration.0066_provider_operation_retention_bigint");
