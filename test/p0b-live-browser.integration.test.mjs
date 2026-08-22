@@ -404,7 +404,14 @@ async function scenario(parent, name, callback) {
       // scenario ordinal so CI can identify the failing matrix slice without
       // exposing assertion text, URLs, or fixture data.
       const message = scenarioError instanceof Error ? scenarioError.message : "";
-      if (lifecycleFailureMarker(scenarioError) === null && !/^P0B_SAFE_[A-Z0-9_]+$/u.test(message)) {
+      const safeMessage = /^P0B_SAFE_[A-Z0-9_]+$/u.test(message);
+      if (safeMessage) {
+        // The callback's assertion is captured so resources can be closed;
+        // re-emit its fixed marker after cleanup before propagating failure.
+        process.stderr.write(`${message}\n`);
+        throw scenarioError;
+      }
+      if (lifecycleFailureMarker(scenarioError) === null) {
         process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
       }
       failLifecycle(scenarioError);
@@ -535,7 +542,10 @@ function failWakeStatus(failurePrefix, suffix) {
 
 function failLifecycle(error) {
   const marker = lifecycleFailureMarker(error);
-  if (marker !== null) assert.fail(marker);
+  if (marker !== null) {
+    process.stderr.write(`${marker}\n`);
+    assert.fail(marker);
+  }
   throw error;
 }
 
