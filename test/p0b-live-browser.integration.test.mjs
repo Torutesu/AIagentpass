@@ -208,14 +208,14 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     await scenario(t, `${role} completes distinct real WebAuthn device revoke`, async ({ open }) => {
       let page;
       try { page = await open(role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {}); }
-      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_OPEN_FAILED"); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("owner final open failed"); }
       try { await page.getByRole("button", { name: "セットアップ", exact: true }).click(); }
-      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_SETUP_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_SETUP_FAILED"); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_SETUP_FAILED"); throw new Error("owner final setup failed"); }
       const device = page.getByRole("listitem").filter({ hasText: deviceName });
       try { await device.getByRole("button", { name: "停止" }).click(); }
-      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_STOP_FAILED"); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("owner final stop failed"); }
       try { await page.getByText(`${deviceName}を停止しました`).waitFor(); }
-      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_CONFIRM_FAILED"); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("owner final confirmation failed"); }
     });
   }
 
@@ -411,8 +411,7 @@ async function scenario(parent, name, callback) {
               if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
-              if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
-              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_MISSING_FAILED");
+              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
             }
             const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
             if (deviceReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED");
