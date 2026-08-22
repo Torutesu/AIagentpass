@@ -390,6 +390,9 @@ async function scenario(parent, name, callback) {
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
         } catch {
           const summaryStatus = page?.__p0bSummaryResponses?.get("summary");
+          if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && !Number.isInteger(summaryStatus)) {
+            assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
+          }
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && Number.isInteger(summaryStatus)) {
             if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
             if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
