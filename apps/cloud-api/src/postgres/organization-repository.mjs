@@ -791,6 +791,9 @@ function requireIdempotencyKey(input) {
 }
 function mapPostgresMutationError(error) {
   if (error instanceof OrganizationRepositoryError) return error;
+  if (error?.code === "23505" && /idempotency key was already used/u.test(String(error?.message ?? ""))) {
+    return new OrganizationRepositoryError("ERR_IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different request");
+  }
   if (error?.code === "23514" && error?.constraint === "memberships_last_active_owner") {
     return new OrganizationRepositoryError("ERR_LAST_OWNER", "the final active organization owner is protected");
   }

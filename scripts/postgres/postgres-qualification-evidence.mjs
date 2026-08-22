@@ -94,7 +94,7 @@ async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl
              (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()) AS ssl,
              (SELECT version FROM pg_stat_ssl WHERE pid=pg_backend_pid()) AS tls_version,
              (SELECT cipher FROM pg_stat_ssl WHERE pid=pg_backend_pid()) AS cipher,
-             (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles WHERE rolname = ANY($1::text[])) AS roles,
+             (SELECT array_agg(rolname::text ORDER BY rolname)::text[] FROM pg_roles WHERE rolname = ANY($1::text[])) AS roles,
              (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                 WHERE n.nspname='public' AND c.relname IN ('device_audit_events','device_audit_heads','device_audit_gaps')
                   AND c.relrowsecurity AND c.relforcerowsecurity) AS forced_rls_relations,
