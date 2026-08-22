@@ -184,7 +184,11 @@ test("live PostgreSQL Native Device audit upload enforces forced tenant RLS for 
   await withSessionAuthorization(fixture.pool, "agentpass_app", async (client) => {
     await client.query("BEGIN");
     try {
-      await client.query("SELECT set_config('agentpass.organization_id',$1,true)", [fixture.organization]);
+      const authorization = await client.query(
+        "SELECT public.agentpass_authorize_device_audit_tenant($1::uuid,$2::uuid) AS organization_id",
+        [fixture.organization, fixture.deviceA],
+      );
+      assert.equal(authorization.rows[0].organization_id, fixture.organization);
       const visible = {};
       for (const table of ["device_audit_events", "device_audit_heads", "device_audit_gaps"]) {
         const result = await client.query(`SELECT count(*)::int AS count FROM public.${table}`);
