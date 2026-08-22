@@ -48,6 +48,15 @@ CREATE POLICY device_audit_export_heads_tenant_update
   USING (organization_id = public.agentpass_device_audit_current_organization_id())
   WITH CHECK (organization_id = public.agentpass_device_audit_current_organization_id());
 
+DROP POLICY IF EXISTS device_audit_export_entries_migrator_authority ON public.device_audit_export_entries;
+CREATE POLICY device_audit_export_entries_migrator_authority
+  ON public.device_audit_export_entries FOR ALL TO agentpass_migrator
+  USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS device_audit_export_heads_migrator_authority ON public.device_audit_export_heads;
+CREATE POLICY device_audit_export_heads_migrator_authority
+  ON public.device_audit_export_heads FOR ALL TO agentpass_migrator
+  USING (true) WITH CHECK (true);
+
 ALTER FUNCTION public.agentpass_agent_session_grant_get(uuid, uuid) VOLATILE;
 
 -- The authority-generation column was added after the original session row

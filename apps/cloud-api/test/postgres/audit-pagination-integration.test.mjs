@@ -32,6 +32,10 @@ test("PostgreSQL activity keyset traverses more than 500 rows without duplicates
     otherDeviceId,
     TEST_PUBLIC_KEYS[1]
   ]);
+  await pool.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
+    VALUES ($1,$2,$2,'cli','Activity agent',$3,'active'),($1,$4,$4,'cli','Other activity agent',$5,'active')`, [
+    organizationId, deviceId, TEST_PUBLIC_KEYS[0], otherDeviceId, TEST_PUBLIC_KEYS[1]
+  ]);
 
   const initial = [];
   const otherDeviceEvents = [];
