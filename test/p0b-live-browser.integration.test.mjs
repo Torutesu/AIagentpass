@@ -255,6 +255,7 @@ export function staleAuthCeremonyFailureMarker(error) {
 async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
   selectedScenarioCount += 1;
+  const scenarioIndex = selectedScenarioCount;
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
@@ -385,7 +386,12 @@ async function scenario(parent, name, callback) {
       try { await fixture?.close(); }
       catch (error) { cleanupError ??= error; }
     }
-    if (scenarioError) failLifecycle(scenarioError);
+    if (scenarioError) {
+      if (!String(scenarioError?.message ?? "").startsWith("P0B_SAFE_")) {
+        assert.fail(`P0B_SAFE_SCENARIO_${scenarioIndex}_FAILED`);
+      }
+      failLifecycle(scenarioError);
+    }
     if (cleanupError) failLifecycle(cleanupError);
   });
 }
