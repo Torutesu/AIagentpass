@@ -27,7 +27,7 @@ BEGIN
         INTO result
         FROM jsonb_each(value) AS entry;
     WHEN 'array' THEN
-      SELECT '[' || COALESCE(string_agg(public.agentpass_canonical_audit_json(entry), ',' ORDER BY entry.ordinality), '') || ']'
+      SELECT '[' || COALESCE(string_agg(public.agentpass_canonical_audit_json(entry.value), ',' ORDER BY entry.ordinality), '') || ']'
         INTO result
         FROM jsonb_array_elements(value) WITH ORDINALITY AS entry(value, ordinality);
     ELSE
