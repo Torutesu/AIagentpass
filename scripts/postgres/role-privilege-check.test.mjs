@@ -83,7 +83,8 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /device_audit_inbox_boundary_ok/u);
   assert.match(checker, /agentpass_device_audit_inbox_enqueue\(uuid,uuid,uuid,text,text,jsonb\)/u);
   assert.match(checker, /agentpass_device_audit_inbox_health\(\)/u);
-  assert.match(checker, /device_audit_events_tenant_select/u);
+  assert.match(checker, /expected\(policy_suffix, command, role_oid\)/u);
+  assert.match(checker, /t\.relname \|\| '_' \|\| expected\.policy_suffix/u);
   assert.match(checker, /agentpass_record_device_audit_head\(\)/u);
   assert.match(checker, /expected_migrations\(version, checksum\)/u);
   assert.match(checker, /actual\.checksum IS DISTINCT FROM expected\.checksum/u);
