@@ -255,7 +255,6 @@ export function staleAuthCeremonyFailureMarker(error) {
 async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
   selectedScenarioCount += 1;
-  const scenarioIndex = selectedScenarioCount;
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
@@ -386,13 +385,7 @@ async function scenario(parent, name, callback) {
       try { await fixture?.close(); }
       catch (error) { cleanupError ??= error; }
     }
-    if (scenarioError) {
-      if (scenarioError instanceof P0BLiveBrowserFixtureError) failLifecycle(scenarioError);
-      if (!String(scenarioError?.message ?? "").startsWith("P0B_SAFE_")) {
-        assert.fail(`P0B_SAFE_SCENARIO_${scenarioIndex}_FAILED`);
-      }
-      failLifecycle(scenarioError);
-    }
+    if (scenarioError) failLifecycle(scenarioError);
     if (cleanupError) failLifecycle(cleanupError);
   });
 }
@@ -525,7 +518,6 @@ function failLifecycle(error) {
 
 export function lifecycleFailureMarker(error) {
   if (!(error instanceof P0BLiveBrowserFixtureError)) return null;
-  if (typeof error.code === "string" && error.code.startsWith("database_seed_")) return "P0B_SAFE_DATABASE_SEED_FAILED";
   return new Map([
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
     ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
