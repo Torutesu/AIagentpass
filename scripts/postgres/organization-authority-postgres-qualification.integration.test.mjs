@@ -179,6 +179,7 @@ async function cleanup(adminPool, { organizationIds, memberIds }) {
     ["DELETE FROM public.idempotency_records WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
     ["DELETE FROM public.outbox_events WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
     ["DELETE FROM public.admin_audit_events WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+    ["DELETE FROM public.control_plane_authority_generations WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
     ["DELETE FROM public.organization_invitations WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
     ["DELETE FROM public.memberships WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
     ["DELETE FROM public.admin_audit_heads WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
@@ -210,11 +211,12 @@ async function cleanup(adminPool, { organizationIds, memberIds }) {
              (SELECT count(*) FROM public.idempotency_records WHERE organization_id = ANY($1::uuid[])) AS idempotency_records,
              (SELECT count(*) FROM public.outbox_events WHERE organization_id = ANY($1::uuid[])) AS outbox_events,
              (SELECT count(*) FROM public.admin_audit_events WHERE organization_id = ANY($1::uuid[])) AS audit_events,
-             (SELECT count(*) FROM public.admin_audit_heads WHERE organization_id = ANY($1::uuid[])) AS audit_heads`,
+             (SELECT count(*) FROM public.admin_audit_heads WHERE organization_id = ANY($1::uuid[])) AS audit_heads,
+             (SELECT count(*) FROM public.control_plane_authority_generations WHERE organization_id = ANY($1::uuid[])) AS authority_generations`,
     [organizationArray, memberArray]);
     assert.deepEqual(remaining.rows[0], {
       organizations: "0", members: "0", memberships: "0", invitations: "0",
-      idempotency_records: "0", outbox_events: "0", audit_events: "0", audit_heads: "0",
+      idempotency_records: "0", outbox_events: "0", audit_events: "0", audit_heads: "0", authority_generations: "0",
     }, "organization qualification cleanup left rows behind");
   } finally {
     if (began) await cleanupClient.query("ROLLBACK").catch(() => {});

@@ -126,6 +126,8 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
   const otherAgentId = id("other-agent");
   const memberId = id("member");
   const membershipId = id("membership");
+  const qualificationPublicKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
+  const otherQualificationPublicKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   try {
     // The administrator identity is limited to schema migration and fixture
     // setup. All online authorization, DML, RLS, and trigger probes below use
@@ -153,8 +155,8 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
       INSERT INTO devices (organization_id, id, label, key_algorithm, public_key_pem, status) VALUES
         ($1, $2, 'qualification device', 'ed25519', $3, 'active'),
         ($4, $5, 'other qualification device', 'ed25519', $6, 'active')`, [
-      organizationId, deviceId, "-----BEGIN PUBLIC KEY-----\nqualification\n-----END PUBLIC KEY-----",
-      otherOrganizationId, otherDeviceId, "-----BEGIN PUBLIC KEY-----\nother-qualification\n-----END PUBLIC KEY-----"
+      organizationId, deviceId, qualificationPublicKey,
+      otherOrganizationId, otherDeviceId, otherQualificationPublicKey
     ]);
     await adminPool.query(`
       INSERT INTO agents (organization_id, id, device_id, kind, name, public_key_pem, status) VALUES
