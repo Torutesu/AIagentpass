@@ -562,6 +562,7 @@ export async function main(argv = process.argv.slice(2)) {
           // itself reaches its hard deadline, preserve that timeout instead of
           // misreporting it as a normal nonzero admin/revoke failure.
           const reason = liveBrowserFailureReason(result);
+          emitCommandDiagnostic("live-browser", result);
           failure = { stage: "live-browser", error: new OrchestrationError(reason) };
         } else if (interrupted) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
@@ -585,6 +586,7 @@ export async function main(argv = process.argv.slice(2)) {
         activeChild = undefined;
         terminateActiveChild = undefined;
         if (result.status !== "passed") {
+          emitCommandDiagnostic("live-test", result);
           failure = { stage: "live-test", error: new OrchestrationError(result.reason) };
         } else if (interrupted) {
           failure = { stage: "live-test", error: new OrchestrationError("interrupted") };
@@ -721,6 +723,21 @@ export async function prepareQualificationOutput(outputFile) {
 
 function commandEvidence(id, argv, cwd, result) {
   return Object.freeze({ id, argv: Object.freeze(argv), cwd, result });
+}
+
+// Keep failure triage useful without ever forwarding child output. These
+// fields are supervisor-owned numeric/enum metadata only; assertions, URLs,
+// credentials, and arbitrary exception text remain discarded by the runner.
+function emitCommandDiagnostic(stage, result) {
+  const safeStage = /^[a-z][a-z0-9-]{0,31}$/u.test(stage) ? stage : "unknown";
+  const exitCode = Number.isSafeInteger(result?.exit_code) ? result.exit_code : "null";
+  const signal = typeof result?.signal === "string" ? result.signal : "none";
+  const duration = Number.isSafeInteger(result?.duration_ms) ? result.duration_ms : "null";
+  const stdoutBytes = Number.isSafeInteger(result?.stdout_bytes) ? result.stdout_bytes : "null";
+  const stderrBytes = Number.isSafeInteger(result?.stderr_bytes) ? result.stderr_bytes : "null";
+  const marker = typeof result?.internal?.safe_failure_code === "string"
+    ? result.internal.safe_failure_code : "none";
+  process.stderr.write(`p0b-command: stage=${safeStage} exit=${exitCode} signal=${signal} duration_ms=${duration} stdout_bytes=${stdoutBytes} stderr_bytes=${stderrBytes} marker=${marker}\n`);
 }
 
 function gateEvidence(id, metadata) {
