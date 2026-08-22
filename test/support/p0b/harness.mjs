@@ -317,6 +317,8 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     const consolePort = await reservePort();
     const consoleTlsPort = await reservePort();
     const common = {
+      P0B_SOURCE_COMMIT: env.P0B_SOURCE_COMMIT,
+      P0B_SOURCE_TREE: env.P0B_SOURCE_TREE,
       AGENTPASS_DATABASE_URL: databaseAuthorities.app,
       AGENTPASS_MIGRATION_DATABASE_URL: databaseAuthorities.migration,
       AGENTPASS_SIGNER_DATABASE_URL: databaseAuthorities.signer,
