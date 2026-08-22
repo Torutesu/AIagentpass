@@ -248,6 +248,6 @@ export function verifyEvidence(file, sourceCommit) {
 const [command, output, tapFile, expectedSource] = process.argv.slice(2);
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (command === "write" && output && tapFile) await writeEvidence(output, tapFile);
-  else if (command === "verify" && output && expectedSource) verifyEvidence(output, expectedSource);
+  else if (command === "verify" && output && tapFile) verifyEvidence(output, tapFile);
   else fail(`usage: postgres-qualification-evidence.mjs write <evidence> <tap> | verify <evidence> <source-sha> (command=${String(command ?? "")}, output=${Boolean(output)}, tap=${Boolean(tapFile)}, source=${Boolean(expectedSource)})`);
 }
