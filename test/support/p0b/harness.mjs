@@ -844,8 +844,16 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
   const readinessDiagnostic = /^status_\d+_[a-z][a-z0-9_]{0,63}$/u.test(detail) ? detail : "transport_or_timeout";
-  const readinessMarker = readinessDiagnostic.startsWith("status_503_health_invalid_")
-    ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_READINESS_FAILED"
+  const readinessMarker = readinessDiagnostic === "status_503_health_invalid_readiness_checks"
+    ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_READINESS_CHECKS_FAILED"
+    : readinessDiagnostic === "status_503_health_invalid_deployment_identity"
+      ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_DEPLOYMENT_IDENTITY_FAILED"
+      : readinessDiagnostic === "status_503_health_invalid_managed_signers"
+        ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_MANAGED_SIGNERS_FAILED"
+        : readinessDiagnostic === "status_503_health_invalid_readiness_report"
+          ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_REPORT_FAILED"
+          : readinessDiagnostic.startsWith("status_503_health_invalid_")
+            ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_READINESS_FAILED"
     : readinessDiagnostic === "status_503_health_unavailable"
     ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNAVAILABLE_FAILED"
     : readinessDiagnostic === "status_503_schema_identity_unavailable"
