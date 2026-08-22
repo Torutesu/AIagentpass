@@ -871,6 +871,18 @@ SELECT json_build_object(
     JOIN pg_class AS c ON c.oid = p.polrelid
     JOIN pg_namespace AS n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relname = 'device_audit_events'), '[]'::json),
+  'device_audit_policy_comparison', COALESCE((SELECT json_agg(json_build_object(
+    'name', p.polname,
+    'command', p.polcmd,
+    'roles', p.polroles,
+    'normalized_using', replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', ''),
+    'normalized_with_check', replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', ''),
+    'expected_using', CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN '(organization_id=agentpass_device_audit_current_organization_id())' END,
+    'expected_with_check', CASE WHEN p.polcmd IN ('a', 'w') THEN '(organization_id=agentpass_device_audit_current_organization_id())' END
+  ) ORDER BY p.polname) FROM pg_policy AS p
+    JOIN pg_class AS c ON c.oid = p.polrelid
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relname = 'device_audit_events'), '[]'::json),
   'app_missing_allowlist', COALESCE((SELECT json_agg(routine_signature ORDER BY routine_signature)
     FROM app_function_oids WHERE routine_oid IS NULL), '[]'::json),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
@@ -979,7 +991,7 @@ SELECT json_build_object(
                 : ` agent_session_authority_diagnostics=${boundedTableDiagnostics(report.agent_session_authority_diagnostics)}`;
               const deviceAuditDiagnostics = report.device_audit_boundary_ok === true
                 ? ''
-                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, event_policies: report.device_audit_event_policies, missing_app_functions: report.app_missing_allowlist })}`;
+                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, event_policies: report.device_audit_event_policies, comparison: report.device_audit_policy_comparison, missing_app_functions: report.app_missing_allowlist })}`;
               fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}${deviceAuditDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
