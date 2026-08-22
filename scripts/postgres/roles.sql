@@ -180,9 +180,6 @@ BEGIN
      AND to_regclass('public.memberships') IS NOT NULL THEN
     EXECUTE 'GRANT SELECT ON TABLE public.organizations, public.memberships TO agentpass_app';
   END IF;
-  IF to_regclass('public.organization_invitations') IS NOT NULL THEN
-    EXECUTE 'GRANT SELECT ON TABLE public.organization_invitations TO agentpass_app';
-  END IF;
 END
 $$;
 
@@ -231,7 +228,7 @@ BEGIN
     'platform_operator_assignment_approvals',
         'managed_signer_key_lifecycles', 'managed_signer_keys',
         'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
-    'managed_signer_provider_operations'
+    'managed_signer_provider_operations', 'organization_invitations'
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
@@ -293,6 +290,17 @@ BEGIN
   IF to_regclass('public.device_audit_inbox') IS NOT NULL THEN
     REVOKE ALL PRIVILEGES ON TABLE public.device_audit_inbox FROM agentpass_app, agentpass_backup, agentpass_maintenance;
     GRANT SELECT ON TABLE public.device_audit_inbox TO agentpass_backup;
+  END IF;
+END
+$$;
+
+-- Organization invitations are function-only for the application identity;
+-- raw SELECT would expose token_hash.
+DO $$
+BEGIN
+  IF to_regclass('public.organization_invitations') IS NOT NULL THEN
+    REVOKE ALL PRIVILEGES ON TABLE public.organization_invitations FROM agentpass_app, agentpass_backup, agentpass_maintenance;
+    GRANT SELECT ON TABLE public.organization_invitations TO agentpass_backup;
   END IF;
 END
 $$;

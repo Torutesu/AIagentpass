@@ -82,6 +82,7 @@ async function cleanupFixture(adminPool, { organizationIds, memberIds }) {
       ["DELETE FROM control_plane_authority_generations WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM agents WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM devices WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_control_plane_state WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM memberships WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM organizations WHERE id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM members WHERE id = ANY($1::uuid[])", [memberArray]],
