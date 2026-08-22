@@ -325,6 +325,14 @@ async function scenario(parent, name, callback) {
             }
           );
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
+        let summaryStatus = null;
+        const summaryResponseListener = (response) => {
+          try {
+            const url = new URL(response.url());
+            if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") summaryStatus = response.status();
+          } catch {}
+        };
+        page.on("response", summaryResponseListener);
         if (register) {
           try { await fixture.installVirtualAuthenticator(page, role); }
           catch { failSafeOpen(effectiveSafeOpenPrefix, "AUTHENTICATOR"); }
@@ -378,6 +386,11 @@ async function scenario(parent, name, callback) {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
             const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
             if (summaryReady === 0) {
+              if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
+              if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
+              if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
+              if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_5XX_FAILED");
+              if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
               if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
