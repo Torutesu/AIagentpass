@@ -306,6 +306,8 @@ async function scenario(parent, name, callback) {
         let page;
         let summaryResponses = new Map();
         let summaryRequests = new Set();
+        let sessionResponses = new Map();
+        let sessionRequests = new Set();
         try {
           context = await runP0BLifecycle(
             () => browser.newContext({ ignoreHTTPSErrors: false }),
@@ -333,6 +335,10 @@ async function scenario(parent, name, callback) {
           page.on("request", (request) => {
             try {
               const url = new URL(request.url());
+              if (url.pathname === "/api/auth/session/resume") {
+                sessionRequests.add("resume");
+                return;
+              }
               if (url.pathname !== "/api/console") return;
               const resource = url.searchParams.get("resource") ?? "summary";
               if (resource === "summary" || resource === "deployment-readiness") summaryRequests.add(resource);
@@ -341,6 +347,10 @@ async function scenario(parent, name, callback) {
           page.on("response", (response) => {
             try {
               const url = new URL(response.url());
+              if (url.pathname === "/api/auth/session/resume") {
+                sessionResponses.set("resume", response.status());
+                return;
+              }
               if (url.pathname !== "/api/console") return;
               const resource = url.searchParams.get("resource") ?? "summary";
               if (resource === "summary" || resource === "deployment-readiness") summaryResponses.set(resource, response.status());
@@ -399,7 +409,15 @@ async function scenario(parent, name, callback) {
         } catch {
           const summaryStatus = summaryResponses.get("summary");
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && !Number.isInteger(summaryStatus)) {
-            if (!summaryRequests.has("summary")) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED");
+            if (!summaryRequests.has("summary")) {
+              const sessionStatus = sessionResponses.get("resume");
+              if (!Number.isInteger(sessionStatus)) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_NO_RESPONSE_FAILED");
+              if (sessionStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_401_FAILED");
+              if (sessionStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_403_FAILED");
+              if (sessionStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_5XX_FAILED");
+              if (sessionStatus >= 200 && sessionStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_RESPONSE_CONTRACT_FAILED");
+              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED");
+            }
             assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
           }
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && Number.isInteger(summaryStatus)) {
