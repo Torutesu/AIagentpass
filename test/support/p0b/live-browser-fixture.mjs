@@ -574,6 +574,8 @@ export async function startP0BLiveBrowserFixture({
 
 export function classifyP0BStartupError(error) {
   const message = typeof error?.message === "string" ? error.message : "";
+  if (/P0-B deployment schema identity failed/u.test(message)) return "database_prepare_failed";
+  if (/P0-B deployment (?:migration|catalog) digest failed|P0-B source identity unavailable/u.test(message)) return "startup_failed";
   const cloudCategory = message.match(/^P0-B cloud ([a-z_]+_failed) before readiness\b/u)?.[1];
   if (cloudCategory === "postgres_start_failed") return "cloud_postgres_start_failed";
   if (cloudCategory === "config_start_failed") return "cloud_config_start_failed";

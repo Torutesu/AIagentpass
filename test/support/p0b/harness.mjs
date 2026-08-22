@@ -55,7 +55,9 @@ async function p0BDeploymentDigests({ repoRoot, database, sourceCommit, sourceTr
   if (!/^[0-9a-f]{40}$/u.test(sourceCommit ?? "") || !/^[0-9a-f]{40}$/u.test(sourceTree ?? "")) {
     throw new Error("P0-B source identity is unavailable");
   }
-  const migrations = await loadSqlMigrations();
+  let migrations;
+  try { migrations = await loadSqlMigrations(); }
+  catch { throw new Error("P0-B deployment migration digest failed"); }
   const manifest = {
     schema_version: 1,
     source_commit: sourceCommit,
@@ -63,17 +65,25 @@ async function p0BDeploymentDigests({ repoRoot, database, sourceCommit, sourceTr
     migrations: migrations.map((migration) => ({ name: migration.name, bytes: Buffer.byteLength(migration.sql, "utf8"), sha256: migration.checksum }))
   };
   const schemaDigest = crypto.createHash("sha256").update(`${canonicalJson(manifest)}\n`, "utf8").digest("hex");
-  const catalogBytes = await fsp.readFile(path.resolve(repoRoot, "contracts/catalog-v1.json"));
+  let catalogBytes;
+  try { catalogBytes = await fsp.readFile(path.resolve(repoRoot, "contracts/catalog-v1.json")); }
+  catch { throw new Error("P0-B deployment catalog digest failed"); }
   const catalogDigest = crypto.createHash("sha256").update(catalogBytes).digest("hex");
-  const client = await database.pool.connect();
+  let client;
+  try { client = await database.pool.connect(); }
+  catch { throw new Error("P0-B deployment schema identity failed"); }
   let began = false;
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     began = true;
     await client.query("SET LOCAL search_path TO pg_catalog, public");
-    const result = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
-    const snapshot = typeof result?.rows?.[0]?.snapshot === "string" ? JSON.parse(result.rows[0].snapshot) : result?.rows?.[0]?.snapshot;
-    return Object.freeze({ schemaDigest, catalogDigest, databaseSchemaDigest: postgresSchemaIdentityDigest(snapshot) });
+    let result;
+    try { result = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY); }
+    catch { throw new Error("P0-B deployment schema identity failed"); }
+    try {
+      const snapshot = typeof result?.rows?.[0]?.snapshot === "string" ? JSON.parse(result.rows[0].snapshot) : result?.rows?.[0]?.snapshot;
+      return Object.freeze({ schemaDigest, catalogDigest, databaseSchemaDigest: postgresSchemaIdentityDigest(snapshot) });
+    } catch { throw new Error("P0-B deployment schema identity failed"); }
   } finally {
     if (began) await client.query("ROLLBACK").catch(() => {});
     client.release();
