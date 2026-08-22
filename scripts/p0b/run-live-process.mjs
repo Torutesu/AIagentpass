@@ -258,6 +258,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED", "missing_authenticator_confirm", false],
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED", "missing_authenticator_alert", false],
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_MUTATION_FAILED", "missing_authenticator_mutation", false],
+  [null, "P0B_SAFE_DATABASE_SEED_FAILED", "database_seed_failed", false],
   [null, "P0B_SAFE_SCENARIO_1_FAILED", "browser_scenario_1", false],
   [null, "P0B_SAFE_SCENARIO_2_FAILED", "browser_scenario_2", false],
   [null, "P0B_SAFE_SCENARIO_3_FAILED", "browser_scenario_3", false],

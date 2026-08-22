@@ -524,6 +524,7 @@ function failLifecycle(error) {
 
 export function lifecycleFailureMarker(error) {
   if (!(error instanceof P0BLiveBrowserFixtureError)) return null;
+  if (typeof error.code === "string" && error.code.startsWith("database_seed_")) return "P0B_SAFE_DATABASE_SEED_FAILED";
   return new Map([
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
     ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
