@@ -5,6 +5,7 @@ import { Pool } from "pg";
 
 import { createPostgresAuditRepository } from "../../src/postgres/audit-repository.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
 const TEST_PUBLIC_KEYS = [0, 1].map(() => crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd());
@@ -119,5 +120,5 @@ function eventRecord(deviceId, deviceTimestamp) {
     device_timestamp: deviceTimestamp,
     previous_hash: "0".repeat(64)
   };
-  return { ...event, event_hash: crypto.createHash("sha256").update(JSON.stringify(event)).digest("hex") };
+  return { ...event, event_hash: crypto.createHash("sha256").update(canonicalJson(event), "utf8").digest("hex") };
 }

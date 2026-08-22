@@ -106,7 +106,15 @@ BEGIN
   ) ON CONFLICT (organization_id, grant_id) DO NOTHING;
   GET DIAGNOSTICS changed = ROW_COUNT;
   did_insert := changed = 1;
-  RETURN QUERY SELECT did_insert, g.*
+  RETURN QUERY SELECT did_insert,
+    g.organization_id, g.grant_id, g.device_id, g.agent_id, g.agent_kind,
+    g.adapter_id, g.adapter_version, g.worktree_binding_sha256,
+    g.process_binding_policy_id, g.scope_json, g.max_signatures,
+    g.not_before, g.expires_at, g.control_sequence, g.authority_generation,
+    g.issuer, g.signer_key_id, g.statement_hash, g.grant_hash,
+    g.signature_base64url, g.status, g.issued_at, g.consumed_at,
+    g.consumed_session_id, g.consumed_process_binding_sha256, g.expired_at,
+    g.revoked_at, g.created_by
     FROM public.agent_session_grants AS g
     WHERE g.organization_id = p_organization_id AND g.grant_id = p_grant_id
     FOR UPDATE;
