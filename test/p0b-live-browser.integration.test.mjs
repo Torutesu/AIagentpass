@@ -387,6 +387,7 @@ async function scenario(parent, name, callback) {
       catch (error) { cleanupError ??= error; }
     }
     if (scenarioError) {
+      if (scenarioError instanceof P0BLiveBrowserFixtureError) failLifecycle(scenarioError);
       if (!String(scenarioError?.message ?? "").startsWith("P0B_SAFE_")) {
         assert.fail(`P0B_SAFE_SCENARIO_${scenarioIndex}_FAILED`);
       }
