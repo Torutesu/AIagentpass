@@ -92,8 +92,8 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  SELECT m, o.authority_epoch
-    INTO target_membership, target_authority_epoch
+  SELECT m.*
+    INTO target_membership
   FROM public.memberships AS m
   JOIN public.organizations AS o ON o.id = m.organization_id
   WHERE m.organization_id = p_target_organization_id
@@ -101,6 +101,18 @@ BEGIN
   FOR UPDATE OF m, o;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'target organization membership is unavailable' USING ERRCODE = '23503';
+  END IF;
+
+  -- Keep the composite membership row and scalar organization epoch in
+  -- separate INTO statements. PostgreSQL rejects a composite row target in a
+  -- multi-item INTO list, even when the target is a concrete %ROWTYPE.
+  SELECT o.authority_epoch
+    INTO target_authority_epoch
+  FROM public.organizations AS o
+  WHERE o.id = p_target_organization_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'target organization is unavailable' USING ERRCODE = '23503';
   END IF;
 
   switch_reason := CASE WHEN p_reason = 'organization_switch'
