@@ -171,7 +171,7 @@ REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_device_audit_current_organiza
 GRANT EXECUTE ON FUNCTION public.agentpass_authorize_device_audit_tenant(uuid, uuid) TO agentpass_app;
 GRANT EXECUTE ON FUNCTION public.agentpass_authorize_device_audit_device(uuid, uuid) TO agentpass_app;
 GRANT EXECUTE ON FUNCTION public.agentpass_device_audit_current_organization_id()
-  TO agentpass_app, agentpass_backup, agentpass_migrator;
+  TO agentpass_app, agentpass_migrator;
 
 DROP POLICY device_audit_events_tenant_select ON public.device_audit_events;
 DROP POLICY device_audit_events_tenant_insert ON public.device_audit_events;

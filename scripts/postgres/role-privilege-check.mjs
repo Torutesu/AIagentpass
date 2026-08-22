@@ -636,9 +636,9 @@ device_audit_boundary_observations AS (
         WHERE p.polrelid = t.oid
           AND p.polname LIKE 'device_audit%_tenant_%'
           AND (
-            regexp_replace(replace(replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), 'public.agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
+            regexp_replace(replace(replace(replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), 'public.agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), 'agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
               IS DISTINCT FROM CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN 'organization_id=agentpass_current_organization_id()' END
-            OR regexp_replace(replace(replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), 'public.agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
+            OR regexp_replace(replace(replace(replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'), 'public.agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), 'agentpass_device_audit_current_organization_id()', 'agentpass_current_organization_id()'), '(^[(]|[)]$)', '', 'g')
               IS DISTINCT FROM CASE WHEN p.polcmd IN ('a', 'w') THEN 'organization_id=agentpass_current_organization_id()' END
           )
       ) THEN 'policy:tenant_predicate_mismatch' END,
