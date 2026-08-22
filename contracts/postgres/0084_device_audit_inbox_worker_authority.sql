@@ -19,6 +19,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   authorized uuid;
   canonical_payload text;
