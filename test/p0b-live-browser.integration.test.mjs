@@ -553,6 +553,7 @@ export function lifecycleFailureMarker(error) {
   if (!(error instanceof P0BLiveBrowserFixtureError)) return null;
   return new Map([
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
+    ["startup_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
     ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
     ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
     ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],
