@@ -176,7 +176,7 @@ test("live PostgreSQL Native Device audit upload enforces forced tenant RLS for 
       ORDER BY policyname`, [table, `${table}_tenant_%`]);
     assert.deepEqual(policies.rows.map((row) => row.cmd).sort(), ["DELETE", "INSERT", "SELECT", "UPDATE"]);
     for (const policy of policies.rows) {
-      assert.match(`${policy.qual ?? ""} ${policy.with_check ?? ""}`, /organization_id\s*=\s*agentpass_current_organization_id\(\)/u,
+      assert.match(`${policy.qual ?? ""} ${policy.with_check ?? ""}`, /organization_id\s*=\s*agentpass_device_audit_current_organization_id\(\)/u,
         `${table}.${policy.policyname} must bind access to the transaction tenant`);
     }
   }

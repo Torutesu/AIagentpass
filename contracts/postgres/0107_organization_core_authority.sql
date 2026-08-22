@@ -1,5 +1,7 @@
 BEGIN;
 
+SET LOCAL plpgsql.variable_conflict = 'use_column';
+
 -- Organization core authority boundary.
 --
 -- The organization repository currently owns the surrounding transaction: it

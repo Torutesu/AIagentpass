@@ -1,5 +1,7 @@
 BEGIN;
 
+SET LOCAL plpgsql.variable_conflict = 'use_column';
+
 -- Invitation authority boundary.
 --
 -- organization_invitations is function-only for the application, including
