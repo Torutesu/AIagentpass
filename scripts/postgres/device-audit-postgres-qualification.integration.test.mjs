@@ -226,6 +226,10 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
         "SELECT * FROM public.agentpass_device_audit_inbox_claim($1::bytea,$2::integer,$3::integer)",
         [Buffer.alloc(32, 1), 1, 30_000]
       )));
+      // The worker uses a separately authenticated connection, so publish the
+      // enqueue before asking maintenance to claim it. Re-establish the
+      // device-bound application context for the remaining online probes.
+      await appClient.query("COMMIT");
 
       const maintenanceClient = await maintenancePool.connect();
       try {
@@ -246,6 +250,12 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
       } finally {
         maintenanceClient.release(true);
       }
+      await appClient.query("BEGIN");
+      const rebound = await appClient.query(
+        "SELECT public.agentpass_authorize_device_audit_device($1::uuid, $2::uuid) AS organization_id",
+        [organizationId, deviceId]
+      );
+      assert.deepEqual(rebound.rows, [{ organization_id: organizationId }]);
 
       // Query effective privileges and trigger ownership from the online
       // connection itself. An administrator must not be able to mask an ACL
