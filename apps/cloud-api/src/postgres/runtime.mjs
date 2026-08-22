@@ -311,7 +311,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     deliveryBinding: ownerRecoveryDeliveryBinding
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
-  ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool, deliveryBinding: ownerRecoveryDeliveryBinding });
+  // Claim, settle, and aggregate owner-recovery outbox work through the
+  // deployment-wide maintenance identity. The request/app role must not have
+  // direct access to every tenant's raw recovery payload.
+  ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: maintenancePool, deliveryBinding: ownerRecoveryDeliveryBinding });
   const ownerRecoveryOutboxManagementRepository = createPostgresOwnerRecoveryOutboxManagementRepository({
     client: pool,
     cursorSecret: auditCursorSecret,
@@ -319,7 +322,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     metrics: operationalMetrics
   });
   const ownerRecoveryOutboxRetentionRepository = createPostgresOwnerRecoveryOutboxRetentionRepository({
-    client: pool,
+    client: maintenancePool,
     metrics: operationalMetrics
   });
   if (ownerRecoveryPublisher !== undefined) {
