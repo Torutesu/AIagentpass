@@ -5,10 +5,6 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
-import {
-  runC3Migration0047Qualification,
-  verifyQualificationEvidence
-} from "./postgres-c3-migration-0047.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
@@ -38,6 +34,23 @@ const CHECK_KEYS = Object.freeze(["check_id", "status", "expected", "observed", 
 
 export class PostgresExternalQualificationRunnerError extends Error {
   constructor(message) { super(message); this.name = "PostgresExternalQualificationRunnerError"; }
+}
+
+export function classifyQualificationDependencyError(error) {
+  if (error?.code === "ERR_MODULE_NOT_FOUND" && /package ['"]pg['"]|node_modules[\\/]pg/u.test(String(error.message ?? error))) {
+    return "required PostgreSQL qualification dependency is unavailable";
+  }
+  return null;
+}
+
+async function loadC3Qualification() {
+  try {
+    return await import("./postgres-c3-migration-0047.mjs");
+  } catch (error) {
+    const classified = classifyQualificationDependencyError(error);
+    if (classified) throw new PostgresExternalQualificationRunnerError(classified);
+    throw error;
+  }
 }
 
 function required(env, name, pattern) {
@@ -216,6 +229,7 @@ export async function runExternalPostgresC3Qualification({ env = process.env } =
   const binding = externalBinding(env);
   const output = path.resolve(required(env, "AGENTPASS_POSTGRES_QUALIFICATION_EVIDENCE_PATH", /^[^\0]+$/u));
   if (fs.existsSync(output)) throw new PostgresExternalQualificationRunnerError("PostgreSQL qualification evidence target already exists");
+  const { runC3Migration0047Qualification } = await loadC3Qualification();
   const c3Env = { ...env };
   for (const name of ["GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "AGENTPASS_C3_ARTIFACT_SHA256", "AGENTPASS_QUALIFICATION_ARTIFACT_SHA256"]) delete c3Env[name];
   Object.assign(c3Env, {
