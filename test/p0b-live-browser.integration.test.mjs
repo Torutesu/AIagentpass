@@ -352,7 +352,9 @@ async function scenario(parent, name, callback) {
               const url = new URL(response.url());
               if (url.pathname === "/api/auth/session/resume") {
                 sessionResponses.set("resume", response.status());
-                void response.json().then((body) => { sessionContractCode = classifySessionContract(body); }).catch(() => { sessionContractCode = "invalid_json"; });
+                void Promise.resolve().then(() => response.body()).then((bytes) => {
+                  sessionContractCode = classifySessionContract(JSON.parse(Buffer.from(bytes).toString("utf8")));
+                }).catch(() => { sessionContractCode = "invalid_json"; });
                 return;
               }
               if (url.pathname !== "/api/console") return;
