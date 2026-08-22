@@ -847,6 +847,8 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   const unknownCheckKey = readinessDiagnostic.match(/^status_503_health_unknown_key_([a-z][a-z0-9_]*)$/u)?.[1];
   const readinessMarker = unknownCheckKey !== undefined
     ? `P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_KEY_${unknownCheckKey.toUpperCase()}_FAILED`
+    : readinessDiagnostic === "status_503_health_readiness_checks_disagree"
+      ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_READINESS_DISAGREE_FAILED"
     : readinessDiagnostic === "status_503_health_agent_session_signing_capability_maintenance"
       ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_CAPABILITY_MAINTENANCE_FAILED"
     : readinessDiagnostic === "status_503_health_unknown_key_metrics"

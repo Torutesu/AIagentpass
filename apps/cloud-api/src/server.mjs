@@ -1033,6 +1033,7 @@ function safeReadinessFailureCode(error) {
   if (message === "invalid deployment identity") return "health_invalid_deployment_identity";
   if (message === "invalid managed signer readiness") return "health_invalid_managed_signers";
   if (message === "invalid readiness report") return "health_invalid_readiness_report";
+  if (message === "readiness checks disagree with report") return "health_readiness_checks_disagree";
   return "health_unavailable";
 }
 
