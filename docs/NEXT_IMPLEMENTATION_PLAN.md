@@ -81,9 +81,9 @@ independent security review remain open.
 
 This section records the current state of the separate native Device-audit
 delivery slice. It must not be confused with the existing owner-recovery
-notification outbox. The status below is pinned to `HEAD=acacbf3`; the
-checkout also has unrelated uncommitted native changes, which were not edited
-or used as implementation evidence for this documentation update.
+notification outbox. The status below is pinned to the current clean candidate
+lineage beginning at `HEAD=69ae0a6e`; external qualification claims remain
+deliberately separate from local source evidence.
 
 | Boundary | Implemented in source | Local verification basis | External gate still unverified |
 | --- | --- | --- | --- |
@@ -91,15 +91,15 @@ or used as implementation evidence for this documentation update.
 | Native durable outbox | `NativeDeviceAuditOutbox.swift` writes one immutable `0400` event file, fsyncs file and directory state, deduplicates an event ID only when bytes match, bounds pending events at 4,096, and removes only response-confirmed accepted/duplicate IDs. | `NativeDeviceAuditOutboxTests.swift` covers restart persistence, exact bytes, event-ID equivocation, unknown acknowledgements, and selective acknowledgement. | Installed launchd/service ownership, crash/kill, permission/path substitution, disk-full, and post-unlink directory-fsync behavior on real Apple silicon and Intel/T2 are not qualified. |
 | Device upload coordinator | `NativeDeviceAuditUploadCoordinator.swift` submits at most eight exact batches per call; transport or response failure leaves the exact events pending. `ServiceEndpoint` wires it to the signed Device transport with a bounded supervised loop. | `NativeDeviceAuditUploadCoordinatorTests.swift`, projection tests, and focused HTTP tests cover response loss/transport failure, retry after recovery, stable reason projection, and bounded attempts. | Legacy `control_url` mode has no Device transport; online/offline restart behavior and production launchd supervision remain external gates. |
 | Cloud ingest | `server.mjs` rejects unknown top-level fields and calls `ingestDeviceAuditEvents`. The file store and PostgreSQL authority repository validate event hashes and tenant/device/agent binding, deduplicate exact evidence, record gaps, and return accepted/duplicate/gap/head state. PostgreSQL locks the device head during the transaction. | Existing Node/store, HTTP, repository, migration, and audit-pagination tests cover the local contract and repository behavior. | A deployed Cloud API plus real PostgreSQL role/RLS/concurrency, commit-response loss, migration-head/checksum, retention, backup/restore, and multi-instance qualification are not proven. |
-| Cloud audit worker/inbox | Not implemented as a separate device-audit inbox/worker. Current ingest writes directly to `device_audit_events` and advances `device_audit_heads` in the request transaction; `device_audit_gaps` records predecessor mismatches. | Local file-store and PostgreSQL repository paths exist. | The productization target of a durable inbox, asynchronous worker, and independently observable retry/dead-letter lifecycle remains a follow-up design/implementation gate. |
+| Cloud audit worker/inbox | PostgreSQL inbox migrations `0082`/`0083` and `device-audit-inbox-worker.mjs` provide durable enqueue, lease/claim, retry, uncertain, and dead-letter transitions. The request path can return a bounded queued result; the worker then performs the authoritative ingest. | Inbox contract, migration, repository, worker, response-loss, and retry tests cover exact payload digests, lease recovery, duplicate enqueue, and secret-free public states. | Deployed worker/API plus real PostgreSQL role/RLS, multi-instance, backup/restore, and production observability qualification are not proven. |
 
 The native slice spans `c75da86`, `acacbf3`, `2db752c`, `6c042fe`, and the
-current ServiceEndpoint integration changes. The focused tests listed above
-were rerun in this implementation pass. “Implemented” therefore means source
-is present and locally tested in this checkout, while it remains weaker than a
-deployed, launchd, or hardware qualification result.
+current ServiceEndpoint integration changes. The contract/inbox slices span
+`87c87fc1` and the subsequent candidate lineage. “Implemented” therefore
+means source is present and locally tested in this checkout, while it remains
+weaker than a deployed, launchd, or hardware qualification result.
 
-#### Contract references and current contract gap
+#### Contract references and current contract status
 
 The current authoritative references are:
 
@@ -120,13 +120,15 @@ The current authoritative references are:
   and export sequencing in
   [`contracts/postgres/0045_device_audit_export_sequence.sql`](../contracts/postgres/0045_device_audit_export_sequence.sql).
 
-The upload request (`batch_id`, `events`) and the `202` ingestion response
-(`accepted`, `duplicates`, `gaps`, `head`) are currently enforced by the
-native Swift contract and Cloud implementation, but the OpenAPI POST still
-uses a generic JSON response and there is no standalone JSON Schema for this
-upload/ingestion pair. Freeze those request/response schemas, add deterministic
-fixtures and catalog references, and make Node/Swift validation consume them
-before declaring the Device-audit contract complete.
+The upload request (`batch_id`, `events`) and the `202` ingestion response are
+now frozen in standalone JSON Schemas:
+`device-audit-upload-v1.schema.json` and
+`device-audit-ingestion-response-v1.schema.json`. The OpenAPI POST references
+both schemas, deterministic fixtures are catalogued, and contract tests
+validate queued inbox states as well as the committed
+(`accepted`/`duplicates`/`gaps`/`head`) response. This closes the contract
+freeze locally; deployed API parity and signed-artifact qualification remain
+external gates.
 
 #### Operational resend, head, and failure recovery
 
@@ -167,13 +169,11 @@ before declaring the Device-audit contract complete.
    outbox is over capacity or contains an unexpected file, fail closed and
    preserve the evidence for manual recovery.
 
-The next implementation slice is therefore: wire the coordinator into the
-supervised native lifecycle; freeze the upload/ingestion JSON Schemas and
-OpenAPI response; add a Cloud-side observable recovery state for gaps and
-ambiguous uploads; then qualify response loss, process loss, head contention,
-filesystem faults, real PostgreSQL roles/RLS, and the exact signed release
-artifact. None of those external gates is satisfied by the focused local
-tests alone.
+The next implementation slice is therefore: complete the external
+qualification of the already-frozen contract and durable inbox path—response
+loss, process loss, head contention, filesystem faults, real PostgreSQL
+roles/RLS, and the exact signed release artifact. None of those external gates
+is satisfied by focused local tests alone.
 
 ## 3. Delivery rules
 
