@@ -917,7 +917,7 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
       ? "P0B_SAFE_LIFECYCLE_CLOUD_SCHEMA_UNAVAILABLE_FAILED"
       : "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_DIAGNOSTIC_FAILED";
   const boundedReadinessMarker = `P0B_SAFE_LIFECYCLE_CLOUD_READINESS_CODE_${readinessDiagnostic.toUpperCase()}_FAILED`;
-  process.stdout.write(`${readinessMarker}\n${boundedReadinessMarker}\n`);
+  process.stdout.write(`${boundedReadinessMarker}\n`);
   throw new Error(`P0-B ${label} readiness failed (${detail || "unavailable"}; ${processDiagnostic(child) || "process_unknown"})`);
 }
 
