@@ -13,4 +13,13 @@ ALTER FUNCTION public.agentpass_record_device_audit_head()
 REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_record_device_audit_head()
   FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 
+ALTER FUNCTION public.agentpass_record_device_audit_export_entry()
+  OWNER TO agentpass_migrator;
+ALTER FUNCTION public.agentpass_record_device_audit_export_entry()
+  SECURITY DEFINER;
+ALTER FUNCTION public.agentpass_record_device_audit_export_entry()
+  SET search_path = pg_catalog, public;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_record_device_audit_export_entry()
+  FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
+
 COMMIT;
