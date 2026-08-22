@@ -231,7 +231,7 @@ BEGIN
     'platform_operator_assignment_approvals',
         'managed_signer_key_lifecycles', 'managed_signer_keys',
         'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
-    'managed_signer_provider_operations', 'device_audit_inbox'
+    'managed_signer_provider_operations'
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(

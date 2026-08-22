@@ -146,7 +146,8 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
   assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_app/u);
   assert.match(rolesSql, /c\.relname NOT IN \([\s\S]*'capabilities'[\s\S]*'agent_session_signing_capability_reservations'/u);
   assert.match(rolesSql, /c\.relname NOT IN \([\s\S]*'device_audit_inbox'/u);
-  assert.match(rolesSql, /'managed_signer_provider_operations', 'device_audit_inbox'/u);
+  assert.match(rolesSql, /'managed_signer_provider_operations'/u);
+  assert.doesNotMatch(rolesSql, /'managed_signer_provider_operations', 'device_audit_inbox'/u);
   assert.match(rolesSql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
