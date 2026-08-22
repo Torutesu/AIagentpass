@@ -564,6 +564,13 @@ export function lifecycleFailureMarker(error) {
   return new Map([
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
     ["startup_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
+    ["cloud_start_failed", "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED"],
+    ["console_start_failed", "P0B_SAFE_LIFECYCLE_CONSOLE_START_FAILED"],
+    ["cloud_readiness_failed", "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_FAILED"],
+    ["console_readiness_failed", "P0B_SAFE_LIFECYCLE_CONSOLE_READINESS_FAILED"],
+    ["cloud_kms_start_failed", "P0B_SAFE_LIFECYCLE_CLOUD_KMS_START_FAILED"],
+    ["dependency_start_failed", "P0B_SAFE_LIFECYCLE_DEPENDENCY_START_FAILED"],
+    ["signer_start_failed", "P0B_SAFE_LIFECYCLE_SIGNER_START_FAILED"],
     ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
     ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
     ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],

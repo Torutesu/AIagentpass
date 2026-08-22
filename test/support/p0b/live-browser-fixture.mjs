@@ -166,6 +166,8 @@ export async function startP0BLiveBrowserFixture({
   } catch (error) {
     if (error instanceof P0BSkip) throw error;
     if (error instanceof P0BLiveBrowserFixtureError) throw error;
+    const startupCode = classifyP0BStartupError(error);
+    if (startupCode !== null) throw new P0BLiveBrowserFixtureError(startupCode, "P0-B live browser fixture startup failed");
     throw new P0BLiveBrowserFixtureError("startup_failed", "P0-B live browser fixture startup failed");
   }
 
@@ -568,6 +570,18 @@ export async function startP0BLiveBrowserFixture({
   };
 
   return Object.freeze(fixture);
+}
+
+export function classifyP0BStartupError(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  if (/^P0-B cloud (?:\w+_failed) before readiness\b/u.test(message)) return "cloud_start_failed";
+  if (/^P0-B console (?:\w+_failed) before readiness\b/u.test(message)) return "console_start_failed";
+  if (/^P0-B cloud readiness failed\b/u.test(message)) return "cloud_readiness_failed";
+  if (/^P0-B console readiness failed\b/u.test(message)) return "console_readiness_failed";
+  if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(message)) return "cloud_kms_start_failed";
+  if (/ERR_MODULE_NOT_FOUND|Cannot find package/u.test(message)) return "dependency_start_failed";
+  if (/P0-B signer (?:public key|private key|path)/u.test(message)) return "signer_start_failed";
+  return null;
 }
 
 export const createP0BLiveBrowserFixture = startP0BLiveBrowserFixture;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { adminWakeFailureMarker, keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, lifecycleFailureMarker, staleAuthorizationFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
-import { P0BLiveBrowserFixtureError } from "./support/p0b/live-browser-fixture.mjs";
+import { classifyP0BStartupError, P0BLiveBrowserFixtureError } from "./support/p0b/live-browser-fixture.mjs";
 
 function response(status, payload, parse = true) {
   return {
@@ -58,6 +58,14 @@ test("P0-B lifecycle diagnostics expose only reviewed timeout classes", () => {
     ["P0-B signer private key is invalid", "P0B_SAFE_LIFECYCLE_SIGNER_START_FAILED"],
   ]) assert.equal(lifecycleFailureMarker(new Error(message)), marker);
   assert.equal(lifecycleFailureMarker(new Error("unsafe")), null);
+});
+
+test("P0-B startup classification retains only fixed service categories", () => {
+  assert.equal(classifyP0BStartupError(new Error("P0-B cloud kms_start_failed before readiness (redacted)")), "cloud_start_failed");
+  assert.equal(classifyP0BStartupError(new Error("P0-B console dependency_start_failed before readiness (redacted)")), "console_start_failed");
+  assert.equal(classifyP0BStartupError(new Error("P0-B cloud readiness failed (redacted)")), "cloud_readiness_failed");
+  assert.equal(classifyP0BStartupError(new Error("ERR_KMS_PROVIDER_RUNTIME_CONFIG")), "cloud_kms_start_failed");
+  assert.equal(classifyP0BStartupError(new Error("unsafe arbitrary diagnostic")), null);
 });
 
 test("P0-B stale-authorization diagnostics expose only a fixed phase or status class", () => {
