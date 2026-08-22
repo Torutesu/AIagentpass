@@ -218,7 +218,7 @@ test("retains a provisional safe diagnostic when no detailed marker follows", as
 });
 
 test("supports the bounded live-browser failure marker registry", async () => {
-  const safeFailureMarkers = Array.from({ length: 256 }, (_, index) => ({
+  const safeFailureMarkers = Array.from({ length: 320 }, (_, index) => ({
     marker: `P0B_SAFE_STAGE_${index}_FAILED`,
     code: `stage_${index}`
   }));
@@ -229,7 +229,7 @@ test("supports the bounded live-browser failure marker registry", async () => {
     cwd,
     env,
     timeoutMs: 2_000,
-    safeFailureMarkers: Array.from({ length: 257 }, (_, index) => ({ marker: `m${index}`, code: `m_${index}` }))
+    safeFailureMarkers: Array.from({ length: 321 }, (_, index) => ({ marker: `m${index}`, code: `m_${index}` }))
   }), TypeError);
 });
 
