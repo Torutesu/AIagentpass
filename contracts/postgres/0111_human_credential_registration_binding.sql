@@ -89,8 +89,4 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION public.agentpass_human_register_credential(
-  uuid, uuid, uuid, bytea, bytea, bigint, text[], text, boolean, boolean
-) OWNER TO agentpass_migrator;
-
 COMMIT;
