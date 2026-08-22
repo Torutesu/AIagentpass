@@ -54,7 +54,7 @@ WITH tables AS (
 ), object_acls AS (
   SELECT n.nspname AS schema_name, c.relname AS object_name,
     CASE WHEN c.relkind = 'S' THEN 'sequence' ELSE 'table' END AS object_type,
-    pg_catalog.pg_get_userbyid(c.relowner) AS owner, c.relacl IS NULL AS acl_is_null,
+    pg_catalog.pg_get_userbyid(c.relowner) AS owner, bool_and(c.relacl IS NULL) AS acl_is_null,
     COALESCE(jsonb_agg(jsonb_build_object(
       'grantor', pg_catalog.pg_get_userbyid(ax.grantor),
       'grantee', CASE WHEN ax.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(ax.grantee) END,
@@ -63,7 +63,10 @@ WITH tables AS (
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN LATERAL pg_catalog.aclexplode(c.relacl) ax ON true
   WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','S')
-  GROUP BY n.nspname, c.relname, c.relkind, c.relowner, c.relacl
+  -- aclitem[] has no portable GROUP BY implementation on PostgreSQL 17.
+  -- The relation has one relacl value, so aggregate only its NULL predicate
+  -- while grouping on stable scalar identity fields.
+  GROUP BY n.nspname, c.relname, c.relkind, c.relowner
 ), default_privileges AS (
   SELECT pg_catalog.pg_get_userbyid(d.defaclrole) AS grantor_role,
     NULLIF(ns.nspname, '') AS schema_name,
