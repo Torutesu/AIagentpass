@@ -10,7 +10,7 @@ const keyId = "arn:aws:kms:us-east-1:123456789012:key/ed25519-v1";
 const commands = { GetPublicKeyCommand: class { constructor(input) { this.input = input; this.kind = "get"; } }, SignCommand: class { constructor(input) { this.input = input; this.kind = "sign"; } } };
 const base = { keyId, purpose: "agent-session-grant", publicKey: keys.publicKey, commands };
 const request = { key_id: keyId, purpose: "agent-session-grant", algorithm: "ed25519", version: 1 };
-const publicMetadata = { PublicKey: der, KeyUsage: "SIGN_VERIFY", KeySpec: "ECC_NIST_EDWARDS25519", SigningAlgorithms: [AWS_KMS_ED25519_SIGNING_ALGORITHM] };
+const publicMetadata = { KeyId: keyId, PublicKey: der, KeyUsage: "SIGN_VERIFY", KeySpec: "ECC_NIST_EDWARDS25519", SigningAlgorithms: [AWS_KMS_ED25519_SIGNING_ALGORITHM] };
 
 test("uses injected AWS KMS commands with exact key and abort signal", async () => {
   const seen = [];
@@ -34,4 +34,24 @@ test("rejects adapter construction and request substitution", async () => {
   assert.throws(() => createAwsKmsEd25519Provider({ ...base, client, maxRequestBytes: AWS_KMS_MAX_RAW_MESSAGE_BYTES + 1 }), (error) => error.code === "ERR_REMOTE_KMS_CONFIG");
   const wrongUsage = createAwsKmsEd25519Provider({ ...base, client: { async send(command) { return command.kind === "get" ? { ...publicMetadata, KeyUsage: "ENCRYPT_DECRYPT" } : {}; } } });
   await assert.rejects(wrongUsage.publicKeyMetadata(request), (error) => error.code === "ERR_REMOTE_KMS_PROVIDER");
+});
+
+test("rejects missing or substituted AWS response identity fields", async () => {
+  for (const response of [
+    { ...publicMetadata, KeyId: undefined },
+    { ...publicMetadata, KeyId: "arn:aws:kms:us-east-1:123456789012:key/other" }
+  ]) {
+    const provider = createAwsKmsEd25519Provider({ ...base, client: { async send(command) { return command.kind === "get" ? response : { KeyId: keyId, SigningAlgorithm: AWS_KMS_ED25519_SIGNING_ALGORITHM, Signature: crypto.sign(null, command.input.Message, keys.privateKey) }; } } });
+    await assert.rejects(provider.publicKeyMetadata(request), (error) => error.code === "ERR_REMOTE_KMS_PROVIDER");
+  }
+
+  for (const response of [
+    { SigningAlgorithm: AWS_KMS_ED25519_SIGNING_ALGORITHM },
+    { KeyId: keyId },
+    { KeyId: "arn:aws:kms:us-east-1:123456789012:key/other", SigningAlgorithm: AWS_KMS_ED25519_SIGNING_ALGORITHM },
+    { KeyId: keyId, SigningAlgorithm: "ECDSA_SHA_256" }
+  ]) {
+    const provider = createAwsKmsEd25519Provider({ ...base, client: { async send(command) { return command.kind === "get" ? publicMetadata : { ...response, Signature: crypto.sign(null, command.input.Message, keys.privateKey) }; } } });
+    await assert.rejects(provider.sign({ ...request, bytes: Buffer.from("identity") }), (error) => error.code === "ERR_REMOTE_KMS_PROVIDER");
+  }
 });

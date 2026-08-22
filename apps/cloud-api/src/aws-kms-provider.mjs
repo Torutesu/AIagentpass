@@ -22,7 +22,7 @@ export function createAwsKmsEd25519Transport({ client, commands, keyId, purpose,
     async getPublicKey(request, { signal } = {}) {
       assertBoundRemoteKmsRequest(request, binding);
       const result = await client.send(new commands.GetPublicKeyCommand({ KeyId: keyId }), { abortSignal: signal });
-      if (result?.KeyUsage !== "SIGN_VERIFY" || result?.KeySpec !== "ECC_NIST_EDWARDS25519"
+      if (result?.KeyId !== keyId || result?.KeyUsage !== "SIGN_VERIFY" || result?.KeySpec !== "ECC_NIST_EDWARDS25519"
         || !Array.isArray(result?.SigningAlgorithms) || !result.SigningAlgorithms.includes(AWS_KMS_ED25519_SIGNING_ALGORITHM)) {
         throw new Error("invalid AWS KMS key metadata");
       }
@@ -39,8 +39,8 @@ export function createAwsKmsEd25519Transport({ client, commands, keyId, purpose,
         MessageType: "RAW",
         SigningAlgorithm: AWS_KMS_ED25519_SIGNING_ALGORITHM
       }), { abortSignal: signal });
-      if (result?.KeyId !== undefined && result.KeyId !== keyId) throw new Error("AWS KMS signing key substitution");
-      if (result?.SigningAlgorithm !== undefined && result.SigningAlgorithm !== AWS_KMS_ED25519_SIGNING_ALGORITHM) throw new Error("AWS KMS signing algorithm substitution");
+      if (result?.KeyId !== keyId) throw new Error("AWS KMS signing key identity is missing or substituted");
+      if (result?.SigningAlgorithm !== AWS_KMS_ED25519_SIGNING_ALGORITHM) throw new Error("AWS KMS signing algorithm identity is missing or substituted");
       return result?.Signature;
     }
   });
