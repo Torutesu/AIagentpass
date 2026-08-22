@@ -553,6 +553,8 @@ export function lifecycleFailureMarker(error) {
   const message = typeof error?.message === "string" ? error.message : "";
   if (/^P0-B cloud exited before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED";
   if (/^P0-B console exited before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CONSOLE_START_FAILED";
+  if (/^P0-B cloud (?:kms_start_failed|dependency_start_failed|signer_start_failed) before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED";
+  if (/^P0-B console (?:kms_start_failed|dependency_start_failed|signer_start_failed) before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CONSOLE_START_FAILED";
   if (/^P0-B cloud readiness failed\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_FAILED";
   if (/^P0-B console readiness failed\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CONSOLE_READINESS_FAILED";
   if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_KMS_START_FAILED";

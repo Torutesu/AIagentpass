@@ -576,6 +576,17 @@ function processDiagnostic(child) {
   return `${state}${safeOutput}`;
 }
 
+// Reduce child startup output to a reviewed category before it crosses the
+// fixture boundary. The raw diagnostics remain redacted and are never emitted
+// by the supervisor; only these fixed classes are consumed by browser tests.
+export function classifyP0BProcessStartup(child) {
+  const output = [child?.p0bDiagnostics?.stdout, child?.p0bDiagnostics?.stderr].filter(Boolean).join("\n");
+  if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(output)) return "kms_start_failed";
+  if (/ERR_MODULE_NOT_FOUND|Cannot find package/u.test(output)) return "dependency_start_failed";
+  if (/P0-B signer (?:public key|private key|path)/u.test(output)) return "signer_start_failed";
+  return "start_failed";
+}
+
 async function boundedCleanup(task, timeoutMs, onAbort) {
   const timedOut = Symbol("cleanup_timeout");
   let timer;
@@ -746,7 +757,10 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
-    if (child?.p0bSpawnError || child?.exitCode !== null || child?.signalCode !== null) throw new Error(`P0-B ${label} exited before readiness (${processDiagnostic(child)})`);
+    if (child?.p0bSpawnError || child?.exitCode !== null || child?.signalCode !== null) {
+      const category = classifyP0BProcessStartup(child);
+      throw new Error(`P0-B ${label} ${category} before readiness (${processDiagnostic(child)})`);
+    }
     try {
       const result = await httpsRequest(new URL(requestPath, origin), { ca: caPem, headers, timeoutMs: 1_500 });
       if (result.status === expectedStatus) return result;
