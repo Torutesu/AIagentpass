@@ -186,6 +186,18 @@ BEGIN
 END
 $$;
 
+-- Device Audit is an explicit mixed boundary: the app may append/read events
+-- and read the trigger-maintained projections; backup may read all evidence.
+DO $$
+BEGIN
+  IF to_regclass('public.device_audit_events') IS NOT NULL THEN
+    GRANT SELECT, INSERT ON TABLE public.device_audit_events TO agentpass_app;
+    GRANT SELECT ON TABLE public.device_audit_heads, public.device_audit_gaps TO agentpass_app;
+    GRANT SELECT ON TABLE public.device_audit_events, public.device_audit_heads, public.device_audit_gaps TO agentpass_backup;
+  END IF;
+END
+$$;
+
 -- signer: all managed-signer state is function-only after migration 0051.
 -- The signer identity receives no table or sequence privileges. Every state
 -- transition is routed through the exact SECURITY DEFINER entry-point list
@@ -281,6 +293,9 @@ DECLARE
   routine_signature text;
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_authorize_device_audit_tenant(uuid,uuid)',
+    'agentpass_authorize_device_audit_device(uuid,uuid)',
+    'agentpass_device_audit_current_organization_id()',
     'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
     'agentpass_consume_human_identity_assertion(bytea,timestamptz)',
     'agentpass_valid_webauthn_transports(text[])',
