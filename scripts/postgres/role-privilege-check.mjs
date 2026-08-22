@@ -871,7 +871,7 @@ SELECT json_build_object(
     JOIN pg_class AS c ON c.oid = p.polrelid
     JOIN pg_namespace AS n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relname = 'device_audit_events'), '[]'::json),
-  'device_audit_policy_comparison', COALESCE((SELECT json_agg(json_build_object(
+      'device_audit_policy_comparison', COALESCE((SELECT json_agg(json_build_object(
     'name', p.polname,
     'command', p.polcmd,
     'roles', p.polroles,
@@ -883,9 +883,19 @@ SELECT json_build_object(
     JOIN pg_class AS c ON c.oid = p.polrelid
     JOIN pg_namespace AS n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relname = 'device_audit_events'), '[]'::json),
-  'app_missing_allowlist', COALESCE((SELECT json_agg(routine_signature ORDER BY routine_signature)
-    FROM app_function_oids WHERE routine_oid IS NULL), '[]'::json),
-  'table_privileges_ok', (SELECT value FROM table_privileges_ok),
+      'app_missing_allowlist', COALESCE((SELECT json_agg(routine_signature ORDER BY routine_signature)
+        FROM app_function_oids WHERE routine_oid IS NULL), '[]'::json),
+      'device_audit_inbox_observed', COALESCE((SELECT json_build_object(
+        'app_select', has_table_privilege('agentpass_app', oid, 'SELECT'),
+        'backup_select', has_table_privilege('agentpass_backup', oid, 'SELECT'),
+        'maintenance_select', has_table_privilege('agentpass_maintenance', oid, 'SELECT'),
+        'signer_select', has_table_privilege('agentpass_signer', oid, 'SELECT'),
+        'policy_count', (SELECT count(*) FROM pg_policy WHERE polrelid = tables.oid),
+        'app_enqueue_execute', has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)', 'EXECUTE'),
+        'app_claim_execute', has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE'),
+        'maintenance_claim_execute', has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE')
+      ) FROM tables WHERE relname = 'device_audit_inbox'), '{}'::json),
+      'table_privileges_ok', (SELECT value FROM table_privileges_ok),
   'table_privilege_diagnostics', COALESCE((SELECT json_agg(json_build_object(
       'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
       'kind', relkind,
@@ -989,9 +999,9 @@ SELECT json_build_object(
               const agentSessionAuthorityDiagnostics = report.agent_session_authority_boundary_ok === true
                 ? ''
                 : ` agent_session_authority_diagnostics=${boundedTableDiagnostics(report.agent_session_authority_diagnostics)}`;
-              const deviceAuditDiagnostics = report.device_audit_boundary_ok === true
-                ? ''
-                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, event_policies: report.device_audit_event_policies, comparison: report.device_audit_policy_comparison, missing_app_functions: report.app_missing_allowlist })}`;
+                    const deviceAuditDiagnostics = report.device_audit_boundary_ok === true && report.table_privileges_ok === true
+                      ? ''
+                      : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, inbox: report.device_audit_inbox_observed, function: report.device_audit_function_observed, event_policies: report.device_audit_event_policies, comparison: report.device_audit_policy_comparison, missing_app_functions: report.app_missing_allowlist })}`;
               fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}${deviceAuditDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
