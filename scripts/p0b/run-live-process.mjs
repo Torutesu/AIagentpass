@@ -241,6 +241,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_LIFECYCLE_EXTERNAL_DEPENDENCY_FAILED", "lifecycle_external_dependency"],
   [null, "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED", "lifecycle_browser_startup_timeout"],
   [null, "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED", "lifecycle_browser_start"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_FAILED", "lifecycle_fixture_cleanup"],
   [null, "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED", "lifecycle_fixture_cleanup_timeout"],
   [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED", "lifecycle_context_cleanup_timeout"],
   [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED", "lifecycle_context_cleanup"],

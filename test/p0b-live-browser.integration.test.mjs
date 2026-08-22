@@ -389,7 +389,14 @@ async function scenario(parent, name, callback) {
     } finally {
       if (!browserCleanupAttempted) cleanupError = await closeBrowserResources(browser, []);
       try { await fixture?.close(); }
-      catch (error) { cleanupError ??= error; }
+      catch (error) {
+        // Fixture implementations may reject with a plain process/container
+        // error. Normalize it at this authority boundary so cleanup failures
+        // remain classified and never leak arbitrary child diagnostics.
+        cleanupError ??= error instanceof P0BLiveBrowserFixtureError
+          ? error
+          : new P0BLiveBrowserFixtureError("cleanup_failed", "P0-B live browser fixture cleanup failed");
+      }
     }
     if (scenarioError) {
       // The supervisor intentionally discards arbitrary TAP diagnostics. If a
@@ -540,6 +547,7 @@ export function lifecycleFailureMarker(error) {
     ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
     ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],
     ["browser_startup_failed", "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED"],
+    ["cleanup_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_FAILED"],
     ["cleanup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED"],
     ["context_cleanup_timeout", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED"],
     ["context_cleanup_failed", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED"],
