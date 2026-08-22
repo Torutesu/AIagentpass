@@ -349,6 +349,27 @@ jobs:
           PGPASSWORD: agentpass-w15-integration
           PGDATABASE: postgres
         run: psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file scripts/postgres/roles.sql
+      - name: Migrate and reconcile PostgreSQL 16 W1.5 database
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { Pool } from "pg";
+          import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          const client = await pool.connect();
+          try {
+            await createMigrationRunner({ client, applicationVersion: "postgres-w15-preflight" }).run();
+            const roles = (await readFile("./scripts/postgres/roles.sql", "utf8"))
+              .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+              .trim();
+            await client.query(roles);
+          } finally {
+            client.release();
+            await pool.end();
+          }
+          NODE
       - name: Prepare W1.5 evidence directory
         run: |
           mkdir -p "$GITHUB_WORKSPACE/w15-evidence"
