@@ -89,8 +89,8 @@ test("0075 applies beneath the current schema head when PostgreSQL qualification
   const client = await pool.connect();
   t.after(async () => { client.release(true); await pool.end(); });
   const result = await createMigrationRunner({ client, applicationVersion: "agent-session-signing-capability-expiry-audit-contract" }).run();
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 76);
-  assert.equal(result.currentVersion, 76);
+  assert.ok(POSTGRES_SCHEMA_HEAD.version >= 76);
+  assert.equal(result.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   const relations = await client.query(`
     SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
       FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace

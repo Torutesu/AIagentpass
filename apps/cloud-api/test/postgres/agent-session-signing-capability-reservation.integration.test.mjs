@@ -56,7 +56,7 @@ test("0074 real PostgreSQL migration and function-owned signing capability lifec
     applicationVersion: "agent-session-signing-capability-reservation-integration"
   }).run();
   assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 76);
+  assert.ok(POSTGRES_SCHEMA_HEAD.version >= 76);
 
   const applied = await client.query(
     `SELECT version::int AS version, checksum

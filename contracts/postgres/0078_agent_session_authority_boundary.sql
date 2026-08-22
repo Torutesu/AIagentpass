@@ -293,7 +293,7 @@ CREATE FUNCTION public.agentpass_agent_session_grant_get(
 )
 RETURNS SETOF public.agent_session_grants
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
@@ -408,7 +408,17 @@ BEGIN
        OR (p_session_id_explicit AND p_session_id IS DISTINCT FROM session_row.session_id) THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation', CONSTRAINT = 'agent_session_authority_binding_conflict';
     END IF;
-    RETURN QUERY SELECT true, session_row.*;
+    RETURN QUERY SELECT true,
+      session_row.organization_id, session_row.session_id, session_row.grant_id,
+      session_row.device_id, session_row.agent_id, session_row.agent_kind,
+      session_row.adapter_id, session_row.adapter_version,
+      session_row.process_binding_policy_id, session_row.grant_hash,
+      session_row.process_binding_sha256, session_row.ancestry_binding_sha256,
+      session_row.worktree_binding_sha256, session_row.control_sequence,
+      session_row.authority_generation, session_row.max_signatures,
+      session_row.used_signatures, session_row.reserved_signatures,
+      session_row.status, session_row.created_at, session_row.not_before,
+      session_row.expires_at;
     RETURN;
   END IF;
   IF grant_row.status <> 'issued' THEN
@@ -480,7 +490,17 @@ BEGIN
     FROM public.agent_sessions AS s
     WHERE s.organization_id = p_organization_id AND s.session_id = p_session_id
     FOR SHARE;
-  RETURN QUERY SELECT false, session_row.*;
+  RETURN QUERY SELECT false,
+    session_row.organization_id, session_row.session_id, session_row.grant_id,
+    session_row.device_id, session_row.agent_id, session_row.agent_kind,
+    session_row.adapter_id, session_row.adapter_version,
+    session_row.process_binding_policy_id, session_row.grant_hash,
+    session_row.process_binding_sha256, session_row.ancestry_binding_sha256,
+    session_row.worktree_binding_sha256, session_row.control_sequence,
+    session_row.authority_generation, session_row.max_signatures,
+    session_row.used_signatures, session_row.reserved_signatures,
+    session_row.status, session_row.created_at, session_row.not_before,
+    session_row.expires_at;
 END;
 $$;
 
