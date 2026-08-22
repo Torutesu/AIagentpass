@@ -167,13 +167,13 @@ test("live PostgreSQL Native Device audit upload enforces forced tenant RLS for 
     assert.equal(relation.rowCount, 1, `${table} must exist in the live schema`);
     assert.equal(relation.rows[0].relrowsecurity, true, `${table} must enable RLS`);
     assert.equal(relation.rows[0].relforcerowsecurity, true, `${table} must force RLS for the table owner`);
-    assert.equal(relation.rows[0].policy_count, 4, `${table} must expose explicit CRUD tenant policies`);
+    assert.equal(relation.rows[0].policy_count, 6, `${table} must expose tenant, backup, and migrator policies`);
 
     const policies = await fixture.pool.query(`
       SELECT policyname,cmd,qual,with_check
       FROM pg_policies
-      WHERE schemaname='public' AND tablename=$1
-      ORDER BY policyname`, [table]);
+      WHERE schemaname='public' AND tablename=$1 AND policyname LIKE $2
+      ORDER BY policyname`, [table, `${table}_tenant_%`]);
     assert.deepEqual(policies.rows.map((row) => row.cmd).sort(), ["DELETE", "INSERT", "SELECT", "UPDATE"]);
     for (const policy of policies.rows) {
       assert.match(`${policy.qual ?? ""} ${policy.with_check ?? ""}`, /organization_id\s*=\s*agentpass_current_organization_id\(\)/u,
