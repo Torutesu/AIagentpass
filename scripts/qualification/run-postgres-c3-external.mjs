@@ -115,7 +115,7 @@ function externalBinding(env) {
     qualification_job_id: required(env, "AGENTPASS_POSTGRES_QUALIFICATION_JOB_ID", RUN_ID),
     artifact_sha256: required(env, "AGENTPASS_POSTGRES_QUALIFICATION_ARTIFACT_SHA256", DIGEST),
     postgres_major: required(env, "AGENTPASS_POSTGRES_QUALIFICATION_POSTGRES_MAJOR", MAJOR),
-    runner_id
+    runner_id: runnerId
   };
   if (value.ci_run_id === value.qualification_run_id) throw new PostgresExternalQualificationRunnerError("canonical CI and qualification runs must be distinct");
   return Object.freeze(value);
