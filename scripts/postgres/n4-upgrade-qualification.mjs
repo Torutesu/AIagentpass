@@ -235,7 +235,8 @@ export function parseN4AuthorityTapEvidence(filePath) {
   const numbers = new Set();
   for (const [index, line] of lines.entries()) {
     if (index > 0 && /^\s*TAP version\b/iu.test(line)) throw new Error("N4 authority TAP has a duplicate version");
-    if (/^\s*Bail out!/iu.test(line) || /^\s*not ok(?:\s|$)/iu.test(line) || /(^|\s)#\s*(?:skip|todo)(?:\s|$)/iu.test(line)) throw new Error("N4 authority TAP contains an incomplete test");
+    const tapSummary = /^\s*#\s*(?:skipped|todo)\s+[0-9]+\s*$/iu.test(line);
+    if (/^\s*Bail out!/iu.test(line) || /^\s*not ok(?:\s|$)/iu.test(line) || (!tapSummary && /(^|\s)#\s*(?:skip|todo)(?:\s|$)/iu.test(line))) throw new Error("N4 authority TAP contains an incomplete test");
     if (/^1\.\./u.test(line)) {
       const match = /^1\.\.([1-9][0-9]*)(?:[ \t]+#.*)?$/u.exec(line);
       if (!match || plan !== undefined) throw new Error("N4 authority TAP has an invalid or duplicate plan");
