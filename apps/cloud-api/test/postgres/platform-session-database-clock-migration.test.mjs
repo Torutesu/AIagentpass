@@ -17,7 +17,7 @@ test("0069 keeps Platform Session creation on the database clock and preserves o
 test("0069 remains catalogued at the current schema head", async () => {
   const catalog = JSON.parse(await readFile(catalogUrl, "utf8"));
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0110_device_audit_trigger_authority.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0111_human_credential_registration_binding.sql");
   assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(catalog.entries.find((entry) => entry.version === 69)?.id, "migration.0069_platform_session_database_clock");
 });

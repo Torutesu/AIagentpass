@@ -23,7 +23,7 @@ test("0067 pins PL/pgSQL column binding for atomic Hosted OAuth completion", asy
   assert.match(migration, /COMMIT;\s*$/u);
 
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0110_device_audit_trigger_authority.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0111_human_credential_registration_binding.sql");
   const catalog = JSON.parse(catalogText);
   assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(catalog.entries.find((entry) => entry.version === 67)?.id, "migration.0067_hosted_oauth_completion_column_binding");
