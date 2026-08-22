@@ -11,6 +11,7 @@ import { createPostgresOrganizationRepository } from "../../src/postgres/organiz
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
 const NOW = "2026-08-12T00:00:00.000Z";
 const EXPIRES = "2026-08-13T00:00:00.000Z";
+const SESSION_EXPIRES = "2099-01-01T00:00:00.000Z";
 const ownerId = "11111111-1111-4111-8111-111111111111";
 const invitedId = "22222222-2222-4222-8222-222222222222";
 const bootstrapOrganizationId = "33333333-3333-4333-8333-333333333333";
@@ -53,6 +54,18 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(created.filter((item) => item.replayed === true).length, 1);
   const organizationId = created[0].organization_id;
   owner.organization_id = organizationId;
+
+  const ownerMembership = await pool.query(
+    "SELECT id FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active'",
+    [organizationId, ownerId]
+  );
+  assert.equal(ownerMembership.rowCount, 1);
+  await pool.query(`INSERT INTO human_sessions
+    (id,member_id,organization_id,membership_id,role,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at)
+    VALUES ($1,$2,$3,$4,'owner',$5,$6,$7,$8,$7,$8)`, [
+    owner.session_id, ownerId, organizationId, ownerMembership.rows[0].id,
+    Buffer.alloc(32, 0x31), Buffer.alloc(32, 0x32), NOW, SESSION_EXPIRES
+  ]);
 
   const secondCreated = await service.createOrganization({ ...createInput, name: "Integration Team Two", idempotency_key: "create-organization-integration-2" });
   assert.notEqual(secondCreated.organization_id, organizationId);
