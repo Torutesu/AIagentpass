@@ -98,6 +98,9 @@ async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl
              (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                 WHERE n.nspname='public' AND c.relname IN ('device_audit_events','device_audit_heads','device_audit_gaps')
                   AND c.relrowsecurity AND c.relforcerowsecurity) AS forced_rls_relations,
+             (SELECT jsonb_agg(jsonb_build_object('name', c.relname, 'enabled', c.relrowsecurity, 'forced', c.relforcerowsecurity) ORDER BY c.relname)
+                FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='public' AND c.relname IN ('device_audit_events','device_audit_heads','device_audit_gaps')) AS device_audit_rls,
              (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
                 WHERE n.nspname='public' AND t.tgenabled <> 'D' AND t.tgname IN ('device_audit_events_validate_insert','device_audit_events_record_head')) AS device_audit_triggers,
              (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -119,7 +122,7 @@ async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl
     assert.equal(row.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
     assert.deepEqual(row.migration_versions, Array.from({ length: POSTGRES_SCHEMA_HEAD.migration_count }, (_, index) => index + 1));
     assert.equal(row.roles?.length, ROLE_NAMES.length);
-    assert.equal(row.forced_rls_relations, 3);
+    assert.equal(row.forced_rls_relations, 3, `device audit RLS state: ${JSON.stringify(row.device_audit_rls)}`);
     assert.equal(row.device_audit_triggers, 2);
     assert.equal(row.tenant_authority_relations, 1);
     assert.equal(row.tenant_authority_functions, 3);
