@@ -377,7 +377,12 @@ async function scenario(parent, name, callback) {
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
             const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
-            if (summaryReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
+            if (summaryReady === 0) {
+              const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
+              if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
+              if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
+              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_MISSING_FAILED");
+            }
             const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
             if (deviceReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED");
           }
