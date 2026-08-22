@@ -365,7 +365,7 @@ test("PostgreSQL 0107/0108/0109 organization authority qualification", {
     assert.equal(listed.rowCount, 1, "authorized invitation list returns a projection");
     assert.equal(Object.hasOwn(listed.rows[0], "token_hash"), false, "invitation list projection does not expose token_hash");
     assert.deepEqual(Object.keys(listed.rows[0]).sort(), [
-      "accepted_member_id", "consumed_at", "created_at", "created_by", "expires_at",
+      "consumed_by", "consumed_at", "created_at", "created_by", "expires_at",
       "invitation_id", "organization_id", "revoked_at", "role", "version",
     ].sort());
 
