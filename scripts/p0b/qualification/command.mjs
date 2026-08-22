@@ -206,8 +206,9 @@ export function runQualificationCommand(command, args, options) {
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
     for (const entry of safeFailureMarkers) {
       if (includesMarker(candidate, entry.marker)) {
-        if (entry.code === "lifecycle_cloud_health_unknown_key") {
-          const diagnostic = candidate.toString("utf8").match(/P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_KEY_([A-Z][A-Z0-9_]*)_FAILED/u)?.[1];
+        if (entry.code === "lifecycle_cloud_health_unknown_key" || entry.code === "lifecycle_cloud_readiness_code") {
+          const prefix = entry.code === "lifecycle_cloud_health_unknown_key" ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_KEY_" : "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_CODE_";
+          const diagnostic = candidate.toString("utf8").match(new RegExp(`${prefix}([A-Z][A-Z0-9_]*)_FAILED`, "u"))?.[1];
           safeFailureCode = diagnostic === undefined ? entry.code : `${entry.code}_${diagnostic.toLowerCase()}`;
         } else safeFailureCode = entry.code;
         if (entry.terminate) {
