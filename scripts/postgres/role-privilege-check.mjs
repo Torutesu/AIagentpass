@@ -286,7 +286,8 @@ maintenance_function_allowlist(routine_signature) AS (
     ('agentpass_human_identity_bind(text,text,uuid,uuid)'),
     ('agentpass_device_audit_inbox_claim(bytea,integer,integer)'),
     ('agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)'),
-    ('agentpass_device_audit_inbox_health()')
+    ('agentpass_device_audit_inbox_health()'),
+    ('agentpass_prune_owner_recovery_outbox_terminal(integer)')
 ),
 signing_authority_table_allowlist(relname) AS (
   VALUES
@@ -752,10 +753,14 @@ table_privilege_observations AS (
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRUNCATE') THEN NULL ELSE 'backup:truncate' END,
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'REFERENCES') THEN NULL ELSE 'backup:references' END,
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRIGGER') THEN NULL ELSE 'backup:trigger' END,
-      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'SELECT') THEN 'maintenance:select' END,
-      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'INSERT') THEN 'maintenance:insert' END,
-      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'UPDATE') THEN 'maintenance:update' END,
-      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'DELETE') THEN 'maintenance:delete' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'SELECT')
+        AND t.relname NOT IN ('owner_recovery_outbox', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'owner_recovery_outbox_retention_ledger') THEN 'maintenance:select' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'INSERT')
+        AND t.relname NOT IN ('owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'owner_recovery_outbox_retention_ledger') THEN 'maintenance:insert' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'UPDATE')
+        AND t.relname NOT IN ('owner_recovery_outbox', 'owner_recovery_outbox_transition_heads') THEN 'maintenance:update' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'DELETE')
+        AND t.relname NOT IN ('owner_recovery_outbox') THEN 'maintenance:delete' END,
       CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'TRUNCATE') THEN 'maintenance:truncate' END,
       CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'REFERENCES') THEN 'maintenance:references' END,
       CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'TRIGGER') THEN 'maintenance:trigger' END,
