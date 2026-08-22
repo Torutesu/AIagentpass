@@ -156,6 +156,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const mutation = mutationCounter(page);
     const card = deviceCard(page, "反映待ち Mac");
     await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+    await card.getByRole("button", { name: "確認して送信" }).click();
     await card.getByRole("alert").waitFor();
     assert.equal(mutation.count(), 0);
   });
