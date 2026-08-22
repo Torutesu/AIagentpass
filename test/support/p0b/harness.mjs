@@ -843,6 +843,8 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
+  const readinessDiagnostic = /^status_\d+_[a-z][a-z0-9_]{0,63}$/u.test(detail) ? detail : "transport_or_timeout";
+  process.stderr.write(`p0b-readiness: label=${label} class=${readinessDiagnostic}\n`);
   throw new Error(`P0-B ${label} readiness failed (${detail || "unavailable"}; ${processDiagnostic(child) || "process_unknown"})`);
 }
 
