@@ -844,7 +844,9 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
   const readinessDiagnostic = /^status_\d+_[a-z][a-z0-9_]{0,63}$/u.test(detail) ? detail : "transport_or_timeout";
-  const readinessMarker = readinessDiagnostic === "status_503_health_unavailable"
+  const readinessMarker = readinessDiagnostic.startsWith("status_503_health_invalid_")
+    ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_INVALID_READINESS_FAILED"
+    : readinessDiagnostic === "status_503_health_unavailable"
     ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNAVAILABLE_FAILED"
     : readinessDiagnostic === "status_503_schema_identity_unavailable"
       ? "P0B_SAFE_LIFECYCLE_CLOUD_SCHEMA_UNAVAILABLE_FAILED"

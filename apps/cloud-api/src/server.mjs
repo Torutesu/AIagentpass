@@ -133,7 +133,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       const healthPath = new URL(request.url, "http://agentpass.invalid").pathname;
       if (request.method === "GET" && healthPath === "/health/ready" && readiness) {
         if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
-        const report = await readiness().then(publicReadinessReport).catch(() => ({ version: 1, ready: false, status: "not_ready", code: "health_unavailable" }));
+        const report = await readiness().then(publicReadinessReport).catch((error) => ({ version: 1, ready: false, status: "not_ready", code: safeReadinessFailureCode(error) }));
         return send(response, report.ready === true ? 200 : 503, report);
       }
       if (request.method === "GET" && healthPath === "/health/metrics" && operationalMetrics) {
@@ -1024,6 +1024,15 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       }, false, false, "organization.emergency_stop")
     ];
   }
+}
+
+function safeReadinessFailureCode(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  if (message === "invalid readiness checks") return "health_invalid_readiness_checks";
+  if (message === "invalid deployment identity") return "health_invalid_deployment_identity";
+  if (message === "invalid managed signer readiness") return "health_invalid_managed_signers";
+  if (message === "invalid readiness report") return "health_invalid_readiness_report";
+  return "health_unavailable";
 }
 
 function isExactHumanAuthPath(url, method = undefined) {
