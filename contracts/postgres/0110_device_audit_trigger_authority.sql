@@ -1,5 +1,12 @@
 BEGIN;
 
+ALTER TABLE public.device_audit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.device_audit_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.device_audit_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.device_audit_heads FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.device_audit_gaps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.device_audit_gaps FORCE ROW LEVEL SECURITY;
+
 -- Device audit head advancement is trigger-owned state.  The online
 -- application may insert an event, but must not inherit direct privileges on
 -- the head/gap projections.  Run the trigger under the migration owner so
