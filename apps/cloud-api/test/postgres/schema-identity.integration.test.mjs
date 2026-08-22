@@ -18,6 +18,10 @@ test("real PostgreSQL schema identity detects RLS drift in the same snapshot con
   await client.query("SET ROLE agentpass_app");
   await assert.doesNotReject(() => client.query(POSTGRES_SCHEMA_IDENTITY_QUERY), "agentpass_app must be able to measure the deployed schema identity");
   await client.query("RESET ROLE");
+  await client.query("SET ROLE agentpass_maintenance");
+  const maintenanceResult = await client.query("SELECT public.agentpass_agent_signing_capability_recover_expired($1::integer) AS result", [256]);
+  assert.deepEqual(maintenanceResult.rows[0]?.result, { status: "ok", expired: 0, uncertain: 0 });
+  await client.query("RESET ROLE");
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   await client.query("SET LOCAL search_path TO pg_catalog, public");
   const baselineResult = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
