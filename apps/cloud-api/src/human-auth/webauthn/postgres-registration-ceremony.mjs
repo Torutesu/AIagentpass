@@ -35,22 +35,17 @@ INSERT INTO webauthn_challenges (
 )
 SELECT $1, s.id, s.member_id, s.organization_id, 'registration', $5,
   $6, $7, $8, $9, $10, $11, 'pending'
-FROM human_sessions s
-JOIN memberships m
-  ON m.organization_id = s.organization_id
- AND m.member_id = s.member_id
- AND m.id = s.membership_id
-JOIN organizations o ON o.id = s.organization_id
+FROM public.agentpass_webauthn_registration_sessions s
 WHERE s.id = $2
   AND s.member_id = $3
   AND s.organization_id = $4
   AND s.revoked_at IS NULL
   AND s.expires_at > $7
   AND (s.idle_expires_at IS NULL OR s.idle_expires_at > $7)
-  AND m.status = 'active'
-  AND m.role = s.role
-  AND o.authority_epoch = s.organization_authority_epoch
-  AND m.session_epoch = s.membership_session_epoch
+  AND s.membership_status = 'active'
+  AND s.membership_role = s.role
+  AND s.authority_epoch = s.organization_authority_epoch
+  AND s.session_epoch = s.membership_session_epoch
 RETURNING id, session_id, member_id, organization_id, ceremony, operation,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
   created_at, expires_at, rp_id, origin, user_verification, status`;
