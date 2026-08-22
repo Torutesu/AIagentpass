@@ -308,6 +308,7 @@ BEGIN
     'agentpass_authorize_device_audit_tenant(uuid,uuid)',
     'agentpass_authorize_device_audit_device(uuid,uuid)',
     'agentpass_device_audit_current_organization_id()',
+    'agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)',
     'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
     'agentpass_consume_human_identity_assertion(bytea,timestamptz)',
     'agentpass_valid_webauthn_transports(text[])',
@@ -391,7 +392,10 @@ DECLARE
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
     'agentpass_agent_signing_capability_recover_expired(integer)',
-    'agentpass_human_identity_bind(text,text,uuid,uuid)'
+    'agentpass_human_identity_bind(text,text,uuid,uuid)',
+    'agentpass_device_audit_inbox_claim(bytea,integer,integer)',
+    'agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)',
+    'agentpass_device_audit_inbox_health()'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_maintenance', routine_signature);
