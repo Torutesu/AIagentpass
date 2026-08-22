@@ -374,7 +374,15 @@ async function scenario(parent, name, callback) {
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
-        } catch { failSafeOpen(effectiveSafeOpenPrefix, "READINESS"); }
+        } catch {
+          if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
+            const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
+            if (summaryReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
+            const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
+            if (deviceReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED");
+          }
+          failSafeOpen(effectiveSafeOpenPrefix, "READINESS");
+        }
         return page;
       };
       try {

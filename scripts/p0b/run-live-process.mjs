@@ -125,6 +125,8 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_FAILED", "owner_open_registration"],
   [null, "P0B_SAFE_OWNER_OPEN_RELOAD_FAILED", "owner_open_reload"],
   [null, "P0B_SAFE_OWNER_OPEN_READINESS_FAILED", "owner_open_readiness"],
+  [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED", "owner_open_summary_not_ready"],
+  [null, "P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED", "owner_open_device_card_not_ready"],
   [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_400_FAILED", "owner_open_bootstrap_http_400"],
   [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_401_FAILED", "owner_open_bootstrap_http_401"],
   [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_403_FAILED", "owner_open_bootstrap_http_403"],
