@@ -36,6 +36,7 @@ const verifiedRecentAuth = {
 test("P0-B lifecycle diagnostics expose only reviewed timeout classes", () => {
   for (const [code, marker] of [
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
+    ["startup_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
     ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
     ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
     ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],
@@ -49,6 +50,13 @@ test("P0-B lifecycle diagnostics expose only reviewed timeout classes", () => {
     assert.equal(lifecycleFailureMarker(new P0BLiveBrowserFixtureError(code, "unsafe diagnostic")), marker);
   }
   assert.equal(lifecycleFailureMarker(new P0BLiveBrowserFixtureError("unknown", "unsafe")), null);
+  for (const [message, marker] of [
+    ["P0-B cloud exited before readiness (redacted)", "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED"],
+    ["P0-B console exited before readiness (redacted)", "P0B_SAFE_LIFECYCLE_CONSOLE_START_FAILED"],
+    ["P0-B cloud readiness failed (redacted)", "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_FAILED"],
+    ["P0-B console readiness failed (redacted)", "P0B_SAFE_LIFECYCLE_CONSOLE_READINESS_FAILED"],
+    ["P0-B signer private key is invalid", "P0B_SAFE_LIFECYCLE_SIGNER_START_FAILED"],
+  ]) assert.equal(lifecycleFailureMarker(new Error(message)), marker);
   assert.equal(lifecycleFailureMarker(new Error("unsafe")), null);
 });
 

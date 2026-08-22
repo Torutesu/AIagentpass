@@ -550,6 +550,14 @@ function failLifecycle(error) {
 }
 
 export function lifecycleFailureMarker(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  if (/^P0-B cloud exited before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED";
+  if (/^P0-B console exited before readiness\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CONSOLE_START_FAILED";
+  if (/^P0-B cloud readiness failed\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_FAILED";
+  if (/^P0-B console readiness failed\b/u.test(message)) return "P0B_SAFE_LIFECYCLE_CONSOLE_READINESS_FAILED";
+  if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(message)) return "P0B_SAFE_LIFECYCLE_CLOUD_KMS_START_FAILED";
+  if (/ERR_MODULE_NOT_FOUND|Cannot find package/u.test(message)) return "P0B_SAFE_LIFECYCLE_DEPENDENCY_START_FAILED";
+  if (/P0-B signer (?:public key|private key|path)/u.test(message)) return "P0B_SAFE_LIFECYCLE_SIGNER_START_FAILED";
   if (!(error instanceof P0BLiveBrowserFixtureError)) return null;
   return new Map([
     ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
