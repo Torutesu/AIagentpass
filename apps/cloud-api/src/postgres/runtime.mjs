@@ -539,7 +539,13 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     drain,
     close
   });
-  if (ownerRecoveryOutboxAutoStart) ownerRecoveryOutboxWorker?.start();
+  if (ownerRecoveryOutboxAutoStart && ownerRecoveryOutboxWorker) {
+    // Establish one successful outbox claim boundary before advertising
+    // readiness. A scheduled worker alone cannot prove the maintenance role,
+    // repository contract, or publisher boundary is usable.
+    await ownerRecoveryOutboxWorker.runOnce();
+    ownerRecoveryOutboxWorker.start();
+  }
   if (sharedControlMaintenanceAutoStart) sharedControlMaintenanceWorker.start();
   if (managedSignerProviderOperationMaintenanceAutoStart) {
     await providerOperationMaintenanceWorker.runOnce();
