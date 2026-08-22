@@ -80,6 +80,7 @@ VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   changed integer;
   did_insert boolean;

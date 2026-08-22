@@ -101,11 +101,11 @@ BEGIN
   -- The organization row is deliberately established before this lookup: the
   -- idempotency relation has an FK to organizations.  This is the same
   -- ordering as the current repository implementation.
-  DELETE FROM public.idempotency_records
-  WHERE organization_id = p_organization_id
-    AND principal_id = p_actor_principal
-    AND idempotency_key = p_idempotency_key
-    AND expires_at <= pg_catalog.clock_timestamp();
+  DELETE FROM public.idempotency_records AS records
+  WHERE records.organization_id = p_organization_id
+    AND records.principal_id = p_actor_principal
+    AND records.idempotency_key = p_idempotency_key
+    AND records.expires_at <= pg_catalog.clock_timestamp();
 
   INSERT INTO public.idempotency_records (
     organization_id,
@@ -128,10 +128,10 @@ BEGIN
 
   SELECT *
     INTO idempotency_row
-  FROM public.idempotency_records
-  WHERE organization_id = p_organization_id
-    AND principal_id = p_actor_principal
-    AND idempotency_key = p_idempotency_key
+  FROM public.idempotency_records AS records
+  WHERE records.organization_id = p_organization_id
+    AND records.principal_id = p_actor_principal
+    AND records.idempotency_key = p_idempotency_key
   FOR UPDATE;
 
   IF NOT FOUND THEN
