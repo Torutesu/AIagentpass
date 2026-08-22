@@ -204,12 +204,12 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
       await assertIdentity(appClient, "agentpass_app");
       await appClient.query("BEGIN");
       const authority = await appClient.query(
-        "SELECT public.agentpass_authorize_device_audit_tenant($1::uuid, $2::uuid) AS organization_id",
-        [organizationId, memberId]
+        "SELECT public.agentpass_authorize_device_audit_device($1::uuid, $2::uuid) AS organization_id",
+        [organizationId, deviceId]
       );
       assert.deepEqual(authority.rows, [{ organization_id: organizationId }]);
 
-      // The application role may enqueue only through the tenant-authorized
+      // The application role may enqueue only through the device-authorized
       // function. It cannot claim raw payloads or settle a lease; those
       // deployment-wide transitions belong exclusively to maintenance.
       const inboxId = id("inbox");
