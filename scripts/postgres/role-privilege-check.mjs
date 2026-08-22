@@ -857,6 +857,14 @@ SELECT json_build_object(
   'device_audit_boundary_ok', (SELECT value FROM device_audit_boundary_ok),
   'device_audit_diagnostics', COALESCE((SELECT json_agg(json_build_object('relation', relname, 'failures', failures) ORDER BY relname)
     FROM device_audit_boundary_observations WHERE cardinality(failures) > 0), '[]'::json),
+  'device_audit_function_observed', COALESCE((SELECT json_agg(json_build_object(
+    'owner', proowner, 'security_definer', prosecdef, 'config', proconfig,
+    'app_execute', has_function_privilege('agentpass_app', oid, 'EXECUTE'),
+    'backup_execute', has_function_privilege('agentpass_backup', oid, 'EXECUTE'),
+    'signer_execute', has_function_privilege('agentpass_signer', oid, 'EXECUTE')
+  )) FROM functions WHERE oid = to_regprocedure('public.agentpass_record_device_audit_head()')), '[]'::json),
+  'app_missing_allowlist', COALESCE((SELECT json_agg(routine_signature ORDER BY routine_signature)
+    FROM app_function_oids WHERE routine_oid IS NULL), '[]'::json),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
   'table_privilege_diagnostics', COALESCE((SELECT json_agg(json_build_object(
       'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
@@ -961,7 +969,10 @@ SELECT json_build_object(
               const agentSessionAuthorityDiagnostics = report.agent_session_authority_boundary_ok === true
                 ? ''
                 : ` agent_session_authority_diagnostics=${boundedTableDiagnostics(report.agent_session_authority_diagnostics)}`;
-              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}`);
+              const deviceAuditDiagnostics = report.device_audit_boundary_ok === true
+                ? ''
+                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, missing_app_functions: report.app_missing_allowlist })}`;
+              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}${deviceAuditDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
               if (evidenceOutput !== undefined) {
