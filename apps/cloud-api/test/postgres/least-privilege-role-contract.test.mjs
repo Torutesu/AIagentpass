@@ -98,6 +98,7 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC/);
   assert.match(sql, /schema_migrations/);
   assert.match(sql, /schema_migration_attempts/);
+  assert.match(sql, /to_regclass\('public\.organizations'\)[\s\S]*to_regclass\('public\.memberships'\)[\s\S]*GRANT SELECT ON TABLE public\.organizations, public\.memberships/u);
   for (const relation of ['release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'platform_principals', 'platform_operator_assignments', 'platform_operator_assignment_approvals', 'managed_signer_key_lifecycles', 'managed_signer_keys']) assert.match(sql, new RegExp(`\\b${relation}\\b`));
   for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
     assert.match(platformSql, new RegExp(`CREATE TABLE (?:public\\.)?${relation} \\(`, 'u'), `migration relation missing: ${relation}`);

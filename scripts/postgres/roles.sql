@@ -165,9 +165,17 @@ END
 $$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
 -- Organization and membership rows are readable by the online application,
--- but every mutation must cross a reviewed authority function.  This keeps
--- existing read paths working while removing the direct-DML escalation path.
-GRANT SELECT ON TABLE public.organizations, public.memberships TO agentpass_app;
+-- but every mutation must cross a reviewed authority function. This script is
+-- intentionally run both before and after migrations: the pre-migration pass
+-- must not fail merely because these tables do not exist yet.
+DO $$
+BEGIN
+  IF to_regclass('public.organizations') IS NOT NULL
+     AND to_regclass('public.memberships') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON TABLE public.organizations, public.memberships TO agentpass_app';
+  END IF;
+END
+$$;
 
 -- signer: all managed-signer state is function-only after migration 0051.
 -- The signer identity receives no table or sequence privileges. Every state

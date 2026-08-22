@@ -330,6 +330,7 @@ test("C3 evidence verification binds source, tree, run, job, and PostgreSQL majo
 
 test("real PostgreSQL qualification requires a CA before it can connect", async () => {
   const evidence = await runC3Migration0047Qualification({
+    env: {},
     databaseUrl: "postgresql://user:password@example.invalid/agentpass_c3_16?sslmode=verify-full",
     sourceCommit: "a".repeat(40),
     sourceTree: "b".repeat(40),
@@ -385,6 +386,7 @@ test("real PostgreSQL qualification requires backup and PITR evidence instead of
   t.after(() => rm(directory, { recursive: true, force: true }));
 
   const evidence = await runC3Migration0047Qualification({
+    env: {},
     databaseUrl: "postgresql://user:password@example.invalid/agentpass_c3_16?sslmode=verify-full",
     sourceCommit: "a".repeat(40),
     sourceTree: "b".repeat(40),
