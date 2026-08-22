@@ -126,6 +126,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_OWNER_OPEN_RELOAD_FAILED", "owner_open_reload"],
   [null, "P0B_SAFE_OWNER_OPEN_READINESS_FAILED", "owner_open_readiness"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED", "owner_open_summary_no_response"],
+  [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED", "owner_open_summary_no_request"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED", "owner_open_summary_http_401"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED", "owner_open_summary_http_403"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_500_FAILED", "owner_open_summary_http_500"],

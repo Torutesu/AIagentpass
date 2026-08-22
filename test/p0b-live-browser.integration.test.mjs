@@ -329,6 +329,15 @@ async function scenario(parent, name, callback) {
           // tenant data, but distinguishes an upstream summary failure from a
           // client-side readiness/parser failure.
           const summaryResponses = new Map();
+          const summaryRequests = new Set();
+          page.on("request", (request) => {
+            try {
+              const url = new URL(request.url());
+              if (url.pathname !== "/api/console") return;
+              const resource = url.searchParams.get("resource") ?? "summary";
+              if (resource === "summary" || resource === "deployment-readiness") summaryRequests.add(resource);
+            } catch { /* bounded diagnostic is best effort */ }
+          });
           page.on("response", (response) => {
             try {
               const url = new URL(response.url());
@@ -338,6 +347,7 @@ async function scenario(parent, name, callback) {
             } catch { /* bounded diagnostic is best effort */ }
           });
           page.__p0bSummaryResponses = summaryResponses;
+          page.__p0bSummaryRequests = summaryRequests;
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         if (register) {
           try { await fixture.installVirtualAuthenticator(page, role); }
@@ -391,6 +401,7 @@ async function scenario(parent, name, callback) {
         } catch {
           const summaryStatus = page?.__p0bSummaryResponses?.get("summary");
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && !Number.isInteger(summaryStatus)) {
+            if (!page?.__p0bSummaryRequests?.has("summary")) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED");
             assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
           }
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && Number.isInteger(summaryStatus)) {
