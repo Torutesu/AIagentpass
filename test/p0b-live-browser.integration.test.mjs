@@ -260,6 +260,7 @@ export function staleAuthCeremonyFailureMarker(error) {
 async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
   selectedScenarioCount += 1;
+  const scenarioOrdinal = selectedScenarioCount;
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
@@ -390,7 +391,17 @@ async function scenario(parent, name, callback) {
       try { await fixture?.close(); }
       catch (error) { cleanupError ??= error; }
     }
-    if (scenarioError) failLifecycle(scenarioError);
+    if (scenarioError) {
+      // The supervisor intentionally discards arbitrary TAP diagnostics. If a
+      // failure escaped the reviewed marker mappers, retain only its bounded
+      // scenario ordinal so CI can identify the failing matrix slice without
+      // exposing assertion text, URLs, or fixture data.
+      const message = scenarioError instanceof Error ? scenarioError.message : "";
+      if (lifecycleFailureMarker(scenarioError) === null && !/^P0B_SAFE_[A-Z0-9_]+$/u.test(message)) {
+        process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
+      }
+      failLifecycle(scenarioError);
+    }
     if (cleanupError) failLifecycle(cleanupError);
   });
 }
