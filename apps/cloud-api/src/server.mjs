@@ -1028,6 +1028,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
 
 function safeReadinessFailureCode(error) {
   const message = typeof error?.message === "string" ? error.message : "";
+  if (/^invalid readiness checks:unknown_key_/u.test(message)) return "health_invalid_readiness_checks";
   if (/^invalid readiness checks:/u.test(message)) return `health_${message.slice("invalid readiness checks:".length)}`;
   if (message === "invalid deployment identity") return "health_invalid_deployment_identity";
   if (message === "invalid managed signer readiness") return "health_invalid_managed_signers";
@@ -1981,12 +1982,12 @@ function publicDeploymentIdentity(value) {
 function publicReadinessChecks(value, expectedReady = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks:shape");
   const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
-  const allowedCheckNames = new Set(["database", "schema", "pool", "drain", "platform_session", "platform_promotion", "owner_recovery_outbox", "managed_signer_provider_operations", "device_audit_inbox", "managed_signers", ...hostedSignerCheckNames]);
+  const allowedCheckNames = new Set(["database", "schema", "pool", "drain", "platform_session", "platform_promotion", "owner_recovery_outbox", "managed_signer_provider_operations", "device_audit_inbox", "agent_session_signing_capability_maintenance", "managed_signers", ...hostedSignerCheckNames]);
   const unknownCheck = Object.keys(value).find((key) => !allowedCheckNames.has(key));
   if (unknownCheck !== undefined) throw new Error(`invalid readiness checks:unknown_key_${unknownCheck}`);
   const suppliedSignerCheckNames = Object.keys(value).filter((key) => key.endsWith("_signer")).sort();
   if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks:signer_set");
-  const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, device_audit_inbox: deviceAuditInbox, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
+  const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, device_audit_inbox: deviceAuditInbox, agent_session_signing_capability_maintenance: capabilityMaintenance, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks:database");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
@@ -2012,6 +2013,10 @@ function publicReadinessChecks(value, expectedReady = undefined) {
     || !nonNegativeIntegerOrNull(deviceAuditInbox.accepted_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.uncertain_count)
     || !nonNegativeIntegerOrNull(deviceAuditInbox.dead_letter_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_pending_age_ms)
     || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks:device_audit_inbox");
+  if (capabilityMaintenance !== undefined && (!capabilityMaintenance || typeof capabilityMaintenance.ok !== "boolean" || typeof capabilityMaintenance.code !== "string"
+    || typeof capabilityMaintenance.worker_state !== "string" || !Number.isSafeInteger(capabilityMaintenance.cycles) || capabilityMaintenance.cycles < 0
+    || !Number.isSafeInteger(capabilityMaintenance.consecutive_failures) || capabilityMaintenance.consecutive_failures < 0
+    || (capabilityMaintenance.last_success_at !== null && !Number.isSafeInteger(capabilityMaintenance.last_success_at)))) throw new Error("invalid readiness checks:agent_session_signing_capability_maintenance");
   const publicKeyFingerprint = /^(?:[0-9a-f]{64}|SHA256:[A-Za-z0-9_-]{43})$/u;
   if (managedSigners !== undefined) validateManagedSignerReadiness(managedSigners);
   if (agentSessionSigner !== undefined && (!agentSessionSigner || typeof agentSessionSigner.ok !== "boolean"
@@ -2048,6 +2053,7 @@ function publicReadinessChecks(value, expectedReady = undefined) {
     && (ownerRecoveryOutbox === undefined || ownerRecoveryOutbox.ok === true)
     && (managedSignerProviderOperations === undefined || managedSignerProviderOperations.ok === true)
     && (deviceAuditInbox === undefined || deviceAuditInbox.ok === true)
+    && (capabilityMaintenance === undefined || capabilityMaintenance.ok === true)
     && (managedSigners === undefined || managedSigners.ok === true);
   if (expectedReady !== undefined && expectedReady !== (coreChecksReady && optionalChecksReady)) throw new Error("readiness checks disagree with report");
   return Object.freeze({
@@ -2060,6 +2066,7 @@ function publicReadinessChecks(value, expectedReady = undefined) {
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
     ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
     ...(deviceAuditInbox === undefined ? {} : { device_audit_inbox: Object.freeze({ ok: deviceAuditInbox.ok, code: deviceAuditInbox.code, worker_state: deviceAuditInbox.worker_state, pending_count: deviceAuditInbox.pending_count, processing_count: deviceAuditInbox.processing_count, accepted_count: deviceAuditInbox.accepted_count, uncertain_count: deviceAuditInbox.uncertain_count, dead_letter_count: deviceAuditInbox.dead_letter_count, oldest_pending_age_ms: deviceAuditInbox.oldest_pending_age_ms, oldest_uncertain_age_ms: deviceAuditInbox.oldest_uncertain_age_ms }) }),
+    ...(capabilityMaintenance === undefined ? {} : { agent_session_signing_capability_maintenance: Object.freeze({ ok: capabilityMaintenance.ok, code: capabilityMaintenance.code, worker_state: capabilityMaintenance.worker_state, cycles: capabilityMaintenance.cycles, consecutive_failures: capabilityMaintenance.consecutive_failures, last_success_at: capabilityMaintenance.last_success_at }) }),
     ...(managedSigners === undefined ? {} : { managed_signers: Object.freeze({
       version: 1,
       cardinality: managedSigners.cardinality,
