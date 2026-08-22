@@ -17,6 +17,8 @@ const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const SESSION_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const SESSION_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 let selectedScenarioCount = 0;
 
 // Thirteen authority scenarios each own a fresh TLS PostgreSQL/Cloud/Console
@@ -912,6 +914,13 @@ function classifySessionContract(value) {
     || typeof session.created_at !== "string" || typeof session.expires_at !== "string"
     || (session.recent_auth_at !== null && typeof session.recent_auth_at !== "string")) return "field_types";
   if (typeof value.csrf_token !== "string") return "csrf_type";
+  if (!UUID.test(session.session_id)) return "session_id_format";
+  if (!UUID.test(session.member_id)) return "member_id_format";
+  if (!UUID.test(session.organization_id)) return "organization_id_format";
+  if (!["owner", "admin", "auditor", "viewer"].includes(session.role)) return "role_value";
+  if (!SESSION_TIMESTAMP.test(session.created_at) || !SESSION_TIMESTAMP.test(session.expires_at)
+    || (session.recent_auth_at !== null && !SESSION_TIMESTAMP.test(session.recent_auth_at))) return "timestamp_format";
+  if (!SESSION_TOKEN.test(value.csrf_token)) return "csrf_format";
   return "valid_shape";
 }
 
