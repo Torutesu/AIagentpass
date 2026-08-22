@@ -923,8 +923,12 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
 
 function safeReadinessCode(body) {
   if (typeof body !== "string" || body.length > 64 * 1024) return null;
-  const match = body.match(/"code"\s*:\s*"([a-z][a-z0-9_]{0,63})"/u);
-  return match?.[1] ?? null;
+  try {
+    const parsed = JSON.parse(body);
+    return typeof parsed?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(parsed.code) ? parsed.code : null;
+  } catch {
+    return null;
+  }
 }
 
 function httpsRequest(url, { ca, headers, timeoutMs }) {
