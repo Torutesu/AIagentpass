@@ -844,7 +844,10 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
   const readinessDiagnostic = /^status_\d+_[a-z][a-z0-9_]{0,63}$/u.test(detail) ? detail : "transport_or_timeout";
-  const readinessMarker = readinessDiagnostic === "status_503_health_unknown_key_metrics"
+  const unknownCheckKey = readinessDiagnostic.match(/^status_503_health_unknown_key_([a-z][a-z0-9_]*)$/u)?.[1];
+  const readinessMarker = unknownCheckKey !== undefined
+    ? `P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_KEY_${unknownCheckKey.toUpperCase()}_FAILED`
+    : readinessDiagnostic === "status_503_health_unknown_key_metrics"
     ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_METRICS_FAILED"
     : readinessDiagnostic === "status_503_health_unknown_key_agent_session_signer"
       ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_AGENT_SESSION_FAILED"
