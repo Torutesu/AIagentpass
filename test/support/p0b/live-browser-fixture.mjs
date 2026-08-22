@@ -595,6 +595,9 @@ export function classifyP0BStartupError(error) {
   if (cloudCategory === "unknown_start_failed") return "cloud_unknown_start_failed";
   if (/^P0-B cloud (?:\w+_failed) before readiness\b/u.test(message)) return "cloud_start_failed";
   if (/^P0-B console (?:\w+_failed) before readiness\b/u.test(message)) return "console_start_failed";
+  if (/^P0-B cloud readiness failed \(status_\d+_schema_identity_mismatch\b/u.test(message)) return "cloud_schema_readiness_failed";
+  if (/^P0-B cloud readiness failed \(status_\d+_(?:signer|managed_signer|refresh_hint)[a-z0-9_]*\b/u.test(message)) return "cloud_signer_readiness_failed";
+  if (/^P0-B cloud readiness failed \(status_\d+_platform_session[a-z0-9_]*\b/u.test(message)) return "cloud_platform_session_readiness_failed";
   if (/^P0-B cloud readiness failed\b/u.test(message)) return "cloud_readiness_failed";
   if (/^P0-B console readiness failed\b/u.test(message)) return "console_readiness_failed";
   if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(message)) return "cloud_kms_start_failed";

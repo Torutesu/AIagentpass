@@ -837,12 +837,19 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
     try {
       const result = await httpsRequest(new URL(requestPath, origin), { ca: caPem, headers, timeoutMs: 1_500 });
       if (result.status === expectedStatus) return result;
-      lastError = new Error(`status_${result.status}`);
+      const readinessCode = safeReadinessCode(result.body);
+      lastError = new Error(`status_${result.status}${readinessCode ? `_${readinessCode}` : ""}`);
     } catch (error) { lastError = error; }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
   throw new Error(`P0-B ${label} readiness failed (${detail || "unavailable"}; ${processDiagnostic(child) || "process_unknown"})`);
+}
+
+function safeReadinessCode(body) {
+  if (typeof body !== "string" || body.length > 64 * 1024) return null;
+  const match = body.match(/"code"\s*:\s*"([a-z][a-z0-9_]{0,63})"/u);
+  return match?.[1] ?? null;
 }
 
 function httpsRequest(url, { ca, headers, timeoutMs }) {
