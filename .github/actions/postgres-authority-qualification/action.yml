@@ -630,7 +630,8 @@ runs:
           ((.service.roles | length) == 5) and
           (.service.role_assertions == [
             {connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres"},
-            {connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app"}
+            {connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app"},
+            {connection: "maintenance", expected_role: "agentpass_maintenance", session_user: "agentpass_maintenance", current_user: "agentpass_maintenance"}
           ]) and
           (.service.tenant_authority == {
             relation: "platform_device_audit_tenant_context",
