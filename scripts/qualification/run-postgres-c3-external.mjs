@@ -286,7 +286,16 @@ export async function runExternalPostgresC3Qualification({ env = process.env } =
   return Object.freeze({ status: report.status, qualified: report.qualified, evidence_path: output, artifact_sha256: binding.artifact_sha256, migration_artifact_sha256: report.migration_artifact_sha256 });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   runExternalPostgresC3Qualification().then((result) => {
     process.stdout.write(`${canonicalJson(result)}\n`);
     process.exitCode = externalQualificationExitCode(result);
