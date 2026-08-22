@@ -10,9 +10,10 @@ CREATE TABLE public.platform_device_audit_tenant_context (
   transaction_id bigint NOT NULL CHECK (transaction_id > 0),
   organization_id uuid NOT NULL REFERENCES public.organizations(id),
   member_id uuid REFERENCES public.members(id),
-  device_id uuid REFERENCES public.devices(id),
+  device_id uuid,
   authorized_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (backend_pid, transaction_id),
+  FOREIGN KEY (organization_id, device_id) REFERENCES public.devices(organization_id, id),
   CHECK ((member_id IS NOT NULL) <> (device_id IS NOT NULL))
 );
 
