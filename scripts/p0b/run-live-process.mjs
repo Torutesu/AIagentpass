@@ -258,6 +258,8 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED", "missing_authenticator_confirm", false],
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED", "missing_authenticator_alert", false],
   [null, "P0B_SAFE_MISSING_AUTHENTICATOR_MUTATION_FAILED", "missing_authenticator_mutation", false],
+  [null, "P0B_SAFE_CHILD_UNCAUGHT_EXCEPTION", "child_uncaught_exception", false],
+  [null, "P0B_SAFE_CHILD_UNHANDLED_REJECTION", "child_unhandled_rejection", false],
 ].map(([index, name, code, terminate = true]) => Object.freeze({
   marker: index === null ? name : `not ok ${index} - ${name}`,
   code,

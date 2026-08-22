@@ -5,6 +5,11 @@ import { chromium } from "../apps/web-console/node_modules/@playwright/test/inde
 import { P0BSkip } from "./support/p0b/harness.mjs";
 import { P0BLiveBrowserFixtureError, runP0BLifecycle, startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
 
+// Keep supervisor diagnostics fixed and secret-free when the browser child
+// exits before Node's TAP reporter can serialize a test failure.
+process.on("uncaughtExceptionMonitor", () => process.stderr.write("P0B_SAFE_CHILD_UNCAUGHT_EXCEPTION\n"));
+process.on("unhandledRejection", () => process.stderr.write("P0B_SAFE_CHILD_UNHANDLED_REJECTION\n"));
+
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
 const scenarioFilter = process.env.P0B_LIVE_BROWSER_SCENARIO?.trim() ?? "";
 const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
