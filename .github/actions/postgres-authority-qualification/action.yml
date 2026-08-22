@@ -621,7 +621,7 @@ runs:
         jq -e \
           --arg source "$GITHUB_SHA" \
           --argjson migration_head "$(node --input-type=module -e 'import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs"; console.log(POSTGRES_SCHEMA_HEAD.version)')" \
-          (.kind == "agentpass.postgres.real-service.qualification") and
+          '(.kind == "agentpass.postgres.real-service.qualification") and
           (.candidate_id | type == "string") and
           (.source_commit == $source) and
           (.schema.head == $migration_head) and
@@ -634,7 +634,7 @@ runs:
           ]) and
           (.service.tenant_authority == {
             relation: "platform_device_audit_tenant_context",
-            security_definer_functions: 2,
+            security_definer_functions: 3,
             app_can_select_relation: false
           }) and
           (.service.forced_rls_relations == 3) and

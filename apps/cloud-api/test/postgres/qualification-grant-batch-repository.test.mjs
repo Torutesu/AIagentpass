@@ -62,12 +62,14 @@ test("live PostgreSQL qualification-grant-batch repository qualification is boun
   t.after(async () => pool.end());
   const result = await pool.query(`
     SELECT current_setting('server_version') AS server_version,
+           current_setting('server_version_num')::int AS server_version_num,
            (SELECT max(version)::int FROM schema_migrations) AS schema_version,
            to_regclass('public.qualification_grant_batches') AS batches,
            to_regclass('public.qualification_grant_batch_steps') AS steps
   `);
   assert.equal(result.rowCount, 1);
-  assert.match(result.rows[0].server_version, /^\d+(?:\.\d+)+$/u);
+  assert.ok(Number.isSafeInteger(result.rows[0].server_version_num));
+  assert.ok(result.rows[0].server_version_num > 0);
   assert.equal(result.rows[0].batches, "qualification_grant_batches");
   assert.equal(result.rows[0].steps, "qualification_grant_batch_steps");
   assert.ok(Number.isInteger(result.rows[0].schema_version));
