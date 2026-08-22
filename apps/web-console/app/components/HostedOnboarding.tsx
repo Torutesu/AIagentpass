@@ -47,9 +47,15 @@ function activeStep(state: BootstrapState | null): number {
 function friendlyError(error: unknown): Guidance {
   if (error instanceof HostedBootstrapClientError) {
     const code = error.serverCode ?? error.code;
+    if (code === "bootstrap_origin_not_allowed") return { kind: "terminal", message: "許可されたAgentPass Consoleからのみセットアップできます。ブックマークした正規のURLから開き直してください。" };
+    if (code === "bootstrap_csrf_failed") return { kind: "retryable", message: "安全なセッションを確認できませんでした。ページを再読み込みしてからもう一度お試しください。" };
     if (code === "bootstrap_session_expired") return { kind: "terminal", message: "セットアップの有効期限が切れました。GitHubから新しく始めてください。" };
     if (code === "bootstrap_no_membership") return { kind: "terminal", message: "以前の所属履歴があるため、新しいワークスペースは作成できません。管理者の招待または復旧が必要です。" };
+    if (code === "bootstrap_already_completed") return { kind: "terminal", message: "このセットアップはすでに完了しています。通常のConsoleへ進んでください。" };
+    if (code === "bootstrap_idempotency_conflict") return { kind: "retryable", message: "セットアップの状態を確認できませんでした。ページを再読み込みしてから続けてください。" };
     if (code === "bootstrap_webauthn_replayed") return { kind: "terminal", message: "このパスキー確認はすでに使われました。状態を確認するにはConsoleを開いてください。" };
+    if (code === "bootstrap_webauthn_invalid" || code === "bootstrap_webauthn_required") return { kind: "retryable", message: "パスキーを確認できませんでした。登録した端末で、もう一度お試しください。" };
+    if (code === "bootstrap_unavailable") return { kind: "retryable", message: "AgentPassのセットアップサービスが一時的に利用できません。少し待ってからもう一度お試しください。" };
     if (code === "webauthn_failed" || code === "aborted") return { kind: "retryable", message: "パスキーの確認がキャンセルされました。準備ができたらもう一度お試しください。" };
     if (error.code === "transport_failed") return { kind: "retryable", message: "ネットワークへ接続できません。接続を確認してもう一度お試しください。" };
   }

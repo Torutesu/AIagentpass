@@ -22,6 +22,10 @@ test("Hosted onboarding exposes the complete first-user journey", async () => {
   assert.match(component, /data-device-handoff="ready"/);
   assert.match(component, /端末をAgentへ引き渡す/);
   assert.match(component, /セットアップを再開してください/);
+  assert.match(component, /許可されたAgentPass Consoleからのみセットアップできます/);
+  assert.match(component, /安全なセッションを確認できませんでした/);
+  assert.match(component, /このセットアップはすでに完了しています/);
+  assert.match(component, /AgentPassのセットアップサービスが一時的に利用できません/);
   assert.match(component, /retryable/);
   assert.match(component, /terminal/);
 });
