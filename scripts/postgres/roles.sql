@@ -511,6 +511,30 @@ BEGIN
 END
 $$;
 
+-- The outbox worker is the only deployment-wide component allowed to inspect
+-- and settle recovery delivery rows. This block runs both before and after
+-- migrations, so the reconciliation pass restores the exact maintenance ACL
+-- after the deny-by-default reset above.
+DO $$
+BEGIN
+  IF to_regclass('public.owner_recovery_outbox') IS NOT NULL THEN
+    GRANT SELECT, UPDATE, DELETE ON TABLE public.owner_recovery_outbox TO agentpass_maintenance;
+  END IF;
+  IF to_regclass('public.owner_recovery_outbox_transition_heads') IS NOT NULL THEN
+    GRANT SELECT, INSERT, UPDATE ON TABLE public.owner_recovery_outbox_transition_heads TO agentpass_maintenance;
+  END IF;
+  IF to_regclass('public.owner_recovery_outbox_transition_ledger') IS NOT NULL THEN
+    GRANT SELECT, INSERT ON TABLE public.owner_recovery_outbox_transition_ledger TO agentpass_maintenance;
+  END IF;
+  IF to_regclass('public.owner_recovery_outbox_retention_ledger') IS NOT NULL THEN
+    GRANT SELECT, INSERT ON TABLE public.owner_recovery_outbox_retention_ledger TO agentpass_maintenance;
+  END IF;
+  IF to_regprocedure('public.agentpass_prune_owner_recovery_outbox_terminal(integer)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.agentpass_prune_owner_recovery_outbox_terminal(integer) TO agentpass_maintenance;
+  END IF;
+END
+$$;
+
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
