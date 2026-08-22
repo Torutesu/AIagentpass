@@ -308,6 +308,7 @@ async function scenario(parent, name, callback) {
         let summaryRequests = new Set();
         let sessionResponses = new Map();
         let sessionRequests = new Set();
+        let sessionContractCode = "unknown";
         try {
           context = await runP0BLifecycle(
             () => browser.newContext({ ignoreHTTPSErrors: false }),
@@ -349,6 +350,7 @@ async function scenario(parent, name, callback) {
               const url = new URL(response.url());
               if (url.pathname === "/api/auth/session/resume") {
                 sessionResponses.set("resume", response.status());
+                void response.json().then((body) => { sessionContractCode = classifySessionContract(body); }).catch(() => { sessionContractCode = "invalid_json"; });
                 return;
               }
               if (url.pathname !== "/api/console") return;
@@ -415,7 +417,10 @@ async function scenario(parent, name, callback) {
               if (sessionStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_401_FAILED");
               if (sessionStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_403_FAILED");
               if (sessionStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_HTTP_5XX_FAILED");
-              if (sessionStatus >= 200 && sessionStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_RESPONSE_CONTRACT_FAILED");
+              if (sessionStatus >= 200 && sessionStatus < 300) {
+                if (sessionContractCode === "invalid_json") assert.fail("P0B_SAFE_OWNER_OPEN_SESSION_INVALID_JSON_FAILED");
+                assert.fail(`P0B_SAFE_OWNER_OPEN_SESSION_RESPONSE_CONTRACT_${sessionContractCode.toUpperCase()}_FAILED`);
+              }
               assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED");
             }
             assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
@@ -894,6 +899,21 @@ function isKeyboardSessionRequest(request) {
 }
 
 function deviceCard(page, name) { return page.getByRole("article").filter({ has: page.getByRole("heading", { name }) }); }
+
+function classifySessionContract(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "payload_shape";
+  if (Object.keys(value).sort().join(",") !== "csrf_token,session") return "top_keys";
+  const session = value.session;
+  if (!session || typeof session !== "object" || Array.isArray(session)) return "session_shape";
+  const expected = "created_at,expires_at,member_id,organization_id,recent_auth_at,role,session_id,version";
+  if (Object.keys(session).sort().join(",") !== expected) return "session_keys";
+  if (session.version !== 1 || typeof session.session_id !== "string" || typeof session.member_id !== "string"
+    || typeof session.organization_id !== "string" || typeof session.role !== "string"
+    || typeof session.created_at !== "string" || typeof session.expires_at !== "string"
+    || (session.recent_auth_at !== null && typeof session.recent_auth_at !== "string")) return "field_types";
+  if (typeof value.csrf_token !== "string") return "csrf_type";
+  return "valid_shape";
+}
 
 function mutationCounter(page) {
   let calls = 0;
