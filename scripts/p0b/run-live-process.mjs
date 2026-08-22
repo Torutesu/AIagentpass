@@ -272,6 +272,8 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_SIGNER_SET_FAILED", "lifecycle_cloud_health_signer_set"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_CHECK_FAILED", "lifecycle_cloud_health_unknown_check"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_METRICS_FAILED", "lifecycle_cloud_health_unknown_metrics"],
+  [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_MANAGED_SIGNERS_FAILED", "lifecycle_cloud_health_unknown_managed_signers"],
+  [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_OWNER_OUTBOX_FAILED", "lifecycle_cloud_health_unknown_owner_outbox"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_OUTBOX_FAILED", "lifecycle_cloud_health_unknown_outbox"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_PROVIDER_OPERATIONS_FAILED", "lifecycle_cloud_health_unknown_provider_operations"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_DEVICE_AUDIT_FAILED", "lifecycle_cloud_health_unknown_device_audit"],
