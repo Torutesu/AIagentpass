@@ -304,8 +304,6 @@ async function scenario(parent, name, callback) {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
-        let summaryResponses = new Map();
-        let summaryRequests = new Set();
         try {
           context = await runP0BLifecycle(
             () => browser.newContext({ ignoreHTTPSErrors: false }),
@@ -326,26 +324,6 @@ async function scenario(parent, name, callback) {
               onLateSuccess: () => context.close()
             }
           );
-          // Retain only bounded status observations for the owner landing
-          // contract. This never captures response bodies, URLs, cookies, or
-          // tenant data, but distinguishes an upstream summary failure from a
-          // client-side readiness/parser failure.
-          page.on("request", (request) => {
-            try {
-              const url = new URL(request.url());
-              if (url.pathname !== "/api/console") return;
-              const resource = url.searchParams.get("resource") ?? "summary";
-              if (resource === "summary" || resource === "deployment-readiness") summaryRequests.add(resource);
-            } catch { /* bounded diagnostic is best effort */ }
-          });
-          page.on("response", (response) => {
-            try {
-              const url = new URL(response.url());
-              if (url.pathname !== "/api/console") return;
-              const resource = url.searchParams.get("resource") ?? "summary";
-              if (resource === "summary" || resource === "deployment-readiness") summaryResponses.set(resource, response.status());
-            } catch { /* bounded diagnostic is best effort */ }
-          });
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         if (register) {
           try { await fixture.installVirtualAuthenticator(page, role); }
@@ -396,24 +374,7 @@ async function scenario(parent, name, callback) {
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
-        } catch {
-          const summaryStatus = summaryResponses.get("summary");
-          if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && !Number.isInteger(summaryStatus)) {
-            if (!summaryRequests.has("summary")) {
-              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_REQUEST_FAILED");
-            }
-            assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
-          }
-          if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN" && Number.isInteger(summaryStatus)) {
-            if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
-            if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
-            if (summaryStatus === 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_500_FAILED");
-            if (summaryStatus >= 400 && summaryStatus < 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_4XX_FAILED");
-            if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_5XX_FAILED");
-            if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
-          }
-          failSafeOpen(effectiveSafeOpenPrefix, "READINESS");
-        }
+        } catch { failSafeOpen(effectiveSafeOpenPrefix, "READINESS"); }
         return page;
       };
       try {
