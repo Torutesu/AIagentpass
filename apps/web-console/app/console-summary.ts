@@ -114,7 +114,9 @@ const MAX_NAME = 128;
 const MAX_SCOPE_ITEMS = 64;
 const MAX_CURSOR = 512;
 const MAX_ID = 128;
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
+// PostgreSQL timestamptz JSON can be rendered as either canonical `Z` or
+// explicit UTC `+00:00`; both denote the same UTC instant and are safe here.
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/u;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const CURSOR = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}$/u;
