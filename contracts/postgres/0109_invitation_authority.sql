@@ -1,7 +1,5 @@
 BEGIN;
 
-SET LOCAL plpgsql.variable_conflict = 'use_column';
-
 -- Invitation authority boundary.
 --
 -- organization_invitations is function-only for the application, including
@@ -39,6 +37,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   actor_row public.memberships%ROWTYPE;
   invitation_row public.organization_invitations%ROWTYPE;
@@ -129,6 +128,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   actor_row public.memberships%ROWTYPE;
   invitation_row public.organization_invitations%ROWTYPE;
@@ -221,6 +221,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   actor_row public.memberships%ROWTYPE;
   current_row public.organization_invitations%ROWTYPE;
@@ -344,6 +345,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   invitation_row public.organization_invitations%ROWTYPE;
   consumed_row public.organization_invitations%ROWTYPE;
@@ -463,6 +465,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   actor_role text;
 BEGIN

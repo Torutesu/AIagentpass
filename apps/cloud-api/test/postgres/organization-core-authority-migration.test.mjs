@@ -85,7 +85,7 @@ test("0107 is catalog-bound to its frozen checksum and does not authorize reposi
       "apps/cloud-api/test/postgres/organization-core-authority-migration.test.mjs",
       "scripts/postgres/organization-authority-postgres-qualification.integration.test.mjs",
     ],
-    sha256: "09dd1e66181f6b3005371a7a808b1895e39ff0241cf5e2a46d3ca398c375c38f"
+    sha256: "72465b685adb6a47e38785c735bbcb870da976140ba13963466511544b5a51d8"
   });
   assert.doesNotMatch(source, /organization-repository\.mjs|roles\.sql/u);
 });

@@ -1,7 +1,5 @@
 BEGIN;
 
-SET LOCAL plpgsql.variable_conflict = 'use_column';
-
 -- Organization core authority boundary.
 --
 -- The organization repository currently owns the surrounding transaction: it
@@ -47,6 +45,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   organization_row public.organizations%ROWTYPE;
   membership_row public.memberships%ROWTYPE;
@@ -257,6 +256,7 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+#variable_conflict use_column
 DECLARE
   organization_row public.organizations%ROWTYPE;
   actor_role text;
