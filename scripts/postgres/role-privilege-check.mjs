@@ -863,6 +863,14 @@ SELECT json_build_object(
     'backup_execute', has_function_privilege('agentpass_backup', oid, 'EXECUTE'),
     'signer_execute', has_function_privilege('agentpass_signer', oid, 'EXECUTE')
   )) FROM functions WHERE oid = to_regprocedure('public.agentpass_record_device_audit_head()')), '[]'::json),
+  'device_audit_event_policies', COALESCE((SELECT json_agg(json_build_object(
+    'name', p.polname, 'command', p.polcmd, 'roles', p.polroles,
+    'using', pg_get_expr(p.polqual, p.polrelid),
+    'with_check', pg_get_expr(p.polwithcheck, p.polrelid)
+  ) ORDER BY p.polname) FROM pg_policy AS p
+    JOIN pg_class AS c ON c.oid = p.polrelid
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relname = 'device_audit_events'), '[]'::json),
   'app_missing_allowlist', COALESCE((SELECT json_agg(routine_signature ORDER BY routine_signature)
     FROM app_function_oids WHERE routine_oid IS NULL), '[]'::json),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
@@ -971,7 +979,7 @@ SELECT json_build_object(
                 : ` agent_session_authority_diagnostics=${boundedTableDiagnostics(report.agent_session_authority_diagnostics)}`;
               const deviceAuditDiagnostics = report.device_audit_boundary_ok === true
                 ? ''
-                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, missing_app_functions: report.app_missing_allowlist })}`;
+                : ` device_audit_diagnostics=${JSON.stringify({ tables: report.device_audit_diagnostics, function: report.device_audit_function_observed, event_policies: report.device_audit_event_policies, missing_app_functions: report.app_missing_allowlist })}`;
               fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}${signingCapabilityDiagnostics}${agentSessionAuthorityDiagnostics}${deviceAuditDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
