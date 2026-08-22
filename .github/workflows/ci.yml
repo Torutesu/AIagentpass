@@ -341,6 +341,14 @@ jobs:
         env:
           PGPASSWORD: agentpass-w15-integration
         run: createdb --host=127.0.0.1 --port=5433 --username=postgres agentpass_w15_upgrade
+      - name: Bootstrap PostgreSQL 16 migration roles for W1.5
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5433"
+          PGUSER: postgres
+          PGPASSWORD: agentpass-w15-integration
+          PGDATABASE: postgres
+        run: psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file scripts/postgres/roles.sql
       - name: Prepare W1.5 evidence directory
         run: |
           mkdir -p "$GITHUB_WORKSPACE/w15-evidence"
