@@ -1,5 +1,12 @@
 BEGIN;
 
+-- The original authority intentionally revokes EXECUTE from the migration
+-- identity. Restore only the owner-side privilege needed while replacing the
+-- body, then restore the deny-by-default ACL before committing this migration.
+GRANT EXECUTE ON FUNCTION public.agentpass_human_register_credential(
+  uuid, uuid, uuid, bytea, bytea, bigint, text[], text, boolean, boolean
+) TO agentpass_migrator;
+
 -- Recompile the 0092 authority with an explicit PL/pgSQL conflict policy. The
 -- RETURNS TABLE column `id` otherwise collides with the composite projection
 -- returned by `created`, which PostgreSQL reports as an ambiguous reference
@@ -88,5 +95,9 @@ BEGIN
     created.created_at AS created_at, created.last_used_at AS last_used_at, created.revoked_at AS revoked_at;
 END;
 $$;
+
+REVOKE EXECUTE ON FUNCTION public.agentpass_human_register_credential(
+  uuid, uuid, uuid, bytea, bytea, bigint, text[], text, boolean, boolean
+) FROM agentpass_migrator;
 
 COMMIT;
