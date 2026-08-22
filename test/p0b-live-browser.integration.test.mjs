@@ -155,10 +155,14 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = await open("owner", { register: false });
     const mutation = mutationCounter(page);
     const card = deviceCard(page, "反映待ち Mac");
-    await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-    await card.getByRole("button", { name: "確認して送信" }).click();
-    await card.getByRole("alert").waitFor();
-    assert.equal(mutation.count(), 0);
+    try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
+    catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_WAKE_CLICK_FAILED"); }
+    try { await card.getByRole("button", { name: "確認して送信" }).click(); }
+    catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED"); }
+    try { await card.getByRole("alert").waitFor(); }
+    catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED"); }
+    try { assert.equal(mutation.count(), 0); }
+    catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_MUTATION_FAILED"); }
   });
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
