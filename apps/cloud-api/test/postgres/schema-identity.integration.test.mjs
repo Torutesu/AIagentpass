@@ -15,6 +15,9 @@ test("real PostgreSQL schema identity detects RLS drift in the same snapshot con
   await client.query(`CREATE TABLE \"${schema}\".probe (id integer PRIMARY KEY, value text DEFAULT 'safe')`);
   await client.query(`ALTER TABLE \"${schema}\".probe ENABLE ROW LEVEL SECURITY`);
   await client.query(`CREATE POLICY probe_public ON \"${schema}\".probe FOR SELECT TO PUBLIC USING (true)`);
+  await client.query("SET ROLE agentpass_app");
+  await assert.doesNotReject(() => client.query(POSTGRES_SCHEMA_IDENTITY_QUERY), "agentpass_app must be able to measure the deployed schema identity");
+  await client.query("RESET ROLE");
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   await client.query("SET LOCAL search_path TO pg_catalog, public");
   const baselineResult = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
