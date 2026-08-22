@@ -285,6 +285,18 @@ BEGIN
 END
 $$;
 
+-- The durable audit inbox is function-only for the application identity. The
+-- migration creates a tenant SELECT policy for bootstrap compatibility, but
+-- the post-migration reconciliation must remove that direct table path.
+DO $$
+BEGIN
+  IF to_regclass('public.device_audit_inbox') IS NOT NULL THEN
+    REVOKE ALL PRIVILEGES ON TABLE public.device_audit_inbox FROM agentpass_app, agentpass_backup, agentpass_maintenance;
+    GRANT SELECT ON TABLE public.device_audit_inbox TO agentpass_backup;
+  END IF;
+END
+$$;
+
 -- Shared replay and abuse controls are online application responsibilities,
 -- but remain function-scoped so callers cannot gain EXECUTE on unrelated
 -- migration helpers. Maintenance is bounded inside each reviewed function.
