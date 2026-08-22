@@ -20,7 +20,8 @@ test("real PostgreSQL schema identity detects RLS drift in the same snapshot con
   const baselineResult = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
   const baselineDigest = postgresSchemaIdentityDigest(baselineResult.rows[0].snapshot);
   await client.query("ROLLBACK");
-  assert.equal((await measurePostgresSchemaIdentity({ client, expectedDigest: baselineDigest })).code, "verified");
+  const baselineMeasurement = await measurePostgresSchemaIdentity({ client, expectedDigest: baselineDigest, onFailure: (stage) => console.error(`schema-identity-diagnostic: ${stage}`) });
+  assert.equal(baselineMeasurement.code, "verified", JSON.stringify(baselineMeasurement));
   await client.query(`ALTER TABLE \"${schema}\".probe DISABLE ROW LEVEL SECURITY`);
   assert.equal((await measurePostgresSchemaIdentity({ client, expectedDigest: baselineDigest })).code, "schema_identity_mismatch");
 });
