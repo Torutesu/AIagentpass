@@ -155,7 +155,10 @@ type ToastTone = "success" | "error";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+// PostgreSQL's JSON representation of timestamptz may use either the
+// canonical `Z` suffix or the equivalent explicit UTC offset. Keep the
+// accepted surface UTC-only and let Date perform the calendar validation.
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/;
 const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_OPERATION = "device.enrollment.issue";
 const ENROLLMENT_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
