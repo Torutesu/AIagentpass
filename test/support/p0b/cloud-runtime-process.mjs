@@ -6,6 +6,16 @@ import path from "node:path";
 
 import { createCloudRuntime } from "../../../apps/cloud-api/src/runtime.mjs";
 
+// The supervisor deliberately discards arbitrary child output. Preserve only
+// a fixed startup class when the Cloud runtime rejects before it can listen.
+process.on("uncaughtExceptionMonitor", (error) => {
+  process.stderr.write(`${startupFailureMarker(error)}\n`);
+});
+process.on("unhandledRejection", (reason) => {
+  process.stderr.write(`${startupFailureMarker(reason)}\n`);
+  process.exitCode = 1;
+});
+
 if (process.env.P0B_LIVE_BROWSER !== "1" || process.env.AGENTPASS_CLOUD_PROFILE !== "hosted") {
   throw new Error("P0-B Cloud process is not enabled");
 }
@@ -92,6 +102,16 @@ function loadProvider({ privateKeyPath, publicKeyPem, version = 1 }) {
     },
     async sign({ bytes }) { return crypto.sign(null, bytes, privateKey); }
   });
+}
+
+function startupFailureMarker(error) {
+  const message = typeof error?.message === "string" ? error.message : String(error ?? "");
+  if (/ERR_MODULE_NOT_FOUND|Cannot find package/u.test(message)) return "P0B_CLOUD_START_DEPENDENCY_FAILED";
+  if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|configuration is invalid|profile is required/u.test(message)) return "P0B_CLOUD_START_CONFIG_FAILED";
+  if (/PostgreSQL|postgres|database|migration|repository/iu.test(message)) return "P0B_CLOUD_START_POSTGRES_FAILED";
+  if (/signer|signature|key|Ed25519/u.test(message)) return "P0B_CLOUD_START_SIGNER_FAILED";
+  if (/Platform Session|platform session|WebAuthn/u.test(message)) return "P0B_CLOUD_START_PLATFORM_SESSION_FAILED";
+  return "P0B_CLOUD_START_UNKNOWN_FAILED";
 }
 
 function readPrivateKey(file) {

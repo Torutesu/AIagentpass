@@ -574,6 +574,13 @@ export async function startP0BLiveBrowserFixture({
 
 export function classifyP0BStartupError(error) {
   const message = typeof error?.message === "string" ? error.message : "";
+  const cloudCategory = message.match(/^P0-B cloud ([a-z_]+_failed) before readiness\b/u)?.[1];
+  if (cloudCategory === "postgres_start_failed") return "cloud_postgres_start_failed";
+  if (cloudCategory === "config_start_failed") return "cloud_config_start_failed";
+  if (cloudCategory === "signer_start_failed") return "cloud_signer_start_failed";
+  if (cloudCategory === "platform_session_start_failed") return "cloud_platform_session_start_failed";
+  if (cloudCategory === "dependency_start_failed") return "cloud_dependency_start_failed";
+  if (cloudCategory === "unknown_start_failed") return "cloud_unknown_start_failed";
   if (/^P0-B cloud (?:\w+_failed) before readiness\b/u.test(message)) return "cloud_start_failed";
   if (/^P0-B console (?:\w+_failed) before readiness\b/u.test(message)) return "console_start_failed";
   if (/^P0-B cloud readiness failed\b/u.test(message)) return "cloud_readiness_failed";

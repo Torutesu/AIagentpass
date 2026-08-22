@@ -581,6 +581,12 @@ function processDiagnostic(child) {
 // by the supervisor; only these fixed classes are consumed by browser tests.
 export function classifyP0BProcessStartup(child) {
   const output = [child?.p0bDiagnostics?.stdout, child?.p0bDiagnostics?.stderr].filter(Boolean).join("\n");
+  if (output.includes("P0B_CLOUD_START_DEPENDENCY_FAILED")) return "dependency_start_failed";
+  if (output.includes("P0B_CLOUD_START_CONFIG_FAILED")) return "config_start_failed";
+  if (output.includes("P0B_CLOUD_START_POSTGRES_FAILED")) return "postgres_start_failed";
+  if (output.includes("P0B_CLOUD_START_SIGNER_FAILED")) return "signer_start_failed";
+  if (output.includes("P0B_CLOUD_START_PLATFORM_SESSION_FAILED")) return "platform_session_start_failed";
+  if (output.includes("P0B_CLOUD_START_UNKNOWN_FAILED")) return "unknown_start_failed";
   if (/ERR_KMS_PROVIDER_RUNTIME_CONFIG|ERR_KMS_PROVIDER_RUNTIME_SDK|ERR_KMS_PROVIDER_RUNTIME_UNAVAILABLE/u.test(output)) return "kms_start_failed";
   if (/ERR_MODULE_NOT_FOUND|Cannot find package/u.test(output)) return "dependency_start_failed";
   if (/P0-B signer (?:public key|private key|path)/u.test(output)) return "signer_start_failed";
