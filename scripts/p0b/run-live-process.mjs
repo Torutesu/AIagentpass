@@ -612,6 +612,7 @@ export async function main(argv = process.argv.slice(2)) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
       } catch (error) {
+        emitSupervisorDiagnostic("live-browser", error);
         failure = { stage: "live-browser", error };
       }
     }
@@ -782,6 +783,13 @@ function emitCommandDiagnostic(stage, result) {
   const marker = typeof result?.internal?.safe_failure_code === "string"
     ? result.internal.safe_failure_code : "none";
   process.stderr.write(`p0b-command: stage=${safeStage} exit=${exitCode} signal=${signal} duration_ms=${duration} stdout_bytes=${stdoutBytes} stderr_bytes=${stderrBytes} marker=${marker}\n`);
+}
+
+function emitSupervisorDiagnostic(stage, error) {
+  const safeStage = /^[a-z][a-z0-9-]{0,31}$/u.test(stage) ? stage : "unknown";
+  const name = typeof error?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/u.test(error.name) ? error.name : "Error";
+  const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,47}$/u.test(error.code) ? error.code : "none";
+  process.stderr.write(`p0b-supervisor: stage=${safeStage} class=${name} code=${code}\n`);
 }
 
 function gateEvidence(id, metadata) {
