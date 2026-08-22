@@ -206,11 +206,16 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const [role, deviceName] of [["owner", "同期済み Mac"], ["admin", "オフライン Mac"]]) {
     await scenario(t, `${role} completes distinct real WebAuthn device revoke`, async ({ open }) => {
-      const page = await open(role);
-      await page.getByRole("button", { name: "セットアップ", exact: true }).click();
+      let page;
+      try { page = await open(role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {}); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_OPEN_FAILED"); }
+      try { await page.getByRole("button", { name: "セットアップ", exact: true }).click(); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_SETUP_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_SETUP_FAILED"); }
       const device = page.getByRole("listitem").filter({ hasText: deviceName });
-      await device.getByRole("button", { name: "停止" }).click();
-      await page.getByText(`${deviceName}を停止しました`).waitFor();
+      try { await device.getByRole("button", { name: "停止" }).click(); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_STOP_FAILED"); }
+      try { await page.getByText(`${deviceName}を停止しました`).waitFor(); }
+      catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("P0B_SAFE_OWNER_FINAL_CONFIRM_FAILED"); }
     });
   }
 
