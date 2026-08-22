@@ -636,10 +636,10 @@ device_audit_boundary_observations AS (
         WHERE p.polrelid = t.oid
           AND p.polname LIKE 'device_audit%_tenant_%'
           AND (
-            regexp_replace(replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', ''), '(^[(]|[)]$)', '', 'g')
-              IS DISTINCT FROM CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN 'organization_id=agentpass_device_audit_current_organization_id()' END
-            OR regexp_replace(replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', ''), '(^[(]|[)]$)', '', 'g')
-              IS DISTINCT FROM CASE WHEN p.polcmd IN ('a', 'w') THEN 'organization_id=agentpass_device_audit_current_organization_id()' END
+            replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', '')
+              IS DISTINCT FROM CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN '(organization_id=agentpass_device_audit_current_organization_id())' END
+            OR replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', '')
+              IS DISTINCT FROM CASE WHEN p.polcmd IN ('a', 'w') THEN '(organization_id=agentpass_device_audit_current_organization_id())' END
           )
       ) THEN 'policy:tenant_predicate_mismatch' END,
       CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') IS DISTINCT FROM true THEN 'app:select_missing' END,
