@@ -107,7 +107,7 @@ async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl
                 WHERE n.nspname='public' AND c.relname='platform_device_audit_tenant_context') AS tenant_authority_relations,
              (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                 WHERE n.nspname='public'
-                  AND p.oid IN (to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)'), to_regprocedure('public.agentpass_device_audit_current_organization_id()'))
+                  AND p.oid IN (to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)'), to_regprocedure('public.agentpass_authorize_device_audit_device(uuid,uuid)'), to_regprocedure('public.agentpass_device_audit_current_organization_id()'))
                   AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog, public']) AS tenant_authority_functions,
              has_table_privilege('agentpass_app', 'public.platform_device_audit_tenant_context', 'SELECT') AS app_can_select_tenant_authority,
              has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)', 'EXECUTE') AS app_can_enqueue_inbox,
