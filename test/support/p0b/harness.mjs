@@ -72,15 +72,25 @@ async function p0BDeploymentDigests({ repoRoot, database, sourceCommit, sourceTr
   try {
     let result;
     try { result = await database.pool.query(POSTGRES_SCHEMA_IDENTITY_QUERY); }
-    catch { throw new Error("P0-B deployment schema identity failed"); }
+    catch (error) { throw new Error(`P0-B deployment schema identity ${schemaQueryFailureClass(error)} failed`); }
     try {
       const snapshot = typeof result?.rows?.[0]?.snapshot === "string" ? JSON.parse(result.rows[0].snapshot) : result?.rows?.[0]?.snapshot;
       return Object.freeze({ schemaDigest, catalogDigest, databaseSchemaDigest: postgresSchemaIdentityDigest(snapshot) });
     } catch { throw new Error("P0-B deployment schema identity failed"); }
   } catch (error) {
-    if (error?.message === "P0-B deployment schema identity failed") throw error;
+    if (/^P0-B deployment schema identity [a-z_]+ failed$/u.test(error?.message ?? "")) throw error;
     throw new Error("P0-B deployment schema identity failed");
   }
+}
+
+function schemaQueryFailureClass(error) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === "42P01") return "relation_missing";
+  if (code === "42703") return "column_missing";
+  if (code === "42501") return "permission_denied";
+  if (code === "42601") return "syntax_invalid";
+  if (/^08/u.test(code) || ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND"].includes(code)) return "connection_failed";
+  return "query_failed";
 }
 
 export function requireTrustedHttpsLoopback(value) {
