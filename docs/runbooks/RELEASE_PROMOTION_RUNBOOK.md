@@ -75,6 +75,16 @@ The required CI lanes are exactly:
    the release integrity evidence; it never fills missing fields with local
    timestamps, guessed IDs, or simulated results.
 
+   Before dispatch, configure and independently verify the nine external
+   qualification inputs: aggregate evidence, aggregate binding, child
+   evidence, aggregate signature/public key/fingerprint, and child
+   signature/public key/fingerprint. Promotion verifies the aggregate
+   signature over `{ evidence, binding }` and the child signature over
+   `{ evidence, binding, child_evidence }`. Retain the canonical binding,
+   `.sig`, `.pub`, and signature-verification JSON files with the promotion
+   evidence. Private signing keys remain with the approved authority and must
+   never be supplied to GitHub Actions or copied into the evidence packet.
+
    Then project the reviewed cutover and traffic-rollback envelopes into the
    provider-neutral evidence contract:
 

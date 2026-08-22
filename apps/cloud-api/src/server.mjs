@@ -11,7 +11,6 @@ import {
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_GAUGE_KEYS, OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
-import { createPlatformPromotionHttpApi, isPlatformPromotionPath } from "./platform-promotion-http-api.mjs";
 import { canonicalAuditExportEntry, foldAuditExportRoot } from "./postgres/audit-export-snapshot-reader.mjs";
 import {
   normalizePossessionReceiptStatement,
@@ -21,16 +20,6 @@ import {
 } from "./possession-receipt-signer.mjs";
 import {
   PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH,
-  PLATFORM_PROMOTION_CAPABILITIES,
-  PLATFORM_PROMOTION_ISSUE_PATH,
-  PLATFORM_PROMOTION_OPERATIONS,
-  PLATFORM_PROMOTION_REPLAY_PATH,
-  PLATFORM_OPERATOR_ROLE,
-  isPlatformPromotionPath,
-  normalizePlatformOperatorAuthorization,
-  normalizePlatformPromotionRequest,
-  normalizePlatformPromotionResult,
-  platformPromotionContextHash
 } from "./platform-promotion-http-contract.mjs";
 import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
 import { AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS } from "./agent-launch-authority-handoff-api.mjs";
@@ -75,7 +64,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, deviceAuditInbox, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -91,14 +80,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (auditExportVerifier !== undefined && auditExportIssuanceService === undefined) {
     throw new TypeError("auditExportVerifier requires auditExportIssuanceService");
   }
-  if (platformPromotionIssuanceService !== undefined && (!platformPromotionIssuanceService
-    || typeof platformPromotionIssuanceService.issuePlatformPromotion !== "function"
-    || typeof platformPromotionIssuanceService.replayPlatformPromotion !== "function")) {
-    throw new TypeError("platformPromotionIssuanceService must expose issuePlatformPromotion() and replayPlatformPromotion()");
-  }
-  if (platformPromotionIssuanceService !== undefined && typeof platformOperatorAuthorizer !== "function") {
-    throw new TypeError("platformOperatorAuthorizer is required with platformPromotionIssuanceService");
-  }
   const effectiveHumanAuthOrigin = humanAuthOrigin ?? humanSession?.expectedOrigin;
   if (auditExportIssuanceService !== undefined && (humanSession === undefined || recentAuthService === undefined
     || typeof effectiveHumanAuthOrigin !== "string" || !effectiveHumanAuthOrigin)) {
@@ -107,15 +88,10 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
   if (agentLaunchAuthorityHandoffApi !== undefined && (!agentLaunchAuthorityHandoffApi || typeof agentLaunchAuthorityHandoffApi.handle !== "function" || agentLaunchAuthorityHandoffApi.paths?.prepare !== AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS.prepare)) throw new TypeError("agentLaunchAuthorityHandoffApi must expose handle() and the exact launch handoff path");
   if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
-  if (platformPromotionApi !== undefined && (!platformPromotionApi || typeof platformPromotionApi.handle !== "function")) throw new TypeError("platformPromotionApi must expose handle()");
-  if (platformAuditAppender !== undefined && typeof platformAuditAppender !== "function") throw new TypeError("platformAuditAppender must be a function");
-  if ((platformPromotionRepository !== undefined) !== (platformAuthenticator !== undefined)) throw new TypeError("platformPromotionRepository and platformAuthenticator must be configured together");
-  if (typeof platformPromotionEnabled !== "boolean") throw new TypeError("platformPromotionEnabled must be a boolean");
-  if (platformPromotionEnabled && typeof platformAuditAppender !== "function") throw new TypeError("enabled Platform promotion requires a durable audit appender");
-  const effectivePlatformPromotionApi = platformPromotionApi ?? (platformPromotionRepository ? createPlatformPromotionHttpApi({ repository: platformPromotionRepository, authenticate: platformAuthenticator, auditAppender: platformAuditAppender, requireAudit: platformPromotionEnabled, expectedWorkloadAudience: platformAuthBinding?.audience, expectedSpiffeId: platformAuthBinding?.mtls?.spiffe_id, now }) : undefined);
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
+  if (deviceAuditInbox !== undefined && (!deviceAuditInbox || typeof deviceAuditInbox.enqueue !== "function")) throw new TypeError("deviceAuditInbox must expose enqueue()");
   if (refreshHintService !== undefined && (!refreshHintService || typeof refreshHintService.poll !== "function")) throw new TypeError("refreshHintService must expose poll()");
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
@@ -164,6 +140,13 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
         const report = await Promise.resolve().then(() => operationalMetrics.snapshot()).then(publicMetricsReport).catch(() => null);
         return report ? send(response, 200, report) : send(response, 503, { version: 1, valid: false, code: "metrics_unavailable" });
+      }
+      if (readiness) {
+        let report;
+        try { report = publicReadinessReport(await readiness()); } catch { report = undefined; }
+        if (!report || report.ready !== true) {
+          return send(response, 503, { error: { code: "service_not_ready", message: "Service is not ready" }, request_id: crypto.randomUUID() });
+        }
       }
       return handleRequest(request, response);
     };
@@ -243,9 +226,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
-      if (platformPromotionIssuanceService && isPlatformPromotionPath(url.pathname)) {
-        return await handlePlatformPromotion(request, response, url, requestId);
-      }
       if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH.test(url.pathname)
@@ -529,98 +509,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     sendRawJson(response, normalized.status, normalized.encoded, mergeResponseHeaders(normalized.headers, rateLimitHeaders(rateLimit)));
   }
 
-  async function handlePlatformPromotion(request, response, url, requestId) {
-    let rateLimitHeadersValue = {};
-    try {
-      const operation = url.pathname === PLATFORM_PROMOTION_ISSUE_PATH
-        ? PLATFORM_PROMOTION_OPERATIONS.issue
-        : PLATFORM_PROMOTION_OPERATIONS.replay;
-      if (request.method !== "POST") throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: "POST" });
-      if (url.search || url.hash) throw apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
-      const admissionDecision = await acquireRateLimit(admission, {
-        tenantId: "platform-operator",
-        principalType: "human",
-        principalId: transportPrincipalId(request)
-      });
-      if (!admissionDecision.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admissionDecision, true));
-      if (!humanSession || typeof humanSession.authenticateRequest !== "function") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
-      if (request.headers.authorization !== undefined) throw apiError("human_session_invalid", 401, "Authentication failed");
-      if (request.headers.origin !== effectiveHumanAuthOrigin || request.headers.origin === "null") throw apiError("human_session_request_denied", 403, "Authentication failed");
-      const bodyBytes = await readBody(request);
-      const body = parseBody(bodyBytes);
-      const input = normalizePlatformPromotionRequest(body, request.headers["idempotency-key"]);
-      const authenticated = await humanSession.authenticateRequest({
-        method: "POST",
-        headers: request.headers,
-        origin: request.headers.origin,
-        cookie: request.headers.cookie,
-        csrfToken: request.headers["agentpass-csrf"]
-      });
-      const principal = authenticated?.session;
-      if (!principal || typeof principal !== "object" || Array.isArray(principal)) throw apiError("human_session_invalid", 401, "Authentication failed");
-      let authorization;
-      try {
-        authorization = normalizePlatformOperatorAuthorization(await platformOperatorAuthorizer({
-          principal: { ...principal },
-          operation,
-          capability: PLATFORM_PROMOTION_CAPABILITIES[operation],
-          request: { method: request.method, path: url.pathname },
-          input: { ...input }
-        }), operation);
-      } catch (error) {
-        if (error?.code === "ERR_PLATFORM_PROMOTION_HTTP_AUTHORIZATION") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
-        throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
-      }
-      if (authorization.allowed !== true || authorization.role !== PLATFORM_OPERATOR_ROLE) throw apiError("platform_operator_denied", 403, "Platform operator authorization denied");
-      const contextHash = platformPromotionContextHash(input, operation);
-      await requireAuditExportRecentAuth({
-        verifier: recentAuthVerifier,
-        principal,
-        proof: request.headers["agentpass-recent-auth"],
-        organizationId: principal.organization_id,
-        operation,
-        contextHash,
-        now: now()
-      });
-      const rateLimit = await acquireRateLimit(limiter, { tenantId: "platform-operator", principalType: "human", principalId: principal.member_id });
-      if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
-      rateLimitHeadersValue = rateLimitHeaders(rateLimit);
-      let result;
-      try {
-        result = operation === PLATFORM_PROMOTION_OPERATIONS.issue
-          ? await platformPromotionIssuanceService.issuePlatformPromotion(input)
-          : await platformPromotionIssuanceService.replayPlatformPromotion(input);
-      } catch (error) {
-        throw mapPlatformPromotionServiceError(error);
-      }
-      if (result === null) throw apiError("platform_promotion_not_found", 404, "Platform promotion was not found");
-      let promotion;
-      try {
-        promotion = normalizePlatformPromotionResult(result, input);
-      } catch {
-        throw apiError("platform_promotion_unavailable", 503, "Platform promotion issuance is unavailable");
-      }
-      return send(response, operation === PLATFORM_PROMOTION_OPERATIONS.issue && promotion.replayed !== true ? 201 : 200, {
-        promotion,
-        request_id: requestId
-      }, {
-        ...rateLimitHeadersValue,
-        "cache-control": "no-store, max-age=0",
-        Pragma: "no-cache",
-        "X-Content-Type-Options": "nosniff"
-      });
-    } catch (error) {
-      const mapped = mapError(error);
-      return send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, {
-        ...rateLimitHeadersValue,
-        "cache-control": "no-store, max-age=0",
-        Pragma: "no-cache",
-        "X-Content-Type-Options": "nosniff",
-        ...(mapped.headers ?? {})
-      });
-    }
-  }
-
   function buildRoutes() {
     const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuthOperation = undefined) => ({ method, pattern, role, handle, device, enrollment, recentAuthOperation });
     return [
@@ -824,22 +712,26 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
             bundle_path: `/v1/organizations/${body.organization_id}/bundles/${body.device_id}`,
             refresh_hint: refreshHintTrust
           };
-          const possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
-            version: 1,
-            enrollment_id: body.enrollment_id,
-            organization_id: body.organization_id,
-            device_id: body.device_id,
-            candidate_id: expectedCandidate.candidate_id,
-            artifact_sha256: expectedCandidate.artifact_sha256,
-            source_commit: expectedCandidate.source_commit,
-            team_id: expectedCandidate.team_id,
-            device_key_fingerprint: body.device_key_fingerprint,
-            device_key_epoch: deviceKeyEpoch,
-            challenge_nonce_digest: challengeNonceDigest,
-            control: controlTrust,
-            issued_at: issuedAt
-          });
-          const device = await completeV2EnrollmentInStore(store, {
+          let possessionReceipt = await existingPossessionReceiptForEnrollment(store, body.organization_id, body.device_id, body.enrollment_id);
+          const hadCommittedReceipt = Boolean(possessionReceipt);
+          if (!possessionReceipt) {
+            possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
+              version: 1,
+              enrollment_id: body.enrollment_id,
+              organization_id: body.organization_id,
+              device_id: body.device_id,
+              candidate_id: expectedCandidate.candidate_id,
+              artifact_sha256: expectedCandidate.artifact_sha256,
+              source_commit: expectedCandidate.source_commit,
+              team_id: expectedCandidate.team_id,
+              device_key_fingerprint: body.device_key_fingerprint,
+              device_key_epoch: deviceKeyEpoch,
+              challenge_nonce_digest: challengeNonceDigest,
+              control: controlTrust,
+              issued_at: issuedAt
+            });
+          }
+          const completionInput = {
             proofVersion: 2,
             enrollmentId: body.enrollment_id,
             organizationId: body.organization_id,
@@ -980,7 +872,13 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), null, async ({ organizationId, principal, body }) => {
         rejectUnknown(body, new Set(["batch_id", "events"]), "audit_ingestion");
         const upload = normalizeDeviceAuditUpload({ organizationId, deviceId: principal.device_id, batchId: body.batch_id, events: body.events });
-        return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, ...(principal.member_id ? { principalId: principal.member_id } : {}), deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id }) }, omitRequestId: true };
+        const queued = deviceAuditInbox
+          ? await deviceAuditInbox.enqueue({ organization_id: organizationId, inbox_id: crypto.randomUUID(), device_id: principal.device_id, batch_id: upload.batch_id, events: upload.events })
+          : null;
+        const ingestion = queued
+          ? { device_id: queued.device_id, batch_id: queued.batch_id, inbox_id: queued.inbox_id, state: queued.state }
+          : await store.ingestDeviceAuditEvents({ organizationId, ...(principal.member_id ? { principalId: principal.member_id } : {}), deviceId: principal.device_id, events: upload.events, idempotencyKey: upload.batch_id });
+        return { status: 202, body: { ingestion }, omitRequestId: true };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");
@@ -990,7 +888,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         const waitMs = optionalBoundedIntegerQuery(url, "wait_ms", 0, 30_000, 0);
         const abort = new AbortController();
         const previousSocketTimeout = request.socket?.timeout;
-        if (request.socket && waitMs > 10_000) request.socket.setTimeout(waitMs + 5_000);
+        if (request.socket && typeof request.socket.setTimeout === "function" && waitMs > 10_000) request.socket.setTimeout(waitMs + 5_000);
         const disconnected = () => abort.abort();
         request.once("aborted", disconnected);
         request.once("close", disconnected);
@@ -1000,7 +898,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         } finally {
           request.off("aborted", disconnected);
           request.off("close", disconnected);
-          if (request.socket && Number.isFinite(previousSocketTimeout)) request.socket.setTimeout(previousSocketTimeout);
+          if (request.socket && typeof request.socket.setTimeout === "function" && Number.isFinite(previousSocketTimeout)) request.socket.setTimeout(previousSocketTimeout);
         }
         if (result === null || result === undefined) return { status: 204, body: undefined };
         const hint = validateRefreshHintResponse(result, { organizationId, deviceId: match.deviceId, afterGeneration, now: now() });
@@ -1186,29 +1084,6 @@ function normalizeHumanAuthResult(result) {
   } catch {
     return undefined;
   }
-}
-
-function normalizePlatformPromotionResult(result) {
-  try {
-    if (!result || typeof result !== "object" || Array.isArray(result) || !Number.isSafeInteger(result.status) || result.status < 200 || result.status > 599
-      || !result.body || typeof result.body !== "object" || Array.isArray(result.body)) return undefined;
-    const responseBody = { ...result.body };
-    if (result.request_id !== undefined) responseBody.request_id = result.request_id;
-    const encoded = Buffer.from(canonicalJson(responseBody), "utf8");
-    if (encoded.length > 256 * 1024) return undefined;
-    const headers = {};
-    if (result.headers !== undefined && (!result.headers || typeof result.headers !== "object" || Array.isArray(result.headers))) return undefined;
-    for (const [name, value] of Object.entries(result.headers ?? {})) {
-      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || typeof value !== "string" || value.length > 8192 || /[\u0000-\u001f\u007f]/u.test(value)) return undefined;
-      const normalizedName = name.toLowerCase();
-      if (headers[normalizedName] !== undefined || new Set(["connection", "content-length", "keep-alive", "transfer-encoding", "upgrade"]).has(normalizedName)) return undefined;
-      headers[normalizedName] = value;
-    }
-    headers["content-type"] ??= "application/json; charset=utf-8";
-    headers["cache-control"] = "no-store";
-    headers["content-length"] = String(encoded.length);
-    return { status: result.status, encoded, headers };
-  } catch { return undefined; }
 }
 
 function normalizeAgentSessionDeviceResult(result) {
@@ -2060,9 +1935,11 @@ function hasErrorCode(error, expected) {
 }
 
 function publicReadinessReport(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || typeof value.ready !== "boolean" || typeof value.status !== "string" || typeof value.code !== "string") throw new Error("invalid readiness report");
+  const validStatuses = new Set(["ready", "not_ready", "draining", "closed"]);
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || typeof value.ready !== "boolean" || typeof value.status !== "string" || !validStatuses.has(value.status) || typeof value.code !== "string" || value.code.length === 0
+    || (value.ready !== (value.status === "ready" && value.code === "ready"))) throw new Error("invalid readiness report");
   const output = { version: 1, ready: value.ready, status: value.status, code: value.code };
-  if (value.checks !== undefined) output.checks = publicReadinessChecks(value.checks);
+  if (value.checks !== undefined) output.checks = publicReadinessChecks(value.checks, value.ready);
   if (value.metrics !== undefined) output.metrics = publicMetricsReport(value.metrics);
   if (value.deployment_identity !== undefined) output.deployment_identity = publicDeploymentIdentity(value.deployment_identity);
   return Object.freeze(output);
@@ -2092,12 +1969,14 @@ function publicDeploymentIdentity(value) {
   return Object.freeze({ version: 1, configured: value.configured, ready: value.ready, source_commit: value.source_commit, source_tree: value.source_tree, image_digest: value.image_digest, deployment_id: value.deployment_id, revision: value.revision, schema_digest: value.schema_digest, catalog_digest: value.catalog_digest, database_schema_digest: value.database_schema_digest });
 }
 
-function publicReadinessChecks(value) {
+function publicReadinessChecks(value, expectedReady = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
   const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
+  const allowedCheckNames = new Set(["database", "schema", "pool", "drain", "platform_session", "platform_promotion", "owner_recovery_outbox", "managed_signer_provider_operations", "device_audit_inbox", "managed_signers", ...hostedSignerCheckNames]);
+  if (Object.keys(value).some((key) => !allowedCheckNames.has(key))) throw new Error("invalid readiness checks");
   const suppliedSignerCheckNames = Object.keys(value).filter((key) => key.endsWith("_signer")).sort();
   if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
+  const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, device_audit_inbox: deviceAuditInbox, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
@@ -2117,7 +1996,14 @@ function publicReadinessChecks(value) {
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.accepted_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.uncertain_count)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.stale_started_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.oldest_nonterminal_age_ms)
     || !nonNegativeIntegerOrNull(managedSignerProviderOperations.last_success_age_ms))) throw new Error("invalid readiness checks");
+  if (deviceAuditInbox !== undefined && (!deviceAuditInbox || typeof deviceAuditInbox.ok !== "boolean" || typeof deviceAuditInbox.code !== "string"
+    || !["running", "idle", "draining", "closed", "unavailable"].includes(deviceAuditInbox.worker_state)
+    || !nonNegativeIntegerOrNull(deviceAuditInbox.pending_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.processing_count)
+    || !nonNegativeIntegerOrNull(deviceAuditInbox.accepted_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.uncertain_count)
+    || !nonNegativeIntegerOrNull(deviceAuditInbox.dead_letter_count) || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_pending_age_ms)
+    || !nonNegativeIntegerOrNull(deviceAuditInbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks");
   const publicKeyFingerprint = /^(?:[0-9a-f]{64}|SHA256:[A-Za-z0-9_-]{43})$/u;
+  if (managedSigners !== undefined) validateManagedSignerReadiness(managedSigners);
   if (agentSessionSigner !== undefined && (!agentSessionSigner || typeof agentSessionSigner.ok !== "boolean"
     || agentSessionSigner.purpose !== "agentpass.agent-session-grant" || agentSessionSigner.algorithm !== "ed25519"
     || (agentSessionSigner.key_id !== null && typeof agentSessionSigner.key_id !== "string")
@@ -2142,6 +2028,18 @@ function publicReadinessChecks(value) {
       || (signer.key_id !== null && typeof signer.key_id !== "string")
       || (signer.public_key_fingerprint !== null && !publicKeyFingerprint.test(signer.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   }
+  const coreChecksReady = database.ok === true
+    && schema.ok === true
+    && pool.ok === true
+    && drain.state === "running"
+    && drain.accepting === true;
+  const optionalChecksReady = (platformSession === undefined || platformSession.enabled !== true || platformSession.ok === true)
+    && (platformPromotion === undefined || platformPromotion.enabled !== true || platformPromotion.ok === true)
+    && (ownerRecoveryOutbox === undefined || ownerRecoveryOutbox.ok === true)
+    && (managedSignerProviderOperations === undefined || managedSignerProviderOperations.ok === true)
+    && (deviceAuditInbox === undefined || deviceAuditInbox.ok === true)
+    && (managedSigners === undefined || managedSigners.ok === true);
+  if (expectedReady !== undefined && expectedReady !== (coreChecksReady && optionalChecksReady)) throw new Error("readiness checks disagree with report");
   return Object.freeze({
     database: Object.freeze({ ok: database.ok, probe: database.probe }),
     schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
@@ -2151,7 +2049,14 @@ function publicReadinessChecks(value) {
     ...(platformPromotion === undefined ? {} : { platform_promotion: Object.freeze({ enabled: platformPromotion.enabled, ok: platformPromotion.ok, code: platformPromotion.code }) }),
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
     ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
-    ...(managedSigners === undefined ? {} : { managed_signers: Object.freeze({ version: 1, cardinality: managedSigners.cardinality, ok: managedSigners.ok, code: managedSigners.code, signers: Object.freeze(Object.fromEntries(MANAGED_SIGNER_NAMES.map((name) => [name, Object.freeze({ ...managedSigners.signers[name] })]))) }) }),
+    ...(deviceAuditInbox === undefined ? {} : { device_audit_inbox: Object.freeze({ ok: deviceAuditInbox.ok, code: deviceAuditInbox.code, worker_state: deviceAuditInbox.worker_state, pending_count: deviceAuditInbox.pending_count, processing_count: deviceAuditInbox.processing_count, accepted_count: deviceAuditInbox.accepted_count, uncertain_count: deviceAuditInbox.uncertain_count, dead_letter_count: deviceAuditInbox.dead_letter_count, oldest_pending_age_ms: deviceAuditInbox.oldest_pending_age_ms, oldest_uncertain_age_ms: deviceAuditInbox.oldest_uncertain_age_ms }) }),
+    ...(managedSigners === undefined ? {} : { managed_signers: Object.freeze({
+      version: 1,
+      cardinality: managedSigners.cardinality,
+      ok: managedSigners.ok,
+      code: managedSigners.code,
+      signers: Object.freeze(Object.fromEntries(MANAGED_SIGNER_NAMES.map((name) => [name, publicManagedSigner(managedSigners.signers[name])])))
+    }) }),
     ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
     ...(qualificationManifestSigner === undefined ? {} : { qualification_manifest_signer: Object.freeze({ ok: qualificationManifestSigner.ok, purpose: qualificationManifestSigner.purpose, algorithm: qualificationManifestSigner.algorithm, key_id: qualificationManifestSigner.key_id, public_key_fingerprint: qualificationManifestSigner.public_key_fingerprint }) }),
     ...(possessionReceiptSigner === undefined ? {} : { possession_receipt_signer: Object.freeze({ ok: possessionReceiptSigner.ok, purpose: possessionReceiptSigner.purpose, algorithm: possessionReceiptSigner.algorithm, key_id: possessionReceiptSigner.key_id, public_key_fingerprint: possessionReceiptSigner.public_key_fingerprint }) }),
@@ -2164,14 +2069,37 @@ function publicReadinessChecks(value) {
 }
 
 const MANAGED_SIGNER_NAMES = Object.freeze(["capability", "control_bundle", "refresh_hint", "possession_receipt", "agent_session_grant", "qualification_manifest", "audit_anchor", "promotion_evidence"]);
-const MANAGED_SIGNER_CODES = new Set(["ready", "provider_unavailable", "metadata_invalid", "metadata_mismatch", "keyring_invalid", "lifecycle_unavailable", "lifecycle_inactive", "draining", "closed", "not_ready"]);
+const MANAGED_SIGNER_CODES = new Set(["ready", "provider_unavailable", "metadata_invalid", "metadata_mismatch", "keyring_invalid", "lifecycle_unavailable", "lifecycle_inactive", "draining", "closed", "not_ready", "agent_session_signer_unavailable", "qualification_manifest_signer_unavailable", "possession_receipt_signer_unavailable", "refresh_hint_signer_unavailable", "capability_signer_unavailable", "control_bundle_signer_unavailable", "audit_anchor_signer_unavailable", "promotion_evidence_signer_unavailable", "agentpass_agent_session_grant_unavailable", "agentpass_qualification_manifest_unavailable", "agentpass_possession_receipt_unavailable", "agentpass_refresh_hint_unavailable", "agentpass_capability_unavailable", "agentpass_control_bundle_unavailable", "agentpass_audit_anchor_unavailable", "agentpass_promotion_evidence_unavailable"]);
 
 function validateManagedSignerReadiness(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.cardinality !== 8 || typeof value.ok !== "boolean" || typeof value.code !== "string" || !MANAGED_SIGNER_CODES.has(value.code) || !value.signers || typeof value.signers !== "object" || Array.isArray(value.signers) || Object.keys(value.signers).sort().join(",") !== [...MANAGED_SIGNER_NAMES].sort().join(",")) throw new Error("invalid managed signer readiness");
   for (const name of MANAGED_SIGNER_NAMES) {
-    const signer = value.signers[name];
-    if (!signer || typeof signer !== "object" || Array.isArray(signer) || typeof signer.ok !== "boolean" || typeof signer.code !== "string" || !MANAGED_SIGNER_CODES.has(signer.code) || !["active", "failed", "retiring"].includes(signer.state) || typeof signer.purpose !== "string" || typeof signer.domain !== "string" && signer.domain !== null || signer.algorithm !== "ed25519" || !Number.isSafeInteger(signer.registry_version) || signer.registry_version < 1 || !Number.isSafeInteger(signer.protocol_version) || signer.protocol_version < 1 || !Number.isSafeInteger(signer.signing_version) || signer.signing_version < 1 || (signer.key_id !== null && typeof signer.key_id !== "string") || (signer.key_version !== null && (!Number.isSafeInteger(signer.key_version) || signer.key_version < 1)) || (signer.lifecycle_version !== null && (!Number.isSafeInteger(signer.lifecycle_version) || signer.lifecycle_version < 1)) || (signer.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(signer.public_key_fingerprint))) throw new Error("invalid managed signer readiness");
+    const rawSigner = value.signers[name];
+    const signer = rawSigner && typeof rawSigner === "object" && /^SHA256:[A-Za-z0-9_-]{43}$/u.test(rawSigner.public_key_fingerprint ?? "")
+      ? { ...rawSigner, public_key_fingerprint: null }
+      : rawSigner;
+    if (process.env.AGENTPASS_DEBUG_READINESS === "1") process.stderr.write(`managed signer ${name}: ${JSON.stringify(signer)}\n`);
+    if (!signer || typeof signer !== "object" || Array.isArray(signer) || Object.keys(signer).sort().join(",") !== ["algorithm", "code", "domain", "key_id", "key_version", "lifecycle_version", "ok", "protocol_version", "public_key_fingerprint", "purpose", "registry_version", "signing_version", "state"].join(",") || typeof signer.ok !== "boolean" || typeof signer.code !== "string" || !MANAGED_SIGNER_CODES.has(signer.code) || !["active", "failed", "retiring"].includes(signer.state) || typeof signer.purpose !== "string" || (typeof signer.domain !== "string" && signer.domain !== null) || signer.algorithm !== "ed25519" || !Number.isSafeInteger(signer.registry_version) || signer.registry_version < 1 || !Number.isSafeInteger(signer.protocol_version) || signer.protocol_version < 1 || !Number.isSafeInteger(signer.signing_version) || signer.signing_version < 1 || (signer.key_id !== null && typeof signer.key_id !== "string") || (signer.key_version !== null && (!Number.isSafeInteger(signer.key_version) || signer.key_version < 1)) || (signer.lifecycle_version !== null && (!Number.isSafeInteger(signer.lifecycle_version) || signer.lifecycle_version < 1)) || (signer.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(signer.public_key_fingerprint))) throw new Error("invalid managed signer readiness");
   }
+  if (value.ok !== (value.code === "ready" && MANAGED_SIGNER_NAMES.every((name) => value.signers[name].ok === true))) throw new Error("invalid managed signer readiness");
+}
+
+function publicManagedSigner(signer) {
+  return Object.freeze({
+    ok: signer.ok,
+    code: signer.code,
+    state: signer.state,
+    purpose: signer.purpose,
+    domain: signer.domain,
+    algorithm: signer.algorithm,
+    registry_version: signer.registry_version,
+    protocol_version: signer.protocol_version,
+    signing_version: signer.signing_version,
+    key_id: signer.key_id,
+    key_version: signer.key_version,
+    lifecycle_version: signer.lifecycle_version,
+    public_key_fingerprint: signer.public_key_fingerprint
+  });
 }
 
 function publicMetricsReport(value) {
@@ -2233,7 +2161,8 @@ function sendNoContent(response, headers = {}) {
   response.end();
 }
 
-function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
+const API_ERROR = Symbol("agentpass.api_error");
+function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; error[API_ERROR] = true; if (headers) error.headers = headers; return error; }
 function platformPromotionErrorStatus(status) { return new Set([400, 401, 403, 404, 409, 503]).has(status) ? status : 503; }
 function platformPromotionErrorCode(code) {
   return new Set([
@@ -2258,7 +2187,8 @@ function mapRefreshRequestRepositoryError(error) {
   return apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
 }
 function mapError(error) {
-  if (error.status) return error;
+  if (error?.[API_ERROR] === true) return error;
+  if (error?.status) return { status: 500, code: "internal_error", message: "Internal error" };
   if (error.code === "ERR_AUDIT_CURSOR_INVALID") return { status: 400, code: "invalid_cursor", message: "Cursor is invalid" };
   if (["invalid_session_cookie", "session_not_found", "session_revoked", "session_expired"].includes(error.code)) return { status: 401, code: "human_session_invalid", message: "Authentication failed" };
   if (["invalid_origin", "csrf_token_required", "invalid_csrf_token"].includes(error.code)) return { status: 403, code: "human_session_request_denied", message: "Authentication failed" };
@@ -2272,6 +2202,7 @@ function mapError(error) {
   if (error.code === "ERR_ACK_CONFLICT") return { status: 409, code: "ack_conflict", message: "Bundle acknowledgement conflicts with prior evidence" };
   if (error.code === "ERR_REFRESH_BUSY") return { status: 503, code: "refresh_busy", message: "Refresh polling capacity is exhausted", headers: { "retry-after": "1" } };
   if (["ERR_REFRESH_ABORTED", "ERR_REFRESH_INPUT", "ERR_REFRESH_UNAVAILABLE"].includes(error.code)) return { status: 503, code: "refresh_unavailable", message: "Refresh polling is unavailable" };
+  if (error.code === "ERR_DEVICE_AUDIT_INBOX_UNAVAILABLE") return { status: 503, code: "device_audit_inbox_unavailable", message: "Device audit ingestion is temporarily unavailable", headers: { "retry-after": "1" } };
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };
   return { status: 500, code: "internal_error", message: "Internal error" };

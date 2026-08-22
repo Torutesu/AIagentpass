@@ -15,6 +15,8 @@ const binding = {
   GITHUB_SHA: "a".repeat(40),
   AGENTPASS_SOURCE_TREE: "b".repeat(40),
   AGENTPASS_QUALIFICATION_ARTIFACT_SHA256: "c".repeat(64),
+  AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN: "https://console.agentpass.example",
+  AGENTPASS_WEBAUTHN_EXPECTED_RP_ID: "agentpass.example",
 };
 
 function evidence() {
@@ -32,7 +34,10 @@ function evidence() {
       kind: "external_runner", real_execution: true, runner_id: binding.AGENTPASS_QUALIFICATION_RUNNER_ID,
       run_id: binding.AGENTPASS_QUALIFICATION_RUN_ID, job_id: binding.AGENTPASS_QUALIFICATION_JOB_ID, run_attempt: binding.AGENTPASS_QUALIFICATION_RUN_ATTEMPT,
       source_commit: binding.GITHUB_SHA, source_tree: binding.AGENTPASS_SOURCE_TREE, artifact_sha256: binding.AGENTPASS_QUALIFICATION_ARTIFACT_SHA256,
-      started_at: "2026-08-20T00:00:00.000Z", completed_at: "2026-08-20T00:01:00.000Z", environment: { kind: "webauthn", identity: "protected-chromium-cdp-webauthn" }
+      started_at: "2026-08-20T00:00:00.000Z", completed_at: "2026-08-20T00:01:00.000Z", environment: {
+        kind: "webauthn", identity: "protected-chromium-cdp-webauthn", authenticator: "platform",
+        origin: "https://console.agentpass.example", rp_id: "agentpass.example", instance_ids: ["web-01", "web-02"]
+      }
     },
     required_checks: checks.map((item) => item.check_id),
     checks

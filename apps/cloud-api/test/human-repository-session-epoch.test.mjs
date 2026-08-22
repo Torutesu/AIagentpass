@@ -30,17 +30,14 @@ test("session creation snapshots the current organization and membership epochs"
   const calls = [];
   const client = { async query(text, params) {
     calls.push({ text, params });
-    return { rowCount: 1, rows: [{ id: ids.session, ...sessionInput, token_hash_hex: sessionInput.token_hash, csrf_token_hash_hex: sessionInput.csrf_token_hash, revoked_at: null }] };
+    return { rowCount: 1, rows: [{ session: { id: ids.session, ...sessionInput, token_hash_hex: sessionInput.token_hash, csrf_token_hash_hex: sessionInput.csrf_token_hash, revoked_at: null } }] };
   } };
   const repository = createPostgresHumanRepository({ client });
 
   await repository.createSession(sessionInput);
 
-  assert.match(calls[0].text, /organization_authority_epoch,membership_session_epoch/);
-  assert.match(calls[0].text, /JOIN organizations o ON o\.id=m\.organization_id/);
-  assert.match(calls[0].text, /o\.authority_epoch,m\.session_epoch/);
-  assert.match(calls[0].text, /m\.organization_id=\$3/);
-  assert.equal(Buffer.isBuffer(calls[0].params[4]), true);
+  assert.match(calls[0].text, /agentpass_human_session_create/);
+  assert.equal(Buffer.isBuffer(calls[0].params[5]), true);
 });
 
 test("all authority-bearing session and credential paths require exact current epochs", async () => {
@@ -65,9 +62,10 @@ test("all authority-bearing session and credential paths require exact current e
   assert.equal(await repository.updateCredentialCounter({ session_id: ids.session, organization_id: ids.organization, credential_id: credentialId, sign_count: 1, expected_sign_count: 0 }), false);
 
   const authorityQueries = calls.filter(({ text }) => /human_sessions/.test(text));
-  assert.ok(authorityQueries.length >= 10);
-  assert.match(calls[1].text, /s\.expires_at>clock_timestamp\(\)/);
-  assert.match(calls[1].text, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
+  assert.ok(calls.some(({ text }) => text.includes("agentpass_human_list_credentials_for_session")));
+  assert.ok(calls.some(({ text }) => text.includes("agentpass_human_find_credential_for_session")));
+  assert.match(calls[0].text, /agentpass_human_session_find_by_token/);
+  assert.match(calls[1].text, /agentpass_human_session_touch/);
   for (const { text } of authorityQueries) {
     assert.match(text, /authority_epoch/);
     assert.match(text, /session_epoch/);
@@ -86,23 +84,14 @@ test("token authentication and WebAuthn allow-list lookup require a currently us
   assert.deepEqual(await repository.listCredentialsForSession({ session_id: ids.session, organization_id: ids.organization }), []);
 
   const sessionLookup = calls[0].text;
-  assert.match(sessionLookup, /s\.revoked_at IS NULL/);
-  assert.match(sessionLookup, /s\.expires_at>clock_timestamp\(\)/);
-  assert.match(sessionLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
-  assert.match(sessionLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
-  assert.match(sessionLookup, /m\.session_epoch=s\.membership_session_epoch/);
+  assert.match(sessionLookup, /agentpass_human_session_find_by_token/);
 
   const credentialLookup = calls[1].text;
-  assert.match(credentialLookup, /s\.revoked_at IS NULL/);
-  assert.match(credentialLookup, /s\.expires_at>clock_timestamp\(\)/);
-  assert.match(credentialLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
-  assert.match(credentialLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
-  assert.match(credentialLookup, /m\.session_epoch=s\.membership_session_epoch/);
+  assert.match(credentialLookup, /agentpass_human_list_credentials_for_session/);
 });
 
 test("session lookup normalizes node-postgres Date values before the JSON boundary", async () => {
-  const client = { async query() {
-    return { rowCount: 1, rows: [{
+  const sessionRow = {
       id: ids.session,
       member_id: ids.member,
       membership_id: ids.membership,
@@ -116,7 +105,11 @@ test("session lookup normalizes node-postgres Date values before the JSON bounda
       idle_expires_at: new Date("2026-08-14T00:31:00.000Z"),
       recent_auth_at: null,
       revoked_at: null
-    }] };
+    };
+  const client = { async query(text) {
+    if (text.includes("agentpass_human_session_find_by_token")) return { rowCount: 1, rows: [{ session: sessionRow }] };
+    if (text.includes("agentpass_human_session_list_safe")) return { rowCount: 1, rows: [{ session: sessionRow }] };
+    return { rowCount: 1, rows: [sessionRow] };
   } };
   const repository = createPostgresHumanRepository({ client });
 
@@ -151,19 +144,8 @@ test("rotateSession atomically snapshots current epochs and revokes the exact ol
   assert.equal(client.insertCount, 1);
   assert.equal(client.revokeCount, 1);
   assert.deepEqual(client.activeSessionIds(), [ids.replacement]);
-  assert.deepEqual(client.transactionEvents, ["BEGIN", "COMMIT"]);
-  assert.deepEqual(client.lockKeys, [`agentpass:organization:${ids.organization}`, ids.member]);
-  assert.match(client.oldQuery, /o\.authority_epoch=s\.organization_authority_epoch/);
-  assert.match(client.oldQuery, /m\.session_epoch=s\.membership_session_epoch/);
-  assert.match(client.oldQuery, /s\.member_id=\$3/);
-  assert.match(client.oldQuery, /s\.organization_id=\$4/);
-  assert.match(client.oldQuery, /s\.membership_id=\$5/);
-  assert.match(client.oldQuery, /s\.role=\$6/);
-  assert.match(client.oldQuery, /s\.expires_at>\$7/);
-  assert.match(client.insertQuery, /organization_authority_epoch,membership_session_epoch/);
-  assert.match(client.insertQuery, /o\.authority_epoch,m\.session_epoch/);
-  assert.match(client.revokeQuery, /s\.token_hash=\$4/);
-  assert.match(client.revokeQuery, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.deepEqual(client.transactionEvents, []);
+  assert.match(client.calls[0].text, /agentpass_human_session_rotate/);
 
   // The same old token/session pair is an idempotent no-op after the first
   // commit. It cannot create a second active replacement.
@@ -203,26 +185,14 @@ class RotationClient {
       this.transactionEvents.push(text);
       return { rowCount: 0, rows: [] };
     }
-    if (text.startsWith("SELECT pg_advisory_xact_lock")) {
-      this.lockKeys.push(params[0]);
-      return { rowCount: 1, rows: [{ locked: true }] };
-    }
-    if (text.startsWith("SELECT s.id FROM human_sessions")) {
-      this.oldQuery = text;
-      return this.oldSessionCurrent ? { rowCount: 1, rows: [{ id: ids.session }] } : { rowCount: 0, rows: [] };
-    }
-    if (text.startsWith("INSERT INTO human_sessions")) {
-      this.insertQuery = text;
+    if (text.startsWith("SELECT public.agentpass_human_session_rotate")) {
+      if (!this.oldSessionCurrent) return { rowCount: 1, rows: [{ session: null }] };
       this.insertCount += 1;
-      this.sessions.set(params[0], { id: params[0], active: true });
-      return { rowCount: 1, rows: [{ ...sessionInput, session_id: params[0], token_hash_hex: sessionInput.token_hash, csrf_token_hash_hex: sessionInput.csrf_token_hash }] };
-    }
-    if (text.startsWith("UPDATE human_sessions s SET revoked_at")) {
-      this.revokeQuery = text;
       this.revokeCount += 1;
       this.oldSessionCurrent = false;
-      this.sessions.get(params[0]).active = false;
-      return { rowCount: 1, rows: [{ id: params[0] }] };
+      this.sessions.get(ids.session).active = false;
+      this.sessions.set(params[2], { id: params[2], active: true });
+      return { rowCount: 1, rows: [{ session: { ...sessionInput, session_id: params[2], id: params[2], token_hash_hex: Buffer.from(params[7]).toString("hex"), csrf_token_hash_hex: Buffer.from(params[8]).toString("hex"), created_at: params[9], expires_at: params[10], last_seen_at: params[11], idle_expires_at: params[12] } }] };
     }
     throw new Error(`unexpected rotation query: ${text}`);
   }

@@ -1,5 +1,11 @@
 # Staging deployment readiness contract
 
+The complete cross-scenario evidence contract is in
+[STAGING_DRILL_EVIDENCE_CONTRACT.md](STAGING_DRILL_EVIDENCE_CONTRACT.md).
+This document describes the readiness-specific projection; it must be read
+with that contract for failover, PITR, signer-outage, recovery, independent
+observer, and measured SLO/RPO/RTO requirements.
+
 This runbook defines the provider-neutral evidence contract for staging. It
 does not add or alter Cloud API, Console, human-auth, WebAuthn, session, or
 authorization behavior. The deployment adapter collects the existing health
@@ -38,6 +44,14 @@ and the deployment's measured identity.
 - a known, ready rollback target bound to its own candidate and deployment
   identity.
 
+Readiness is not complete until the same protected execution envelope also
+contains the fixed `canary`, `drain`, `rollback`, `failover`, `pitr`,
+`signer_outage`, and `recovery` scenario records. Every record must carry the
+exact candidate/source/tree, artifact/image/schema/catalog/database-schema
+digests, a unique execution ID, an independently verifiable observer, and the
+scenario's measured SLO/RPO/RTO. The verifier must derive the aggregate status;
+`qualified: true` or a copied provider status is never sufficient.
+
 The record contains `evidence_sha256`, calculated over the canonical record
 without that field. Unknown fields, accessors, arrays in place of objects,
 symlink/hardlink evidence files, noncanonical JSON, digest substitution,
@@ -61,6 +75,11 @@ Readiness evidence is local contract evidence until the real staging provider
 execution, image identity, database measurement, canary metrics, drain
 timeline, and retained run/job record are independently verified. A focused
 test pass does not close those external gates.
+
+The same boundary applies to failover, PITR, signer outage, and recovery. A
+local/mock/fixture/sandbox result, `not_run`, `not_proven`, stale, or
+self-reported observer record is a hard stop and must remain so in the
+retained evidence.
 
 ## Promotion handoff
 

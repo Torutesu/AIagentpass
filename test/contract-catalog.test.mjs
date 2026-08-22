@@ -10,6 +10,7 @@ import { POSSESSION_RECEIPT_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/posse
 import { QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/qualification-grant-batch-manifest.mjs";
 import { PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/promotion-evidence-v3-statement.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
+import { DEPLOYMENT_ATTESTATION_TRUST_DOMAIN } from "../scripts/release/deployment-attestation.mjs";
 import {
   BUNDLE_ACK_SIGNATURE_DOMAIN,
   REFRESH_HINT_SIGNATURE_DOMAIN
@@ -83,10 +84,10 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  const expectedEntryCount = 59 + 64 + POSTGRES_SCHEMA_HEAD.migration_count;
+  const expectedEntryCount = 64 + 68 + POSTGRES_SCHEMA_HEAD.migration_count;
   assert.equal(catalog.entries.length, expectedEntryCount);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 59, "openapi-operation": 64, "postgres-migration": POSTGRES_SCHEMA_HEAD.migration_count });
+  assert.deepEqual(counts, { "json-schema": 64, "openapi-operation": 68, "postgres-migration": POSTGRES_SCHEMA_HEAD.migration_count });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -96,6 +97,22 @@ test("catalog freezes the complete current contract inventory", () => {
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, new RegExp(`validated frozen contract catalog: ${expectedEntryCount} entries`, "u"));
+});
+
+test("catalog registers the production-readiness gate schema and its direct contract seam", () => {
+  const catalog = readCatalog();
+  const entry = catalog.entries.find((item) => item.id === "schema.production-readiness-gate-v1");
+  assert.deepEqual(entry, {
+    id: "schema.production-readiness-gate-v1",
+    kind: "json-schema",
+    source: "schemas/production-readiness-gate-v1.schema.json",
+    version: 1,
+    profile: "platform-qualification-global",
+    purpose: "qualification.production-readiness-gate.v1",
+    implementation_status: "implemented",
+    implementation_refs: ["scripts/release/production-readiness-gate.mjs", "docs/PRODUCTION_READINESS_GATE.md"],
+    compatibility_fixtures: ["scripts/release/production-readiness-gate.test.mjs"]
+  });
 });
 
 test("catalog includes every promoted Phase 1 schema and fixture", () => {
@@ -156,21 +173,31 @@ test("catalog binds C3 promotion issuance to migration, repository, and seam evi
     kind: "postgres-migration",
     source: "postgres/0047_platform_promotion_issuance.sql",
     version: 47,
+    sha256: "8c33bd130631c2069af3ada179602f35042759ac1bcccf6c543f35baab48b63b",
     profile: "migration-global",
     purpose: "migration.0047.platform-promotion-issuance",
     implementation_status: "implemented",
     implementation_refs: [
       "contracts/postgres/0047_platform_promotion_issuance.sql",
-      "apps/cloud-api/src/postgres/promotion-issuance-repository.mjs"
+      "apps/cloud-api/src/postgres/platform-promotion-issuance-repository.mjs",
+      "apps/cloud-api/src/postgres/index.mjs"
     ],
     compatibility_fixtures: [
       "apps/cloud-api/test/postgres/platform-promotion-issuance-migration.test.mjs",
-      "apps/cloud-api/test/postgres/promotion-issuance-repository.test.mjs"
+      "apps/cloud-api/test/postgres/platform-promotion-issuance-repository.test.mjs"
     ]
   });
   const evidence = catalog.entries.find((entry) => entry.id === "schema.promotion-evidence-v3");
   assert.equal(evidence?.source, "schemas/promotion-evidence-v3.schema.json");
-  assert.deepEqual(evidence?.compatibility_fixtures, ["contracts/fixtures/promotion-evidence-v3.valid.json"]);
+  assert.deepEqual(evidence?.compatibility_fixtures, [
+    "contracts/fixtures/promotion-evidence-v3.valid.json",
+    "apps/cloud-api/test/promotion-evidence-v3-signer.test.mjs",
+    "apps/cloud-api/test/promotion-evidence-v3-verifier.test.mjs",
+    "apps/cloud-api/test/promotion-evidence-v3-public-key-resolver.test.mjs",
+    "apps/cloud-api/test/platform-promotion-issuance.test.mjs",
+    "apps/cloud-api/test/postgres/platform-promotion-issuance-repository.test.mjs",
+    "apps/cloud-api/test/postgres/platform-promotion-service-composition.test.mjs"
+  ]);
   assert.equal(catalog.entries.some((entry) => entry.kind === "openapi-operation" && /promotion.*(?:issuance|reconcile)/iu.test(`${entry.id} ${entry.path ?? ""}`)), true, "promotion API is advertised in its dedicated OpenAPI seam");
 });
 

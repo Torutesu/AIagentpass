@@ -390,7 +390,7 @@ CREATE INDEX rate_limit_buckets_expiry
 CREATE INDEX idempotency_records_expiry
   ON idempotency_records (expires_at, organization_id, principal_id, idempotency_key);
 
-CREATE FUNCTION agentpass_consume_device_request_nonce(
+CREATE FUNCTION public.agentpass_consume_device_request_nonce(
   request_organization_id uuid,
   request_device_id uuid,
   request_nonce_digest bytea,
@@ -399,6 +399,8 @@ CREATE FUNCTION agentpass_consume_device_request_nonce(
 RETURNS TABLE (accepted boolean)
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF request_nonce_digest IS NULL
@@ -410,13 +412,13 @@ BEGIN
     RETURN;
   END IF;
 
-  DELETE FROM device_request_nonces
+  DELETE FROM public.device_request_nonces
   WHERE organization_id = request_organization_id
     AND device_id = request_device_id
     AND nonce_digest = request_nonce_digest
     AND expires_at <= clock_timestamp();
 
-  INSERT INTO device_request_nonces
+  INSERT INTO public.device_request_nonces
     (organization_id, device_id, nonce_digest, expires_at)
   VALUES
     (request_organization_id, request_device_id, request_nonce_digest,

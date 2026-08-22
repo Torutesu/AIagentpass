@@ -13,8 +13,8 @@ the day-to-day merge order from the current source checkpoint.
 
 ## 1. Current source checkpoint
 
-The repository currently has 188 catalog entries, 52 JSON Schemas, 63 OpenAPI
-operations, and 73 forward-only PostgreSQL migrations. The implemented source
+The repository currently has 241 catalog entries, 64 JSON Schemas, 68 OpenAPI
+operations, and 109 forward-only PostgreSQL migrations. The implemented source
 boundary includes:
 
 - organization-qualified Human identity, roles, sessions, WebAuthn credentials,
@@ -45,9 +45,10 @@ The current source checkpoint additionally closes four implementation slices:
 - D1.1 browser-led onboarding contracts across catalog, JSON Schema, OpenAPI,
   shared protocol validators, CLI consumers, and native DTOs;
 - D2.1 invitation delivery is source-complete through `5f6b35b`; D2.2 has the
-  durable resume store through `06325e0` and authoritative signed-receipt
-  recovery through `7ed5474`, but the setup handler/CLI has not yet been wired
-  to advance that store through `control_acknowledged`;
+  durable resume store through `06325e0`, authoritative signed-receipt
+  recovery through `7ed5474`, and the setup handler/CLI now requires the
+  durable path through `control_acknowledged`; persisted candidate expiry is
+  enforced locally;
 - M1.1's native sign-once transaction is source-complete through `2b76abf` and
   its real Swift/OpenSSH verification repair `54bee51`. Full broker lifecycle,
   physical process-loss evidence, and Claude Code lifecycle remain open.
@@ -708,12 +709,16 @@ The current head freezes the public `agentpass launch` argument contract,
 requires a canonical Cloud-signed capability to be verified and atomically
 consumed before native key use, implements the canonical one-use Host handoff,
 adds a fixed-adapter child-supervision primitive, and implements both sides of
-the one-shot private-FD Git bridge. The helper half-closes its request direction
-and the Host requires EOF before signing, so a late second frame cannot race the
+the one-shot private-FD Git bridge. The authenticated Host XPC path is now the
+normal signing transport, while the versioned private session helper remains an
+explicit mode. The helper half-closes its request direction and the Host
+requires EOF before signing, so a late second frame cannot race the
 one-signature boundary. The durable signing transaction is bound to the
 capability-body digest, so an identifier-preserving capability substitution
-cannot replay a completed request. These are source-complete primitives; the
-Host coordinator has not yet wired them into a working Claude Code lifecycle.
+cannot replay a completed request. Source-level Host/Claude lifecycle wiring
+exists. The dedicated `dev.agentpass.agent-host-control` endpoint and
+`agentpass close` route now have bounded replay/response-loss handling;
+physical macOS XPC and two-commit qualification remain open.
 
 Current checkpoint:
 
@@ -724,6 +729,21 @@ Current checkpoint:
 | A2 | Fixed Claude Code adapter, canonical project directory, strict environment allowlist, owned process group, TERM/INT forwarding, reap, and bounded exit classes are implemented as an isolated primitive. | Bind spawn/monitor/close to the same qualified XPC connection; close every private FD and session on child or authority loss. |
 | A3 | Helper client and Host server are implemented with one-use reservation, bounded frames, request half-close/EOF, signer-at-most-once, close-on-all-paths, and no authority selector. | Create the private socketpair in the Host, pass only the helper endpoint, wire the server signer to `signGitCommit`, and prove a real `git commit -S`. |
 | A4-A8 | Not complete. Existing lower-level Cloud, Console, PostgreSQL, signer, release, and evidence components remain inputs, not proof of the end-to-end product. | Execute in dependency order below; no phase inherits a green claim from a lower-level unit test alone. |
+
+Native close boundary update: Host session ownership and the separate signed
+Native Client control principal are distinct. The service registry accepts
+`agentpass close` only through the Native Client designated requirement, keeps
+operation receipts bounded, and rejects post-close signing. The protected
+macOS qualification probe must report separate-process close, close success,
+post-close sign rejection, and exact response-loss retry convergence; static
+tests do not constitute that physical proof.
+
+The Native XPC provenance contract is recorded at
+`native/macos/Qualification/native-xpc-contract-v1.json`. Its focused gate
+binds the Swift contract version/fingerprint, fixed Mach services, control
+selector/DTO inventory, Native Client principal, CLI route, and source
+references. This is source/provenance evidence, not a substitute for a
+signed-package launchd run.
 
 The remaining path is split into merge-sized units below. Each unit must land
 with its own negative tests and may not broaden the five-selector Agent XPC

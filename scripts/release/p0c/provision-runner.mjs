@@ -11,6 +11,7 @@ export const QUALIFICATION_CLIENT_APP_NAME = 'agentpass-qualification-grant-clie
 export const QUALIFICATION_CLIENT_INSTALL_PATH = join(PRODUCTION_ROOT, QUALIFICATION_CLIENT_DIRECTORY, QUALIFICATION_CLIENT_NAME);
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 export const QUALIFICATION_TOOL_FILES = Object.freeze([
+  Object.freeze({ source: 'p0c/verify-runner-attestation.mjs', installed: 'p0c/verify-runner-attestation.mjs' }),
   Object.freeze({ source: 'generate-release-attestation.mjs', installed: 'generate-release-attestation.mjs' }),
   Object.freeze({ source: '../../lib/release-candidate-identity.mjs', installed: 'release-candidate-identity.mjs' }),
   Object.freeze({ source: 'n3e/controller-candidate-contract.mjs', installed: 'n3e/controller-candidate-contract.mjs' }),
@@ -98,7 +99,7 @@ const readStableQualificationClientApp = (appPath, { ownerUid } = {}) => {
 
 export const inspectProvisioningSources = ({ sourceRoot, scenarioDirectory, machineConfigPath, qualificationClientPath, production = true } = {}) => {
   if (typeof qualificationClientPath !== 'string' || !isAbsolute(qualificationClientPath)) throw new Error('qualification client source path is invalid');
-  const requiredSourceEntries = new Set(['drivers', 'generate-scenario-config.mjs', 'lib', 'provision-runner.mjs']);
+  const requiredSourceEntries = new Set(['drivers', 'generate-scenario-config.mjs', 'lib', 'provision-runner.mjs', 'verify-runner-attestation.mjs']);
   const allowedSourceEntries = new Set([...requiredSourceEntries, 'scenarios']);
   const sourceOwner = production ? 0 : undefined;
   const source = protectedDirectory(sourceRoot, 'P0-C source root', { ownerUid: sourceOwner });
@@ -161,12 +162,16 @@ export const verifyInstalledTree = (root, expected, uid, gid = uid) => {
   const qualificationClient = readStableSource(qualificationClientPath, { executable: true, ownerUid: uid });
   const qualificationClientApp = readStableQualificationClientApp(join(qualificationClientDirectory, QUALIFICATION_CLIENT_APP_NAME), { ownerUid: uid });
   const config = readStableSource(join(root, 'driver-config.json'), { ownerUid: uid });
+  const gateManifest = readStableSource(join(root, 'gate-manifest.json'), { ownerUid: uid });
   const machineConfig = readStableSource(join(root, 'scenario-config.json'), { ownerUid: uid });
   const expectedToolManifest = canonicalJSON({ schema_version: 1, files: expected.qualificationToolFiles.map(({ installed, sha256: digest }) => ({ path: installed, sha256: digest })) });
+  let gateManifestValue;
+  try { gateManifestValue = JSON.parse(gateManifest.bytes.toString('utf8')); } catch { throw new Error('installed gate manifest is not valid JSON'); }
+  if (!gateManifest.bytes.equals(canonicalJSON(gateManifestValue)) || JSON.stringify(gateManifestValue) !== JSON.stringify({ schema_version: 1, gates: expected.drivers.map(({ gate, sha256: digest }) => ({ gate, sha256: digest })) })) throw new Error('installed gate manifest is invalid');
   if (drivers.some((item, index) => item.sha256 !== expected.drivers[index].sha256) || scenarios.some((item, index) => item.sha256 !== expected.scenarioFiles[index].sha256) || runtimes.some((item, index) => item.sha256 !== expected.runtimes[index].sha256) || qualificationToolFiles.some((item, index) => item.sha256 !== expected.qualificationToolFiles[index].sha256) || !qualificationToolManifest.bytes.equals(expectedToolManifest) || machineConfig.sha256 !== expected.machineConfig.sha256) throw new Error('installed inventory digest mismatch');
   if (qualificationClient.sha256 !== expected.qualificationClient.sha256) throw new Error('installed qualification client digest mismatch');
   if (qualificationClientApp.sha256 !== expected.qualificationClientApp.sha256) throw new Error('installed qualification client helper app digest mismatch');
-  return { drivers, scenarios, runtimes, qualificationToolFiles, qualificationToolManifest, qualificationClient, qualificationClientApp, config, machineConfig };
+  return { drivers, scenarios, runtimes, qualificationToolFiles, qualificationToolManifest, qualificationClient, qualificationClientApp, config, gateManifest, machineConfig };
 };
 
 export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPath, qualificationClientPath, destinationRoot = PRODUCTION_ROOT, platform = process.platform, uid = process.geteuid?.(), gid = 0, production = true } = {}) => {
@@ -195,6 +200,7 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
     for (const entry of inspected.qualificationClientApp.entries.filter(({ directory }) => !directory)) writeInstalledFile(join(qualificationClientAppDirectory, entry.path), entry.bytes, entry.mode, uid, gid);
     const config = { schema_version: 1, scenario_directory: join(destination, 'scenarios'), scenarios: inspected.scenarioFiles.map(({ gate, executable, sha256: digest }) => ({ gate, executable, sha256: digest })) };
     writeInstalledFile(join(staging, 'driver-config.json'), canonicalJSON(config), 0o644, uid, gid);
+    writeInstalledFile(join(staging, 'gate-manifest.json'), canonicalJSON({ schema_version: 1, gates: inspected.drivers.map(({ gate, sha256: digest }) => ({ gate, sha256: digest })) }), 0o644, uid, gid);
     writeInstalledFile(join(staging, 'scenario-config.json'), inspected.machineConfig.bytes, 0o644, uid, gid);
     fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool/n3e', 'qualification-tool/p0c/lib', 'qualification-tool/p0c', 'qualification-tool', QUALIFICATION_CLIENT_DIRECTORY, `${QUALIFICATION_CLIENT_DIRECTORY}/${QUALIFICATION_CLIENT_APP_NAME}`, ...appDirectories.map(({ path: directory }) => `${QUALIFICATION_CLIENT_DIRECTORY}/${QUALIFICATION_CLIENT_APP_NAME}/${directory}`)]) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
     verifyInstalledTree(staging, inspected, uid, gid);

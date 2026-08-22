@@ -22,6 +22,7 @@ const REQUIRED_CHECKS = Object.freeze([
 ]);
 const EVIDENCE_KEYS = Object.freeze(["checks", "execution", "kind", "qualified", "reason", "required_checks", "schema_version", "status"]);
 const EXECUTION_KEYS = Object.freeze(["artifact_sha256", "completed_at", "environment", "job_id", "kind", "real_execution", "run_attempt", "run_id", "runner_id", "source_commit", "source_tree", "started_at"]);
+const EXECUTION_KEYS_WITH_QUALIFICATION_BINDING = Object.freeze([...EXECUTION_KEYS, "ci_run_attempt", "ci_run_id", "qualification_job_id", "qualification_run_attempt", "qualification_run_id"]);
 
 export class WebAuthnQualificationError extends Error {
   constructor(message) {
@@ -72,14 +73,26 @@ export function validateWebAuthnEvidence(value, env = process.env) {
   if (!Array.isArray(value.required_checks) || value.required_checks.length !== REQUIRED_CHECKS.length || value.required_checks.some((item, index) => item !== REQUIRED_CHECKS[index])) {
     throw new WebAuthnQualificationError("WebAuthn qualification check inventory is invalid");
   }
-  exactKeys(value.execution, EXECUTION_KEYS, "WebAuthn qualification execution");
+  const hasQualificationBinding = Object.prototype.hasOwnProperty.call(value.execution, "ci_run_id");
+  exactKeys(value.execution, hasQualificationBinding ? EXECUTION_KEYS_WITH_QUALIFICATION_BINDING : EXECUTION_KEYS, "WebAuthn qualification execution");
+  if (hasQualificationBinding && ["ci_run_id", "ci_run_attempt", "qualification_run_id", "qualification_run_attempt", "qualification_job_id"].some((key) => typeof value.execution[key] !== "string" || !RUN_ID.test(value.execution[key]))) throw new WebAuthnQualificationError("WebAuthn qualification execution qualification binding is invalid");
   for (const [key, expected] of Object.entries(binding)) if (value.execution[key] !== expected) throw new WebAuthnQualificationError(`WebAuthn qualification ${key} binding is mismatched`);
   if (value.execution.kind !== "external_runner" || value.execution.real_execution !== true || LOCAL_MARKER.test(value.execution.runner_id)) throw new WebAuthnQualificationError("WebAuthn qualification execution is not external");
   timestamp(value.execution.started_at, "execution.started_at");
   timestamp(value.execution.completed_at, "execution.completed_at");
   if (Date.parse(value.execution.completed_at) < Date.parse(value.execution.started_at)) throw new WebAuthnQualificationError("execution timestamps are reversed");
-  exactKeys(value.execution.environment, ["identity", "kind"], "WebAuthn qualification environment");
-  if (value.execution.environment.kind !== "webauthn" || typeof value.execution.environment.identity !== "string" || LOCAL_MARKER.test(value.execution.environment.identity)) throw new WebAuthnQualificationError("WebAuthn qualification environment is not external");
+  exactKeys(value.execution.environment, ["authenticator", "identity", "instance_ids", "kind", "origin", "rp_id"], "WebAuthn qualification environment");
+  const environment = value.execution.environment;
+  if (environment.kind !== "webauthn" || typeof environment.identity !== "string" || LOCAL_MARKER.test(environment.identity)) throw new WebAuthnQualificationError("WebAuthn qualification environment is not external");
+  if (!["platform", "cross-platform"].includes(environment.authenticator) || typeof environment.origin !== "string" || !/^https:\/\//u.test(environment.origin) || LOCAL_MARKER.test(environment.origin)
+    || typeof environment.rp_id !== "string" || !/^[a-z0-9](?:[a-z0-9.-]{0,127})[a-z0-9]$/u.test(environment.rp_id) || LOCAL_MARKER.test(environment.rp_id)) throw new WebAuthnQualificationError("WebAuthn origin, RP ID, or authenticator is not external");
+  let origin;
+  try { origin = new URL(environment.origin); } catch { throw new WebAuthnQualificationError("WebAuthn origin is invalid"); }
+  if (origin.protocol !== "https:" || origin.hostname !== environment.rp_id && !origin.hostname.endsWith(`.${environment.rp_id}`)) throw new WebAuthnQualificationError("WebAuthn origin is not bound to the RP ID");
+  if (!Array.isArray(environment.instance_ids) || environment.instance_ids.length !== 2 || new Set(environment.instance_ids).size !== 2
+    || environment.instance_ids.some((item) => typeof item !== "string" || !IDENTIFIER.test(item) || LOCAL_MARKER.test(item))) throw new WebAuthnQualificationError("WebAuthn qualification must bind two external instances");
+  if (typeof env.AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN === "string" && environment.origin !== env.AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN) throw new WebAuthnQualificationError("WebAuthn origin does not match the deployed origin binding");
+  if (typeof env.AGENTPASS_WEBAUTHN_EXPECTED_RP_ID === "string" && environment.rp_id !== env.AGENTPASS_WEBAUTHN_EXPECTED_RP_ID) throw new WebAuthnQualificationError("WebAuthn RP ID does not match the deployed RP binding");
   if (!Array.isArray(value.checks) || value.checks.length !== REQUIRED_CHECKS.length) throw new WebAuthnQualificationError("WebAuthn qualification checks are incomplete");
   const seen = new Set();
   value.checks.forEach((item, index) => {

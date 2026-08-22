@@ -56,12 +56,18 @@ class EpochMockClient {
 
     if (text.startsWith("SELECT role,status")) return result([{ role: "owner", status: "active" }]);
     if (text.startsWith("SELECT organization_id,id AS membership_id")) return result([membership({ role: this.targetRole })]);
+    if (text.startsWith("SELECT * FROM public.agentpass_human_membership_role_update")) {
+      const role = params[3];
+      return result([membership({ role, status: "active", version: 2 })]);
+    }
+    if (text.startsWith("SELECT * FROM public.agentpass_human_membership_remove")) {
+      return result([membership({ role: this.targetRole, status: "revoked", version: 2 })]);
+    }
     if (text.startsWith("UPDATE memberships target")) {
       const role = this.mutation === "role" ? params[3] : this.targetRole;
       return result([membership({ role, status: this.mutation === "remove" ? "revoked" : "active", version: 2 })]);
     }
-    if (text.startsWith("UPDATE webauthn_challenges")) return result([], 1);
-    if (text.startsWith("UPDATE human_sessions")) return result([], 1);
+    if (text.startsWith("SELECT public.agentpass_human_member_session_revoke(")) return result([{ result: { sessions: [], session_count: 0, challenge_count: 0 } }], 1);
     if (text.startsWith("SELECT set_config('agentpass.organization_id'")) return result([{ organization_id: params[0] }], 1);
     if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
       return result([{ result: { state: "revoked", capabilities: [] } }], 1);
@@ -99,24 +105,25 @@ test("role reduction advances only the target session_epoch and preserves unrela
     return { generation: 3 };
   }).updateMemberRole(input({ role: "viewer" }));
 
-  const membershipUpdate = client.calls.find(({ text }) => text.startsWith("UPDATE memberships target"));
-  assert.doesNotMatch(membershipUpdate.text, /session_epoch/);
+  const authorityCall = client.calls.find(({ text }) => text.includes("agentpass_human_membership_role_update"));
+  assert.ok(authorityCall, "role mutation must cross the membership authority function");
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE memberships target")), false);
   assert.equal(client.calls.some(({ text }) => text.includes("agentpass_bump_organization_authority_epoch")), false);
   assert.equal(client.calls.at(-1).text, "COMMIT");
   assert.equal(reductions.length, 1);
   assert.equal(reductions[0].tx, client);
   assert.equal(Object.hasOwn(response, "session_epoch"), false);
   assert.equal(Object.hasOwn(response, "authority_epoch"), false);
-  assert.doesNotMatch(membershipUpdate.text, /RETURNING[\s\S]*session_epoch/);
+  assert.doesNotMatch(authorityCall.text, /session_epoch/);
 });
 
 test("member removal advances only the target session_epoch", async () => {
   const client = new EpochMockClient({ targetRole: "viewer", mutation: "remove" });
   const response = await repository(client).removeMember(input({ removed_at: NOW, idempotency_key: "epoch-remove-1" }));
 
-  const membershipUpdate = client.calls.find(({ text }) => text.startsWith("UPDATE memberships target"));
-  assert.match(membershipUpdate.text, /status='revoked'/);
-  assert.doesNotMatch(membershipUpdate.text, /session_epoch/);
+  const authorityCall = client.calls.find(({ text }) => text.includes("agentpass_human_membership_remove"));
+  assert.ok(authorityCall, "member removal must cross the membership authority function");
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE memberships target")), false);
   assert.equal(client.calls.some(({ text }) => text.includes("agentpass_bump_organization_authority_epoch")), false);
   assert.equal(client.calls.at(-1).text, "COMMIT");
   assert.equal(response.status, "revoked");
@@ -129,8 +136,9 @@ test("a role widening also advances the target session_epoch but does not advanc
   const client = new EpochMockClient({ targetRole: "viewer", mutation: "role" });
   await repository(client).updateMemberRole(input({ role: "admin", idempotency_key: "epoch-widen-1" }));
 
-  const membershipUpdate = client.calls.find(({ text }) => text.startsWith("UPDATE memberships target"));
-  assert.doesNotMatch(membershipUpdate.text, /session_epoch/);
+  const authorityCall = client.calls.find(({ text }) => text.includes("agentpass_human_membership_role_update"));
+  assert.ok(authorityCall, "role mutation must cross the membership authority function");
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE memberships target")), false);
   assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE organizations")), false);
   assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT agentpass_bump_organization_authority_epoch")), false);
 });

@@ -251,7 +251,9 @@ export function parseCloudRuntimeProfile(env = process.env) {
     const humanAuth = parseHumanAuth(env);
     if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete
       || !hostedControlBundle.complete || !hostedCapability.complete || !hostedAuditAnchor.complete || !hostedPromotionEvidence.complete
-      || !ownerRecoveryNotification.complete || !hostedBootstrap.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+      || !ownerRecoveryNotification.complete || !hostedBootstrap.complete
+      || !configured(env, CAPABILITY_NONCE_SECRET_ENV)
+      || !validCursorSecret(env[OPERATIONAL_PROBE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,

@@ -19,6 +19,11 @@ public enum NativeAgentAuthenticatedHostEndpointError: String, Error, Equatable,
     case dedicatedSignerRequired = "dedicated_signer_required"
     case outcomeUnknown = "outcome_unknown"
     case endpointClosed = "endpoint_closed"
+    case controlUnavailable = "control_unavailable"
+    case controlPeerMismatch = "control_peer_mismatch"
+    case controlReplay = "control_replay"
+    case controlInProgress = "control_in_progress"
+    case controlSessionMissing = "control_session_missing"
 
     public var errorDescription: String? { rawValue }
 }
@@ -129,6 +134,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     public typealias SignatureBudgetProvider = @Sendable () throws -> NativeAgentSignatureBudget?
     public typealias MillisecondClock = @Sendable () -> Int64
     public typealias RequestIDFactory = @Sendable () -> String
+    public typealias SessionRegistrar = @Sendable (_ sessionID: String, _ endpoint: NativeAgentAuthenticatedHostEndpoint, _ ownerIdentity: NativeProcessIdentity) throws -> Void
+    public typealias SessionUnregistrar = @Sendable (_ endpoint: NativeAgentAuthenticatedHostEndpoint) -> Void
 
     private struct ConsumedSignRequest: Equatable {
         let requestID: String
@@ -158,6 +165,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private let requestIDFactory: RequestIDFactory
     private let sessionLifetimeMilliseconds: Int64
     private let childPolicy: NativeProcessIdentityPolicy
+    private let sessionRegistrar: SessionRegistrar?
+    private let sessionUnregistrar: SessionUnregistrar?
     private let stateLock = NSLock()
 
     private var session: NativeAgentAuthenticatedGitBridgeSession?
@@ -167,6 +176,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     private var signatureBudget: NativeAgentSignatureBudgetLedger?
     private var consumedSignRequests: [UInt32: ConsumedSignRequest] = [:]
     private var issuedRequestIDs: Set<String> = []
+    private var closedAtMilliseconds: Int64?
 
     /// `connectionContext` and `initialPeerObservation` must be captured from
     /// the accepted NSXPC connection. The observer closures must independently
@@ -192,7 +202,9 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         childRegistrar: ChildRegistrar? = nil,
         dedicatedChildRegistrar: DedicatedChildRegistrar? = nil,
         childUnregistrar: ChildUnregistrar? = nil,
-        signatureBudgetProvider: SignatureBudgetProvider? = nil
+        signatureBudgetProvider: SignatureBudgetProvider? = nil,
+        sessionRegistrar: SessionRegistrar? = nil,
+        sessionUnregistrar: SessionUnregistrar? = nil
     ) throws {
         guard sessionLifetimeMilliseconds > 0 else {
             throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
@@ -225,6 +237,8 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         self.requestIDFactory = requestIDFactory
         self.sessionLifetimeMilliseconds = sessionLifetimeMilliseconds
         self.childPolicy = childProcessPolicy
+        self.sessionRegistrar = sessionRegistrar
+        self.sessionUnregistrar = sessionUnregistrar
         super.init()
     }
 
@@ -260,6 +274,13 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             terminalStatus = nil
             consumedSignRequests.removeAll(keepingCapacity: true)
             issuedRequestIDs.removeAll(keepingCapacity: true)
+            closedAtMilliseconds = nil
+            do {
+                try sessionRegistrar?(prepared.sessionID, self, peerBinding.processIdentity)
+            } catch {
+                _ = closeSessionAndRevoke(newSession)
+                throw NativeAgentAuthenticatedHostEndpointError.controlUnavailable
+            }
             guard let response = AgentPassHostPrepareResponse(
                 sessionID: prepared.sessionID,
                 status: .prepared,
@@ -484,10 +505,19 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         do {
             try revalidatePeerOrRevoke()
             guard let session else { throw NativeAgentAuthenticatedHostEndpointError.invalidSessionState }
-            let snapshot = closeSessionAndRevoke(session, status: .closed)
+            if terminalStatus == .closed, let closedAtMilliseconds,
+               let response = AgentPassHostCloseResponse(
+                sessionID: session.sessionID,
+                closedAtMilliseconds: closedAtMilliseconds
+               ) {
+                reply(response, nil)
+                return
+            }
+            let closedAt = try validTimestamp(nowMilliseconds())
+            let snapshot = closeSessionAndRevoke(session, status: .closed, closedAtMilliseconds: closedAt)
             guard let response = AgentPassHostCloseResponse(
                 sessionID: snapshot.sessionID,
-                closedAtMilliseconds: try validTimestamp(nowMilliseconds())
+                closedAtMilliseconds: closedAt
             ) else {
                 throw NativeAgentAuthenticatedHostEndpointError.invalidRequest
             }
@@ -495,6 +525,41 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         } catch {
             reply(nil, makeError(error))
         }
+    }
+
+    /// Control-plane close invoked over a separately authenticated XPC
+    /// connection. The target session is closed in this endpoint's own state
+    /// lock; no session token, PID, inherited descriptor, or caller-supplied
+    /// identity participates in the transition.
+    internal func closeFromAuthorizedControl(
+        _ request: AgentPassHostControlCloseRequest
+    ) throws -> AgentPassHostControlCloseResponse {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let session, session.sessionID == request.sessionID else {
+            throw NativeAgentHostControlRegistryError.controlSessionMissing
+        }
+        if terminalStatus == .closed, let closedAtMilliseconds,
+           let response = AgentPassHostControlCloseResponse(
+            operationID: request.operationID,
+            sessionID: session.sessionID,
+            closedAtMilliseconds: closedAtMilliseconds
+           ) {
+            return response
+        }
+        guard terminalStatus == nil else {
+            throw NativeAgentHostControlRegistryError.controlSessionMissing
+        }
+        let closedAt = try validTimestamp(nowMilliseconds())
+        _ = closeSessionAndRevoke(session, status: .closed, closedAtMilliseconds: closedAt)
+        guard let response = AgentPassHostControlCloseResponse(
+            operationID: request.operationID,
+            sessionID: session.sessionID,
+            closedAtMilliseconds: closedAt
+        ) else {
+            throw NativeAgentHostControlRegistryError.controlUnavailable
+        }
+        return response
     }
 
     /// Called by the NSXPC invalidation handler. Connection loss is terminal
@@ -507,6 +572,7 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
             unregisterRegisteredChild()
         }
         stateLock.unlock()
+        sessionUnregistrar?(self)
     }
 
     /// Every terminal session transition revokes the child registry entry in
@@ -516,11 +582,17 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
     @discardableResult
     private func closeSessionAndRevoke(
         _ session: NativeAgentAuthenticatedGitBridgeSession,
-        status: AgentPassHostXPCContract.SessionStatus = .revoked
+        status: AgentPassHostXPCContract.SessionStatus = .revoked,
+        closedAtMilliseconds: Int64? = nil
     ) -> NativeAgentAuthenticatedGitBridgeSession.Snapshot {
         let snapshot = session.close()
         unregisterRegisteredChild()
-        terminalStatus = status
+        if terminalStatus == nil {
+            terminalStatus = status
+            self.closedAtMilliseconds = closedAtMilliseconds
+        } else if terminalStatus == .closed, self.closedAtMilliseconds == nil {
+            self.closedAtMilliseconds = closedAtMilliseconds
+        }
         return snapshot
     }
 
@@ -649,6 +721,14 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         let stable: NativeAgentAuthenticatedHostEndpointError
         if let error = error as? NativeAgentAuthenticatedHostEndpointError {
             stable = error
+        } else if let error = error as? NativeAgentHostControlRegistryError {
+            switch error {
+            case .controlUnavailable: stable = .controlUnavailable
+            case .controlPeerMismatch: stable = .controlPeerMismatch
+            case .controlReplay: stable = .controlReplay
+            case .controlInProgress: stable = .controlInProgress
+            case .controlSessionMissing: stable = .controlSessionMissing
+            }
         } else if let error = error as? NativeAgentAuthenticatedGitBridgeError {
             stable = mapCoreError(error)
         } else {
@@ -676,6 +756,11 @@ public final class NativeAgentAuthenticatedHostEndpoint: NSObject, AgentPassHost
         case .outcomeUnknown: return 11
         case .revoked: return 12
         case .dedicatedSignerRequired: return 13
+        case .controlUnavailable: return 14
+        case .controlPeerMismatch: return 15
+        case .controlReplay: return 16
+        case .controlInProgress: return 17
+        case .controlSessionMissing: return 18
         }
     }
 }

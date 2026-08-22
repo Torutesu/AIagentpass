@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
-import { derivePostgresSchemaHead } from "../../src/postgres/schema-head.mjs";
+import { derivePostgresSchemaHead, POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 
 const migrationUrl = new URL("../../../../contracts/postgres/0081_device_audit_tenant_authority_rls.sql", import.meta.url);
 const catalogUrl = new URL("../../../../contracts/catalog-v1.json", import.meta.url);
@@ -47,14 +47,16 @@ test("0081 is contiguous, catalog-registered, and included in the derived schema
   const catalog = JSON.parse(catalogBytes.toString("utf8"));
   const migration = migrations.find((entry) => entry.version === 81);
   const catalogEntry = catalog.entries.find((entry) => entry.kind === "postgres-migration" && entry.version === 81);
-  assert.equal(migrations.at(-1)?.name, "0081_device_audit_tenant_authority_rls.sql");
-  assert.equal(migrations.length, 81);
+  assert.equal(migrations.at(-1)?.name, POSTGRES_SCHEMA_HEAD.name);
+  assert.equal(migrations.length, POSTGRES_SCHEMA_HEAD.migration_count);
   assert.equal(migration?.name, "0081_device_audit_tenant_authority_rls.sql");
+  assert.match(migration?.checksum ?? "", /^[0-9a-f]{64}$/u);
   assert.deepEqual(catalogEntry, {
     id: "migration.0081_device_audit_tenant_authority_rls",
     kind: "postgres-migration",
     source: "postgres/0081_device_audit_tenant_authority_rls.sql",
     version: 81,
+    sha256: migration.checksum,
     profile: "migration-tenant",
     purpose: "migration.0081.device-audit-tenant-authority-rls",
     implementation_status: "implemented",
@@ -85,8 +87,9 @@ test("0081 is contiguous, catalog-registered, and included in the derived schema
   });
 
   const head = derivePostgresSchemaHead({ catalog, migrations, catalogBytes });
-  assert.equal(head.version, 81);
-  assert.equal(head.migration_count, 81);
-  assert.equal(head.name, migration.name);
-  assert.equal(head.checksum, migration.checksum);
+  const currentMigration = migrations.at(-1);
+  assert.equal(head.version, POSTGRES_SCHEMA_HEAD.version);
+  assert.equal(head.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
+  assert.equal(head.name, currentMigration.name);
+  assert.equal(head.checksum, currentMigration.checksum);
 });

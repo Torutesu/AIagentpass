@@ -49,7 +49,16 @@ function postgres() {
     async reissueInvitation() { return null; },
     async acceptInvitation() { return null; }
   };
-  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
+  return { pool: { async query(sql) {
+    const text = String(sql);
+    // The resolver now calls the SECURITY DEFINER authority function rather
+    // than reading upstream_identities directly. Keep the fixture bound to
+    // that public contract so runtime tests exercise the current seam.
+    if (text.includes("agentpass_human_identity_resolve") || text.includes("FROM upstream_identities")) {
+      return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
 }
 
 function recoveryPostgres() {
@@ -106,6 +115,20 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
   assert.equal(typeof runtime.organizationService.listMembers, "function");
   assert.equal(typeof runtime.organizationApi.handle, "function");
   assert.equal(Object.isFrozen(runtime), true);
+});
+
+test("production human-auth composition rejects a repository without atomic session concurrency authority", () => {
+  const configured = postgres();
+  delete configured.humanRepository.createSessionWithLimit;
+  assert.throws(() => createHumanAuthRuntime({
+    postgresRuntime: configured,
+    tokenRecords: [],
+    origin: "https://console.example.test",
+    rpId: "console.example.test",
+    cursorSecret: CURSOR_SECRET,
+    securitySecret: SECURITY_SECRET,
+    requireStrongSessionConcurrency: true,
+  }), /session concurrency authority is unavailable/iu);
 });
 
 test("composes recovery dead-letter management only from its durable repository", () => {

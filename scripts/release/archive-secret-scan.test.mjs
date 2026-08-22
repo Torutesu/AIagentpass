@@ -81,6 +81,9 @@ test("detects credential-shaped JSON keys across syntax variants without flaggin
       ["access-token-escaped.json", '{ "access\\u005fToken": "escaped-access-token" }'],
       ["api-token-spaced.json", '{ "API token" : "short-api-token" }'],
       ["api-token-kebab.json", '{ "api-token": "short-api-token" }'],
+      ["credential.json", '{ "credential": "agent-credential" }'],
+      ["database-url.json", '{ "database_url": "postgres://user:password@example.test/db" }'],
+      ["db-url-nfkc.json", '{ "ＤＢ＿ＵＲＬ": "postgresql://user:password@example.test/db" }'],
       ["password-short.json", '{ "password": "pw" }'],
       ["secret-short.json", '{ "secret": "s3cr3t" }']
     ];
@@ -95,6 +98,12 @@ test("detects credential-shaped JSON keys across syntax variants without flaggin
     const legacyText = path.join(root, "legacy.env");
     fs.writeFileSync(legacyText, "ACCESS_TOKEN=short-or-long-enough-for-legacy-detection\n");
     assert.throws(() => scanArchives([legacyText]), /secret material/u);
+    const legacyDatabaseUrl = path.join(root, "legacy-database.env");
+    fs.writeFileSync(legacyDatabaseUrl, "DATABASE_URL=postgres://user:password@example.test/db\n");
+    assert.throws(() => scanArchives([legacyDatabaseUrl]), /secret material/u);
+    const legacyCredential = path.join(root, "legacy-credential.env");
+    fs.writeFileSync(legacyCredential, "AGENT_CREDENTIAL=short\n");
+    assert.throws(() => scanArchives([legacyCredential]), /secret material/u);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -103,7 +112,7 @@ test("detects credential-shaped JSON keys across syntax variants without flaggin
 test("rejects traversal, platform-ambiguous, and overlong tar member paths before extraction", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-archive-secret-test-"));
   try {
-    for (const [index, name] of ["../escape", "/absolute", "C:/drive", "C:drive", "safe\\name", "safe/../secret"].entries()) {
+    for (const [index, name] of ["../escape", "/absolute", "C:/drive", "C:drive", "safe\\name", "safe/../secret", "．．/escape"].entries()) {
       const archive = path.join(root, `unsafe-${index}.tar`);
       writeTar(archive, [{ name, data: "safe" }]);
       assert.throws(() => scanArchives([archive]), /unsafe path|invalid member path/u);
@@ -143,6 +152,26 @@ test("enforces deterministic byte, entry, and option limits", () => {
     const nested = path.join(root, "nested.tar");
     writeTar(nested, [{ name: "inner.tar", data: "not scanned as a nested archive" }]);
     assert.throws(() => scanArchives([nested]), /nested archive must be scanned explicitly/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects symlink and hardlink files in a scanned directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-archive-secret-links-test-"));
+  try {
+    const directory = path.join(root, "release");
+    fs.mkdirSync(directory);
+    const target = path.join(directory, "target.json");
+    fs.writeFileSync(target, '{"ok":true}\n');
+    const symlink = path.join(directory, "symlink.json");
+    fs.symlinkSync(target, symlink);
+    assert.throws(() => scanArchives([directory]), /symlink|unsupported entry/u);
+
+    fs.unlinkSync(symlink);
+    const hardlink = path.join(directory, "hardlink.json");
+    fs.linkSync(target, hardlink);
+    assert.throws(() => scanArchives([directory]), /hardlink/u);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

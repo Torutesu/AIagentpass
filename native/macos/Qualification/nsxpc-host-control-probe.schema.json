@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/schemas/macos-nsxpc-host-control-probe-v1.json",
+  "title": "AgentPass macOS NSXPC Host-control probe observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "mach_service", "control_mach_service", "connection_accepted", "authorized_client", "wrong_identity_denied",
+    "host_process", "control_client_process", "separate_process_close", "post_close_sign_rejected", "response_loss_retry"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "mach_service": { "const": "dev.agentpass.agent-host" },
+    "control_mach_service": { "const": "dev.agentpass.agent-host-control" },
+    "connection_accepted": { "const": true },
+    "authorized_client": { "const": true },
+    "wrong_identity_denied": { "const": true },
+    "host_process": { "$ref": "#/$defs/process" },
+    "control_client_process": { "$ref": "#/$defs/control_process" },
+    "separate_process_close": { "$ref": "#/$defs/separate_process_close" },
+    "post_close_sign_rejected": { "$ref": "#/$defs/post_close_sign_rejected" },
+    "response_loss_retry": { "$ref": "#/$defs/response_loss_retry" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "developer_id": { "type": "string", "pattern": "^Developer ID Application: [^\\r\\n()]+ \\([A-Z0-9]{10}\\)$" },
+    "pid": { "type": "integer", "minimum": 1 },
+    "process": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "start_time_ns", "code_directory_sha256", "bundle_identifier", "signing_identity"],
+      "properties": {
+        "pid": { "$ref": "#/$defs/pid" },
+        "start_time_ns": { "type": "integer", "minimum": 1 },
+        "code_directory_sha256": { "$ref": "#/$defs/digest" },
+        "bundle_identifier": { "const": "dev.agentpass.agent-host" },
+        "signing_identity": { "$ref": "#/$defs/developer_id" }
+      }
+    },
+    "control_process": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "start_time_ns", "code_directory_sha256", "bundle_identifier", "signing_identity"],
+      "properties": {
+        "pid": { "$ref": "#/$defs/pid" },
+        "start_time_ns": { "type": "integer", "minimum": 1 },
+        "code_directory_sha256": { "$ref": "#/$defs/digest" },
+        "bundle_identifier": { "const": "dev.agentpass.native-client" },
+        "signing_identity": { "$ref": "#/$defs/developer_id" }
+      }
+    },
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "session_id", "operation_id", "closed_at_ms"],
+      "properties": {
+        "status": { "const": "closed" }, "session_id": { "$ref": "#/$defs/uuid" }, "operation_id": { "$ref": "#/$defs/uuid" }, "closed_at_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "separate_process_close": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "operation_id", "requested_by_pid", "target_host_pid", "distinct_processes", "used_control_mach_service", "receipt"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/uuid" }, "operation_id": { "$ref": "#/$defs/uuid" }, "requested_by_pid": { "$ref": "#/$defs/pid" }, "target_host_pid": { "$ref": "#/$defs/pid" }, "distinct_processes": { "const": true }, "used_control_mach_service": { "const": true }, "receipt": { "$ref": "#/$defs/receipt" }
+      }
+    },
+    "post_close_sign_rejected": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "attempted_by_pid", "attempted_after_close", "status", "reason"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/uuid" }, "attempted_by_pid": { "$ref": "#/$defs/pid" }, "attempted_after_close": { "const": true }, "status": { "const": "rejected" }, "reason": { "const": "endpoint_closed" }
+      }
+    },
+    "response_loss_retry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "operation_id", "first_attempt_response_lost", "reconnected_before_retry", "retry_attempted", "same_operation_id", "retry_receipt", "no_second_close_effect", "terminal_state", "converged"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/uuid" }, "operation_id": { "$ref": "#/$defs/uuid" }, "first_attempt_response_lost": { "const": true }, "reconnected_before_retry": { "const": true }, "retry_attempted": { "const": true }, "same_operation_id": { "const": true }, "retry_receipt": { "$ref": "#/$defs/receipt" }, "no_second_close_effect": { "const": true }, "terminal_state": { "const": "closed" }, "converged": { "const": true }
+      }
+    }
+  }
+}

@@ -11,22 +11,34 @@ must not use production private keys or production tenant data.
 
 ## Drill matrix
 
+The machine-readable handoff is specified by
+[STAGING_DRILL_EVIDENCE_CONTRACT.md](STAGING_DRILL_EVIDENCE_CONTRACT.md).
+The seven scenario IDs below are mandatory; a row marked `not_run`,
+`not_proven`, stale, or self-reported is a blocker rather than a skipped pass.
+
 | Drill | Action | Pass condition and evidence |
 | --- | --- | --- |
-| Canary/drain | Route bounded traffic, stop new work, drain old instances. | No unfenced operation; error/readiness/audit timeline and rollback owner recorded. |
+| `canary` / `drain` | Route bounded traffic, stop new work, drain old instances. | No unfenced operation; exact candidate/deployment binding, independent observer, measured SLO, error/readiness/audit timeline, and rollback owner recorded. |
+| `rollback` | Activate the immutable prior target and restore traffic. | Exact target binding, unique execution ID, independent observer, target readiness, traffic restoration, and measured rollback RTO. |
+| `failover` | Exercise the database/service failure-domain transition. | Distinct endpoint identities, exact schema/catalog/database digests, and measured RPO/RTO. |
+| `pitr` | Restore an isolated target to an explicit point in time. | Immutable backup/restore identity, recovery point, exact schema/catalog/database digests, and measured RPO/RTO. |
+| `signer_outage` | Deny provider availability, verify fail-closed, and recover. | Purpose/key-version binding, no local/file fallback, no duplicate sign after response loss, independent outage/recovery observation, and measured SLO/RTO. |
+| `recovery` | Recover service and audit path after the exercised fault. | Audit continuity, restored deployment/key/database identity, independent observer, and measured SLO/RTO. |
 | Signer outage/rotation | Deny provider calls, rotate one purpose, restore service. | Readiness fails closed; no blind retry; exact lookup/receipt and old-key rejection are evidenced. |
 | Database failover/PITR | Fail primary, restore isolated PITR target, compare authority state. | Measured RPO/RTO, checksum/row-count/authority comparison, no destructive live rollback. |
 | Network/response loss | Drop response after provider acceptance and during commit. | Durable `uncertain` state reconciles exactly or remains operator-actionable; no duplicate sign. |
-| Emergency stop/revoke | Revoke agent/device/session and apply global stop. | Next operation denied within measured bound; audit event and cache/offline expiry evidence retained. |
+| Emergency stop/revoke | Revoke agent/device/session and apply global stop. | Next operation denied within measured bound; the signed operations evidence contains `propagation_bound_ms` and `propagation_observed_ms` with observed <= bound; audit event and cache/offline expiry evidence retained. |
 | Recovery/dead letter | Exercise owner recovery, uncertain adjudication, and bounded redrive. | Role/recent-auth/idempotency/If-Match checks hold; no row deletion or secret exposure. |
 | Upgrade/rollback | Apply forward migration, deploy previous compatible immutable candidate. | Compatibility and rollback owner approval recorded; no rebuild and no down-migration. |
 | Agent E2E | Run Claude Code and Cursor unattended signing, restart, expiry, revoke, and network-loss cases. | Verified commits and denial-after-revoke on exact candidate; hostile substitution and leak scans pass. |
 
 For every drill record trigger, operator, start/end UTC, source/tree and
-artifact/deployment digests, scenario ID, expected/observed state, metrics,
-stable failure code, logs/trace locations after redaction, and independent
-witness. A sandbox `EPERM` or unavailable provider is an environment blocker,
-not a passing drill.
+artifact/image/schema/catalog/database-schema/deployment digests, scenario ID,
+unique execution ID, expected/observed state, measured SLO/RPO/RTO, stable
+failure code, redacted logs/trace references, and an independently verifiable
+observer digest. A sandbox `EPERM` or unavailable provider is an environment
+blocker, not a passing drill. The operator cannot serve as the independent
+witness for its own result.
 
 ## Security review procedure
 
@@ -54,7 +66,7 @@ documented risk decision and security retest; a plan status cannot close them.
 
 ## Final go/no-go checklist
 
-- [ ] All drills pass with measured RPO, RTO, revocation bound, and alert
+- [ ] All seven fixed scenarios pass with measured SLO/RPO/RTO, revocation bound, and alert
   delivery; failures and replacement runs are retained.
 - [ ] Security review report is independent, source-bound, and signed.
 - [ ] No critical/high finding remains; every security-relevant medium has a

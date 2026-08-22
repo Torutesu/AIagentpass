@@ -5,10 +5,9 @@ import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "..
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { parseDeploymentReadiness, type DeploymentReadiness } from "../deployment-readiness";
 import { deriveAccessPosture, type AccessPostureInput, type PostureItem } from "../access-posture";
-import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
 import { BROWSER_CLI_HANDOFF_EVENTS, BROWSER_CLI_HANDOFF_LIMITS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
-import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
+import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient, type OrganizationSession } from "../organization-client";
 import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
@@ -94,7 +93,7 @@ function emptyConsoleData(): AgentPassInitialData {
   };
 }
 
-function summaryViewData(summary: ConsoleSummaryViewModel, deployment: DeploymentReadiness, session: ConsoleSession): AgentPassInitialData {
+function summaryViewData(summary: ConsoleSummaryViewModel, deployment: DeploymentReadiness | null, session: ConsoleSession): AgentPassInitialData {
   const roleLabel = { owner: "Owner", admin: "Admin", auditor: "Auditor", viewer: "Viewer" }[session.role];
   const remainingMs = Math.max(0, Date.parse(session.expiresAt) - Date.now());
   const remainingMinutes = Math.ceil(remainingMs / 60_000);
@@ -367,7 +366,7 @@ function parseDeviceRefreshResponse(value: unknown, expectedDeviceId: string): D
   if (refreshRequest.version !== 1 || typeof refreshRequest.request_id !== "string" || !OPAQUE_ID.test(refreshRequest.request_id) || refreshRequest.device_id !== expectedDeviceId || typeof refreshRequest.device_id !== "string" || !OPAQUE_ID.test(refreshRequest.device_id)) {
     throw new Error("invalid refresh response");
   }
-  if (refreshRequest.desired_generation !== null && (!Number.isSafeInteger(refreshRequest.desired_generation) || refreshRequest.desired_generation < 1)) {
+  if (refreshRequest.desired_generation !== null && (!Number.isSafeInteger(refreshRequest.desired_generation as number) || (refreshRequest.desired_generation as number) < 1)) {
     throw new Error("invalid refresh response");
   }
   if (typeof refreshRequest.status !== "string" || !new Set<DeviceRefreshRequestStatus>(["accepted", "coalesced", "no_pending_refresh"]).has(refreshRequest.status as DeviceRefreshRequestStatus) || typeof refreshRequest.requested_at !== "string" || !RFC3339_UTC.test(refreshRequest.requested_at) || !Number.isFinite(Date.parse(refreshRequest.requested_at))) {
@@ -699,7 +698,7 @@ function deviceState(device: AgentPassInitialData["devices"][number], now = Date
 }
 
 function deviceStateLabel(state: DeviceStateTone): DeviceStateLabel {
-  return { synced: "同期済み", pending: "反映待ち", blocked: "ブロック中", stale: "古い状態", offline: "オフライン", revoked: "失効済み" }[state];
+  return ({ synced: "同期済み", pending: "反映待ち", blocked: "ブロック中", stale: "古い状態", offline: "オフライン", revoked: "失効済み" } as Record<DeviceStateTone, DeviceStateLabel>)[state];
 }
 
 function deviceStateDescription(state: DeviceStateTone): string {
@@ -749,6 +748,13 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
       setWakePending(false);
     }
   };
+  const requestWakeWithConfirmation = () => {
+    if (wakePending || wakeInFlight.current) return;
+    setWakeError("");
+    setWakeOutcome("");
+    setWakeConfirming(true);
+  };
+  const [wakeConfirming, setWakeConfirming] = useState(false);
   return (
     <article className={`health-card device-state-card state-${state}`} aria-busy={wakePending}>
       <div className="health-head">
@@ -757,7 +763,7 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
       </div>
       <p className="device-state-description">{deviceStateDescription(state)}</p>
       {canRequestRefreshForRole ? <div className="device-wake-action">
-        <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={() => void requestWake()}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>
+        {wakeConfirming && !wakePending ? <span className="operation-control"><span className="section-note" role="status" aria-live="polite">端末へWake requestを送信します。適用完了はこの操作では確認しません。</span><button className="secondary-button device-wake-button" type="button" onClick={() => { setWakeConfirming(false); void requestWake(); }}>確認して送信</button><button className="text-button" type="button" onClick={() => setWakeConfirming(false)}>キャンセル</button></span> : <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={requestWakeWithConfirmation}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>}
         <p className="device-wake-copy">端末への配信は未確認です。適用・同期の完了を示す操作ではありません。</p>
         {wakeOutcome ? <p className="device-wake-outcome" role="status" aria-live="polite">{wakeOutcome}</p> : null}
         {wakeError ? <p className="device-wake-error" role="alert">{wakeError}</p> : null}
@@ -1041,15 +1047,8 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
   );
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<SummaryRefreshResult>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
+function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void | boolean>; online: boolean; canManage: boolean; refresh: () => Promise<SummaryRefreshResult>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
-  const [preflightText, setPreflightText] = useState("");
-  const [preflight, setPreflight] = useState<PublicEnrollmentPreflight | null>(null);
-  const [preflightSource, setPreflightSource] = useState<"live" | "manual">("live");
-  const [preflightError, setPreflightError] = useState("");
-  const [advancedEnrollment, setAdvancedEnrollment] = useState(false);
-  const [candidateId, setCandidateId] = useState("");
-  const [deviceKeyFingerprint, setDeviceKeyFingerprint] = useState("");
   const [issuedEnrollment, setIssuedEnrollment] = useState<IssuedEnrollmentSummary | null>(null);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
@@ -1062,20 +1061,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   const [agent, setAgent] = useState({ name: "", kind: "claude-code", public_key: "", device_id: data.devices[0]?.deviceId ?? "" });
   const [capabilityPending, setCapabilityPending] = useState(false);
   const defaultScope = data.policies.find((policy) => policy.scope)?.scope ?? { operations: ["git.commit.sign"], repositories: ["/"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } };
-  const activeGuidedPreflight = preflightSource === "live" ? livePreflight : preflight;
-  const importPreflight = () => {
-    try {
-      const parsed = parsePublicEnrollmentPreflight(preflightText);
-      setPreflight(parsed);
-      setPreflightSource("manual");
-      setPreflightText("");
-      setPreflightError("");
-    } catch (error) {
-      setPreflight(null);
-      setPreflightText("");
-      setPreflightError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。version・platform・candidate_id・device_key_fingerprintだけを含むJSONを確認してください。" : "公開preflightを検証できませんでした。もう一度お試しください。");
-    }
-  };
+  const activeGuidedPreflight = livePreflight;
   const issueCapability = async () => {
     const selectedAgent = data.agents.find((item) => item.agentId);
     const selectedDevice = data.devices.find((item) => item.deviceId);
@@ -1089,14 +1075,15 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
     setEnrollmentPending(true);
     setEnrollmentError("");
     let mutationAttempted = false;
+    let handoffConsumed = false;
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
-      const activePreflight = activeGuidedPreflight ?? parsePublicEnrollmentPreflight(JSON.stringify({
-        version: 1,
-        platform: "macos",
-        candidate_id: candidateId.trim(),
-        device_key_fingerprint: deviceKeyFingerprint.trim(),
-      }));
+      const liveHandoff = liveHandoffRef.current;
+      if (!liveHandoff || !activeGuidedPreflight) throw new EnrollmentFlowError("enrollment", "Macのセットアップ接続が確認できません。新しいセットアップコマンドを実行してください。");
+      const activePreflight = activeGuidedPreflight;
+      if (liveHandoff.preflight.candidate_id !== activePreflight.candidate_id || liveHandoff.preflight.device_key_fingerprint !== activePreflight.device_key_fingerprint) throw new EnrollmentFlowError("enrollment", "公開preflightとMacの接続が一致しません。古い接続は再利用せず、新しいセットアップコマンドを実行してください。");
+      liveHandoffRef.current = null;
+      handoffConsumed = true;
       if (!deviceLabel.trim()) throw new EnrollmentFlowError("enrollment", "端末名を入力してください。");
       if (!supportsWebAuthn()) throw new EnrollmentFlowError("unsupported", "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。");
       const { authorization_id } = await authenticateRecentAuth({
@@ -1125,41 +1112,24 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
         deviceKeyFingerprint: String(invitation.candidate_binding && (invitation.candidate_binding as Record<string, unknown>).device_key_fingerprint),
         expiresAt: String(invitation.expires_at),
       });
-      const liveHandoff = liveHandoffRef.current;
-      if (liveHandoff) {
-        const sameBinding = liveHandoff.preflight.candidate_id === activePreflight.candidate_id
-          && liveHandoff.preflight.device_key_fingerprint === activePreflight.device_key_fingerprint;
-        liveHandoffRef.current = null;
-        if (!sameBinding) {
-          onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
-          setEnrollmentVisible(true);
-        } else {
-          try {
-            await liveHandoff.delivery.deliver(invitation);
-            clearEnrollmentStore(enrollmentStoreId);
-            setEnrollmentVisible(false);
-            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED);
-          } catch {
-            setEnrollmentVisible(true);
-            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
-          }
-        }
-      } else {
-        setEnrollmentError("Mac側のセットアップ接続がありません。credentialはブラウザに表示せず破棄しました。Macの接続を確認してからもう一度発行してください。");
+      try {
+        await liveHandoff.delivery.deliver(invitation);
+        onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED);
+      } catch {
+        onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
+        setEnrollmentError("Macへの安全な受け渡しを確認できませんでした。発行済みcredentialは表示せず破棄しました。Macの接続を確認してください。");
       }
     } catch (error) {
       clearConsoleSessionOnUnauthorized(error);
       if (mutationAttempted && (isEnrollmentOutcomeUnknown(error) || !(error instanceof EnrollmentFlowError))) {
-        const hadLiveHandoff = liveHandoffRef.current !== null;
-        liveHandoffRef.current = null;
-        if (hadLiveHandoff) onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
+        if (handoffConsumed) onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
         setEnrollmentOutcomeUnknown(true);
         setEnrollmentError("");
         // The request may have committed before its response was lost. Read
         // the authoritative summary once, but never issue a second invitation.
         void refresh();
       } else {
-        setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
+        setEnrollmentError(enrollmentErrorMessage(error));
       }
     } finally {
       enrollmentInFlight.current = false;
@@ -1187,7 +1157,6 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   };
   const issuedDevice = issuedEnrollment ? data.devices.find((device) => device.deviceId === issuedEnrollment.deviceId) : undefined;
   const progress = enrollmentProgress(issuedDevice);
-  useEffect(() => () => clearEnrollmentStore(enrollmentStoreId), [enrollmentStoreId]);
   useEffect(() => {
     if (!issuedEnrollment || progress !== "pending") return;
     let stopped = false;
@@ -1198,9 +1167,9 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
       if (Date.now() >= deadline) return;
       try {
         await refresh();
-        if (!stopped) setEnrollmentWatchError("");
+        if (!stopped) setEnrollmentError("");
       } catch {
-        if (!stopped) setEnrollmentWatchError("端末の状態を確認できませんでした。接続を確認して、手動で再確認してください。");
+        if (!stopped) setEnrollmentError("端末の状態を確認できませんでした。接続を確認して、状態を再確認してください。");
       }
       if (!stopped && Date.now() < deadline) timer = window.setTimeout(() => void poll(), 5_000);
     };
@@ -1248,13 +1217,11 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
         </article>
         {canManage ? <article className="surface-card">
           <span className="section-kicker">ENROLL A MAC · GUIDED</span><h2 className="surface-card-title">Macを安全に追加</h2>
-          <p className="surface-card-copy">Macのセットアップ画面から出力した、公開情報だけのpreflight JSONを貼り付けてください。招待credentialは画面・ブラウザ保存領域・clipboardへ表示せず、Macの安全な接続へ一度だけ渡します。</p>
+          <p className="surface-card-copy">Macのセットアップ接続から届いた公開情報だけを確認します。招待credentialは画面・ブラウザ保存領域・clipboardへ表示せず、Macの安全な接続へ一度だけ渡します。</p>
           <div className="guided-enrollment-steps">
-            <div className="guided-enrollment-step"><span className="setup-step-number">01</span><div><h3 className="setup-step-title">公開preflightを読み込む</h3><p className="field-help">macOS用の候補IDとP-256公開キーの指紋、バージョンだけを受け付けます。</p><textarea aria-label="公開preflight JSON" className="preflight-input" rows={5} autoComplete="off" spellCheck={false} placeholder={'{"version":1,"platform":"macos","candidate_id":"…","device_key_fingerprint":"SHA256:…"}'} value={preflightText} onChange={(event) => { setPreflightText(event.target.value); setPreflight(null); setPreflightSource("manual"); setPreflightError(""); }} /><button className="secondary-button" type="button" disabled={!preflightText.trim() || enrollmentPending} onClick={importPreflight}>公開preflightを確認</button>{preflightError ? <p className="form-error" role="alert">{preflightError}</p> : null}</div></div>
-            {activeGuidedPreflight ? <div className="preflight-preview" role="status"><div className="stop-title-row"><div><p className="row-title">公開preflightを確認しました</p><p className="row-description">macOS · 候補 {activeGuidedPreflight.candidate_id} · P-256 {activeGuidedPreflight.device_key_fingerprint}</p></div><StatusTag tone="green">PUBLIC ONLY</StatusTag></div></div> : null}
-            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || enrollmentOutcomeUnknown || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
+            <div className="guided-enrollment-step"><span className="setup-step-number">01</span><div><h3 className="setup-step-title">公開preflightを確認</h3><p className="field-help">Macヘルパーから届いたmacOS用の候補IDとP-256公開キーの指紋だけを受け付けます。</p>{activeGuidedPreflight ? <div className="preflight-preview" role="status"><p className="row-title">公開preflightを確認しました</p><p className="row-description">macOS · 候補 {activeGuidedPreflight.candidate_id} · P-256 {activeGuidedPreflight.device_key_fingerprint}</p><StatusTag tone="green">PUBLIC ONLY</StatusTag></div> : <p className="field-help">Macのセットアップコマンドを実行すると、ここに公開情報が表示されます。</p>}</div></div>
+            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || enrollmentOutcomeUnknown || !activeGuidedPreflight || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
           </div>
-          <details className="advanced-enrollment"><summary>上級者向け：preflight JSONを使えない場合の手入力</summary><p className="field-help">互換性のためのfallbackです。値は同じ厳格な形式で検証し、公開キー指紋以外は受け付けません。</p><div className="form-grid"><label>リリース候補ID<input maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /></label><label>端末キーのフィンガープリント<input maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">秘密鍵ではなく、P-256公開キーのSHA-256指紋。</span></label></div><button className="text-button" type="button" onClick={() => { setAdvancedEnrollment(true); setPreflight(null); setPreflightSource("manual"); setPreflightText(""); setPreflightError(""); }}>手入力を使う</button></details>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
           {enrollmentOutcomeUnknown ? <div className="enrollment-outcome-unknown" data-enrollment-state="outcome-unknown" role="alert" aria-live="assertive">
             <p className="row-title">発行結果を確認できませんでした</p>
@@ -1262,7 +1229,6 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
             <button className="text-button" type="button" onClick={() => void refresh()}>状態を再確認</button>
           </div> : null}
           {issuedEnrollment ? <div className="enrollment-progress" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel(progress)}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><EnrollmentReconciliationCard key={`${issuedEnrollment.enrollmentId}:${progress}`} progress={progress} refresh={refresh} /></div> : null}
-          {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
         </article> : null}
         {canManage ? <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
@@ -1280,11 +1246,31 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
   );
 }
 
-function AgentsSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; canManage: boolean }) {
-  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2>{data.agents.length ? <ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{canManage && agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul> : <EmptyState title="接続されたAgentはありません" copy="Claude CodeまたはCursorを端末から接続すると、ここに表示されます。" />}</article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.length ? data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>) : <EmptyState title="登録済み端末はありません" copy="セットアップから端末を追加してください。" />}</article></div></>;
+function AgentsSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void | boolean>; canManage: boolean }) {
+  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2>{data.agents.length ? <ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{canManage && agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul> : <EmptyState title="接続されたAgentはありません" copy="Claude CodeまたはCursorを端末から接続すると、ここに表示されます。" />}</article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.length ? data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>) : <EmptyState title="登録済み端末はありません" copy="セットアップから端末を追加してください。" />}</article><AgentLaunchGuide /></div></>;
 }
 
-function PoliciesSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; canManage: boolean }) {
+function AgentLaunchGuide() {
+  const [copied, setCopied] = useState<"claude" | "cursor" | null>(null);
+  const commands = {
+    claude: "agentpass launch --agent claude-code --project \"$PWD\" --ttl 600",
+    cursor: "agentpass launch --agent cursor --project \"$PWD\" --ttl 600",
+  } as const;
+
+  const copy = async (kind: keyof typeof commands) => {
+    try {
+      await navigator.clipboard.writeText(commands[kind]);
+      setCopied(kind);
+      window.setTimeout(() => setCopied((current) => current === kind ? null : current), 2_000);
+    } catch {
+      setCopied(null);
+    }
+  };
+
+  return <article className="surface-card" aria-labelledby="agent-launch-guide-title"><span className="section-kicker">START SAFELY</span><h2 className="surface-card-title" id="agent-launch-guide-title">Agentを安全に開始する</h2><p className="surface-card-copy">端末のプロジェクトフォルダで実行します。短期の権限だけが渡され、秘密鍵や認証情報はコマンドに含まれません。</p><div className="row-list"><div className="row-list-item"><div><p className="row-title">Claude Code</p><code className="row-description">{commands.claude}</code></div><button className="secondary-button" type="button" onClick={() => void copy("claude")} aria-label="Claude Codeの起動コマンドをコピー">{copied === "claude" ? "コピーしました" : "コピー"}</button></div><div className="row-list-item"><div><p className="row-title">Cursor</p><code className="row-description">{commands.cursor}</code></div><button className="secondary-button" type="button" onClick={() => void copy("cursor")} aria-label="Cursorの起動コマンドをコピー">{copied === "cursor" ? "コピーしました" : "コピー"}</button></div></div><p className="field-help" role="note">起動に失敗した場合は、セットアップと端末の状態を確認してください。利用できない環境ではAgentPassが安全側に停止します。</p></article>;
+}
+
+function PoliciesSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void | boolean>; canManage: boolean }) {
   const [name, setName] = useState("");
   const [repository, setRepository] = useState("");
   const scope = { operations: ["git.commit.sign"], repositories: [repository], branches: { allow: ["*"], deny: ["main"] }, remotes: { allow: ["*"], deny: [] } };
@@ -1295,9 +1281,60 @@ function ActivitySurface({ data }: { data: AgentPassInitialData }) {
   return <><SurfaceHeader eyebrow="ACTIVITY / 05" title="何が起きたか" copy="AgentPassが確認・許可・ブロックした操作を、時系列で記録しています。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">AUDIT LOG · TODAY</span><h2 className="surface-card-title">きょうの記録</h2><ActivityList activities={data.activities} /></article></div></>;
 }
 
-function EmergencySurface({ data, onOpenConfirm, stopped }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean }) {
+function EmergencySurface({ data, onOpenConfirm, stopped, stopError }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean; stopError: string | null }) {
   const activeCount = data.agents.filter((agent) => agent.state !== "停止").length;
-  return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、有効なAgent登録に対する作業・セッション・キューを一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div><div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}件の有効なAgent登録があります</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
+  return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、有効なAgent登録に対する作業・セッション・キューを一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div>{stopError ? <p className="form-error" role="alert" aria-live="assertive">{stopError}</p> : null}<div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}件の有効なAgent登録があります</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
+}
+
+function OperationalPosture({ data, session, summaryState, stopped, goTo, onRefresh, onSessionEnded }: { data: AgentPassInitialData; session: ConsoleSession | null; summaryState: "loading" | "ready" | "error"; stopped: boolean; goTo: (view: ConsoleView) => void; onRefresh: () => void; onSessionEnded: () => void }) {
+  const postureInput: AccessPostureInput = {
+    summaryState,
+    session: session ? { expiresAt: session.expiresAt, recentAuthAt: session.recentAuthAt } : null,
+    platformAuth: {
+      loadState: summaryState === "loading" ? "loading" : summaryState === "error" ? "error" : "ready",
+      browserSupported: supportsWebAuthn(),
+      // The console intentionally has no permission to enumerate credential
+      // material. Until the server exposes an attested count, zero means
+      // "registration is required", never "a secret was found".
+      passkeyCount: 0,
+    },
+    agents: data.agents.map((agent) => ({ status: agent.state === "停止" ? "revoked" : "active" })),
+    devices: data.devices.map((device) => ({
+      status: device.lifecycleStatus ?? (device.status === "停止" ? "revoked" : device.status === "登録待ち" ? "pending" : "active"),
+      refreshState: device.refreshState ?? null,
+      blockedReason: device.blockedReason ?? null,
+    })),
+    capabilities: (data.capabilityRecords ?? []).map((capability) => ({ expiresAt: capability.expiresAt })),
+    auditHealth: data.audit.map((health) => ({ chainStatus: health.chainStatus })),
+    stopped,
+  };
+  const posture = deriveAccessPosture(postureInput);
+  const nextAction = posture.nextAction;
+  const action = () => {
+    if (!nextAction) return;
+    if (nextAction.action === "retry") {
+      if (posture.items.find((item) => item.key === "human-session")?.state === "blocked") onSessionEnded();
+      else onRefresh();
+      return;
+    }
+    goTo(nextAction.action);
+  };
+  return <section className="access-posture" aria-labelledby="access-posture-heading">
+    <div className="access-posture-header">
+      <div><span className="section-kicker">OPERATIONAL POSTURE</span><h2 className="section-heading" id="access-posture-heading">Agentを動かせる状態か</h2><p className="access-posture-copy">認証・短期権限・監査・停止状態をまとめて確認します。確認できない項目は安全とは判定しません。</p></div>
+      <span className="access-posture-note">秘密値は表示しません</span>
+    </div>
+    <div className="posture-grid">
+      {posture.items.map((item: PostureItem) => <article className={`posture-item posture-${item.tone}`} key={item.key}>
+        <div className="posture-item-head"><span className="posture-item-label">{item.label}</span><span className={`posture-state posture-state-${item.tone}`}><span className="status-dot" aria-hidden="true" />{item.status}</span></div>
+        <p className="posture-item-detail">{item.detail}</p>
+      </article>)}
+    </div>
+    {nextAction ? <div className={`next-action next-action-${nextAction.action}`}>
+      <div><span className="section-kicker">NEXT ACTION</span><h3>{nextAction.title}</h3><p>{nextAction.detail}</p></div>
+      <button className={nextAction.action === "emergency" ? "danger-button" : "secondary-button"} type="button" onClick={action}>{nextAction.actionLabel}</button>
+    </div> : null}
+  </section>;
 }
 
 export function AgentPassConsole() {
@@ -1313,6 +1350,7 @@ export function AgentPassConsole() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmChecked, setConfirmChecked] = useState(false);
   const [stopped, setStopped] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState<ToastTone>("success");
   const [stopPending, setStopPending] = useState(false);
@@ -1325,14 +1363,12 @@ export function AgentPassConsole() {
   const [lastSynced, setLastSynced] = useState("未同期");
   const sidebarRef = useRef<HTMLElement | null>(null);
   const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const workspaceMenuRef = useRef<HTMLElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const mobileTriggerRef = useRef<HTMLButtonElement | null>(null);
   const helpTriggerRef = useRef<HTMLButtonElement | null>(null);
   const helpModalRef = useRef<HTMLElement | null>(null);
   const confirmTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modalRef = useRef<HTMLElement | null>(null);
-  const helpModalRef = useRef<HTMLElement | null>(null);
-  const previousModalFocusRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
@@ -1453,10 +1489,23 @@ export function AgentPassConsole() {
     try {
       const session = await consoleSessionContext.get(signal);
       const { organizationId } = session;
-      const response = await fetchConsole("/api/console?resource=summary", { signal });
-      if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
+      const [response, deploymentResponse] = await Promise.all([
+        fetchConsole("/api/console?resource=summary", { signal }),
+        fetchConsole("/api/console?resource=deployment-readiness", { signal }),
+      ]);
+      if (response.status === 401 || response.status === 403 || deploymentResponse.status === 401 || deploymentResponse.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status === 401 || response.status === 403 ? response.status : deploymentResponse.status);
       if (!response.ok) throw new Error("summary unavailable");
-      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }), session);
+      let deployment: DeploymentReadiness | null = null;
+      if (deploymentResponse.ok) {
+        try {
+          deployment = parseDeploymentReadiness(await deploymentResponse.json());
+        } catch {
+          // A summary without a valid deployment attestation remains usable for
+          // read-only visibility, but the deployment badge stays unverified.
+          deployment = null;
+        }
+      }
+      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }), deployment, session);
       if (epoch !== summaryEpoch.current) return "unavailable";
       organizationIdRef.current = organizationId;
       setSessionRole(session.role);
@@ -1485,13 +1534,15 @@ export function AgentPassConsole() {
   }, []);
 
   const handleOrganizationSwitched = useCallback((session: OrganizationSession): void => {
-    consoleSessionContext.replace({
-      organizationId: session.organizationId,
-      role: session.role,
-      expiresAt: session.expiresAt,
-      recentAuthAt: session.recentAuthAt,
-      csrfToken: session.csrfToken,
-    });
+    // Fence the previous tenant projection before the new summary request
+    // starts. The old devices/agents/policies must never remain visible while
+    // the server-backed session is changing organization.
+    summaryEpoch.current += 1;
+    setData(emptyConsoleData());
+    setSummaryState("loading");
+    setAuditSession(null);
+    setLastSynced("確認中");
+    consoleSessionContext.replace(session);
     void refreshSummary();
   }, [refreshSummary]);
 
@@ -1535,7 +1586,7 @@ export function AgentPassConsole() {
     queueMicrotask(() => {
       advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH);
     });
-    void fetchBrowserCliHandoffPreflight({ handoff, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs }).then((preflight) => {
+    void fetchBrowserCliHandoffPreflight(({ handoff, timeoutMs: BROWSER_CLI_HANDOFF_LIMITS.defaultTimeoutMs } as never)).then((preflight) => {
       if (!liveHandoffMountedRef.current) return;
       liveHandoffRef.current = {
         ...handoff,
@@ -1669,11 +1720,13 @@ export function AgentPassConsole() {
   };
 
   const triggerStop = async () => {
+    if (stopPending) return;
     if (sessionRole !== "owner") {
       showToast("Owner権限が必要です", "error");
       return;
     }
     setStopPending(true);
+    setStopError(null);
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
       if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
@@ -1689,6 +1742,7 @@ export function AgentPassConsole() {
       setStopped(true);
       showToast("すべてのAgentを停止しました");
     } catch {
+      setStopError("停止を確認できませんでした。接続と認証状態を確認し、もう一度お試しください。");
       showToast("停止を確認できませんでした。接続を確認し、緊急停止画面のボタンからもう一度お試しください。", "error");
     } finally {
       setStopPending(false);
@@ -1787,16 +1841,16 @@ export function AgentPassConsole() {
         </header>
         <main id="main-content" tabIndex={-1} aria-labelledby="console-page-heading" className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
-          {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
+          {sessionState === "active" && activeView === "overview" ? <Overview data={data} session={auditSession} goTo={goTo} onRequestRefresh={requestDeviceRefresh} onRefresh={() => void refreshSummary()} onSessionEnded={() => expireSession()} summaryState={summaryState} canManage={canManage} stopped={stopped} /> : null}
           {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={refreshSummary} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffEvent={advanceLiveHandoff} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
           {sessionState === "active" && activeView === "security" ? <SecurityPanel securityClient={securityClient} onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
-          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
+          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} onOrganizationSwitched={handleOrganizationSwitched} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
-          {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
+          {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => { setStopError(null); setConfirmOpen(true); }} stopped={stopped} stopError={stopError} /> : null}
         </main>
       </div>
 

@@ -14,7 +14,12 @@ AGENT_PROFILE="${AGENTPASS_AGENT_PROVISIONING_PROFILE:-}"
 QUALIFICATION_CLIENT_PROFILE="${AGENTPASS_QUALIFICATION_CLIENT_PROVISIONING_PROFILE:-}"
 ADHOC=0
 FORCE=0
-ARCHITECTURES=("$(uname -m)")
+HOST_ARCHITECTURE="$(uname -m)"
+case "$HOST_ARCHITECTURE" in
+  arm64|x86_64) ;;
+  *) echo "Unsupported macOS host architecture: $HOST_ARCHITECTURE" >&2; exit 1 ;;
+esac
+ARCHITECTURES=("$HOST_ARCHITECTURE")
 SWIFT_BUILD_OPTIONS=()
 if [[ "${AGENTPASS_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
   SWIFT_BUILD_OPTIONS+=(--disable-sandbox)
@@ -79,6 +84,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ "${#ARCHITECTURES[@]}" -eq 1 || "${#ARCHITECTURES[@]}" -eq 2 ]] || {
+  echo "Build must target one native architecture or the exact universal arm64/x86_64 pair" >&2
+  exit 1
+}
+if [[ "${#ARCHITECTURES[@]}" -eq 2 && ("${ARCHITECTURES[0]}" != "arm64" || "${ARCHITECTURES[1]}" != "x86_64") ]]; then
+  echo "Universal build must target arm64 and x86_64 exactly once" >&2
+  exit 1
+fi
+
 if [[ "$ADHOC" -eq 1 ]]; then
   [[ -z "$SERVICE_PROFILE" && -z "$CLIENT_PROFILE" && -z "$AGENT_PROFILE" && -z "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Ad-hoc builds must not embed provisioning profiles" >&2; exit 1; }
   TEAM_ID="ADHOC00000"
@@ -86,8 +100,8 @@ if [[ "$ADHOC" -eq 1 ]]; then
   SIGNING_IDENTITY="-"
 else
   [[ -n "$SIGNING_IDENTITY" ]] || { echo "Production build requires --identity" >&2; exit 1; }
-  [[ "$SIGNING_IDENTITY" == "Developer ID Application:"* ]] || { echo "Production app identity must be a Developer ID Application identity" >&2; exit 1; }
   [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --team-id" >&2; exit 1; }
+  [[ "$SIGNING_IDENTITY" =~ ^Developer\ ID\ Application:\ .+\ \(${TEAM_ID}\)$ ]] || { echo "Production app identity must be a Developer ID Application identity. Production build requires a non-empty Developer ID Application identity bound to --team-id" >&2; exit 1; }
   [[ "$APP_IDENTIFIER_PREFIX" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --app-identifier-prefix" >&2; exit 1; }
   [[ -n "$SERVICE_PROFILE" && -n "$CLIENT_PROFILE" && -n "$AGENT_PROFILE" && -n "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Production build requires separate helper profiles including the qualification client profile" >&2; exit 1; }
   [[ -f "$SERVICE_PROFILE" && ! -L "$SERVICE_PROFILE" && -f "$CLIENT_PROFILE" && ! -L "$CLIENT_PROFILE" && -f "$AGENT_PROFILE" && ! -L "$AGENT_PROFILE" && -f "$QUALIFICATION_CLIENT_PROFILE" && ! -L "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Helper profiles must be regular non-symlink files" >&2; exit 1; }
@@ -124,6 +138,7 @@ QUALIFICATION_CLIENT="$HELPER_DIR/agentpass-qualification-grant-client"
 QUALIFICATION_CLIENT_APP="$HELPER_DIR/agentpass-qualification-grant-client.app"
 QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
 GIT_SIGNING_HELPER="$RESOURCE_BIN_DIR/agentpass-git-sign"
+GIT_SESSION_SIGNING_HELPER="$RESOURCE_BIN_DIR/agentpass-git-session-sign"
 GIT_SIGNING_XPC_HELPER="$RESOURCE_BIN_DIR/agentpass-git-sign-xpc"
 ENTITLEMENT_DIR="$TEMP_DIR/entitlements"
 mkdir -p "$MACOS_DIR" "$RESOURCE_BIN_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$QUALIFICATION_CLIENT_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
@@ -152,6 +167,7 @@ install_product agentpass-native-service "$SERVICE_APP/Contents/MacOS/agentpass-
 install_product agentpass-native-client "$CLIENT_APP/Contents/MacOS/agentpass-native-client"
 install_product agentpass-native-agent-host "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host"
 install_product agentpass-git-sign "$GIT_SIGNING_HELPER"
+install_product agentpass-git-session-sign "$GIT_SESSION_SIGNING_HELPER"
 install_product agentpass-git-sign-xpc "$GIT_SIGNING_XPC_HELPER"
 install_product agentpass-atomic-rename "$HELPER_DIR/agentpass-atomic-rename"
 install_product agentpass-qualification-grant-client "$QUALIFICATION_CLIENT_BINARY"
@@ -184,6 +200,9 @@ if [[ "${#ARCHITECTURES[@]}" -eq 2 ]]; then
     "$CLIENT_APP/Contents/MacOS/agentpass-native-client" \
     "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host" \
     "$HELPER_DIR/agentpass-atomic-rename" \
+    "$GIT_SIGNING_HELPER" \
+    "$GIT_SESSION_SIGNING_HELPER" \
+    "$GIT_SIGNING_XPC_HELPER" \
     "$QUALIFICATION_CLIENT_BINARY"; do
     require_universal_binary "$binary"
   done
@@ -255,10 +274,12 @@ sign_item "$QUALIFICATION_CLIENT_APP" "dev.agentpass.qualification-grant-client"
 if [[ "$ADHOC" -eq 1 ]]; then
   /usr/bin/codesign --force --sign - --identifier "dev.agentpass.atomic-rename" "$HELPER_DIR/agentpass-atomic-rename"
   /usr/bin/codesign --force --sign - --identifier "dev.agentpass.git-sign" "$GIT_SIGNING_HELPER"
+  /usr/bin/codesign --force --sign - --identifier "dev.agentpass.git-session-sign" "$GIT_SESSION_SIGNING_HELPER"
   /usr/bin/codesign --force --sign - --identifier "dev.agentpass.git-sign-xpc" "$GIT_SIGNING_XPC_HELPER"
 else
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.atomic-rename" --options runtime --timestamp "$HELPER_DIR/agentpass-atomic-rename"
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.git-sign" --options runtime --timestamp "$GIT_SIGNING_HELPER"
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.git-session-sign" --options runtime --timestamp "$GIT_SESSION_SIGNING_HELPER"
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.git-sign-xpc" --options runtime --timestamp "$GIT_SIGNING_XPC_HELPER"
 fi
 sign_item "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager" "$ENTITLEMENT_DIR/manager.plist"
@@ -299,6 +320,7 @@ verify_agent_entitlement() {
 /usr/bin/codesign --verify --strict --verbose=2 "$QUALIFICATION_CLIENT_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$HELPER_DIR/agentpass-atomic-rename"
 /usr/bin/codesign --verify --strict --verbose=2 "$GIT_SIGNING_HELPER"
+/usr/bin/codesign --verify --strict --verbose=2 "$GIT_SESSION_SIGNING_HELPER"
 /usr/bin/codesign --verify --strict --verbose=2 "$GIT_SIGNING_XPC_HELPER"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
 verify_identifier "$SERVICE_APP" "dev.agentpass.native-service"
@@ -306,6 +328,7 @@ verify_identifier "$CLIENT_APP" "dev.agentpass.native-client"
 verify_identifier "$AGENT_HOST_APP" "dev.agentpass.agent-host"
 verify_identifier "$HELPER_DIR/agentpass-atomic-rename" "dev.agentpass.atomic-rename"
 verify_identifier "$GIT_SIGNING_HELPER" "dev.agentpass.git-sign"
+verify_identifier "$GIT_SESSION_SIGNING_HELPER" "dev.agentpass.git-session-sign"
 verify_identifier "$GIT_SIGNING_XPC_HELPER" "dev.agentpass.git-sign-xpc"
 verify_identifier "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager"
 verify_identifier "$MACOS_DIR/agentpass-onboarding" "dev.agentpass"
@@ -339,11 +362,12 @@ verify_qualification_client_entitlements "$QUALIFICATION_CLIENT_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing daemon Mach service" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-session' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing Agent session Mach service" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-host' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing Host Mach service" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-host-control' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing Host control Mach service" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.child-git' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing child Git Mach service" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing reserved qualification Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
-  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$QUALIFICATION_CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$GIT_SIGNING_HELPER" "$GIT_SIGNING_XPC_HELPER" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
+  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$QUALIFICATION_CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$GIT_SIGNING_HELPER" "$GIT_SESSION_SIGNING_HELPER" "$GIT_SIGNING_XPC_HELPER" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
     actual_team="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}')"
     [[ "$actual_team" == "$TEAM_ID" ]] || { echo "Unexpected TeamIdentifier on $item" >&2; exit 1; }
   done

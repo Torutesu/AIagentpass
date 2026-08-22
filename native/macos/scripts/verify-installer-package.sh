@@ -18,7 +18,7 @@ fi
 SIGNATURE_OUTPUT="$(/usr/sbin/pkgutil --check-signature "$PACKAGE")"
 /usr/bin/grep -q 'Status: signed by a certificate trusted by Mac OS X' <<<"$SIGNATURE_OUTPUT" || { echo "Installer signature is not trusted" >&2; exit 1; }
 if [[ -n "$EXPECTED_TEAM_ID" ]]; then
-  /usr/bin/grep -Eq "Developer ID Installer: .*\(${EXPECTED_TEAM_ID}\)" <<<"$SIGNATURE_OUTPUT" || { echo "Installer Team ID mismatch" >&2; exit 1; }
+  /usr/bin/grep -Eq "Developer ID Installer: .+\(${EXPECTED_TEAM_ID}\)" <<<"$SIGNATURE_OUTPUT" || { echo "Installer Developer ID identity is missing or Team ID mismatched" >&2; exit 1; }
 fi
 
 PAYLOAD_FILES="$(/usr/sbin/pkgutil --payload-files "$PACKAGE")"
@@ -56,6 +56,16 @@ done
 APP="$(/usr/bin/find -P "$TEMP_DIR/expanded" -type d -name AgentPass.app -print -quit)"
 [[ -n "$APP" && -d "$APP" ]] || { echo "Installer does not contain AgentPass.app" >&2; exit 1; }
 if /usr/bin/find -P "$APP" -type l -print -quit | /usr/bin/grep -q .; then echo "Packaged app contains a symlink" >&2; exit 1; fi
+LAUNCHD_PLIST="$APP/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist"
+[[ -f "$LAUNCHD_PLIST" && ! -L "$LAUNCHD_PLIST" ]] || { echo "Installer is missing the native service launchd plist" >&2; exit 1; }
+for mach_service in \
+  dev.agentpass.native-service \
+  dev.agentpass.agent-session \
+  dev.agentpass.agent-host \
+  dev.agentpass.agent-host-control \
+  dev.agentpass.child-git; do
+  [[ "$(/usr/libexec/PlistBuddy -c "Print :MachServices:$mach_service" "$LAUNCHD_PLIST" 2>/dev/null)" == "true" ]] || { echo "Installer launchd plist is missing Mach service: $mach_service" >&2; exit 1; }
+done
 
 # A production package is the cross-hardware distribution boundary. Checking
 # only the outer signature leaves a single-architecture helper able to pass
@@ -77,10 +87,33 @@ CROSS_HARDWARE_BINARIES=(
   "$APP/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client"
   "$APP/Contents/Library/HelperTools/AgentPassNativeAgentHost.app/Contents/MacOS/agentpass-native-agent-host"
   "$APP/Contents/Library/HelperTools/agentpass-atomic-rename"
+  "$APP/Contents/Resources/bin/agentpass-git-sign"
+  "$APP/Contents/Resources/bin/agentpass-git-session-sign"
+  "$APP/Contents/Resources/bin/agentpass-git-sign-xpc"
   "$APP/Contents/Library/HelperTools/agentpass-qualification-grant-client.app/Contents/MacOS/agentpass-qualification-grant-client"
 )
 for binary in "${CROSS_HARDWARE_BINARIES[@]}"; do
   require_universal_binary "$binary"
+done
+
+RESOURCE_BIN="$APP/Contents/Resources/bin"
+[[ "$(/usr/bin/find -P "$RESOURCE_BIN" -mindepth 1 -maxdepth 1 -type f | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "3" ]] || { echo "Packaged Git helper resource directory must contain exactly three files" >&2; exit 1; }
+RESOURCE_NAMES="$(/usr/bin/find -P "$RESOURCE_BIN" -mindepth 1 -maxdepth 1 -type f -exec /usr/bin/basename {} \; | /usr/bin/sort | /usr/bin/tr '\n' ' ')"
+[[ "$RESOURCE_NAMES" == "agentpass-git-session-sign agentpass-git-sign agentpass-git-sign-xpc " ]] || { echo "Packaged Git helper inventory is not exact: $RESOURCE_NAMES" >&2; exit 1; }
+for helper in agentpass-git-sign agentpass-git-session-sign agentpass-git-sign-xpc; do
+  [[ "$(/usr/bin/find -P "$APP" -name "$helper" -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "1" ]] || { echo "Packaged Git helper must appear exactly once: $helper" >&2; exit 1; }
+done
+
+declare -a EXPECTED_GIT_IDENTITIES=(
+  "$APP/Contents/Resources/bin/agentpass-git-sign|dev.agentpass.git-sign"
+  "$APP/Contents/Resources/bin/agentpass-git-session-sign|dev.agentpass.git-session-sign"
+  "$APP/Contents/Resources/bin/agentpass-git-sign-xpc|dev.agentpass.git-sign-xpc"
+)
+for binding in "${EXPECTED_GIT_IDENTITIES[@]}"; do
+  IFS='|' read -r helper expected_identifier <<< "$binding"
+  helper_details="$(/usr/bin/codesign -dv --verbose=4 "$helper" 2>&1)"
+  actual_identifier="$(/usr/bin/awk -F= '/^Identifier=/{print $2; exit}' <<< "$helper_details")"
+  [[ "$actual_identifier" == "$expected_identifier" ]] || { echo "Packaged Git helper identity mismatch: $helper ($actual_identifier)" >&2; exit 1; }
 done
 
 AGENT_HOST_APP="$APP/Contents/Library/HelperTools/AgentPassNativeAgentHost.app"
@@ -131,10 +164,24 @@ APP_TEAM_ID="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$APP_DE
 [[ "$APP_TEAM_ID" == "$EXPECTED_TEAM_ID" ]] || { echo "Application Team ID mismatch: $APP_TEAM_ID" >&2; exit 1; }
 for item in "${CROSS_HARDWARE_BINARIES[@]}" "$APP/Contents/Library/HelperTools/AgentPassNativeService.app" "$APP/Contents/Library/HelperTools/AgentPassNativeClient.app" "$APP/Contents/Library/HelperTools/AgentPassNativeAgentHost.app" "$APP"; do
   details="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1)"
-  grep -q '^Authority=Developer ID Application: ' <<<"$details" || { echo "Packaged item is not Developer ID Application signed: $item" >&2; exit 1; }
+  grep -Eq "^Authority=Developer ID Application: .+\(${EXPECTED_TEAM_ID}\)$" <<<"$details" || { echo "Packaged item has no complete Developer ID Application identity: $item" >&2; exit 1; }
   grep -Eq "^TeamIdentifier=${EXPECTED_TEAM_ID}$" <<<"$details" || { echo "Packaged item Team ID mismatch: $item" >&2; exit 1; }
   grep -Eq '^flags=.*runtime' <<<"$details" || { echo "Packaged item is missing hardened runtime: $item" >&2; exit 1; }
   grep -q '^Timestamp=' <<<"$details" || { echo "Packaged item is missing a secure signing timestamp: $item" >&2; exit 1; }
+done
+declare -a EXPECTED_IDENTITIES=(
+  "${APP}/Contents/MacOS/agentpass-onboarding|dev.agentpass"
+  "${APP}/Contents/MacOS/agentpass-native-manager|dev.agentpass.native-manager"
+  "${APP}/Contents/Library/HelperTools/AgentPassNativeService.app|dev.agentpass.native-service"
+  "${APP}/Contents/Library/HelperTools/AgentPassNativeClient.app|dev.agentpass.native-client"
+  "${APP}/Contents/Library/HelperTools/AgentPassNativeAgentHost.app|dev.agentpass.agent-host"
+  "${APP}/Contents/Library/HelperTools/agentpass-qualification-grant-client.app|dev.agentpass.qualification-grant-client"
+)
+for binding in "${EXPECTED_IDENTITIES[@]}"; do
+  IFS='|' read -r item expected_identifier <<< "$binding"
+  details="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1)"
+  actual_identifier="$(/usr/bin/awk -F= '/^Identifier=/{print $2; exit}' <<< "$details")"
+  [[ "$actual_identifier" == "$expected_identifier" ]] || { echo "Packaged application identity mismatch: $item ($actual_identifier)" >&2; exit 1; }
 done
 echo "artifact_sha256=$PACKAGE_SHA256" >&2
 echo "Installer package payload and preservation policy verified"

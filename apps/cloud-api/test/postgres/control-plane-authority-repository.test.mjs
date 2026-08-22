@@ -34,6 +34,16 @@ class FakeClient {
   async query(text, params = []) {
     this.calls.push({ text, params });
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return result();
+    if (text.startsWith("SELECT public.agentpass_authorize_device_audit_tenant(")) {
+      return result(params[0] === ids.organization && params[1] === ids.member
+        ? [{ organization_id: ids.organization }]
+        : []);
+    }
+    if (text.startsWith("SELECT public.agentpass_authorize_device_audit_device(")) {
+      return result(params[0] === ids.organization && params[1] === ids.device
+        ? [{ organization_id: ids.organization }]
+        : []);
+    }
     if (text.startsWith("SELECT set_config('agentpass.organization_id'")) return result([{ organization_id: params[0] }]);
     if (text.startsWith("SELECT current_setting('agentpass.organization_id'")) return result([{ organization_id: ids.organization }]);
     if (text.includes("pg_advisory_xact_lock")) return result([{ locked: true }]);
@@ -452,9 +462,9 @@ test("audit ingestion verifies the protocol hash, tenant/device agent binding, d
   assert.deepEqual(ingested.duplicates, []);
   assert.deepEqual(ingested.gaps, []);
   assert.deepEqual(ingested.head, { last_hash: event.event_hash, last_event_id: event.event_id, chain_status: "continuous", gap_count: 0 });
-  assert.match(client.calls[1].text, /set_config\('agentpass\.organization_id'/u);
-  assert.deepEqual(client.calls[1].params, [ids.organization]);
-  assert.match(client.calls[2].text, /current_setting\('agentpass\.organization_id'/u);
+  assert.match(client.calls[1].text, /agentpass_authorize_device_audit_device/u);
+  assert.deepEqual(client.calls[1].params, [ids.organization, ids.device]);
+  assert.equal(client.calls.some(({ text }) => text.includes("set_config('agentpass.organization_id'")), false);
   const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO device_audit_events"));
   assert.match(insert.text, /organization_id,device_id,event_id/);
   assert.deepEqual(insert.params.slice(0, 2), [ids.organization, ids.device]);

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
-import { createClaudeCodeLaunchPlan, projectClaudeCodeAdapterError } from "../src/adapter.mjs";
+import { createClaudeCodeLaunchPlan, launchClaudeCodeLifecycle, projectClaudeCodeAdapterError } from "../src/adapter.mjs";
 import { scanClaudeCodeAdapterArtifacts } from "../src/secret-scan.mjs";
 
 function usage() {
-  process.stderr.write("agentpass-claude-code: usage plan PROJECT_DIRECTORY | scan\n");
+  process.stderr.write("agentpass-claude-code: usage plan PROJECT_DIRECTORY | launch PROJECT_DIRECTORY TTL_SECONDS | scan\n");
   process.exitCode = 2;
 }
 
@@ -25,6 +25,8 @@ try {
   const args = process.argv.slice(2);
   if (args.length === 2 && args[0] === "plan" && !args[1].startsWith("-")) {
     process.stdout.write(`${JSON.stringify(createClaudeCodeLaunchPlan({ projectDirectory: args[1] }))}\n`);
+  } else if (args.length === 3 && args[0] === "launch" && !args[1].startsWith("-") && !args[2].startsWith("-")) {
+    process.stdout.write(`${JSON.stringify(await launchClaudeCodeLifecycle({ projectDirectory: args[1], ttlSeconds: Number(args[2]) }, { platform: process.platform }))}\n`);
   } else if (args.length === 1 && args[0] === "scan") {
     const input = JSON.parse(await readStdin());
     process.stdout.write(`${JSON.stringify(scanClaudeCodeAdapterArtifacts(input))}\n`);

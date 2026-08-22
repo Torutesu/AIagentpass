@@ -262,6 +262,7 @@ test('creates a canonical, unqualified v2 template bound to the signed v4 releas
   assert.deepEqual(Object.keys(template).sort(), [...REPORT_KEYS].sort());
   assert.equal(template.schema_version, 2);
   assert.equal(template.source_commit, fixture.manifest.source.commit);
+  assert.equal(template.source_tree, fixture.manifest.source.tree);
   assert.equal(template.release_manifest_sha256, digest(fs.readFileSync(fixture.manifestPath)));
   assert.equal(template.artifact_name, fixture.productName);
   assert.equal(template.artifact_sha256, digest(fs.readFileSync(fixture.artifactPath)));
@@ -397,6 +398,12 @@ test('requires the signed migration artifact to match the attested migration dig
   fs.writeFileSync(fixture.manifestPath, bytes);
   writeSignature(fixture.signaturePath, bytes, fixture.releaseKeys.privateKey);
   assert.throws(() => generateHardwareQualificationTemplate(generateArgs(fixture, join(fixture.directory, 'out.json'))), /migration manifest|artifact digest/u);
+});
+
+test('rejects a signed release whose source tree disagrees with its signed SBOM bindings', () => {
+  const fixture = makeFixture();
+  rewriteSignedManifest(fixture, (manifest) => { manifest.source.tree = 'c'.repeat(40); });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(fixture, join(fixture.directory, 'source-tree-mismatch.json'))), /SBOM source identity|SBOM binding/u);
 });
 
 test('rejects unsafe symlink and hard-link inputs before trusting their bytes', () => {

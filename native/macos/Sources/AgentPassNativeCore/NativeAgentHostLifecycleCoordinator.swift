@@ -287,6 +287,10 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
     private var storageState: StorageState = .new
     private var pinnedIdentity: NativeAgentHostQualifiedSessionIdentity?
     private var privateGitBridgeServer: NativeAgentPrivateGitBridgeServer?
+    private var privateGitBridgeSessionServer: NativeAgentPrivateGitBridgeSessionServer?
+    /// Claims the child endpoint for either the legacy one-shot method or the
+    /// explicit versioned session method. The endpoint can never be upgraded
+    /// after either method has claimed it.
     private var privateGitBridgeAttempted = false
     private var privateGitBridgeCancelRequested = false
     private var privateGitBridgeAuthorityFailure: NativeAgentHostPrivateGitBridgeError?
@@ -298,7 +302,9 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         handoff: NativeAgentLaunchAuthorityHandoff,
         supervisor: NativeAgentHostChildSupervisor,
         hooks: NativeAgentHostLifecycleCoordinatorHooks,
-        gitTransport: NativeAgentHostGitTransport = .legacyFD3
+        // Keep the production lifecycle on authenticated XPC. Legacy FD3 is
+        // an explicit qualification-only transport and is never implicit.
+        gitTransport: NativeAgentHostGitTransport = .authenticatedXPC
     ) throws {
         guard handoff.agentID == connectionBinding.agentID else {
             throw NativeAgentHostLifecycleError.invalidHandoff
@@ -558,6 +564,106 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Serves the explicitly selected `versioned_session_v1` protocol over
+    /// the existing Host endpoint. This method is intentionally separate from
+    /// `servePrivateGitBridge`: it performs a one-time ownership transfer to
+    /// the multi-request transport and has no implicit legacy fallback.
+    ///
+    /// Authority is re-observed immediately before each of the two signer
+    /// calls by the server's signer closure. Any protocol, transport, signer,
+    /// or close failure terminally closes/reaps the child and qualified
+    /// session before returning a stable Host error.
+    public func serveVersionedPrivateGitBridge(
+        protocol selectedProtocol: NativeAgentHostPrivateGitSessionProtocol,
+        signGitCommit: @escaping NativeAgentPrivateGitBridgeSessionServer.Signer
+    ) throws {
+        guard selectedProtocol == .versionedSessionV1 else {
+            throw NativeAgentHostPrivateGitBridgeError.transportFailed
+        }
+
+        switch observeAuthority() {
+        case .authorized:
+            break
+        case .lost:
+            closeForPrivateGitBridgeAuthorityFailure(.authorityLost)
+            throw NativeAgentHostPrivateGitBridgeError.authorityLost
+        case .unavailable:
+            closeForPrivateGitBridgeAuthorityFailure(.authorityUnavailable)
+            throw NativeAgentHostPrivateGitBridgeError.authorityUnavailable
+        }
+
+        let server: NativeAgentPrivateGitBridgeSessionServer
+        lock.lock()
+        guard case .running(let child) = storageState else {
+            let error: NativeAgentHostPrivateGitBridgeError = switch storageState {
+            case .closed, .failed: .cancelled
+            default: .notRunning
+            }
+            lock.unlock()
+            throw error
+        }
+        guard !privateGitBridgeAttempted else {
+            lock.unlock()
+            throw NativeAgentHostPrivateGitBridgeError.alreadyAttempted
+        }
+        guard let endpoint = child.privateGitBridgeHostEndpoint else {
+            lock.unlock()
+            throw NativeAgentHostPrivateGitBridgeError.notRunning
+        }
+
+        privateGitBridgeAttempted = true
+        privateGitBridgeCancelRequested = false
+        privateGitBridgeAuthorityFailure = nil
+
+        let transport: NativeAgentPrivateGitSessionTransport
+        do {
+            transport = try endpoint.upgradeToVersionedSessionTransport()
+        } catch {
+            lock.unlock()
+            _ = try? close()
+            throw NativeAgentHostPrivateGitBridgeError.transportFailed
+        }
+
+        server = NativeAgentPrivateGitBridgeSessionServer(
+            transport: transport,
+            signer: { [weak self] payload in
+                guard let self else {
+                    throw NativeAgentHostPrivateGitBridgeError.cancelled
+                }
+                try self.reobservePrivateGitBridgeAuthority()
+                return try signGitCommit(payload)
+            }
+        )
+        privateGitBridgeSessionServer = server
+        lock.unlock()
+
+        do {
+            try server.serveTwoCommits()
+        } catch {
+            let (cancelled, authorityFailure) = clearPrivateGitBridgeSessionServer(server)
+            if let authorityFailure {
+                closeForPrivateGitBridgeAuthorityFailure(authorityFailure)
+                throw authorityFailure
+            }
+            if !cancelled {
+                _ = try? close()
+            }
+            if cancelled {
+                throw NativeAgentHostPrivateGitBridgeError.cancelled
+            }
+            throw NativeAgentHostPrivateGitBridgeError.transportFailed
+        }
+
+        let (cancelled, authorityFailure) = clearPrivateGitBridgeSessionServer(server)
+        if let authorityFailure {
+            closeForPrivateGitBridgeAuthorityFailure(authorityFailure)
+            throw authorityFailure
+        }
+        if cancelled {
+            throw NativeAgentHostPrivateGitBridgeError.cancelled
+        }
+    }
+
     private func reobservePrivateGitBridgeAuthority() throws {
         switch observeAuthority() {
         case .authorized:
@@ -568,7 +674,8 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
             } else {
                 running = false
             }
-            let cancelled = privateGitBridgeCancelRequested || privateGitBridgeServer == nil
+            let cancelled = privateGitBridgeCancelRequested
+                || (privateGitBridgeServer == nil && privateGitBridgeSessionServer == nil)
             let recordedFailure = privateGitBridgeAuthorityFailure
             lock.unlock()
             if let recordedFailure {
@@ -604,6 +711,20 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
         return (cancelled, privateGitBridgeAuthorityFailure)
     }
 
+    private func clearPrivateGitBridgeSessionServer(
+        _ server: NativeAgentPrivateGitBridgeSessionServer
+    ) -> (cancelled: Bool, authorityFailure: NativeAgentHostPrivateGitBridgeError?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard privateGitBridgeSessionServer === server else {
+            return (true, nil)
+        }
+        privateGitBridgeSessionServer = nil
+        let cancelled = privateGitBridgeCancelRequested
+            || !(ifRunning(storageState))
+        return (cancelled, privateGitBridgeAuthorityFailure)
+    }
+
     private func ifRunning(_ state: StorageState) -> Bool {
         if case .running = state { return true }
         return false
@@ -612,12 +733,15 @@ public final class NativeAgentHostLifecycleCoordinator: @unchecked Sendable {
     private func cancelPrivateGitBridge() {
         lock.lock()
         let server = privateGitBridgeServer
-        if server != nil {
+        let sessionServer = privateGitBridgeSessionServer
+        if server != nil || sessionServer != nil {
             privateGitBridgeCancelRequested = true
             privateGitBridgeServer = nil
+            privateGitBridgeSessionServer = nil
         }
         lock.unlock()
         server?.cancel()
+        sessionServer?.cancel()
     }
 
     private func closeForPrivateGitBridgeAuthorityFailure(

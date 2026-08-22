@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/production-readiness-gate-v1.schema.json",
+  "title": "AgentPass production-readiness gate input v1",
+  "description": "A closed, candidate-bound production evidence envelope with the fixed eleven-row qualification inventory and an independent reviewer binding.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "required": ["candidate", "evidence", "kind", "reviewer", "schema_version"],
+  "x-agentpass-binding": {
+    "contract_version": 1,
+    "candidate": {
+      "source": "candidate",
+      "paths": ["candidate.artifact_sha256", "candidate.candidate_id", "candidate.source_commit", "candidate.source_tree"],
+      "targets": ["evidence[*].artifact_sha256", "evidence[*].candidate_id", "evidence[*].source_commit", "evidence[*].source_tree", "reviewer.artifact_sha256", "reviewer.candidate_id", "reviewer.source_commit", "reviewer.source_tree"]
+    },
+    "run_tuple": {
+      "paths": ["evidence[*].run.run_id", "evidence[*].run.run_attempt", "evidence[*].run.job_id"],
+      "unique": true
+    },
+    "protected_external_provenance": {
+      "path": "evidence[*].provenance",
+      "environment": "production",
+      "execution_class": "protected_external",
+      "source": "external"
+    },
+    "reviewer": {
+      "independent": true,
+      "evidence_digest_path": "reviewer.evidence_sha256",
+      "evidence_path": "evidence"
+    }
+  },
+  "properties": {
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "evidence": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "release" }, "slot": { "const": "candidate" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "ci" }, "slot": { "const": "canonical" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "qualification" }, "slot": { "const": "aggregate" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "external" }, "slot": { "const": "aggregate" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "postgresql" }, "slot": { "const": "protected" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "kms" }, "slot": { "const": "protected" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "webauthn" }, "slot": { "const": "external" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "macos" }, "slot": { "const": "apple_silicon" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "macos" }, "slot": { "const": "intel_t2" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "staging" }, "slot": { "const": "readiness" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/evidenceRow" }, { "properties": { "kind": { "const": "deployment" }, "slot": { "const": "rollback" } } }] }
+      ],
+      "items": false,
+      "x-agentpass-binding": {
+        "candidate_paths": ["candidate.artifact_sha256", "candidate.candidate_id", "candidate.source_commit", "candidate.source_tree"],
+        "run_tuple_paths": ["run.run_id", "run.run_attempt", "run.job_id"],
+        "run_tuple_unique": true
+      }
+    },
+    "kind": { "const": "agentpass.production-readiness-gate" },
+    "reviewer": { "$ref": "#/$defs/reviewer" },
+    "schema_version": { "const": 1 }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "not": { "const": "0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    "commit": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 40,
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "candidateId": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 192,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$"
+    },
+    "runNumber": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["artifact_sha256", "candidate_id", "source_commit", "source_tree"],
+      "properties": {
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "candidate_id": { "$ref": "#/$defs/candidateId" },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "source_tree": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "required": ["job_id", "run_attempt", "run_id"],
+      "properties": {
+        "job_id": { "$ref": "#/$defs/identifier" },
+        "run_attempt": { "$ref": "#/$defs/runNumber" },
+        "run_id": { "$ref": "#/$defs/runNumber" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["environment", "execution_class", "runner_class", "source"],
+      "properties": {
+        "environment": { "const": "production" },
+        "execution_class": { "const": "protected_external" },
+        "runner_class": { "enum": ["managed_provider", "physical_hardware", "protected_runner"] },
+        "source": { "const": "external" }
+      }
+    },
+    "evidenceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 14,
+      "required": ["artifact_sha256", "candidate_id", "expires_at", "kind", "name", "produced_at", "provenance", "qualified", "run", "sha256", "slot", "source_commit", "source_tree", "status"],
+      "properties": {
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "candidate_id": { "$ref": "#/$defs/candidateId" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$" },
+        "name": { "$ref": "#/$defs/name" },
+        "produced_at": { "$ref": "#/$defs/timestamp" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "qualified": { "const": true },
+        "run": { "$ref": "#/$defs/run" },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "slot": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$" },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "source_tree": { "$ref": "#/$defs/commit" },
+        "status": { "const": "passed" }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 10,
+      "required": ["artifact_sha256", "candidate_id", "evidence_sha256", "expires_at", "id", "independent", "report_sha256", "reviewed_at", "source_commit", "source_tree"],
+      "x-agentpass-binding": {
+        "candidate_paths": ["candidate.artifact_sha256", "candidate.candidate_id", "candidate.source_commit", "candidate.source_tree"],
+        "evidence_digest_path": "evidence_sha256",
+        "independent": true
+      },
+      "properties": {
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "candidate_id": { "$ref": "#/$defs/candidateId" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "independent": { "const": true },
+        "report_sha256": { "$ref": "#/$defs/digest" },
+        "reviewed_at": { "$ref": "#/$defs/timestamp" },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "source_tree": { "$ref": "#/$defs/commit" }
+      }
+    }
+  }
+}

@@ -109,6 +109,27 @@ private final class ChildResponseBox: @unchecked Sendable {
     }
 }
 
+private final class FailingAfterAttachIdentityObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let identity: NativeProcessIdentity
+    private var calls = 0
+
+    init(identity: NativeProcessIdentity) {
+        self.identity = identity
+    }
+
+    func observe() throws -> NativeProcessIdentity {
+        lock.lock()
+        calls += 1
+        let call = calls
+        lock.unlock()
+        guard call == 1 else {
+            throw NativeAgentAuthenticatedChildGitError.invalidRequest
+        }
+        return identity
+    }
+}
+
 private final class ContextualChildSigner: NativeAgentAuthenticatedChildContextualSigning, @unchecked Sendable {
     private(set) var observedHelper: NativeProcessIdentity?
     private(set) var observedWorktree: Data?
@@ -484,4 +505,55 @@ private final class ContextualChildSigner: NativeAgentAuthenticatedChildContextu
     reconnect.signChildGitCommit(retry) { _, error in retryError = error }
     #expect(retryError?.userInfo[NSLocalizedDescriptionKey] as? String == NativeAgentAuthenticatedChildGitError.replay.rawValue)
     #expect(blocker.callCount == 1)
+}
+
+@Test func childEndpointRetiresTicketWhenFailureOccursBeforeRegistryAdmission() throws {
+    let identity = NativeProcessIdentity(observation: try childTestObservation())
+    let helper = try childHelperIdentity(for: identity)
+    let observer = FailingAfterAttachIdentityObserver(identity: helper)
+    let registry = NativeAgentAuthenticatedChildGitSessionRegistry()
+    let worktree = Data(repeating: 0x83, count: 32)
+    try registry.register(
+        sessionID: "session-pre-admission-failure",
+        identity: identity,
+        worktreeBindingDigest: worktree,
+        signer: NativeAgentAuthenticatedChildClosureSigner { $0 },
+        signatureBudget: childBudget()
+    )
+    let endpoint = NativeAgentAuthenticatedChildGitEndpoint(
+        registry: registry,
+        identityObserver: observer.observe,
+        worktreeDigestObserver: { worktree },
+        nowMilliseconds: { 1_000 }
+    )
+    var attachResponse: AgentPassChildGitAttachResponse?
+    endpoint.attachChildGit(try #require(AgentPassChildGitAttachRequest())) { response, _ in
+        attachResponse = response
+    }
+    let attached = try #require(attachResponse)
+    let request = try #require(AgentPassChildGitSignRequest(
+        requestSequence: 1,
+        commitPayload: Data([4]),
+        attachTicket: attached.attachTicket,
+        requestID: attached.requestID,
+        createdAtMilliseconds: attached.createdAtMilliseconds
+    ))
+
+    var signError: NSError?
+    endpoint.signChildGitCommit(request) { _, error in signError = error }
+    #expect(signError?.userInfo[NSLocalizedDescriptionKey] as? String == NativeAgentAuthenticatedChildGitError.invalidRequest.rawValue)
+
+    endpoint.connectionInvalidated()
+
+    let reconnect = NativeAgentAuthenticatedChildGitEndpoint(
+        registry: registry,
+        identityObserver: { helper },
+        worktreeDigestObserver: { worktree },
+        nowMilliseconds: { 1_000 }
+    )
+    var reconnectResponse: AgentPassChildGitAttachResponse?
+    reconnect.attachChildGit(try #require(AgentPassChildGitAttachRequest())) { response, _ in
+        reconnectResponse = response
+    }
+    #expect(reconnectResponse != nil)
 }

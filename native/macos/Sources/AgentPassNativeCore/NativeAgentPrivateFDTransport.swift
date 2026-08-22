@@ -44,6 +44,7 @@ public final class NativeAgentPrivateFDTransport: @unchecked Sendable {
     private let operationLock = NSLock()
     private var closed = false
     private var physicallyClosed = false
+    private var ownershipTransferred = false
 
     public convenience init(
         fd: Int32,
@@ -227,6 +228,54 @@ public final class NativeAgentPrivateFDTransport: @unchecked Sendable {
         }
     }
 
+    /// Atomically hands the descriptor lease to the versioned session
+    /// transport. The existing one-shot transport becomes permanently
+    /// unusable and will not close or shut down the descriptor after this
+    /// method returns. The operation lock makes the handoff mutually
+    /// exclusive with an in-flight one-shot frame operation and with close or
+    /// abort, so the two transport objects never own the same descriptor at
+    /// the same time.
+    ///
+    /// This is an explicit upgrade only; it does not negotiate a protocol and
+    /// it does not provide a fallback to the one-shot bridge.
+    public func upgradeToVersionedSessionTransport() throws -> NativeAgentPrivateGitSessionTransport {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+
+        stateLock.lock()
+        guard !closed, !ownershipTransferred else {
+            stateLock.unlock()
+            throw NativeAgentPrivateFDTransportError.alreadyClosed
+        }
+
+        let upgraded: NativeAgentPrivateGitSessionTransport
+        do {
+            upgraded = try NativeAgentPrivateGitSessionTransport(
+                fd: descriptor,
+                ownership: ownership,
+                read: readClosure,
+                write: writeClosure,
+                close: closeClosure,
+                shutdownWrite: shutdownWriteClosure,
+                shutdown: shutdownClosure
+            )
+        } catch NativeAgentPrivateGitSessionTransportError.invalidFileDescriptor {
+            stateLock.unlock()
+            throw NativeAgentPrivateFDTransportError.invalidFileDescriptor
+        } catch {
+            stateLock.unlock()
+            throw NativeAgentPrivateFDTransportError.alreadyClosed
+        }
+
+        // Mark the old wrapper closed before releasing the state lock. Its
+        // deinit/abort path therefore cannot perform a second OS close after
+        // the new wrapper takes over the same descriptor.
+        closed = true
+        ownershipTransferred = true
+        stateLock.unlock()
+        return upgraded
+    }
+
     /// Closes an owned descriptor exactly once. Borrowed descriptors are only
     /// marked unusable here; their caller retains OS-level close ownership.
     public func close() throws {
@@ -313,7 +362,7 @@ public final class NativeAgentPrivateFDTransport: @unchecked Sendable {
     private func finishPhysicalClose() throws {
         guard ownership == .owned else { return }
         stateLock.lock()
-        guard !physicallyClosed else {
+        guard !physicallyClosed, !ownershipTransferred else {
             stateLock.unlock()
             return
         }

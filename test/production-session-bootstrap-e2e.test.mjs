@@ -454,8 +454,8 @@ function createMemoryPostgresState() {
   };
   const pool = {
     async query(text, params = []) {
-      if (String(text).includes("FROM upstream_identities AS ui")) {
-        const [provider, organizationId, subject] = params;
+      if (String(text).startsWith("SELECT * FROM public.agentpass_human_identity_resolve(")) {
+        const [provider, subject, organizationId] = params;
         identityQueries.push({ provider, subject, organization_id: organizationId });
         const row = identities.find((candidate) => candidate.provider === provider
           && candidate.subject === subject

@@ -13,6 +13,8 @@ const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const TERMINATION_GRACE_MS = 250;
+const PRODUCTION_GATE_DRIVER_DIRECTORY = '/opt/agentpass/p0c/gates';
+const PRODUCTION_GATE_MANIFEST_PATH = '/opt/agentpass/p0c/gate-manifest.json';
 const SANITIZED_ENV = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
 const REQUIRED_CODE_IDENTITIES = Object.freeze([
   Object.freeze({ path: 'AgentPass.app', bundle_id: 'dev.agentpass' }),
@@ -43,7 +45,7 @@ export const REQUIRED_TESTS = Object.freeze([
 ]);
 
 const REPORT_KEYS = Object.freeze([
-  'schema_version', 'source_commit', 'dependency_lock_sha256', 'release_manifest_sha256',
+  'schema_version', 'source_commit', 'source_tree', 'dependency_lock_sha256', 'release_manifest_sha256',
   'artifact_name', 'artifact_sha256', 'architecture', 'hardware_class', 'model_identifier',
   'macos_version', 'macos_build', 'secure_enclave', 'team_id', 'nested_code_identities',
   'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256',
@@ -162,7 +164,7 @@ const validateTemplate = (snapshot) => {
   exactKeys(template, Object.hasOwn(template, N3E_REPORT_EVIDENCE_KEY) ? REPORT_KEYS : LEGACY_REPORT_KEYS, 'production report template');
   if (template.schema_version !== 2 || template.qualified !== false) throw new Error('production report template must be unsigned v2 and unqualified');
   if (Object.hasOwn(template, N3E_REPORT_EVIDENCE_KEY) && template[N3E_REPORT_EVIDENCE_KEY] !== null) throw new Error('production report template cannot contain N3-E qualification evidence');
-  if (!safeName(template.artifact_name) || !validDigest(template.artifact_sha256) || !/^[0-9a-f]{40}$/.test(template.source_commit) || !validDigest(template.dependency_lock_sha256) || !validDigest(template.release_manifest_sha256) || !validDigest(template.database_migration_manifest_sha256) || template.source_commit === '0'.repeat(40) || [template.artifact_sha256, template.dependency_lock_sha256, template.release_manifest_sha256, template.database_migration_manifest_sha256].some((value) => value === '0'.repeat(64)) || JSON.stringify(template).includes('REPLACE_WITH') || template.team_id === 'TEAMID1234') throw new Error('production report template lacks release bindings');
+  if (!safeName(template.artifact_name) || !validDigest(template.artifact_sha256) || !/^[0-9a-f]{40}$/.test(template.source_commit) || !/^[0-9a-f]{40}$/.test(template.source_tree) || !validDigest(template.dependency_lock_sha256) || !validDigest(template.release_manifest_sha256) || !validDigest(template.database_migration_manifest_sha256) || template.source_commit === '0'.repeat(40) || template.source_tree === '0'.repeat(40) || [template.artifact_sha256, template.dependency_lock_sha256, template.release_manifest_sha256, template.database_migration_manifest_sha256].some((value) => value === '0'.repeat(64)) || JSON.stringify(template).includes('REPLACE_WITH') || template.team_id === 'TEAMID1234') throw new Error('production report template lacks release bindings');
   if (template.notarization?.status !== 'accepted_stapled') throw new Error('production report template must bind an accepted notarized release');
   if (template.secure_enclave !== true || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(template.operator_key_fingerprint)) throw new Error('production report template is not a production qualification template');
   if (!Array.isArray(template.nested_code_identities) || template.nested_code_identities.length !== REQUIRED_CODE_IDENTITIES.length) throw new Error('production report template must bind all required code identities');
@@ -173,29 +175,53 @@ const validateTemplate = (snapshot) => {
   });
   return template;
 };
-const validateGateDirectory = (input, production) => {
+export const validateGateDirectory = (input, production, manifestInput = null) => {
   const directory = assertDirectory(input, 'gate-driver directory'); const directoryStat = fs.lstatSync(directory);
   if (production && (directoryStat.uid !== 0 || (directoryStat.mode & 0o022) !== 0)) throw new Error('production gate-driver directory must be root-owned and protected');
   const entries = fs.readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name);
   const expected = [...REQUIRED_GATES].sort(); if (entries.sort().join('\n') !== expected.join('\n')) throw new Error('gate-driver directory must contain exactly the fixed required gate basenames');
-  const identities = new Map(); for (const gate of REQUIRED_GATES) identities.set(gate, assertRegularExecutable(join(directory, gate), `gate driver ${gate}`, production)); return { path: directory, identities };
+  if (production && (!manifestInput || !isAbsolute(manifestInput))) throw new Error('production gate-driver manifest is required');
+  const manifest = manifestInput ? snapshotFile(manifestInput, 1024 * 1024, 'gate-driver manifest') : null;
+  let manifestValue = null;
+  if (manifest) {
+    try { manifestValue = JSON.parse(manifest.bytes.toString('utf8')); } catch { throw new Error('gate-driver manifest is not valid JSON'); }
+    exactKeys(manifestValue, ['schema_version', 'gates'], 'gate-driver manifest');
+    if (manifestValue.schema_version !== 1 || !Array.isArray(manifestValue.gates) || manifestValue.gates.length !== REQUIRED_GATES.length) throw new Error('gate-driver manifest has invalid inventory');
+    const names = manifestValue.gates.map((item) => { exactKeys(item, ['gate', 'sha256'], 'gate-driver manifest entry'); if (!REQUIRED_GATES.includes(item.gate) || !validDigest(item.sha256)) throw new Error('gate-driver manifest entry is invalid'); return item.gate; });
+    if (new Set(names).size !== names.length || names.some((name, index) => name !== REQUIRED_GATES[index])) throw new Error('gate-driver manifest is not ordered or complete');
+    if (!manifest.bytes.equals(canonicalJSON(manifestValue))) throw new Error('gate-driver manifest is not canonical JSON');
+    if (production && fs.lstatSync(manifest.path).uid !== 0) throw new Error('production gate-driver manifest must be root-owned');
+  }
+  const identities = new Map(); const digests = new Map();
+  for (const gate of REQUIRED_GATES) {
+    const path = join(directory, gate); const identity = assertRegularExecutable(path, `gate driver ${gate}`, production); const bytes = fs.readFileSync(path); const actual = sha256(bytes);
+    if (manifestValue && actual !== manifestValue.gates.find((item) => item.gate === gate).sha256) throw new Error(`gate driver ${gate} digest does not match its protected manifest`);
+    identities.set(gate, identity); digests.set(gate, actual);
+  }
+  return { path: directory, identities, digests, manifest };
 };
 const protocolFor = (bytes, gate) => {
   let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('gate driver protocol is not valid JSON'); }
   exactKeys(value, ['schema_version', 'gate', 'status', 'tests'], 'gate driver protocol'); if (value.schema_version !== 1 || value.gate !== gate || value.status !== 'passed' || !Array.isArray(value.tests) || value.tests.length === 0) throw new Error('gate driver protocol is not a passing result');
   const seen = new Set(); const tests = []; for (const item of value.tests) { exactKeys(item, ['name', 'status'], 'gate driver test'); if (!REQUIRED_TESTS.includes(item.name) || item.status !== 'passed' || seen.has(item.name)) throw new Error('gate driver protocol contains an invalid or duplicate test'); seen.add(item.name); tests.push(item.name); } return tests;
 };
-const resultEvidence = (kind, name, result, status) => canonicalJSON({ schema_version: 1, kind, name, status, exit_code: result.exitCode, signal: result.signal, timed_out: result.timedOut, output_limit: result.outputLimit, duration_ms: result.durationMs, stdout_bytes: result.stdoutBytes, stdout_sha256: result.stdoutSha256, stderr_bytes: result.stderrBytes, stderr_sha256: result.stderrSha256 });
+const resultEvidence = (kind, name, result, status, driverSha256 = null) => canonicalJSON({ schema_version: 1, kind, name, status, ...(driverSha256 ? { driver_sha256: driverSha256 } : {}), exit_code: result.exitCode, signal: result.signal, timed_out: result.timedOut, output_limit: result.outputLimit, duration_ms: result.durationMs, stdout_bytes: result.stdoutBytes, stdout_sha256: result.stdoutSha256, stderr_bytes: result.stderrBytes, stderr_sha256: result.stderrSha256 });
 const failedResult = (name, reason, evidence) => ({ name, status: 'failed', reason: failReason(reason), evidence: [evidence] });
 const skippedResult = (name, evidence) => ({ name, status: 'skipped', reason: 'required test did not physically pass', evidence: [evidence] });
 
-export const runQualification = async ({ templatePath, outputPath, artifactPath, gateDriverDirectory, evidenceDirectory, operator, qualificationSuiteEvidencePath = null, platform = process.platform, production = false, platformMetadata = null, metadataProvider = null, runCommand = runBoundedCommand, now = () => new Date(), timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
+export const runQualification = async ({ templatePath, outputPath, artifactPath, gateDriverDirectory, gateDriverManifestPath = null, evidenceDirectory, operator, qualificationSuiteEvidencePath = null, platform = process.platform, production = false, platformMetadata = null, metadataProvider = null, runCommand = runBoundedCommand, now = () => new Date(), timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
   if (production && platform !== 'darwin') throw new Error('P0-C production qualification is supported only on darwin');
   if (production && (platformMetadata || metadataProvider || runCommand !== runBoundedCommand)) throw new Error('production qualification cannot use injected runners or metadata');
+  // Production qualification is only allowed to consume the root-owned trust
+  // anchors provisioned on the qualification host. A caller-selected path
+  // would let a substituted CLI/job parameter choose the driver authority.
+  // This does not replace the independent executed-byte ceremony; it closes
+  // the simpler path-substitution class before the runner starts.
+  if (production && (resolve(gateDriverDirectory ?? '') !== PRODUCTION_GATE_DRIVER_DIRECTORY || resolve(gateDriverManifestPath ?? '') !== PRODUCTION_GATE_MANIFEST_PATH)) throw new Error('production gate-driver trust paths are fixed');
   const template = validateTemplate(snapshotFile(assertAbsolutePath(templatePath, 'template path'), MAX_TEMPLATE_BYTES, 'production report template'));
   const output = assertAbsolutePath(outputPath, 'output path'); const artifact = snapshotFile(assertAbsolutePath(artifactPath, 'artifact path'), MAX_ARTIFACT_BYTES, 'production artifact');
   if (basename(artifact.path) !== template.artifact_name || artifact.sha256 !== template.artifact_sha256) throw new Error('exact production artifact does not match report template');
-  const drivers = validateGateDirectory(gateDriverDirectory, production); const evidence = ensureEmptyEvidenceDirectory(evidenceDirectory); if (resolve(output) === resolve(evidence)) throw new Error('output path must not be the evidence directory'); if (fs.existsSync(output)) throw new Error('output path already exists');
+  const drivers = validateGateDirectory(gateDriverDirectory, production, gateDriverManifestPath); const evidence = ensureEmptyEvidenceDirectory(evidenceDirectory); if (resolve(output) === resolve(evidence)) throw new Error('output path must not be the evidence directory'); if (fs.existsSync(output)) throw new Error('output path already exists');
   if (!/^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$/.test(operator ?? '')) throw new Error('operator is invalid');
   const startedAt = utc(now()); const metadata = platformMetadata ?? (metadataProvider ? await metadataProvider({ runCommand, timeoutMs, maxOutputBytes }) : await collectPhysicalMetadata({ runCommand, timeoutMs, maxOutputBytes }));
   if (!metadata || !['arm64', 'x86_64'].includes(metadata.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(metadata.hardwareClass) || typeof metadata.modelIdentifier !== 'string' || typeof metadata.macosVersion !== 'string' || typeof metadata.macosBuild !== 'string' || typeof metadata.secureEnclave !== 'boolean') throw new Error('injected physical metadata is invalid');
@@ -214,6 +240,7 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
     AGENTPASS_P0C_ARTIFACT_PATH: artifact.path,
     AGENTPASS_P0C_ARTIFACT_SHA256: artifact.sha256,
     AGENTPASS_P0C_SOURCE_COMMIT: template.source_commit,
+    AGENTPASS_P0C_SOURCE_TREE: template.source_tree,
     AGENTPASS_P0C_TEAM_ID: template.team_id,
     AGENTPASS_P0C_CODE_IDENTITIES_JSON: JSON.stringify(template.nested_code_identities)
   });
@@ -229,7 +256,7 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
     const passed = result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError && protocolTests.length > 0;
     gateResults.set(gate, { status: passed ? 'passed' : 'failed', reason: passed ? null : result.timedOut ? 'gate driver timed out' : result.outputLimit ? 'gate driver exceeded bounded output' : 'gate driver did not return a passing protocol', result });
     for (const test of protocolTests) { if (testSources.has(test)) duplicateTests.add(test); else testSources.set(test, gate); }
-    const evidenceName = `gate-${String(index).padStart(2, '0')}-${gate}.json`; const binding = writePrivateFile(join(evidence, evidenceName), resultEvidence('p0c-gate-result', gate, result, passed ? 'passed' : 'failed')); writtenEvidence.push(binding); gateResults.get(gate).evidence = binding;
+    const evidenceName = `gate-${String(index).padStart(2, '0')}-${gate}.json`; const binding = writePrivateFile(join(evidence, evidenceName), resultEvidence('p0c-gate-result', gate, result, passed ? 'passed' : 'failed', drivers.digests.get(gate))); writtenEvidence.push(binding); gateResults.get(gate).evidence = binding;
   }
   const testResults = [];
   for (let index = 0; index < REQUIRED_TESTS.length; index += 1) {
@@ -245,12 +272,17 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
 };
 
 const parseArgs = (args) => {
-  const values = {}; for (let index = 0; index < args.length; index += 1) { const key = args[index]; const value = args[index + 1]; if (!key?.startsWith('--') || !value || value.startsWith('--')) throw new Error('invalid P0-C qualification arguments'); const name = key.slice(2); if (!['template', 'output', 'artifact', 'gate-drivers', 'evidence-dir', 'operator', 'n3e-suite-evidence'].includes(name) || values[name]) throw new Error('invalid or duplicate P0-C qualification argument'); values[name] = value; index += 1; }
-  if (![6, 7].includes(Object.keys(values).length)) throw new Error('usage: run-p0c-qualification.mjs --template TEMPLATE --output OUTPUT --artifact PKG --gate-drivers DIR --evidence-dir DIR --operator OPERATOR [--n3e-suite-evidence EVIDENCE]');
-  return { templatePath: values.template, outputPath: values.output, artifactPath: values.artifact, gateDriverDirectory: values['gate-drivers'], evidenceDirectory: values['evidence-dir'], operator: values.operator, qualificationSuiteEvidencePath: values['n3e-suite-evidence'] ?? null };
+  const values = {}; for (let index = 0; index < args.length; index += 1) { const key = args[index]; const value = args[index + 1]; if (!key?.startsWith('--') || !value || value.startsWith('--')) throw new Error('invalid P0-C qualification arguments'); const name = key.slice(2); if (!['template', 'output', 'artifact', 'gate-drivers', 'gate-manifest', 'evidence-dir', 'operator', 'n3e-suite-evidence'].includes(name) || values[name]) throw new Error('invalid or duplicate P0-C qualification argument'); values[name] = value; index += 1; }
+  if (![7, 8].includes(Object.keys(values).length)) throw new Error('usage: run-p0c-qualification.mjs --template TEMPLATE --output OUTPUT --artifact PKG --gate-drivers DIR --gate-manifest MANIFEST --evidence-dir DIR --operator OPERATOR [--n3e-suite-evidence EVIDENCE]');
+  return { templatePath: values.template, outputPath: values.output, artifactPath: values.artifact, gateDriverDirectory: values['gate-drivers'], gateDriverManifestPath: values['gate-manifest'], evidenceDirectory: values['evidence-dir'], operator: values.operator, qualificationSuiteEvidencePath: values['n3e-suite-evidence'] ?? null };
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  try { const result = await runQualification({ ...parseArgs(process.argv.slice(2)), platform: process.platform, production: true }); process.stdout.write(`${JSON.stringify({ ok: true, qualified: result.report.qualified, output: result.outputPath, evidence_directory: result.evidenceDirectory })}\n`); }
+  try {
+    const result = await runQualification({ ...parseArgs(process.argv.slice(2)), platform: process.platform, production: true });
+    const qualified = result.report.qualified === true;
+    process.stdout.write(`${JSON.stringify({ ok: qualified, qualified, output: result.outputPath, evidence_directory: result.evidenceDirectory })}\n`);
+    if (!qualified) process.exitCode = 1;
+  }
   catch (error) { process.stderr.write(`p0c qualification refused: ${failReason(error.message)}\n`); process.exitCode = 1; }
 }

@@ -4,10 +4,12 @@ import test from "node:test";
 
 import { createMigrationRunner } from "../../apps/cloud-api/src/postgres/migration-runner.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
+import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 
 const ADMIN_DATABASE_URL = process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL ?? process.env.AGENTPASS_TEST_DATABASE_URL;
 const APP_DATABASE_URL = process.env.AGENTPASS_TEST_APP_DATABASE_URL;
-const { Pool } = ADMIN_DATABASE_URL && APP_DATABASE_URL ? await import("pg") : { Pool: undefined };
+const MAINTENANCE_DATABASE_URL = process.env.AGENTPASS_TEST_MAINTENANCE_DATABASE_URL;
+const { Pool } = APP_DATABASE_URL && MAINTENANCE_DATABASE_URL ? await import("pg") : { Pool: undefined };
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
 
 function id(label) {
@@ -22,6 +24,14 @@ async function assertIdentity(pool, expectedRole) {
   const result = await pool.query("SELECT session_user, current_user");
   assert.deepEqual(result.rows[0], { session_user: expectedRole, current_user: expectedRole });
   return result.rows[0];
+}
+
+async function assertTls(pool, connection) {
+  const result = await pool.query("SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()");
+  assert.equal(result.rowCount, 1, `${connection} TLS session is observable`);
+  assert.equal(result.rows[0].ssl, true, `${connection} PostgreSQL connection must use TLS`);
+  assert.match(result.rows[0].version, /^TLSv[0-9.]+$/u, `${connection} TLS version`);
+  assert.ok(typeof result.rows[0].cipher === "string" && result.rows[0].cipher.length > 0, `${connection} TLS cipher`);
 }
 
 async function expectPermissionDenied(operation) {
@@ -49,14 +59,62 @@ function auditEvent({ organizationId, deviceId, agentId, label, previousHash }) 
   return [organizationId, deviceId, eventId, previousHash, eventHash, { ...evidence, event_hash: eventHash }];
 }
 
+async function cleanupFixture(adminPool, { organizationIds, memberIds }) {
+  const client = await adminPool.connect();
+  const organizationArray = organizationIds.filter(Boolean);
+  const memberArray = memberIds.filter(Boolean);
+  try {
+    await client.query("BEGIN");
+    // Export entries are trigger-created dependants of audit events and must
+    // be removed before the event rows. Keep this list explicit: a broad
+    // TRUNCATE ... CASCADE could erase another qualification lane's fixture.
+    for (const [sql, parameters] of [
+      ["DELETE FROM device_audit_export_entries WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_audit_export_heads WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_audit_gaps WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_audit_heads WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_audit_inbox WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM device_audit_events WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM agents WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM devices WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM memberships WHERE organization_id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM organizations WHERE id = ANY($1::uuid[])", [organizationArray]],
+      ["DELETE FROM members WHERE id = ANY($1::uuid[])", [memberArray]],
+    ]) await client.query(sql, parameters);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release(true);
+  }
+
+  const remaining = await adminPool.query(`
+    SELECT (SELECT count(*) FROM organizations WHERE id = ANY($1::uuid[])) AS organizations,
+           (SELECT count(*) FROM members WHERE id = ANY($2::uuid[])) AS members,
+           (SELECT count(*) FROM devices WHERE organization_id = ANY($1::uuid[])) AS devices,
+           (SELECT count(*) FROM agents WHERE organization_id = ANY($1::uuid[])) AS agents,
+           (SELECT count(*) FROM device_audit_events WHERE organization_id = ANY($1::uuid[])) AS events,
+           (SELECT count(*) FROM device_audit_export_entries WHERE organization_id = ANY($1::uuid[])) AS export_entries,
+           (SELECT count(*) FROM device_audit_heads WHERE organization_id = ANY($1::uuid[])) AS heads,
+           (SELECT count(*) FROM device_audit_gaps WHERE organization_id = ANY($1::uuid[])) AS gaps,
+           (SELECT count(*) FROM device_audit_inbox WHERE organization_id = ANY($1::uuid[])) AS inbox`,
+  [organizationArray, memberArray]);
+  assert.deepEqual(remaining.rows[0], {
+    organizations: "0", members: "0", devices: "0", agents: "0", events: "0",
+    export_entries: "0", heads: "0", gaps: "0", inbox: "0",
+  }, "device-audit qualification cleanup left rows behind");
+}
+
 test("P2 PostgreSQL device-audit qualification uses the application role for security probes", {
   skip: ADMIN_DATABASE_URL && APP_DATABASE_URL
-    ? false
-    : "set AGENTPASS_TEST_POSTGRES_ADMIN_URL (or AGENTPASS_TEST_DATABASE_URL) and AGENTPASS_TEST_APP_DATABASE_URL to run the P2 PostgreSQL lane",
+    && MAINTENANCE_DATABASE_URL ? false
+    : "set admin, app, and AGENTPASS_TEST_MAINTENANCE_DATABASE_URL to run the P2 PostgreSQL lane",
   timeout: 120_000,
 }, async (t) => {
   const adminPool = new Pool({ connectionString: ADMIN_DATABASE_URL, max: 4 });
   const appPool = new Pool({ connectionString: APP_DATABASE_URL, max: 4 });
+  const maintenancePool = new Pool({ connectionString: MAINTENANCE_DATABASE_URL, max: 4 });
   const organizationId = id("organization");
   const otherOrganizationId = id("other-organization");
   const deviceId = id("device");
@@ -71,6 +129,10 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
     // the separately authenticated application identity.
     await assertIdentity(adminPool, process.env.AGENTPASS_TEST_ADMIN_ROLE ?? "postgres");
     await assertIdentity(appPool, "agentpass_app");
+    await assertIdentity(maintenancePool, "agentpass_maintenance");
+    await assertTls(adminPool, "admin");
+    await assertTls(appPool, "app");
+    await assertTls(maintenancePool, "maintenance");
 
     const migrationClient = await adminPool.connect();
     try {
@@ -135,6 +197,44 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
         [organizationId, memberId]
       );
       assert.deepEqual(authority.rows, [{ organization_id: organizationId }]);
+
+      // The application role may enqueue only through the tenant-authorized
+      // function. It cannot claim raw payloads or settle a lease; those
+      // deployment-wide transitions belong exclusively to maintenance.
+      const inboxId = id("inbox");
+      const payload = { events: [{ event_id: id("inbox-event"), marker: "qualification" }] };
+      const payloadSha256 = crypto.createHash("sha256").update(canonicalJson(payload), "utf8").digest("hex");
+      const batchId = `audit-${payloadSha256}`;
+      const queued = await appClient.query(
+        "SELECT * FROM public.agentpass_device_audit_inbox_enqueue($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::jsonb)",
+        [organizationId, inboxId, deviceId, batchId, payloadSha256, payload]
+      );
+      assert.equal(queued.rows.length, 1);
+      assert.equal(queued.rows[0].state, "pending");
+      await inSavepoint(appClient, () => expectPermissionDenied(() => appClient.query(
+        "SELECT * FROM public.agentpass_device_audit_inbox_claim($1::bytea,$2::integer,$3::integer)",
+        [Buffer.alloc(32, 1), 1, 30_000]
+      )));
+
+      const maintenanceClient = await maintenancePool.connect();
+      try {
+        const claimDigest = Buffer.alloc(32, 2);
+        const claimed = await maintenanceClient.query(
+          "SELECT * FROM public.agentpass_device_audit_inbox_claim($1::bytea,$2::integer,$3::integer)",
+          [claimDigest, 1, 30_000]
+        );
+        assert.equal(claimed.rows.length, 1);
+        assert.equal(claimed.rows[0].inbox_id, inboxId);
+        const health = await maintenanceClient.query("SELECT * FROM public.agentpass_device_audit_inbox_health()");
+        assert.ok(health.rows.some((row) => row.state === "processing" && Number(row.row_count) >= 1));
+        const settled = await maintenanceClient.query(
+          "SELECT * FROM public.agentpass_device_audit_inbox_settle($1::uuid,$2::uuid,$3::integer,$4::bytea,$5::text,$6::text)",
+          [organizationId, inboxId, claimed.rows[0].attempt, claimDigest, "accepted", null]
+        );
+        assert.deepEqual(settled.rows[0].state, "accepted");
+      } finally {
+        maintenanceClient.release(true);
+      }
 
       // Query effective privileges and trigger ownership from the online
       // connection itself. An administrator must not be able to mask an ACL
@@ -273,21 +373,21 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
     }
   } finally {
     // Fixture teardown is administrative cleanup after the app transaction
-    // has rolled back all security-sensitive writes.
-    await adminPool.query("DELETE FROM memberships WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM members WHERE id = $1", [memberId]).catch(() => {});
-    await adminPool.query("DELETE FROM device_audit_gaps WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM device_audit_heads WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM device_audit_events WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM agents WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM devices WHERE organization_id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await adminPool.query("DELETE FROM organizations WHERE id = ANY($1::uuid[])", [[organizationId, otherOrganizationId]]).catch(() => {});
-    await Promise.all([adminPool.end(), appPool.end()]);
+    // has rolled back all security-sensitive writes. Cleanup is fail-closed:
+    // a swallowed FK/trigger failure is itself a failed qualification.
+    try {
+      await cleanupFixture(adminPool, {
+        organizationIds: [organizationId, otherOrganizationId],
+        memberIds: [memberId],
+      });
+    } finally {
+      await Promise.all([adminPool.end(), appPool.end(), maintenancePool.end()]);
+    }
   }
 });
 
 test("P2 tenant RLS remains fail-closed without application tenant context", {
-  skip: APP_DATABASE_URL ? false : "set AGENTPASS_TEST_APP_DATABASE_URL to run the P2 RLS negative case",
+  skip: APP_DATABASE_URL && MAINTENANCE_DATABASE_URL ? false : "set AGENTPASS_TEST_APP_DATABASE_URL and AGENTPASS_TEST_MAINTENANCE_DATABASE_URL to run the P2 RLS negative case",
 }, async () => {
   const pool = new Pool({ connectionString: APP_DATABASE_URL, max: 2 });
   try {

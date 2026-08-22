@@ -530,10 +530,26 @@ function quoteIdentifier(value) { return `"${value.replaceAll('"', '""')}"`; }
 
 async function reservePort() {
   const server = net.createServer();
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, LOOPBACK, resolve); });
+  try {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, LOOPBACK, resolve); });
+  } catch (error) {
+    if (isSocketPermissionError(error)) throw new P0BSkip("socket_unavailable", "P0-B real socket transport is unavailable in this environment");
+    throw error;
+  }
   const port = server.address().port;
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   return port;
+}
+
+export async function listenP0BTestServer(server, { port = 0, host = LOOPBACK } = {}) {
+  if (!server || typeof server.listen !== "function") throw new TypeError("P0-B test server is required");
+  try {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, host, resolve); });
+  } catch (error) {
+    if (isSocketPermissionError(error)) throw new P0BSkip("socket_unavailable", "P0-B real socket transport is unavailable in this environment");
+    throw error;
+  }
+  return server.address();
 }
 
 function spawnProcess(command, args, cwd, env) {
@@ -683,7 +699,13 @@ async function createTlsProxy({ cert, key, targetPort, port }) {
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 1_000;
   server.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, LOOPBACK, resolve); });
+  try {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, LOOPBACK, resolve); });
+  } catch (error) {
+    try { server.close(); } catch {}
+    if (isSocketPermissionError(error)) throw new P0BSkip("socket_unavailable", "P0-B real socket transport is unavailable in this environment");
+    throw error;
+  }
   let closePromise;
   const forceClose = () => {
     try { server.closeIdleConnections?.(); } catch {}
@@ -713,6 +735,10 @@ async function createTlsProxy({ cert, key, targetPort, port }) {
       await closePromise;
     }
   });
+}
+
+function isSocketPermissionError(error) {
+  return error?.code === "EPERM" || error?.code === "EACCES" || /listen\s+EPERM|operation not permitted|permission denied/iu.test(String(error?.message ?? ""));
 }
 
 async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expectedStatus = 200, timeoutMs = 20_000, process: child, label = "service" } = {}) {

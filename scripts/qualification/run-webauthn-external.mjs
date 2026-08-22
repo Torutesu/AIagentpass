@@ -62,27 +62,35 @@ async function loadAdapter(env) {
 function binding(env) {
   const runnerId = required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID", IDENTIFIER);
   if (LOCAL_MARKER.test(runnerId)) throw new WebAuthnExternalQualificationError("WebAuthn runner is not external");
-  return Object.freeze({
+  const value = {
     source_commit: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_SOURCE_COMMIT", SHA),
     source_tree: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_SOURCE_TREE", SHA),
     deployment_digest: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST", DIGEST),
     artifact_sha256: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256", DIGEST),
-    run_id: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ID", RUN_ID),
-    run_attempt: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ATTEMPT", RUN_ID),
-    job_id: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_JOB_ID", RUN_ID),
+    origin: required(env, "AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN", /^https:\/\/[^\s/]+(?:\/[^\s]*)?$/u),
+    rp_id: required(env, "AGENTPASS_WEBAUTHN_EXPECTED_RP_ID", /^[a-z0-9](?:[a-z0-9.-]{0,127})[a-z0-9]$/u),
+    ci_run_id: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_CI_RUN_ID", RUN_ID),
+    ci_run_attempt: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_CI_RUN_ATTEMPT", RUN_ID),
+    qualification_run_id: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ID", RUN_ID),
+    qualification_run_attempt: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ATTEMPT", RUN_ID),
+    qualification_job_id: required(env, "AGENTPASS_WEBAUTHN_QUALIFICATION_JOB_ID", RUN_ID),
     runner_id: runnerId
-  });
+  };
+  if (value.ci_run_id === value.qualification_run_id) throw new WebAuthnExternalQualificationError("canonical CI and qualification runs must be distinct");
+  return Object.freeze(value);
 }
 
 function validateAdapterEvidence(evidence, expected) {
   const validationEnv = {
     AGENTPASS_QUALIFICATION_RUNNER_ID: expected.runner_id,
-    AGENTPASS_QUALIFICATION_RUN_ID: expected.run_id,
-    AGENTPASS_QUALIFICATION_JOB_ID: expected.job_id,
-    AGENTPASS_QUALIFICATION_RUN_ATTEMPT: expected.run_attempt,
+    AGENTPASS_QUALIFICATION_RUN_ID: expected.qualification_run_id,
+    AGENTPASS_QUALIFICATION_JOB_ID: expected.qualification_job_id,
+    AGENTPASS_QUALIFICATION_RUN_ATTEMPT: expected.qualification_run_attempt,
     GITHUB_SHA: expected.source_commit,
     AGENTPASS_SOURCE_TREE: expected.source_tree,
-    AGENTPASS_QUALIFICATION_ARTIFACT_SHA256: expected.artifact_sha256
+    AGENTPASS_QUALIFICATION_ARTIFACT_SHA256: expected.artifact_sha256,
+    AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN: expected.origin,
+    AGENTPASS_WEBAUTHN_EXPECTED_RP_ID: expected.rp_id
   };
   const normalized = validateWebAuthnEvidence(evidence, validationEnv);
   if (normalized.execution.environment.identity !== expected.deployment_digest) throw new WebAuthnExternalQualificationError("WebAuthn evidence deployment identity is mismatched");
@@ -104,17 +112,28 @@ export async function runExternalWebAuthnQualification({ env = process.env } = {
     source_tree: expected.source_tree,
     deployment_digest: expected.deployment_digest,
     artifact_sha256: expected.artifact_sha256,
-    run_id: expected.run_id,
-    run_attempt: expected.run_attempt,
-    job_id: expected.job_id
+    run_id: expected.qualification_run_id,
+    run_attempt: expected.qualification_run_attempt,
+    job_id: expected.qualification_job_id
   }));
   const normalized = validateAdapterEvidence(evidence, expected);
-  const text = canonicalJson(normalized);
+  const outputEvidence = {
+    ...normalized,
+    execution: {
+      ...normalized.execution,
+      ci_run_id: expected.ci_run_id,
+      ci_run_attempt: expected.ci_run_attempt,
+      qualification_run_id: expected.qualification_run_id,
+      qualification_run_attempt: expected.qualification_run_attempt,
+      qualification_job_id: expected.qualification_job_id
+    }
+  };
+  const text = canonicalJson(outputEvidence);
   if (normalized.kind !== EVIDENCE_KIND || normalized.required_checks.join("|") !== REQUIRED_CHECKS.join("|") || normalized.status !== "passed" || normalized.qualified !== true) throw new WebAuthnExternalQualificationError("WebAuthn adapter did not produce a complete passing result");
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
   const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
   try { fs.writeFileSync(fd, `${text}\n`, "utf8"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  return Object.freeze({ status: "passed", qualified: true, evidence_path: output, adapter_sha256: loaded.sha256, source_commit: expected.source_commit, run_id: expected.run_id, job_id: expected.job_id, deployment_digest: expected.deployment_digest });
+  return Object.freeze({ status: "passed", qualified: true, evidence_path: output, adapter_sha256: loaded.sha256, source_commit: expected.source_commit, ci_run_id: expected.ci_run_id, ci_run_attempt: expected.ci_run_attempt, qualification_run_id: expected.qualification_run_id, qualification_run_attempt: expected.qualification_run_attempt, qualification_job_id: expected.qualification_job_id, deployment_digest: expected.deployment_digest });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {

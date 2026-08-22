@@ -19,9 +19,42 @@ on:
         description: HTTPS URL for the independently signed production KMS report
         required: true
         type: string
+      cloud_signer_qualification_url:
+        description: HTTPS URL for the canonical Cloud signer v2 qualification evidence
+        required: true
+        type: string
+      kms_artifact_sha256:
+        description: Exact 64-character SHA-256 of the release artifact bound to Cloud signer qualification
+        required: true
+        type: string
+      kms_qualification_run_id:
+        description: Exact successful External qualification runners workflow run ID for Cloud signer evidence
+        required: true
+        type: string
+      kms_qualification_run_attempt:
+        description: Exact attempt of the external Cloud signer qualification run
+        required: true
+        type: string
+      kms_qualification_job_id:
+        description: Exact successful kms job ID for Cloud signer evidence
+        required: true
+        type: string
+      operations_evidence_url:
+        description: HTTPS URL for the signed operations-evidence tar archive
+        required: true
+        type: string
+      operations_qualification_evidence_url:
+        description: HTTPS URL for the separately signed independent operations qualification attestation
+        required: true
+        type: string
+      candidate_id:
+        description: Exact release candidate ID bound to the operations evidence
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: cloud-production-qualification-${{ inputs.source_commit }}-${{ inputs.image_digest }}
@@ -38,10 +71,25 @@ jobs:
       EXPECTED_DIGEST: ${{ inputs.image_digest }}
       DEPLOYMENT_EVIDENCE_URL: ${{ inputs.deployment_evidence_url }}
       KMS_REPORT_URL: ${{ inputs.kms_report_url }}
+      CLOUD_SIGNER_QUALIFICATION_URL: ${{ inputs.cloud_signer_qualification_url }}
+      KMS_ARTIFACT_SHA256: ${{ inputs.kms_artifact_sha256 }}
+      KMS_QUALIFICATION_RUN_ID: ${{ inputs.kms_qualification_run_id }}
+      KMS_QUALIFICATION_RUN_ATTEMPT: ${{ inputs.kms_qualification_run_attempt }}
+      KMS_QUALIFICATION_JOB_ID: ${{ inputs.kms_qualification_job_id }}
+      KMS_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST }}
+      KMS_EXPECTED_BINDINGS: ${{ vars.AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS }}
+      KMS_IDENTITY_ATTESTATION_TRUST: ${{ secrets.AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST }}
+      OPERATIONS_EVIDENCE_URL: ${{ inputs.operations_evidence_url }}
+      OPERATIONS_QUALIFICATION_EVIDENCE_URL: ${{ inputs.operations_qualification_evidence_url }}
+      EXPECTED_CANDIDATE: ${{ inputs.candidate_id }}
       DEPLOYMENT_KEY_FINGERPRINT: ${{ vars.AGENTPASS_CLOUD_DEPLOYMENT_KEY_FINGERPRINT }}
       KMS_TRUSTED_KEY_ID: ${{ vars.AGENTPASS_KMS_TRUSTED_KEY_ID }}
       DEPLOYMENT_PUBLIC_KEY_PEM: ${{ secrets.AGENTPASS_CLOUD_DEPLOYMENT_PUBLIC_KEY_PEM }}
       KMS_PUBLIC_KEY_DER_B64: ${{ secrets.AGENTPASS_KMS_PUBLIC_KEY_DER_B64 }}
+      OPERATIONS_EVIDENCE_PUBLIC_KEY_PEM: ${{ secrets.AGENTPASS_OPERATIONS_EVIDENCE_PUBLIC_KEY_PEM }}
+      OPERATIONS_EVIDENCE_KEY_FINGERPRINT: ${{ vars.AGENTPASS_OPERATIONS_EVIDENCE_KEY_FINGERPRINT }}
+      OPERATIONS_QUALIFICATION_KEY_FINGERPRINT: ${{ vars.AGENTPASS_OPERATIONS_QUALIFICATION_KEY_FINGERPRINT }}
+      OPERATIONS_QUALIFICATION_PUBLIC_KEY_PEM: ${{ secrets.AGENTPASS_OPERATIONS_QUALIFICATION_PUBLIC_KEY_PEM }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,25 +114,224 @@ jobs:
           set -euo pipefail
           [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source commit must be a full SHA" >&2; exit 1; }
           [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "image digest must be immutable" >&2; exit 1; }
-          [[ "$DEPLOYMENT_EVIDENCE_URL" == https://* && "$KMS_REPORT_URL" == https://* ]] || { echo "evidence URLs must use HTTPS" >&2; exit 1; }
+          [[ "$DEPLOYMENT_EVIDENCE_URL" == https://* && "$KMS_REPORT_URL" == https://* && "$CLOUD_SIGNER_QUALIFICATION_URL" == https://* ]] || { echo "evidence URLs must use HTTPS" >&2; exit 1; }
+          [[ "$KMS_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Cloud signer artifact digest must be a full SHA-256" >&2; exit 1; }
+          [[ "$KMS_DEPLOYMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Cloud signer deployment digest must be a full SHA-256" >&2; exit 1; }
+          [[ "$KMS_QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "Cloud signer qualification run ID is invalid" >&2; exit 1; }
+          [[ "$KMS_QUALIFICATION_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "Cloud signer qualification run attempt is invalid" >&2; exit 1; }
+          [[ "$KMS_QUALIFICATION_JOB_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "Cloud signer qualification job ID is invalid" >&2; exit 1; }
+          [[ "$OPERATIONS_EVIDENCE_URL" == https://* ]] || { echo "operations evidence URL must use HTTPS" >&2; exit 1; }
+          [[ "$OPERATIONS_QUALIFICATION_EVIDENCE_URL" == https://* ]] || { echo "operations qualification evidence URL must use HTTPS" >&2; exit 1; }
+          [[ "$EXPECTED_CANDIDATE" =~ ^release-pkg-sha256-v1-[0-9a-f]{64}$ ]] || { echo "candidate ID must be immutable" >&2; exit 1; }
           : "${DEPLOYMENT_KEY_FINGERPRINT:?deployment key fingerprint is required}"
           : "${KMS_TRUSTED_KEY_ID:?KMS trusted key ID is required}"
           : "${DEPLOYMENT_PUBLIC_KEY_PEM:?deployment public key is required}"
           : "${KMS_PUBLIC_KEY_DER_B64:?KMS public key is required}"
+          : "${KMS_EXPECTED_BINDINGS:?Cloud signer expected provider bindings are required}"
+          : "${KMS_IDENTITY_ATTESTATION_TRUST:?Cloud signer identity attestor trust is required}"
+          : "${OPERATIONS_EVIDENCE_PUBLIC_KEY_PEM:?operations evidence public key is required}"
+          [[ "$OPERATIONS_EVIDENCE_KEY_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { echo "operations evidence fingerprint is required" >&2; exit 1; }
+          : "${OPERATIONS_QUALIFICATION_PUBLIC_KEY_PEM:?operations qualification public key is required}"
+          [[ "$OPERATIONS_QUALIFICATION_KEY_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { echo "operations qualification fingerprint is required" >&2; exit 1; }
+          [[ "$OPERATIONS_QUALIFICATION_KEY_FINGERPRINT" != "$OPERATIONS_EVIDENCE_KEY_FINGERPRINT" ]] || { echo "operations qualification key must be separate" >&2; exit 1; }
+      - name: Verify the external Cloud signer run and job binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ ]] || { echo "checked-out source tree is invalid" >&2; exit 1; }
+          printf 'KMS_SOURCE_TREE=%s\n' "$source_tree" >> "$GITHUB_ENV"
+          run_json="$RUNNER_TEMP/cloud-signer-qualification-run.json"
+          jobs_json="$RUNNER_TEMP/cloud-signer-qualification-jobs.json"
+          artifacts_json="$RUNNER_TEMP/cloud-signer-qualification-artifacts.json"
+          gh api --header 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$KMS_QUALIFICATION_RUN_ID" > "$run_json"
+          gh api --header 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$KMS_QUALIFICATION_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg commit "$EXPECTED_COMMIT" \
+            --arg run "$KMS_QUALIFICATION_RUN_ID" --arg attempt "$KMS_QUALIFICATION_RUN_ATTEMPT" \
+            '((.id|tostring) == $run and .repository.full_name == $repository and .head_repository.full_name == $repository and .name == "External qualification runners" and .path == ".github/workflows/external-qualification-runners.yml" and .event == "workflow_dispatch" and .head_branch == "main" and .head_sha == $commit and (.run_attempt|tostring) == $attempt and .status == "completed" and .conclusion == "success")' \
+            "$run_json" >/dev/null
+          jq -e --arg run "$KMS_QUALIFICATION_RUN_ID" --arg job "$KMS_QUALIFICATION_JOB_ID" \
+            '[.jobs[] | select((.id|tostring) == $job and (.run_id|tostring) == $run and .name == "kms" and .status == "completed" and .conclusion == "success")] | length == 1' \
+            "$jobs_json" >/dev/null
+          artifact_name="external-kms-qualification-${EXPECTED_COMMIT}-${KMS_QUALIFICATION_RUN_ID}-${KMS_QUALIFICATION_RUN_ATTEMPT}"
+          gh api --header 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$KMS_QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$artifacts_json"
+          artifact_count="$(jq --arg name "$artifact_name" --arg run "$KMS_QUALIFICATION_RUN_ID" '[.artifacts[] | select(.name == $name and (.workflow_run.id|tostring) == $run and .expired == false)] | length' "$artifacts_json")"
+          [[ "$artifact_count" == 1 ]] || { echo "Cloud signer qualification artifact is missing or duplicated" >&2; exit 1; }
+          artifact_id="$(jq -er --arg name "$artifact_name" --arg run "$KMS_QUALIFICATION_RUN_ID" '[.artifacts[] | select(.name == $name and (.workflow_run.id|tostring) == $run and .expired == false)] | .[0].id | tostring' "$artifacts_json")"
+          artifact_digest="$(jq -er --arg name "$artifact_name" --arg run "$KMS_QUALIFICATION_RUN_ID" '[.artifacts[] | select(.name == $name and (.workflow_run.id|tostring) == $run and .expired == false)] | .[0].digest' "$artifacts_json")"
+          artifact_url="$(jq -er --arg name "$artifact_name" --arg run "$KMS_QUALIFICATION_RUN_ID" '[.artifacts[] | select(.name == $name and (.workflow_run.id|tostring) == $run and .expired == false)] | .[0].archive_download_url' "$artifacts_json")"
+          [[ "$artifact_id" =~ ^[1-9][0-9]{0,19}$ && "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Cloud signer qualification artifact metadata is invalid" >&2; exit 1; }
+          [[ "$artifact_url" == "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" ]] || { echo "Cloud signer qualification artifact URL is not canonical" >&2; exit 1; }
+          printf 'KMS_EVIDENCE_ARTIFACT_DIGEST=%s\n' "$artifact_digest" >> "$GITHUB_ENV"
+          printf 'KMS_EVIDENCE_ARTIFACT_URL=%s\n' "$artifact_url" >> "$GITHUB_ENV"
       - name: Download evidence over HTTPS
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$DEPLOYMENT_EVIDENCE_URL" -o "$RUNNER_TEMP/cloud-deployment-evidence.json"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$KMS_REPORT_URL" -o "$RUNNER_TEMP/kms-qualification.json"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$CLOUD_SIGNER_QUALIFICATION_URL" -o "$RUNNER_TEMP/cloud-signer-qualification.json"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$OPERATIONS_EVIDENCE_URL" -o "$RUNNER_TEMP/operations-evidence.tar"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$OPERATIONS_QUALIFICATION_EVIDENCE_URL" -o "$RUNNER_TEMP/operations-qualification-evidence.json"
+          [[ "$(wc -c < "$RUNNER_TEMP/cloud-signer-qualification.json")" -le 16777216 ]] || { echo "Cloud signer qualification evidence exceeds the size limit" >&2; exit 1; }
+          [[ "$(wc -c < "$RUNNER_TEMP/operations-evidence.tar")" -le 67108864 ]] || { echo "operations evidence archive exceeds the size limit" >&2; exit 1; }
+          gh api "$KMS_EVIDENCE_ARTIFACT_URL" > "$RUNNER_TEMP/cloud-signer-qualification-artifact.zip"
+          [[ "sha256:$(sha256sum "$RUNNER_TEMP/cloud-signer-qualification-artifact.zip" | awk '{print $1}')" == "$KMS_EVIDENCE_ARTIFACT_DIGEST" ]] || { echo "Cloud signer qualification artifact digest mismatch" >&2; exit 1; }
+          mapfile -t signer_entries < <(unzip -Z1 "$RUNNER_TEMP/cloud-signer-qualification-artifact.zip")
+          [[ "${#signer_entries[@]}" -eq 1 && "${signer_entries[0]}" == "kms-qualification.json" ]] || { echo "Cloud signer qualification artifact has an unexpected inventory" >&2; exit 1; }
+          mkdir -m 0700 "$RUNNER_TEMP/cloud-signer-qualification-artifact"
+          unzip -q "$RUNNER_TEMP/cloud-signer-qualification-artifact.zip" -d "$RUNNER_TEMP/cloud-signer-qualification-artifact"
+          [[ -f "$RUNNER_TEMP/cloud-signer-qualification-artifact/kms-qualification.json" && ! -L "$RUNNER_TEMP/cloud-signer-qualification-artifact/kms-qualification.json" ]] || { echo "Cloud signer qualification artifact entry is not a regular file" >&2; exit 1; }
+          cmp -s "$RUNNER_TEMP/cloud-signer-qualification.json" "$RUNNER_TEMP/cloud-signer-qualification-artifact/kms-qualification.json" || { echo "Cloud signer qualification URL is not bound to the selected GitHub artifact" >&2; exit 1; }
           printf '%s\n' "$DEPLOYMENT_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/deployment-public.pem"
           printf '%s' "$KMS_PUBLIC_KEY_DER_B64" | base64 --decode > "$RUNNER_TEMP/kms-public.der"
+          printf '%s\n' "$OPERATIONS_EVIDENCE_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/operations-evidence-public.pem"
+          printf '%s\n' "$OPERATIONS_QUALIFICATION_PUBLIC_KEY_PEM" > "$RUNNER_TEMP/operations-qualification-public.pem"
+          mapfile -t archive_entries < <(tar --list --file "$RUNNER_TEMP/operations-evidence.tar")
+          [[ "${#archive_entries[@]}" -eq 6 ]] || { echo "operations evidence archive has an unexpected entry count" >&2; exit 1; }
+          expected_archive_entries=$'alert_delivery.json\nbackup_restore_pitr.json\nemergency_stop.json\nfleet_propagation.json\nindex.json\nrollback.json'
+          actual_archive_entries="$(printf '%s\n' "${archive_entries[@]}" | LC_ALL=C sort -u)"
+          [[ "$actual_archive_entries" == "$expected_archive_entries" ]] || { echo "operations evidence archive has duplicate, missing, or unexpected entries" >&2; exit 1; }
+          mkdir -m 0700 "$RUNNER_TEMP/operations-evidence"
+          tar --extract --file "$RUNNER_TEMP/operations-evidence.tar" --directory "$RUNNER_TEMP/operations-evidence" --no-same-owner --no-same-permissions
+          for entry in "${archive_entries[@]}"; do
+            target="$RUNNER_TEMP/operations-evidence/$entry"
+            [[ -f "$target" && ! -L "$target" ]] || { echo "operations evidence archive entry is not a regular file" >&2; exit 1; }
+            [[ "$(stat -c '%h' "$target")" == 1 ]] || { echo "operations evidence archive entry is multiply linked" >&2; exit 1; }
+          done
       - name: Verify signed deployment and provider qualification
         shell: bash
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
+          node --input-type=module - \
+            "$RUNNER_TEMP/cloud-signer-qualification.json" "$RUNNER_TEMP/cloud-signer-qualification-canonical.json" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [input, output] = process.argv.slice(2);
+          const text = fs.readFileSync(input, 'utf8');
+          let value;
+          try { value = JSON.parse(text); } catch { throw new Error('Cloud signer evidence is not JSON'); }
+          if (text !== `${canonicalJson(value)}\n`) throw new Error('Cloud signer evidence is not canonical JSON with the required terminal newline');
+          fs.writeFileSync(output, canonicalJson(value), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+          NODE
+          node scripts/release/ci-preflight.mjs kms-qualification \
+            "$RUNNER_TEMP/cloud-signer-qualification-canonical.json" "$EXPECTED_COMMIT" "$KMS_SOURCE_TREE" \
+            "$KMS_DEPLOYMENT_DIGEST" "$KMS_ARTIFACT_SHA256" "$KMS_QUALIFICATION_RUN_ID" "$KMS_QUALIFICATION_JOB_ID" \
+            > "$RUNNER_TEMP/cloud-signer-qualification-result.json"
+          node --input-type=module - \
+            "$RUNNER_TEMP/cloud-signer-qualification-canonical.json" "$RUNNER_TEMP/kms-public.der" \
+            "$RUNNER_TEMP/deployment-public.pem" "$KMS_SOURCE_TREE" "$KMS_DEPLOYMENT_DIGEST" \
+            "$KMS_ARTIFACT_SHA256" "$KMS_QUALIFICATION_RUN_ID" "$KMS_QUALIFICATION_RUN_ATTEMPT" \
+            "$KMS_QUALIFICATION_JOB_ID" <<'NODE' > "$RUNNER_TEMP/cloud-signer-identity-verification.json"
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          import {
+            identityAttestationNonce,
+            identityBindingDigest,
+            verifyCloudSignerKmsQualificationEvidence
+          } from './scripts/qualification/cloud-signer-kms.mjs';
+          import {
+            normalizeKmsProviderIdentityAttestorTrustInputs,
+            verifyKmsProviderIdentityAttestation
+          } from './scripts/qualification/kms-provider-identity-attestation.mjs';
+
+          const [evidencePath, kmsKeyPath, deploymentKeyPath, expectedTree, expectedDeployment, expectedArtifact, expectedRun, expectedAttempt, expectedJob] = process.argv.slice(2);
+          const bytes = fs.readFileSync(evidencePath);
+          const text = bytes.toString('utf8');
+          let evidence;
+          try { evidence = JSON.parse(text); } catch { throw new Error('Cloud signer evidence is not JSON'); }
+          if (text !== canonicalJson(evidence)) throw new Error('Cloud signer evidence is not canonical JSON');
+          const result = verifyCloudSignerKmsQualificationEvidence(bytes, {
+            expectedSourceCommit: process.env.EXPECTED_COMMIT,
+            expectedSourceTree: expectedTree,
+            expectedDeploymentDigest: expectedDeployment,
+            expectedArtifactSha256: expectedArtifact,
+            expectedRunId: expectedRun,
+            expectedJobId: expectedJob,
+            requireProviderIdentityAttestation: true
+          });
+          if (result.status !== 'passed' || result.qualified !== true || evidence.status === 'not_run') throw new Error('Cloud signer qualification is not passed');
+          if (evidence.qualification_run_id !== expectedRun || evidence.qualification_run_attempt !== expectedAttempt || evidence.qualification_job_id !== expectedJob) throw new Error('Cloud signer qualification execution binding is invalid');
+          if (evidence.qualification_run_id === evidence.ci_run_id) throw new Error('Cloud signer qualification and canonical CI runs must be distinct');
+
+          const trustText = process.env.KMS_IDENTITY_ATTESTATION_TRUST;
+          let trustValue;
+          try { trustValue = JSON.parse(trustText); } catch { throw new Error('Cloud signer provider identity attestor trust is not JSON'); }
+          if (trustText !== canonicalJson(trustValue)) throw new Error('Cloud signer provider identity attestor trust is not canonical JSON');
+          const trusted = normalizeKmsProviderIdentityAttestorTrustInputs({
+            identityAttestationTrust: trustValue,
+            expectedProviders: new Set(evidence.provider_identities.map((item) => item.provider))
+          });
+          if (trusted === null) throw new Error('Cloud signer provider identity attestor trust is missing');
+          const expectedBindingText = process.env.KMS_EXPECTED_BINDINGS;
+          let expectedBindings;
+          try { expectedBindings = JSON.parse(expectedBindingText); } catch { throw new Error('Cloud signer expected provider bindings are not JSON'); }
+          if (expectedBindingText !== canonicalJson(expectedBindings) || expectedBindings === null || typeof expectedBindings !== 'object' || Array.isArray(expectedBindings)) throw new Error('Cloud signer expected provider bindings are not canonical');
+          const expectedBindingKeys = ['account_or_project', 'identity', 'identity_fingerprint', 'key_id', 'key_version', 'provider', 'provider_resource_id', 'public_key_fingerprint', 'region'];
+          const expectedNames = Object.keys(expectedBindings).sort();
+          const observedNames = evidence.purpose_bindings.map((item) => item.name).sort();
+          if (expectedNames.length !== evidence.purpose_bindings.length || canonicalJson(expectedNames) !== canonicalJson(observedNames)) throw new Error('Cloud signer expected purpose binding set is mismatched');
+          for (const binding of evidence.purpose_bindings) {
+            const expected = expectedBindings[binding.name];
+            if (!expected || canonicalJson(Object.keys(expected).sort()) !== canonicalJson([...expectedBindingKeys].sort())
+              || expected.provider !== binding.provider || expected.key_id !== binding.key_id || expected.key_version !== binding.key_version
+              || expected.provider_resource_id !== binding.provider_resource_id || expected.public_key_fingerprint !== binding.public_key_fingerprint) {
+              throw new Error('Cloud signer expected provider target binding is mismatched');
+            }
+          }
+          const qualificationBinding = {
+            source_commit: evidence.source_commit,
+            source_tree: evidence.source_tree,
+            deployment_digest: evidence.deployment_digest,
+            artifact_sha256: evidence.artifact_sha256,
+            run_id: evidence.run_id,
+            job_id: evidence.job_id
+          };
+          for (const identity of evidence.provider_identities) {
+            const expectedForProvider = Object.values(expectedBindings).filter((item) => item.provider === identity.provider);
+            const resources = expectedForProvider.map((item) => item.provider_resource_id).sort();
+            if (resources.length === 0) throw new Error('Cloud signer provider resource binding is incomplete');
+            const first = expectedForProvider[0];
+            if (expectedForProvider.some((item) => item.account_or_project !== identity.account_or_project
+              || item.identity !== identity.identity || item.identity_fingerprint !== identity.identity_fingerprint
+              || item.region !== identity.region)) throw new Error('Cloud signer expected provider identity is mismatched');
+            const bindingDigest = identityBindingDigest({ ...qualificationBinding, provider: identity.provider, account_or_project: identity.account_or_project, identity: identity.identity, identity_fingerprint: identity.identity_fingerprint, region: identity.region, resource_ids: resources });
+            const attestation = verifyKmsProviderIdentityAttestation(identity.attestation, {
+              trustedPublicKey: Buffer.from(trusted[identity.provider].public_key_der_base64url, 'base64url'),
+              expectedNonce: identityAttestationNonce(identity.provider, qualificationBinding),
+              expectedBindingDigest: bindingDigest,
+              now: Date.now()
+            });
+            if (attestation.attestor_key_id !== trusted[identity.provider].key_id
+              || attestation.provider !== identity.provider
+              || attestation.account_or_project !== identity.account_or_project
+              || attestation.identity !== identity.identity
+              || attestation.identity_fingerprint !== identity.identity_fingerprint
+              || attestation.region !== identity.region
+              || canonicalJson([...attestation.resource_ids].sort()) !== canonicalJson(resources)
+              || identity.observed_at !== attestation.challenge.issued_at
+              || identity.response_digest !== attestation.provider_claims.response_digest
+              || !first) throw new Error('Cloud signer provider identity attestation target is invalid');
+          }
+          const kmsDer = fs.readFileSync(kmsKeyPath);
+          const deploymentDer = crypto.createPublicKey(fs.readFileSync(deploymentKeyPath)).export({ type: 'spki', format: 'der' });
+          if (kmsDer.equals(deploymentDer)) throw new Error('deployment and KMS qualification keys must be independent');
+          for (const trust of Object.values(trusted)) {
+            if (Buffer.from(trust.public_key_der_base64url, 'base64url').equals(kmsDer)
+              || Buffer.from(trust.public_key_der_base64url, 'base64url').equals(deploymentDer)) throw new Error('provider identity attestor key must be independent');
+          }
+          process.stdout.write(`${canonicalJson({ status: 'verified', evidence_sha256: result.evidence_sha256, provider_identity_attestation: 'verified', independent_keys: true, source_tree: expectedTree, deployment_digest: expectedDeployment, artifact_sha256: expectedArtifact, run_id: expectedRun, run_attempt: expectedAttempt, job_id: expectedJob })}\n`);
+          NODE
           node scripts/ops/verify-cloud-deployment.mjs \
             "$RUNNER_TEMP/cloud-deployment-evidence.json" \
             "$RUNNER_TEMP/deployment-public.pem" "$DEPLOYMENT_KEY_FINGERPRINT" > "$RUNNER_TEMP/deployment-result.json"
@@ -98,6 +345,19 @@ jobs:
           jq -e --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
             '.source_commit == $commit and .image_digest == $digest and .status == "verified"' \
             "$RUNNER_TEMP/deployment-result.json" >/dev/null
+          jq -e --arg tree "$KMS_SOURCE_TREE" --arg deployment "$KMS_DEPLOYMENT_DIGEST" --arg artifact "$KMS_ARTIFACT_SHA256" \
+            --arg run "$KMS_QUALIFICATION_RUN_ID" --arg attempt "$KMS_QUALIFICATION_RUN_ATTEMPT" --arg job "$KMS_QUALIFICATION_JOB_ID" \
+            '.status == "verified" and .provider_identity_attestation == "verified" and .independent_keys == true and .source_tree == $tree and .deployment_digest == $deployment and .artifact_sha256 == $artifact and .run_id == $run and .run_attempt == $attempt and .job_id == $job' \
+            "$RUNNER_TEMP/cloud-signer-identity-verification.json" >/dev/null
+          node scripts/ops/verify-operations-evidence-bundle.mjs verify \
+            "$RUNNER_TEMP/operations-evidence/index.json" "$RUNNER_TEMP/operations-evidence" \
+            "$EXPECTED_CANDIDATE" "$EXPECTED_COMMIT" "$EXPECTED_DIGEST" \
+            "$RUNNER_TEMP/operations-evidence-public.pem" "$OPERATIONS_EVIDENCE_KEY_FINGERPRINT" \
+            "$RUNNER_TEMP/operations-qualification-evidence.json" "$RUNNER_TEMP/operations-qualification-public.pem" "$OPERATIONS_QUALIFICATION_KEY_FINGERPRINT" \
+            > "$RUNNER_TEMP/operations-evidence-result.json"
+          jq -e --arg candidate "$EXPECTED_CANDIDATE" --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
+            '.candidate_id == $candidate and .source_commit == $commit and .image_digest == $digest and .status == "verified" and .integrity_status == "integrity_verified" and .qualification_status == "independently_qualified" and .evidence_count == 5' \
+            "$RUNNER_TEMP/operations-evidence-result.json" >/dev/null
       - name: Publish non-secret qualification summary
         env:
           PROMOTION_RESULT: ${{ runner.temp }}/promotion-result.json
@@ -111,11 +371,39 @@ jobs:
           install -d -m 0700 "$artifact_dir"
           install -m 0600 "$RUNNER_TEMP/cloud-deployment-evidence.json" "$artifact_dir/deployment-evidence.json"
           install -m 0600 "$RUNNER_TEMP/kms-qualification.json" "$artifact_dir/kms-qualification.json"
+          install -m 0600 "$RUNNER_TEMP/cloud-signer-qualification.json" "$artifact_dir/cloud-signer-qualification.json"
+          install -m 0600 "$RUNNER_TEMP/cloud-signer-qualification-artifacts.json" "$artifact_dir/cloud-signer-qualification-artifacts.json"
+          install -m 0600 "$RUNNER_TEMP/cloud-signer-qualification-result.json" "$artifact_dir/cloud-signer-qualification-result.json"
+          install -m 0600 "$RUNNER_TEMP/cloud-signer-identity-verification.json" "$artifact_dir/cloud-signer-identity-verification.json"
+          printf '%s\n' "$KMS_EVIDENCE_ARTIFACT_DIGEST" > "$artifact_dir/cloud-signer-qualification-artifact.sha256"
           install -m 0600 "$RUNNER_TEMP/promotion-result.json" "$artifact_dir/promotion-result.json"
           install -m 0600 "$RUNNER_TEMP/deployment-result.json" "$artifact_dir/deployment-result.json"
-          jq -n --arg commit "$EXPECTED_COMMIT" --arg digest "$EXPECTED_DIGEST" \
-            '{schema_version:1,source_commit:$commit,image_digest:$digest,status:"verified"}' \
+          install -m 0600 "$RUNNER_TEMP/operations-evidence-result.json" "$artifact_dir/operations-evidence-result.json"
+          install -m 0600 "$RUNNER_TEMP/operations-evidence.tar" "$artifact_dir/operations-evidence.tar"
+          install -m 0600 "$RUNNER_TEMP/operations-qualification-evidence.json" "$artifact_dir/operations-qualification-evidence.json"
+          sha256sum "$RUNNER_TEMP/operations-evidence.tar" | awk '{print $1}' > "$artifact_dir/operations-evidence.tar.sha256"
+          jq -n --arg commit "$EXPECTED_COMMIT" --arg tree "$KMS_SOURCE_TREE" --arg digest "$EXPECTED_DIGEST" \
+            --arg deployment "$KMS_DEPLOYMENT_DIGEST" --arg artifact "$KMS_ARTIFACT_SHA256" \
+            --arg evidence_artifact "$KMS_EVIDENCE_ARTIFACT_DIGEST" --arg run "$KMS_QUALIFICATION_RUN_ID" --arg attempt "$KMS_QUALIFICATION_RUN_ATTEMPT" --arg job "$KMS_QUALIFICATION_JOB_ID" \
+            '{schema_version:2,source_commit:$commit,source_tree:$tree,image_digest:$digest,deployment_digest:$deployment,artifact_sha256:$artifact,evidence_archive_digest:$evidence_artifact,qualification_run_id:$run,qualification_run_attempt:$attempt,qualification_job_id:$job,status:"verified"}' \
             > "$artifact_dir/qualification-binding.json"
+      - name: Secret-scan every cloud qualification artifact before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/cloud-production-qualification-${EXPECTED_COMMIT}"
+          scan_evidence="$RUNNER_TEMP/cloud-production-qualification-artifact-scan.json"
+          [[ ! -e "$scan_evidence" ]] || { echo "cloud qualification scan evidence already exists" >&2; exit 1; }
+          [[ -f "$artifact_dir/operations-evidence.tar" ]] || { echo "operations evidence archive is missing from the qualification artifact" >&2; exit 1; }
+          # artifact-scan dispatches the dedicated archive scanner for the tar
+          # and scans every JSON/plain file in the same source-bound tree.
+          node scripts/release/ci-preflight.mjs artifact-scan \
+            "$artifact_dir" "$scan_evidence"
+          install -m 0600 "$scan_evidence" "$artifact_dir/artifact-scan.json"
+          # The scan report is also part of the uploaded artifact; scan it
+          # independently so the uploaded evidence set is covered end-to-end.
+          node scripts/release/ci-preflight.mjs secret-scan \
+            "$artifact_dir/artifact-scan.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cloud-production-qualification-${{ inputs.source_commit }}

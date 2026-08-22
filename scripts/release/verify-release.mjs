@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { assertReleaseCandidateIdMatchesProduct, parseReleaseCandidateId, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
+import { verifyManifestDeclaredAssets } from './roundtrip-release-assets.mjs';
 
 const [manifestPath, signaturePath, publicKeyPath, expectedFingerprint] = process.argv.slice(2);
 if (!manifestPath || !signaturePath || !publicKeyPath || !expectedFingerprint || process.argv.slice(2).length !== 4) throw new Error('Usage: verify-release.mjs RELEASE-MANIFEST.json SIGNATURE PUBLIC-KEY EXPECTED-FINGERPRINT');
@@ -82,6 +83,7 @@ if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) throw
 exactKeys(manifest.evidence, ['checksums', 'sbom', 'notarization'], 'evidence');
 
 const manifestDirectory = dirname(manifestSnapshot.path);
+verifyManifestDeclaredAssets(manifest, manifestDirectory);
 const names = new Set();
 const artifactContent = new Map();
 const roles = new Set(['product', 'sbom', 'release_notice', 'trust_root', 'auxiliary', 'external_qualification_controller']);

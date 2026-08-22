@@ -274,7 +274,7 @@ test("N4 qualification owns its seed set, authority evidence, and direct CI aggr
   assert.match(source, /platform_authorization/u);
   assert.match(source, /parseN4AuthorityTapEvidence/u);
   assert.doesNotMatch(source, /\.github\/workflows/u);
-  const ci = await readFile(CI_PATH, "utf8");
+  const ci = `${await readFile(CI_PATH, "utf8")}\n${await readFile(new URL("../../../../.github/actions/postgres-authority-qualification/action.yml", import.meta.url), "utf8")}`;
   assert.match(ci, /qualification-n4-upgrade\.json/u);
   assert.match(ci, /qualification-0054\.tap/u);
   assert.match(ci, /n4UpgradeReport/u);

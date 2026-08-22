@@ -153,6 +153,23 @@ private func changed(_ index: Int) -> [UInt32] {
     ) == requirement)
 }
 
+@Test func hostChildCodeDirectoryHashIsRequiredAtConfigurationBoundary() throws {
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try requireHostChildCodeDirectoryHash(nil)
+    }
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try requireHostChildCodeDirectoryHash(String(repeating: "a", count: 63))
+    }
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try requireHostChildCodeDirectoryHash(String(repeating: "g", count: 64))
+    }
+}
+
+@Test func hostChildCodeDirectoryHashIsCanonicalizedForTheProcessPolicy() throws {
+    let hash = String(repeating: "Ab", count: 32)
+    #expect(try requireHostChildCodeDirectoryHash(hash) == hash.lowercased())
+}
+
 @Test func hostListenerDefaultAuditTokenSourceFailsClosedWhenTheOSSourceIsUnavailable() throws {
     let delegate = NativeAgentAuthenticatedHostListenerDelegate(
         allowedClientUID: 501,

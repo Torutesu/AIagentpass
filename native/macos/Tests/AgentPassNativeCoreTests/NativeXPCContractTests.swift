@@ -4,14 +4,14 @@ import Testing
 
 @Test func nativeXPCContractHasFrozenFingerprintAndClosedInventory() {
     #expect(AgentPassNativeXPCContract.contractVersion == 3)
-    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:62fc2dc6a1ba7731b031e06250a762239dd6cb7e01b009786b82e976068d831e")
+    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:f74fea0f9d0a4c2394a7e5c248353f80613f39b289de400eb007369e8a6224ae")
     #expect(AgentPassNativeXPCContract.fingerprint == AgentPassNativeXPCContract.derivedFingerprint)
     #expect(AgentPassNativeXPCContract.managementProtocol.methods.count == 41)
     #expect(AgentPassNativeXPCContract.agentProtocol.methods.count == 5)
     #expect(AgentPassNativeXPCContract.hostProtocol.methods.count == 5)
-    #expect(AgentPassNativeXPCContract.protocolInventories.count == 4)
+    #expect(AgentPassNativeXPCContract.protocolInventories.count == 5)
     #expect(AgentPassNativeXPCContract.childGitProtocol.methods.count == 2)
-    #expect(AgentPassNativeXPCContract.dtoInventories.count == 24)
+    #expect(AgentPassNativeXPCContract.dtoInventories.count == 26)
 }
 
 @Test func nativeXPCContractRejectsAnUninventoriedChildGitDTO() {

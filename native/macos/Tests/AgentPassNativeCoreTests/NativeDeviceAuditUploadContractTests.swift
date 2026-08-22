@@ -79,3 +79,23 @@ func deviceAuditBatchIdentityUsesOrderedContent() throws {
     #expect(batch.batchID == expected)
     #expect(batch.batchID != (try NativeDeviceAuditBatch.batchID(for: [first])))
 }
+
+@Test("device audit ingestion accepts durable queued responses without treating them as committed")
+func queuedAuditIngestionResponseIsNotCommitted() throws {
+    let body: [String: Any] = [
+        "ingestion": [
+            "device_id": "66666666-6666-4666-8666-666666666666",
+            "batch_id": "audit-\(String(repeating: "a", count: 64))",
+            "inbox_id": "77777777-7777-4777-8777-777777777777",
+            "state": "uncertain"
+        ]
+    ]
+    let response = try NativeDeviceAuditIngestionResponse.decode(
+        try JSONSerialization.data(withJSONObject: body),
+        expectedDeviceID: "66666666-6666-4666-8666-666666666666"
+    )
+    #expect(response.deliveryState == "uncertain")
+    #expect(response.acceptedEventIDs.isEmpty)
+    #expect(response.queuedBatchID?.hasPrefix("audit-") == true)
+    #expect(response.queuedInboxID == "77777777-7777-4777-8777-777777777777")
+}

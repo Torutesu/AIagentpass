@@ -311,6 +311,25 @@ test("logout and explicit revocation invalidate sessions and clear the cookie", 
   await assert.rejects(() => f.service.authenticateRequest({ cookie: second.cookie, method: "GET", origin: ORIGIN }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
 });
 
+test("logout uses the atomic adapter when the repository provides one", async () => {
+  const repository = new MemorySessionRepository();
+  const calls = [];
+  repository.logoutSession = async (input) => {
+    calls.push(input);
+    return MemorySessionRepository.prototype.revokeSession.call(repository, input);
+  };
+  const f = fixture({ repository });
+  const issued = await issue(f);
+
+  await f.service.logout({ cookie: issued.cookie, origin: ORIGIN, csrfToken: issued.csrfToken });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].session_id, issued.session.session_id);
+  assert.equal(calls[0].member_id, MEMBER_ID);
+  assert.equal(calls[0].organization_id, ORGANIZATION_ID);
+  assert.match(calls[0].token_hash, /^[0-9a-f]{64}$/);
+});
+
 test("bounds active sessions per member", async () => {
   const f = fixture({ maxConcurrentSessions: 2 });
   const first = await issue(f);

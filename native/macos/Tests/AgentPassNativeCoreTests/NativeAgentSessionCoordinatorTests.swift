@@ -628,6 +628,7 @@ private func coordinatorFixture(
   #expect(first.status.state == .active)
   #expect(fixture.consumer.calls == 1)
   #expect(try fixture.coordinator.status(sessionID: coordinatorSessionID).state == .active)
+  #expect(try fixture.coordinator.binding(sessionID: coordinatorSessionID) == first.binding)
   #expect(
     try fixture.coordinator.close(sessionID: coordinatorSessionID, reason: .completed).state
       == .closed)

@@ -49,11 +49,13 @@ test("0079 is the discovered migration and has a matching catalog contract", asy
   const migration = migrations.find((entry) => entry.version === 79);
   const catalogEntry = catalog.entries.find((entry) => entry.kind === "postgres-migration" && entry.version === 79);
   assert.equal(migration?.name, "0079_device_audit_tenant_rls.sql");
+  assert.match(migration?.checksum ?? "", /^[0-9a-f]{64}$/u);
   assert.deepEqual(catalogEntry, {
     id: "migration.0079_device_audit_tenant_rls",
     kind: "postgres-migration",
     source: "postgres/0079_device_audit_tenant_rls.sql",
     version: 79,
+    sha256: migration.checksum,
     profile: "migration-tenant",
     purpose: "migration.0079.device-audit-tenant-rls",
     implementation_status: "implemented",

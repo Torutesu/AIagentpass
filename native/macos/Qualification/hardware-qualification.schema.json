@@ -43,14 +43,14 @@
         "bytes": { "type": "integer", "minimum": 1 },
         "sha256": { "$ref": "#/$defs/digest" },
         "signed": { "const": true },
-        "signing_identity": { "type": "string", "pattern": "^Developer ID Installer: .+\\([A-Z0-9]{10}\\)$" },
+        "signing_identity": { "type": "string", "pattern": "^Developer ID Installer: [^\\r\\n()]+ \\([A-Z0-9]{10}\\)$" },
         "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
       }
     },
     "release_manifest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "bytes", "sha256", "signature_path", "signature_sha256", "public_key_path", "public_key_fingerprint", "signed", "source_commit", "source_tree", "artifact_name", "artifact_bytes", "artifact_sha256", "release_attestation_sha256"],
+      "required": ["path", "bytes", "sha256", "signature_path", "signature_sha256", "public_key_path", "public_key_fingerprint", "signed", "source_commit", "source_tree", "artifact_name", "artifact_bytes", "artifact_sha256", "release_attestation_sha256", "notarization_status"],
       "properties": {
         "path": { "$ref": "#/$defs/absolute_path" },
         "bytes": { "type": "integer", "minimum": 1 },
@@ -65,7 +65,8 @@
         "artifact_name": { "$ref": "#/$defs/safe_name" },
         "artifact_bytes": { "type": "integer", "minimum": 1 },
         "artifact_sha256": { "$ref": "#/$defs/digest" },
-        "release_attestation_sha256": { "$ref": "#/$defs/digest" }
+        "release_attestation_sha256": { "$ref": "#/$defs/digest" },
+        "notarization_status": { "const": "accepted_stapled" }
       }
     },
     "machine": {
@@ -74,7 +75,7 @@
       "required": ["architecture", "hardware_class", "model_identifier", "os_version", "os_build", "native_execution", "vm_detected", "rosetta_detected"],
       "properties": {
         "architecture": { "enum": ["arm64", "x86_64"] },
-        "hardware_class": { "enum": ["apple_silicon", "intel"] },
+        "hardware_class": { "enum": ["apple_silicon", "intel_t2"] },
         "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
         "os_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
         "os_build": { "type": "string", "pattern": "^[A-Za-z0-9]{3,32}$" },
@@ -100,9 +101,9 @@
         "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
         "schema_version": { "const": 1 },
         "kind": { "const": "agentpass.macos.protected-runner-attestation" },
-        "runner_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" },
+        "runner_id": { "type": "string", "pattern": "^(?!.*(?:^|[._:/-])(local|localhost|static|unit|mock|fixture|fake|simulator|emulator|sandbox|test|macos-latest|vm|virtual|rosetta)(?:$|[._:/-]))[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" },
         "architecture": { "enum": ["arm64", "x86_64"] },
-        "hardware_class": { "enum": ["apple_silicon", "intel"] },
+        "hardware_class": { "enum": ["apple_silicon", "intel_t2"] },
         "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
         "native_execution": { "const": true },
         "vm_detected": { "const": false },
@@ -134,8 +135,8 @@
         "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
         "sha256": { "$ref": "#/$defs/digest" },
         "expected_sha256": { "$ref": "#/$defs/digest" },
-        "signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
-        "expected_signing_identity": { "anyOf": [{ "$ref": "#/$defs/developer_id_application" }, { "type": "null" }] },
+        "signing_identity": { "$ref": "#/$defs/developer_id_application" },
+        "expected_signing_identity": { "$ref": "#/$defs/developer_id_application" },
         "ancestor_directories_protected": { "const": true },
         "acl_checked": { "const": true },
         "executed_from_staging_copy": { "const": true },
@@ -144,7 +145,33 @@
       }
     },
     "launchd_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["service_label", "host_pid", "child_pid", "host_identity", "child_identity", "identity_match"], "properties": { "service_label": { "type": "string", "minLength": 1 }, "host_pid": { "type": "integer", "minimum": 1 }, "child_pid": { "type": "integer", "minimum": 1 }, "host_identity": { "type": "object" }, "child_identity": { "type": "object" }, "identity_match": { "const": true } } } } }] },
-    "nsxpc_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["mach_service", "connection_accepted", "authorized_client", "wrong_identity_denied"], "properties": { "mach_service": { "type": "string", "minLength": 1 }, "connection_accepted": { "const": true }, "authorized_client": { "const": true }, "wrong_identity_denied": { "const": true } } } } }] },
+    "nsxpc_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "$ref": "#/$defs/nsxpc_observation" } } }] },
+    "nsxpc_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "mach_service", "control_mach_service", "connection_accepted", "authorized_client", "wrong_identity_denied", "host_process", "control_client_process", "separate_process_close", "post_close_sign_rejected", "response_loss_retry"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "mach_service": { "const": "dev.agentpass.agent-host" },
+        "control_mach_service": { "const": "dev.agentpass.agent-host-control" },
+        "connection_accepted": { "const": true },
+        "authorized_client": { "const": true },
+        "wrong_identity_denied": { "const": true },
+        "host_process": { "$ref": "#/$defs/nsxpc_host_process" },
+        "control_client_process": { "$ref": "#/$defs/nsxpc_control_process" },
+        "separate_process_close": { "$ref": "#/$defs/nsxpc_close" },
+        "post_close_sign_rejected": { "$ref": "#/$defs/nsxpc_denial" },
+        "response_loss_retry": { "$ref": "#/$defs/nsxpc_retry" }
+      }
+    },
+    "nsxpc_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nsxpc_uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "nsxpc_identity": { "type": "string", "pattern": "^Developer ID Application: [^\\r\\n()]+ \\([A-Z0-9]{10}\\)$" },
+    "nsxpc_host_process": { "type": "object", "additionalProperties": false, "required": ["pid", "start_time_ns", "code_directory_sha256", "bundle_identifier", "signing_identity"], "properties": { "pid": { "type": "integer", "minimum": 1 }, "start_time_ns": { "type": "integer", "minimum": 1 }, "code_directory_sha256": { "$ref": "#/$defs/nsxpc_digest" }, "bundle_identifier": { "const": "dev.agentpass.agent-host" }, "signing_identity": { "$ref": "#/$defs/nsxpc_identity" } } },
+    "nsxpc_control_process": { "type": "object", "additionalProperties": false, "required": ["pid", "start_time_ns", "code_directory_sha256", "bundle_identifier", "signing_identity"], "properties": { "pid": { "type": "integer", "minimum": 1 }, "start_time_ns": { "type": "integer", "minimum": 1 }, "code_directory_sha256": { "$ref": "#/$defs/nsxpc_digest" }, "bundle_identifier": { "const": "dev.agentpass.native-client" }, "signing_identity": { "$ref": "#/$defs/nsxpc_identity" } } },
+    "nsxpc_receipt": { "type": "object", "additionalProperties": false, "required": ["status", "session_id", "operation_id", "closed_at_ms"], "properties": { "status": { "const": "closed" }, "session_id": { "$ref": "#/$defs/nsxpc_uuid" }, "operation_id": { "$ref": "#/$defs/nsxpc_uuid" }, "closed_at_ms": { "type": "integer", "minimum": 1 } } },
+    "nsxpc_close": { "type": "object", "additionalProperties": false, "required": ["session_id", "operation_id", "requested_by_pid", "target_host_pid", "distinct_processes", "used_control_mach_service", "receipt"], "properties": { "session_id": { "$ref": "#/$defs/nsxpc_uuid" }, "operation_id": { "$ref": "#/$defs/nsxpc_uuid" }, "requested_by_pid": { "type": "integer", "minimum": 1 }, "target_host_pid": { "type": "integer", "minimum": 1 }, "distinct_processes": { "const": true }, "used_control_mach_service": { "const": true }, "receipt": { "$ref": "#/$defs/nsxpc_receipt" } } },
+    "nsxpc_denial": { "type": "object", "additionalProperties": false, "required": ["session_id", "attempted_by_pid", "attempted_after_close", "status", "reason"], "properties": { "session_id": { "$ref": "#/$defs/nsxpc_uuid" }, "attempted_by_pid": { "type": "integer", "minimum": 1 }, "attempted_after_close": { "const": true }, "status": { "const": "rejected" }, "reason": { "const": "endpoint_closed" } } },
+    "nsxpc_retry": { "type": "object", "additionalProperties": false, "required": ["session_id", "operation_id", "first_attempt_response_lost", "reconnected_before_retry", "retry_attempted", "same_operation_id", "retry_receipt", "no_second_close_effect", "terminal_state", "converged"], "properties": { "session_id": { "$ref": "#/$defs/nsxpc_uuid" }, "operation_id": { "$ref": "#/$defs/nsxpc_uuid" }, "first_attempt_response_lost": { "const": true }, "reconnected_before_retry": { "const": true }, "retry_attempted": { "const": true }, "same_operation_id": { "const": true }, "retry_receipt": { "$ref": "#/$defs/nsxpc_receipt" }, "no_second_close_effect": { "const": true }, "terminal_state": { "const": "closed" }, "converged": { "const": true } } },
     "restart_check": { "allOf": [{ "$ref": "#/$defs/check" }, { "type": "object", "properties": { "observed": { "type": "object", "additionalProperties": false, "required": ["initial_pid", "crash_signal", "restarted_pid", "restart_count", "state_recovered"], "properties": { "initial_pid": { "type": "integer", "minimum": 1 }, "crash_signal": { "type": "string", "minLength": 1 }, "restarted_pid": { "type": "integer", "minimum": 1 }, "restart_count": { "type": "integer", "minimum": 1 }, "state_recovered": { "const": true } } } } }] }
   }
 }

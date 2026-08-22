@@ -223,18 +223,22 @@ BEGIN
     ORDER BY g.expires_at ASC, g.grant_id ASC
     LIMIT 500
     FOR UPDATE OF g
+  ), updated AS (
+    UPDATE public.agent_session_grants AS g
+    SET status = CASE WHEN g.expires_at <= now_value THEN 'expired' ELSE 'revoked' END,
+        expired_at = CASE WHEN g.expires_at <= now_value
+          THEN GREATEST(now_value, COALESCE(p_revoked_at, now_value), g.expires_at) ELSE NULL END,
+        revoked_at = CASE WHEN g.expires_at <= now_value THEN NULL
+          ELSE GREATEST(now_value, COALESCE(p_revoked_at, now_value), g.issued_at) END
+    FROM candidates
+    WHERE g.organization_id = candidates.organization_id
+      AND g.grant_id = candidates.grant_id
+      AND g.status = 'issued'
+    RETURNING g.status
   )
-  UPDATE public.agent_session_grants AS g
-  SET status = CASE WHEN g.expires_at <= now_value THEN 'expired' ELSE 'revoked' END,
-      expired_at = CASE WHEN g.expires_at <= now_value
-        THEN GREATEST(now_value, COALESCE(p_revoked_at, now_value), g.expires_at) ELSE NULL END,
-      revoked_at = CASE WHEN g.expires_at <= now_value THEN NULL
-        ELSE GREATEST(now_value, COALESCE(p_revoked_at, now_value), g.issued_at) END
-  FROM candidates
-  WHERE g.organization_id = candidates.organization_id
-    AND g.grant_id = candidates.grant_id
-    AND g.status = 'issued';
-  GET DIAGNOSTICS grant_count = ROW_COUNT;
+  SELECT COUNT(*) FILTER (WHERE status = 'expired'), COUNT(*) FILTER (WHERE status = 'revoked')
+    INTO grant_expired_count, grant_revoked_count FROM updated;
+  grant_count := grant_expired_count + grant_revoked_count;
 
   WITH candidates AS (
     SELECT s.organization_id, s.session_id
@@ -248,24 +252,24 @@ BEGIN
     ORDER BY s.expires_at ASC, s.session_id ASC
     LIMIT 500
     FOR UPDATE OF s
+  ), updated AS (
+    UPDATE public.agent_sessions AS s
+    SET status = CASE WHEN s.expires_at <= now_value THEN 'expired' ELSE 'revoked' END,
+        last_request_id = COALESCE(s.last_request_id, s.active_request_id),
+        active_request_id = NULL,
+        expired_at = CASE WHEN s.expires_at <= now_value
+          THEN GREATEST(now_value, COALESCE(p_revoked_at, now_value), s.expires_at) ELSE NULL END,
+        revoked_at = CASE WHEN s.expires_at <= now_value THEN NULL
+          ELSE GREATEST(now_value, COALESCE(p_revoked_at, now_value), s.created_at) END
+    FROM candidates
+    WHERE s.organization_id = candidates.organization_id
+      AND s.session_id = candidates.session_id
+      AND s.status IN ('challenge_pending','active','request_reserved','signing_intent','signed')
+    RETURNING s.status
   )
-  UPDATE public.agent_sessions AS s
-  SET status = CASE WHEN s.expires_at <= now_value THEN 'expired' ELSE 'revoked' END,
-      last_request_id = COALESCE(s.last_request_id, s.active_request_id),
-      active_request_id = NULL,
-      expired_at = CASE WHEN s.expires_at <= now_value
-        THEN GREATEST(now_value, COALESCE(p_revoked_at, now_value), s.expires_at) ELSE NULL END,
-      revoked_at = CASE WHEN s.expires_at <= now_value THEN NULL
-        ELSE GREATEST(now_value, COALESCE(p_revoked_at, now_value), s.created_at) END
-  FROM candidates
-  WHERE s.organization_id = candidates.organization_id
-    AND s.session_id = candidates.session_id
-    AND s.status IN ('challenge_pending','active','request_reserved','signing_intent','signed');
-  GET DIAGNOSTICS session_count = ROW_COUNT;
-  grant_expired_count := 0;
-  grant_revoked_count := grant_count;
-  session_expired_count := 0;
-  session_revoked_count := session_count;
+  SELECT COUNT(*) FILTER (WHERE status = 'expired'), COUNT(*) FILTER (WHERE status = 'revoked')
+    INTO session_expired_count, session_revoked_count FROM updated;
+  session_count := session_expired_count + session_revoked_count;
   RETURN jsonb_build_object(
     'counts', jsonb_build_array(grant_count, session_count),
     'expired', grant_expired_count + session_expired_count,

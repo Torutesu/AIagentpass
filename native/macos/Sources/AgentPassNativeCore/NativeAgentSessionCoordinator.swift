@@ -596,6 +596,21 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     }
   }
 
+  /// Returns the service-observed binding for an authenticated connection's
+  /// session. The binding is used only for internal association cleanup; it is
+  /// never serialized into an Agent DTO or accepted as caller authority.
+  public func binding(sessionID: String) throws -> NativeAgentSessionBinding {
+    guard Self.uuid(sessionID) else { throw NativeAgentSessionCoordinatorError.invalidInput }
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let binding = stateLock.withLock({ sessionBindings[sessionID.lowercased()] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    return binding
+  }
+
   /// Reserves one fixed Git-sign request after a fresh process, worktree,
   /// control, generation, and key binding observation. The returned
   /// reservation is the only authority accepted by the signing transitions.

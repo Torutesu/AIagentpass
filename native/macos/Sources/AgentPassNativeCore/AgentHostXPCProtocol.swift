@@ -119,6 +119,10 @@ public enum AgentPassHostXPCContract {
         containsForbiddenAuthorityKey(coder) || Self.requestOnlyForbiddenKeys.contains { coder.containsValue(forKey: $0) }
     }
 
+    fileprivate static func containsForbiddenControlRequestKey(_ coder: NSCoder) -> Bool {
+        containsForbiddenAuthorityKey(coder) || Self.controlRequestForbiddenKeys.contains { coder.containsValue(forKey: $0) }
+    }
+
     /// These names are reserved so a later archive extension cannot silently
     /// turn a Host DTO into an authority-bearing request. They are checked at
     /// decode time as well as kept out of every public DTO property.
@@ -135,6 +139,19 @@ public enum AgentPassHostXPCContract {
         "session_id", "status", "expires_at_ms", "max_signatures", "used_signatures",
         "child_attached", "attached_at_ms", "closed_at_ms", "signature", "remaining_signatures",
     ]
+
+    private static let controlRequestForbiddenKeys = [
+        "status", "expires_at_ms", "max_signatures", "used_signatures",
+        "child_attached", "attached_at_ms", "closed_at_ms", "signature", "remaining_signatures",
+    ]
+}
+
+/// Separate Mach service and protocol for cross-connection Host lifecycle
+/// control. The control surface intentionally has no prepare, attach, sign,
+/// or status operation.
+public enum AgentPassHostControlXPCContract {
+    public static let protocolVersion = AgentPassHostXPCContract.protocolVersion
+    public static let machServiceName = "dev.agentpass.agent-host-control"
 }
 
 /// A prepare request. The service assigns the session identifier in the
@@ -764,8 +781,145 @@ public final class AgentPassHostCloseResponse: NSObject, NSSecureCoding {
     }
 }
 
+/// A control-plane close request for a Host session owned by another XPC
+/// connection. `sessionID` is a service-issued locator, not an authority
+/// token. `operationID` is an in-memory idempotency key only; the service
+/// authenticates the caller from the live XPC peer before it considers either
+/// value. Neither value is a secret and neither is intended for argv,
+/// environment, or file transport.
+@objc(AgentPassHostControlCloseRequest)
+public final class AgentPassHostControlCloseRequest: NSObject, NSSecureCoding {
+    public static var supportsSecureCoding: Bool { true }
+
+    public let protocolVersion: Int
+    public let sessionID: String
+    public let operationID: String
+    public let reason: String
+
+    public init?(
+        protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
+        sessionID: String,
+        operationID: String,
+        reason: AgentPassHostXPCContract.CloseReason
+    ) {
+        guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
+              let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
+              let operationID = AgentPassHostXPCContract.canonicalUUID(operationID) else {
+            return nil
+        }
+        self.protocolVersion = protocolVersion
+        self.sessionID = sessionID
+        self.operationID = operationID
+        self.reason = reason.rawValue
+        super.init()
+    }
+
+    public required convenience init?(coder: NSCoder) {
+        guard !AgentPassHostXPCContract.containsForbiddenControlRequestKey(coder),
+              coder.containsValue(forKey: Keys.protocolVersion),
+              let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
+              let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
+              let operationID = coder.decodeObject(of: NSString.self, forKey: Keys.operationID) as String?,
+              let reason = coder.decodeObject(of: NSString.self, forKey: Keys.reason) as String?,
+              let reason = AgentPassHostXPCContract.CloseReason(rawValue: reason) else {
+            return nil
+        }
+        self.init(
+            protocolVersion: protocolVersion,
+            sessionID: sessionID,
+            operationID: operationID,
+            reason: reason
+        )
+    }
+
+    public func encode(with coder: NSCoder) {
+        coder.encode(NSNumber(value: protocolVersion), forKey: Keys.protocolVersion)
+        coder.encode(sessionID as NSString, forKey: Keys.sessionID)
+        coder.encode(operationID as NSString, forKey: Keys.operationID)
+        coder.encode(reason as NSString, forKey: Keys.reason)
+    }
+
+    private enum Keys {
+        static let protocolVersion = "protocol_version"
+        static let sessionID = "session_id"
+        static let operationID = "operation_id"
+        static let reason = "reason"
+    }
+}
+
+/// The control response is deliberately separate from the connection-owned
+/// close response so a retry can be correlated without turning an operation
+/// ID into a reusable bearer. The response is only returned after the service
+/// has performed the terminal transition.
+@objc(AgentPassHostControlCloseResponse)
+public final class AgentPassHostControlCloseResponse: NSObject, NSSecureCoding {
+    public static var supportsSecureCoding: Bool { true }
+
+    public let protocolVersion: Int
+    public let operationID: String
+    public let sessionID: String
+    public let status: String
+    public let closedAtMilliseconds: Int64
+
+    public init?(
+        protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
+        operationID: String,
+        sessionID: String,
+        closedAtMilliseconds: Int64
+    ) {
+        guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
+              let operationID = AgentPassHostXPCContract.canonicalUUID(operationID),
+              let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
+              AgentPassHostXPCContract.isTimestamp(closedAtMilliseconds) else {
+            return nil
+        }
+        self.protocolVersion = protocolVersion
+        self.operationID = operationID
+        self.sessionID = sessionID
+        self.status = AgentPassHostXPCContract.SessionStatus.closed.rawValue
+        self.closedAtMilliseconds = closedAtMilliseconds
+        super.init()
+    }
+
+    public required convenience init?(coder: NSCoder) {
+        guard !AgentPassHostXPCContract.containsForbiddenAuthorityKey(coder),
+              coder.containsValue(forKey: Keys.protocolVersion),
+              coder.containsValue(forKey: Keys.closedAtMilliseconds),
+              let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
+              let operationID = coder.decodeObject(of: NSString.self, forKey: Keys.operationID) as String?,
+              let sessionID = coder.decodeObject(of: NSString.self, forKey: Keys.sessionID) as String?,
+              let status = coder.decodeObject(of: NSString.self, forKey: Keys.status) as String?,
+              status == AgentPassHostXPCContract.SessionStatus.closed.rawValue,
+              let closedAtMilliseconds = coder.decodeObject(of: NSNumber.self, forKey: Keys.closedAtMilliseconds)?.int64Value else {
+            return nil
+        }
+        self.init(
+            protocolVersion: protocolVersion,
+            operationID: operationID,
+            sessionID: sessionID,
+            closedAtMilliseconds: closedAtMilliseconds
+        )
+    }
+
+    public func encode(with coder: NSCoder) {
+        coder.encode(NSNumber(value: protocolVersion), forKey: Keys.protocolVersion)
+        coder.encode(operationID as NSString, forKey: Keys.operationID)
+        coder.encode(sessionID as NSString, forKey: Keys.sessionID)
+        coder.encode(status as NSString, forKey: Keys.status)
+        coder.encode(NSNumber(value: closedAtMilliseconds), forKey: Keys.closedAtMilliseconds)
+    }
+
+    private enum Keys {
+        static let protocolVersion = "protocol_version"
+        static let operationID = "operation_id"
+        static let sessionID = "session_id"
+        static let status = "status"
+        static let closedAtMilliseconds = "closed_at_ms"
+    }
+}
+
 /// Host-only XPC surface. It is connection-owned and intentionally disjoint
-/// from both the management and Agent protocols.
+/// from both the management, control, and Agent protocols.
 @objc public protocol AgentPassHostXPCProtocol {
     func prepareHostSession(_ request: AgentPassHostPrepareRequest, withReply reply: @escaping (AgentPassHostPrepareResponse?, NSError?) -> Void)
     func attachHostChild(_ request: AgentPassHostAttachChildRequest, withReply reply: @escaping (AgentPassHostAttachChildResponse?, NSError?) -> Void)
@@ -792,5 +946,31 @@ public enum AgentPassHostXPCInterface {
 
     private static func register(_ type: AnyClass, on interface: NSXPCInterface, selector: Selector, reply: Bool = false) {
         interface.setClasses(NSSet(array: [type]) as! Set<AnyHashable>, for: selector, argumentIndex: 0, ofReply: reply)
+    }
+}
+
+/// Dedicated control-only XPC surface. It is exported by a separate Mach
+/// listener, so a normal Host connection cannot invoke lifecycle control and
+/// a control connection cannot invoke signing methods.
+@objc public protocol AgentPassHostControlXPCProtocol {
+    func closeHostSessionFromControl(_ request: AgentPassHostControlCloseRequest, withReply reply: @escaping (AgentPassHostControlCloseResponse?, NSError?) -> Void)
+}
+
+public enum AgentPassHostControlXPCInterface {
+    public static func make() -> NSXPCInterface {
+        let interface = NSXPCInterface(with: AgentPassHostControlXPCProtocol.self)
+        interface.setClasses(
+            NSSet(array: [AgentPassHostControlCloseRequest.self]) as! Set<AnyHashable>,
+            for: #selector(AgentPassHostControlXPCProtocol.closeHostSessionFromControl(_:withReply:)),
+            argumentIndex: 0,
+            ofReply: false
+        )
+        interface.setClasses(
+            NSSet(array: [AgentPassHostControlCloseResponse.self]) as! Set<AnyHashable>,
+            for: #selector(AgentPassHostControlXPCProtocol.closeHostSessionFromControl(_:withReply:)),
+            argumentIndex: 0,
+            ofReply: true
+        )
+        return interface
     }
 }

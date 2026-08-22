@@ -11,11 +11,16 @@ rename either file after evidence is produced. A changed byte, missing file,
 symlink, hard link, duplicate inventory entry, or changed inventory JSON is a
 hard failure.
 
+The production app is universal: every executable in the signed bundle,
+including all three Git helpers under `Contents/Resources/bin`, must contain
+exactly the `arm64` and `x86_64` slices. A single-architecture app or a helper
+outside that frozen resource path is rejected before notarization.
+
 ## Protected release evidence
 
 After the credentialed macOS job has run `pkgutil --check-signature`,
 `xcrun notarytool`, `xcrun stapler validate`, and the install Gatekeeper
-assessment, create the closed evidence document and the three small canonical
+assessment, create the closed evidence document and the four small canonical
 JSON projections in one evidence directory. The evidence must bind all four
 records to the PKG SHA-256 and bind the inventory descriptor to the exact
 inventory file:
@@ -25,10 +30,13 @@ node native/macos/scripts/verify-distribution-evidence.mjs \
   distribution-evidence.json \
   AgentPass-1.0.0-macos-universal.pkg.inventory.json \
   release-root \
-  evidence
+  evidence \
+  evidence/independent-verification.json
 ```
 
-The verifier requires a trusted `Developer ID Installer` identity and a
+The verifier requires a separate canonical independent-verification artifact
+whose digest is recorded in the evidence envelope, as well as a trusted
+`Developer ID Installer` identity and a
 10-character Team ID, an `Accepted` notary result with a UUID, validated
 stapling, and an accepted Gatekeeper assessment. It re-hashes the candidate,
 re-hashes every inventory entry, and re-reads every evidence projection.
@@ -55,6 +63,13 @@ distribution. Production onboarding must not continue when any artifact or
 evidence check is unknown or fails.
 
 ## Physical hardware qualification evidence
+
+For the operator handoff covering the installed launchd boundary and the
+separate Host-control close flow, use
+[`docs/runbooks/MACOS_HOST_CONTROL_QUALIFICATION_HANDOFF.md`](../runbooks/MACOS_HOST_CONTROL_QUALIFICATION_HANDOFF.md).
+It defines the protected probe executable, Developer ID identity, exact SHA,
+`agentpass close`, post-close signing denial, response-loss retry, and the
+`not_proven` stop conditions.
 
 The separate `macOS hardware qualification evidence` workflow must run once on
 an Apple Silicon runner and once on an Intel runner for the exact release
@@ -85,3 +100,14 @@ redacted JSON. Configure their absolute paths as the protected repository
 variables `AGENTPASS_LAUNCHD_HOST_CHILD_PROBE`, `AGENTPASS_NSXPC_PROBE`, and
 `AGENTPASS_CRASH_RESTART_PROBE`. The workflow does not manufacture probes or
 claim hardware evidence when those prerequisites are absent.
+
+The qualification entrypoint performs the physical-runner preflight before it
+starts the installed toolchain: it checks the requested lane against
+`uname -m`, rejects translated/Rosetta execution and hypervisor guests,
+requires the `AppleSEPManager` Secure Enclave/T2 probe, rejects local/mock/test
+runner identifiers, and only accepts the root-owned toolchain at
+`/opt/agentpass/macos/qualification-tool`. The distribution wrapper similarly
+rejects relative, symlinked, and non-regular evidence inputs before delegating
+to the evidence verifier. These are input and execution guards; actual
+physical hardware, Apple notarization, stapler, and Gatekeeper qualification
+remain `not_proven` until protected runner evidence exists.

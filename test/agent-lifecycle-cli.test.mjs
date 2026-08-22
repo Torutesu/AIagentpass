@@ -22,10 +22,9 @@ test("bounded lifecycle failures expose no arguments or authority selectors", ()
   assert.throws(() => unavailableAgentLifecycle("sign"), /operation is invalid/u);
 });
 
-for (const operation of ["launch", "close"]) {
-  test(`${operation} fails closed until the signed Agent Host lifecycle is connected`, () => {
+test("launch fails closed until the signed Agent Host lifecycle is connected", () => {
     const secret = "authority-material-that-must-not-be-echoed";
-    const result = spawnSync(process.execPath, [cli, operation, "--token", secret, "--key", secret, "--algorithm", "unsafe"], {
+    const result = spawnSync(process.execPath, [cli, "launch", "--token", secret, "--key", secret, "--algorithm", "unsafe"], {
       encoding: "utf8",
       env: { ...process.env, AGENTPASS_SESSION: secret }
     });
@@ -33,12 +32,22 @@ for (const operation of ["launch", "close"]) {
     assert.equal(result.stderr, "");
     const output = JSON.parse(result.stdout);
     assert.equal(output.ok, false);
-    assert.equal(output.operation, operation);
+    assert.equal(output.operation, "launch");
     assert.equal(output.error.code, AGENT_LIFECYCLE_UNAVAILABLE);
     assert.equal(`${result.stdout}${result.stderr}`.includes(secret), false);
     assert.equal(`${result.stdout}${result.stderr}`.includes("unsafe"), false);
+});
+
+test("close rejects an unbound or malformed lifecycle request without echoing authority selectors", () => {
+  const secret = "authority-material-that-must-not-be-echoed";
+  const result = spawnSync(process.execPath, [cli, "close", "--token", secret, "--key", secret, "--algorithm", "unsafe"], {
+    encoding: "utf8",
+    env: { ...process.env, AGENTPASS_SESSION: secret }
   });
-}
+  assert.equal(result.status, 1);
+  assert.equal(`${result.stdout}${result.stderr}`.includes(secret), false);
+  assert.equal(`${result.stdout}${result.stderr}`.includes("unsafe"), false);
+});
 
 test("unknown commands and subcommands never return success", () => {
   for (const arguments_ of [["unknown-command"], ["broker", "unknown-subcommand"], ["session", "unknown-subcommand"]]) {

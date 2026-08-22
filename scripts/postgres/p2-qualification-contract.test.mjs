@@ -12,6 +12,7 @@ const REPOSITORY_ROOT = path.resolve(new URL("../..", import.meta.url).pathname)
 const INTEGRATION_FILE = path.join(REPOSITORY_ROOT, "scripts/postgres/device-audit-postgres-qualification.integration.test.mjs");
 const EVIDENCE_FILE = path.join(REPOSITORY_ROOT, "scripts/postgres/postgres-qualification-evidence.mjs");
 const CI_FILE = path.join(REPOSITORY_ROOT, ".github/workflows/ci.yml");
+const ACTION_FILE = path.join(REPOSITORY_ROOT, ".github/actions/postgres-authority-qualification/action.yml");
 
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -20,6 +21,9 @@ function digest(value) {
 test("P2 qualification contract keeps security probes on agentpass_app", () => {
   const integration = fs.readFileSync(INTEGRATION_FILE, "utf8");
   assert.match(integration, /AGENTPASS_TEST_APP_DATABASE_URL/u);
+  assert.match(integration, /async function assertTls/u);
+  assert.match(integration, /pg_stat_ssl WHERE pid = pg_backend_pid\(\)/u);
+  assert.match(integration, /await assertTls\(maintenancePool, "maintenance"\)/u);
   assert.match(integration, /assertIdentity\(appPool, "agentpass_app"\)/u);
   assert.match(integration, /has_table_privilege\(current_user/u);
   assert.match(integration, /await appClient\.query\("BEGIN"\)/u);
@@ -35,15 +39,23 @@ test("P2 qualification contract keeps security probes on agentpass_app", () => {
 test("P2 evidence contract records exact administrator and application identities", () => {
   const evidence = fs.readFileSync(EVIDENCE_FILE, "utf8");
   const ci = fs.readFileSync(CI_FILE, "utf8");
+  const action = fs.readFileSync(ACTION_FILE, "utf8");
   assert.match(evidence, /SELECT session_user, current_user/u);
   assert.match(evidence, /role_assertions/u);
   assert.match(evidence, /agentpass_app/u);
   assert.match(evidence, /report\.service\.role_assertions/u);
+  assert.match(evidence, /device_audit_inbox_authority/u);
+  assert.match(evidence, /assert\.equal\(row\.app_can_claim_inbox, false\)/u);
+  assert.match(evidence, /assert\.equal\(row\.maintenance_can_settle_inbox, true\)/u);
   assert.match(evidence, /platform_device_audit_tenant_context/u);
   assert.match(evidence, /tenant_authority_functions/u);
-  assert.match(ci, /AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"/u);
-  assert.match(ci, /\.service\.role_assertions/u);
-  assert.match(ci, /scripts\/postgres\/p2-qualification-contract\.test\.mjs/u);
+  assert.match(action, /AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"/u);
+  assert.match(action, /AGENTPASS_TEST_MAINTENANCE_DATABASE_URL="\$N1_MAINTENANCE_DATABASE_URL"/u);
+  assert.match(evidence, /AGENTPASS_TEST_MAINTENANCE_DATABASE_URL/u);
+  assert.match(evidence, /connection: "maintenance"/u);
+  assert.match(ci, /uses: \.\/\.github\/actions\/postgres-authority-qualification/u);
+  assert.match(action, /scripts\/postgres\/p2-qualification-contract\.test\.mjs/u);
+  assert.match(action, /postgres-qualification-evidence\.mjs verify/u);
 });
 
 test("P2 TAP validation requires a complete, passing, count-consistent envelope", () => {
@@ -101,6 +113,7 @@ test("P2 canonical evidence rejects missing or mismatched role assertions", () =
       schema: {
         head: POSTGRES_SCHEMA_HEAD.version,
         migration_count: POSTGRES_SCHEMA_HEAD.migration_count,
+        head_name: POSTGRES_SCHEMA_HEAD.name,
         head_checksum: POSTGRES_SCHEMA_HEAD.checksum,
         migrations_sha256: digest(JSON.stringify(POSTGRES_SCHEMA_HEAD.migrations)),
       },
@@ -108,8 +121,9 @@ test("P2 canonical evidence rejects missing or mismatched role assertions", () =
         ssl: true,
         roles: ["agentpass_app", "agentpass_backup", "agentpass_maintenance", "agentpass_migrator", "agentpass_signer"],
         role_assertions: [
-          { connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres" },
-          { connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app" },
+          { connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres", ssl: true },
+          { connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app", ssl: true },
+          { connection: "maintenance", expected_role: "agentpass_maintenance", session_user: "agentpass_maintenance", current_user: "agentpass_maintenance", ssl: true },
         ],
         forced_rls_relations: 3,
         device_audit_triggers: 2,
@@ -117,6 +131,14 @@ test("P2 canonical evidence rejects missing or mismatched role assertions", () =
           relation: "platform_device_audit_tenant_context",
           security_definer_functions: 3,
           app_can_select_relation: false,
+        },
+        device_audit_inbox_authority: {
+          app_can_enqueue: true,
+          app_can_claim: false,
+          app_can_settle: false,
+          maintenance_can_claim: true,
+          maintenance_can_settle: true,
+          maintenance_can_health: true,
         },
       },
       suites: { tap: { tests: 1, tap_sha256: digest(tap) } },

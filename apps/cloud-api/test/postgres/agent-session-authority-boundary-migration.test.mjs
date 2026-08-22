@@ -94,3 +94,11 @@ test("0078 publishes the SECURITY DEFINER EXECUTE contract", async () => {
     assert.match(sql, new RegExp(`'${name}\\(`, "u"));
   }
 });
+
+test("0078 reports expired and revoked lifecycle outcomes separately", async () => {
+  const sql = await read(migrationUrl);
+  assert.match(sql, /RETURNING g\.status[\s\S]*COUNT\(\*\) FILTER \(WHERE status = 'expired'\)[\s\S]*INTO grant_expired_count, grant_revoked_count/u);
+  assert.match(sql, /RETURNING s\.status[\s\S]*COUNT\(\*\) FILTER \(WHERE status = 'expired'\)[\s\S]*INTO session_expired_count, session_revoked_count/u);
+  assert.doesNotMatch(sql, /grant_expired_count := 0;[\s\S]*grant_revoked_count := grant_count;/u);
+  assert.doesNotMatch(sql, /session_expired_count := 0;[\s\S]*session_revoked_count := session_count;/u);
+});

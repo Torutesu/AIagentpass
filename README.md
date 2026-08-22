@@ -6,6 +6,33 @@ AgentPass is an OSS policy broker for coding-agent operations. It keeps signing 
 
 > Early alpha: macOS + Git SSH signing. Review the threat model before using production keys.
 
+## Start here
+
+AgentPass is for people who want Claude Code, Cursor, or another coding agent
+to make policy-approved Git commits while they are away from the keyboard.
+The agent receives a short-lived, repository-scoped capability; it never
+receives the private signing key. Git still performs the commit, and the
+`agentpass-git-sign` helper asks the local broker to sign only after the
+repository, branch, remote, operation, session, and revocation state pass
+their checks.
+
+The boundary is:
+
+- **The key stays on the Mac.** The native production path uses
+  non-exportable Secure Enclave-backed keys and a signed native service.
+- **The agent gets permission, not key material.** Permissions are short-lived,
+  Agent-bound, and limited by policy.
+- **The Console is for human control.** Organization/device enrollment,
+  WebAuthn approval, audit inspection, scope reduction, and revocation happen
+  through the Console or its CLI-guided browser flow.
+- **A green local test is not a production qualification.** Real PostgreSQL,
+  KMS, WebAuthn, protected runners, and physical macOS evidence are separate
+  release gates.
+
+If you are evaluating the repository, use the local setup below. If you are
+operating a release, use [Protected qualification for release operators](#protected-qualification-for-release-operators)
+and do not treat the evaluation path as production approval.
+
 ## Why
 
 Password managers are designed around human approval. Coding agents need unattended execution, but a plaintext key gives an untrusted process too much power. AgentPass starts with Git commit signing: the private key remains in macOS Secure Enclave-backed infrastructure, while AgentPass applies repository, branch, and remote policy before delegating to `ssh-keygen`.
@@ -23,6 +50,11 @@ agentpass doctor
 ### Production macOS installation
 
 The production channel is a Developer ID-signed and notarized PKG. AgentPass verifies the signed release manifest, pinned release key, Apple Team ID, stapled notarization ticket, Gatekeeper assessment, package payload, and nested code signatures before installation. Verification is a dry run unless `--execute` is explicit:
+
+The values below are release-metadata placeholders, not values to invent. Get
+the manifest, public key, pinned fingerprint, and Team ID from the same release
+packet. Never put a private key, credential, enrollment invitation, or bearer
+token into this document, a repository, a URL, or an environment variable.
 
 ```sh
 agentpass install \
@@ -79,6 +111,25 @@ the invitation in a repository, URL, environment variable, or shell history.
 The browser-assisted command above is the recommended non-engineer path. `--console-url` and `--enrollment-url` are independently pinned: the first is the exact HTTPS Console origin that opens in the browser, and the second is the exact Cloud API `/v1` origin used for enrollment. Neither URL is inferred from the other. The URL fragment contains only a short-lived loopback correlation URL. The handoff nonce remains ephemeral in process memory and Console memory, and the invitation remains memory-only on both sides. No nonce or invitation is placed in a URL, browser storage, argv, environment variable, log, or setup journal.
 
 For a non-engineer, the intended flow is: install the signed PKG, run the browser-assisted command with the two organization-approved URLs, sign in to Console, choose the device name, approve the WebAuthn prompt, and wait for the CLI to finish. If local browser delivery fails, copy the displayed invitation once and use the explicit `pbpaste`/stdin recovery fallback; do not save it in a file, shell history, argv, or an environment variable. If the browser does not open, the handoff expires, or the Console origin is rejected, verify the separately pinned URLs and start a fresh command. Never reuse an expired fragment, nonce, or invitation.
+
+The setup journal is intentionally resumable and fail-closed. The normal
+sequence is:
+
+```sh
+agentpass setup status
+agentpass setup continue --execute
+# At the device-enrollment step, use the browser command shown above.
+agentpass setup continue --execute --browser \
+  --console-url 'https://console.example' \
+  --enrollment-url 'https://api.example/v1'
+agentpass setup status
+agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
+```
+
+Run `setup continue --execute` once per displayed durable step. Run it as the
+signed-in interactive user, not with `sudo`; it may ask for macOS System
+Settings approval. If a step fails, inspect `setup status` and resume from the
+reported state instead of deleting the journal or repeating enrollment.
 
 ### Audit Exports in Console
 
@@ -168,6 +219,118 @@ git config --local commit.gpgsign true
 ## Claude Code and Cursor
 
 AgentPass includes a local MCP server for status, policy checks, setup guidance, and a bounded redacted audit tail. It deliberately does not expose a general-purpose signing tool: commits continue through Git and `agentpass-git-sign`.
+
+### Configure a project
+
+The supported user-facing integration is project-scoped MCP configuration. The
+preview commands do not write files; add `--install` only after reviewing the
+JSON. Existing unrelated MCP servers are preserved.
+
+```sh
+# Claude Code
+agentpass integrate claude-code --project "$PWD"
+agentpass integrate claude-code --install --project "$PWD"
+
+# Cursor
+agentpass integrate cursor --project "$PWD"
+agentpass integrate cursor --install --project "$PWD"
+```
+
+The equivalent native onboarding command also verifies the pinned macOS
+application and prepares the setup journal:
+
+```sh
+agentpass setup --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
+agentpass setup --client claude-code --project "$PWD" --team-id 'APPLETEAM1' --execute
+```
+
+Use `--client cursor` for Cursor. Start Claude Code or Cursor from its normal
+launcher after the integration is installed. The AgentPass MCP surface is
+limited to status, policy checks, setup guidance, and a redacted audit tail;
+the agent does not receive a signing tool or a private key. When it runs
+`git commit`, Git invokes `agentpass-git-sign` and the broker enforces the
+current policy.
+
+Before an unattended run, create a short-lived session for the selected Agent
+identity. The command exports only the returned token to the child process;
+the token itself must never be copied into documentation or committed files:
+
+```sh
+export AGENTPASS_SESSION="$(agentpass session start 900 --agent AGENT_ID)"
+export AGENTPASS_AGENT_ID='AGENT_ID'
+```
+
+Then configure Git once in the repository:
+
+```sh
+git config --local gpg.format ssh
+git config --local user.signingkey ~/.agentpass/keys/id_git_sign.pub
+git config --local gpg.ssh.program "$(command -v agentpass-git-sign)"
+git config --local commit.gpgsign true
+```
+
+The adapter launch plans are intentionally closed: they accept only an
+absolute project directory and a bounded TTL, and reject key/session/path
+substitutions. The lifecycle command is available only after the signed native
+handoff exists and otherwise fails closed:
+
+```sh
+agentpass launch --agent claude-code --project "$PWD" --ttl 600
+agentpass launch --agent cursor --project "$PWD" --ttl 600
+```
+
+On a non-qualified Linux or unsigned macOS checkout, a lifecycle failure is
+expected and remains `not_proven`; it is not permission to bypass the native
+boundary. The adapter contract can be inspected without secrets with:
+
+```sh
+node adapters/claude-code/bin/agentpass-claude-code.mjs plan "$PWD"
+node adapters/cursor/bin/agentpass-cursor.mjs plan "$PWD"
+```
+
+### Closing an unattended Agent session
+
+The signed native Host control path can close a running Agent Host session
+without giving the agent a key or a reusable bearer token:
+
+```sh
+agentpass close \
+  --session-id 'SESSION_UUID' \
+  --reason client_shutdown
+```
+
+The command uses the dedicated `dev.agentpass.agent-host-control` Mach service
+and the signed Native Client principal. If the response is lost, retry with
+the same operation ID printed in the timeout message:
+
+```sh
+agentpass close \
+  --session-id 'SESSION_UUID' \
+  --operation-id 'OPERATION_UUID' \
+  --reason client_shutdown
+```
+
+This route is implemented and covered by focused contract tests. A physical
+Developer ID-signed install, launchd registration, real cross-process NSXPC
+call, and production macOS qualification are separate release gates and are
+not implied by local tests.
+
+### Starting a bounded Agent lifecycle
+
+After Console/setup has created the one-time local handoff, the adapter accepts
+only the project directory and a short TTL. The authority is inherited through
+the private FD3 handoff; never put it in argv, an environment variable, a URL,
+or a file:
+
+```sh
+agentpass launch --agent claude-code --project "$PWD" --ttl 600
+agentpass launch --agent cursor --project "$PWD" --ttl 600
+```
+
+The adapter invokes only the fixed, signed Native Host. On Linux, an unsigned
+build, a missing handoff, an untrusted Host, or a missing physical macOS
+installation, the command fails closed. A successful local contract test does
+not by itself prove a Developer ID-signed launchd/XPC execution.
 
 Preview a project-scoped integration, then install it explicitly:
 
@@ -288,6 +451,73 @@ native/macos/scripts/build-app.sh --adhoc --force
 ```
 
 Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. Native mode verifies, atomically persists, and periodically refreshes signed control bundles under root-owned configuration and ancestry; `agentpass control apply`, `fetch`, and `status` are also routed through XPC. The build pipeline assembles the required `Contents/Library/LaunchDaemons` layout, signs every nested executable, supports universal builds and optional notarization, and exposes `SMAppService` register/status/unregister commands. No Developer ID-signed release artifact is published yet, and ad-hoc builds do not activate the production identity boundary. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
+
+## Protected qualification for release operators
+
+This section is an operator map, not a way to qualify a release from a laptop.
+The protected workflows run against the exact candidate source commit, source
+tree, release artifact digest, CI run/attempt, and job IDs. They must use
+protected self-hosted runners, real service identities, and independently
+retained evidence. Never replace an unavailable lane with a fixture, local
+test, `not_run`, or `not_proven` record.
+
+1. Freeze the candidate. Record the exact source commit/tree, release artifact
+   SHA-256, canonical CI run ID, run attempt, and job tuple. A rerun changes
+   the attempt and requires new evidence.
+2. Dispatch [external-qualification-runners.yml](.github/workflows/external-qualification-runners.yml)
+   from the protected environment. Before PostgreSQL commands, the runner
+   must run `npm run postgres:require-live-env`; then it may run
+   `npm run qualification:postgres-c3:external`. The preflight requires
+   distinct non-loopback TLS `verify-full` endpoints, a protected CA file,
+   disposable targets, and candidate/run/artifact bindings.
+3. Run the provider and browser lanes through their external wrappers:
+
+   ```sh
+   npm run qualification:kms:external
+   npm run qualification:webauthn:external
+   npm run qualification:external -- evidence.json binding.json > verified-evidence.json
+   ```
+
+   These commands require protected environment variables for runner identity,
+   source/tree/artifact/run/attempt/job bindings, deployment or environment
+   digest, adapter path plus adapter SHA-256, and pinned trust maps. Values and
+   credentials belong in the protected environment, never in this repository.
+4. Run both physical macOS lanes through
+   [macos-hardware-qualification.yml](.github/workflows/macos-hardware-qualification.yml)
+   and retain separate Apple Silicon and Intel/T2 evidence. `npm run
+   test:native` and `npm run test:native-xpc-contract` are local contracts;
+   they do not prove Secure Enclave, launchd, Developer ID, or notarization.
+5. Assemble the signed, candidate-bound evidence packet and run the final gate:
+
+   ```sh
+   npm run release:readiness -- \
+     /secure/evidence/production-readiness-gate.json
+   ```
+
+   The evidence path is passed after `--`; a valid packet prints the safe
+   production-ready summary and exits `0`. An invalid, incomplete, stale, or
+   otherwise unproven packet prints a redacted `status: "not_proven"` result to
+   stderr and exits nonzero.
+
+   Promotion also requires the signed evidence index, operations readiness,
+   staging readiness/rollback, independent security review, and exact
+   workflow run/artifact binding. Follow [docs/runbooks/RELEASE_PROMOTION_RUNBOOK.md](docs/runbooks/RELEASE_PROMOTION_RUNBOOK.md)
+   for the complete handoff.
+
+### What `not_proven` means
+
+`not_proven` is a deliberate safety state, not a successful test result and
+not a statement that the implementation is broken. It means the evidence
+needed for the requested claim is missing, unavailable, locally generated,
+stale, substituted, or not independently bound to the exact candidate. The
+`npm run release:readiness -- <evidence-path>` exits nonzero and emits a
+redacted `{"status":"not_proven","reason":"<reason>"}` object on stderr;
+promotion must stop. Green adapter tests can prove
+the adapter contract locally, but only a protected external run can prove a
+real KMS call; a macOS contract test can prove source-level invariants, but
+only the physical signed/notarized lane can prove the release boundary. Keep
+the state as `not_proven`, fix the environment or collect the missing evidence,
+and rerun the complete lane.
 
 ## Current scope and roadmap
 

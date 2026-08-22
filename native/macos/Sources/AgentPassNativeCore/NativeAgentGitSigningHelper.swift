@@ -62,6 +62,42 @@ public struct NativeAgentGitSigningInvocation: Equatable, Sendable {
     }
 }
 
+/// The only invocation accepted by the Agent-facing versioned session
+/// executable. This is deliberately not the argument shape Git passes to
+/// `gpg.ssh.program`: a session is an explicit Agent operation with exactly
+/// two payload files and an explicit protocol label.
+public struct NativeAgentGitSessionSigningInvocation: Equatable, Sendable {
+    public static let protocolFlag = "--protocol"
+    public static let payloadFlag = "--payload"
+    public static let versionedProtocol = "versioned_session_v1"
+
+    public let payloadPaths: [String]
+
+    public init(arguments: [String]) throws {
+        guard arguments.count == 6,
+              arguments[0] == Self.protocolFlag,
+              arguments[1] == Self.versionedProtocol,
+              arguments[2] == Self.payloadFlag,
+              arguments[4] == Self.payloadFlag else {
+            throw NativeAgentGitSigningHelperError.invalidInvocation
+        }
+
+        let paths = [arguments[3], arguments[5]]
+        guard paths[0] != paths[1],
+              paths.allSatisfy(Self.isValidPayloadPath) else {
+            throw NativeAgentGitSigningHelperError.invalidInvocation
+        }
+        self.payloadPaths = paths
+    }
+
+    private static func isValidPayloadPath(_ path: String) -> Bool {
+        !path.isEmpty
+            && path.utf8.count <= NativeAgentGitSigningInvocation.maximumPathBytes
+            && path.hasPrefix("/")
+            && !path.contains("\0")
+    }
+}
+
 /// Fixed-path Git helper runtime.
 ///
 /// It consumes exactly one inherited FD3 request, never discovers a socket,
@@ -124,6 +160,66 @@ public enum NativeAgentGitSigningHelper {
             throw NativeAgentGitSigningHelperError.invalidSignature
         }
         try writeSignature(signature, at: invocation.signaturePath)
+    }
+
+    /// Explicit two-payload entrypoint for the versioned private Git session.
+    ///
+    /// This is intentionally not selected by the normal Git helper invocation:
+    /// the caller must provide exactly two distinct, absolute payload paths.
+    /// Both payloads are read and their output paths are reserved before any
+    /// frame is sent. The client then performs both exchanges and the explicit
+    /// close/EOF handshake; signatures are written only after that handshake
+    /// succeeds, so an ambiguous session cannot be mistaken for success.
+    public static func runVersionedSession(
+        arguments: [String],
+        bridgeFileDescriptor: Int32 = fixedBridgeFileDescriptor
+    ) throws {
+        let invocation = try NativeAgentGitSessionSigningInvocation(arguments: arguments)
+        try runVersionedSession(
+            payloadPaths: invocation.payloadPaths,
+            bridgeFileDescriptor: bridgeFileDescriptor)
+    }
+
+    public static func runVersionedSession(
+        payloadPaths: [String],
+        bridgeFileDescriptor: Int32 = fixedBridgeFileDescriptor
+    ) throws {
+        guard payloadPaths.count == Int(NativeAgentPrivateGitSessionFrameCodec.maximumAcceptedSigns),
+              Set(payloadPaths).count == payloadPaths.count,
+              payloadPaths.allSatisfy(Self.isValidVersionedPayloadPath) else {
+            throw NativeAgentGitSigningHelperError.invalidInvocation
+        }
+
+        let payloads = try payloadPaths.map { try readPayload(at: $0) }
+        let signaturePaths = payloadPaths.map { $0 + ".sig" }
+        try signaturePaths.forEach(reserveSignaturePath)
+        try validateBridgeDescriptor(bridgeFileDescriptor)
+
+        let transport: NativeAgentPrivateGitSessionTransport
+        do {
+            transport = try NativeAgentPrivateGitSessionTransport(
+                fd: bridgeFileDescriptor,
+                ownership: .owned
+            )
+        } catch {
+            throw NativeAgentGitSigningHelperError.bridgeUnavailable
+        }
+
+        let client = NativeAgentPrivateGitBridgeSessionClient(transport: transport)
+        let signatures: [Data]
+        do {
+            signatures = try payloads.map { try client.sign(commitPayload: $0) }
+            try client.close()
+        } catch {
+            throw NativeAgentGitSigningHelperError.bridgeUnavailable
+        }
+
+        guard signatures.allSatisfy(isArmoredGitSignature) else {
+            throw NativeAgentGitSigningHelperError.invalidSignature
+        }
+        for (signature, path) in zip(signatures, signaturePaths) {
+            try writeSignature(signature, at: path)
+        }
     }
 
     private static func readPayload(at path: String) throws -> Data {
@@ -189,6 +285,13 @@ public enum NativeAgentGitSigningHelper {
         guard errno == ENOENT else {
             throw NativeAgentGitSigningHelperError.signatureUnavailable
         }
+    }
+
+    private static func isValidVersionedPayloadPath(_ path: String) -> Bool {
+        !path.isEmpty
+            && path.utf8.count <= NativeAgentGitSigningInvocation.maximumPathBytes
+            && path.hasPrefix("/")
+            && !path.contains("\0")
     }
 
     private static func writeSignature(_ signature: Data, at path: String) throws {

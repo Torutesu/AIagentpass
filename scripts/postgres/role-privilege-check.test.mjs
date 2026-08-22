@@ -11,6 +11,10 @@ test('signing capability role qualification is an explicit catalog contract', as
     'capabilities',
     'agent_session_signing_capability_reservations',
     'agent_capability_sequence_heads',
+    'human_identity_assertion_replays',
+    'device_request_nonces',
+    'rate_limit_buckets',
+    'anonymous_rate_limit_buckets',
   ]) {
     assert.match(checker, new RegExp(`'${table}'`, 'u'));
   }
@@ -71,8 +75,14 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /signing_capability_table_diagnostics/u);
   assert.match(checker, /signing_capability_function_diagnostics/u);
   assert.match(checker, /agentpass_maintenance/u);
+  assert.match(checker, /agentpass_consume_human_identity_assertion/u);
+  assert.match(checker, /device_request_nonces/u);
+  assert.match(checker, /rate_limit_buckets/u);
   assert.match(checker, /maintenance_function_allowlist/u);
   assert.match(checker, /device_audit_boundary_ok/u);
+  assert.match(checker, /device_audit_inbox_boundary_ok/u);
+  assert.match(checker, /agentpass_device_audit_inbox_enqueue\(uuid,uuid,uuid,text,text,jsonb\)/u);
+  assert.match(checker, /agentpass_device_audit_inbox_health\(\)/u);
   assert.match(checker, /device_audit_events_tenant_select/u);
   assert.match(checker, /agentpass_record_device_audit_head\(\)/u);
   assert.match(checker, /expected_migrations\(version, checksum\)/u);
@@ -81,4 +91,13 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /maintenance_function_oids/u);
   assert.match(checker, /policy_mismatches/u);
   assert.match(checker, /actual_with_check/u);
+});
+
+test('privilege checker binds catalog evidence to the authenticated migrator TLS session', async () => {
+  const checker = await readFile(checkerPath, 'utf8');
+  assert.match(checker, /session_user = 'agentpass_migrator'/u);
+  assert.match(checker, /current_user = 'agentpass_migrator'/u);
+  assert.match(checker, /pg_stat_ssl WHERE pid = pg_backend_pid\(\)/u);
+  assert.match(checker, /tls_session_ok/u);
+  assert.match(checker, /failedChecks/u);
 });

@@ -176,6 +176,7 @@ function fakePostgresRuntime() {
   const noOp = async () => null;
   const humanRepository = {
     createSession: noOp,
+    createSessionWithLimit: noOp,
     findSessionByTokenHash: noOp,
     updateSessionActivity: noOp,
     revokeSession: noOp,

@@ -8,7 +8,7 @@ const ids = {
   organization: "33333333-3333-4333-8333-333333333333"
 };
 const args = ["--provider", "chatgpt", "--subject", "subject-42", "--member-id", ids.member, "--organization-id", ids.organization];
-const env = { AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full" };
+const env = { AGENTPASS_IDENTITY_BIND_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full" };
 
 class FakePool {
   static instances = [];
@@ -41,7 +41,9 @@ function usePool(queries) {
           this.calls.push({ text, params });
           if (text.startsWith("SELECT set_config")) return { rowCount: 1, rows: [] };
           if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rowCount: 0, rows: [] };
-          return queries.shift() ?? { rowCount: 0, rows: [] };
+          const next = queries.shift();
+          if (next instanceof Error) throw next;
+          return next ?? { rowCount: 0, rows: [] };
         },
         release(shouldDestroy) {
           this.released = shouldDestroy;
@@ -54,43 +56,29 @@ function usePool(queries) {
 }
 
 test("creates an identity only after exact active membership verification", async () => {
-  const PoolClass = usePool([
-    { rowCount: 1, rows: [{ organization_id: ids.organization, member_id: ids.member, role: "owner" }] },
-    { rowCount: 1, rows: [{ provider: "chatgpt", subject: "subject-42", member_id: ids.member }] }
-  ]);
+  const PoolClass = usePool([{ rowCount: 1, rows: [{ result: "created" }] }]);
   const result = await runIdentityBind({ argv: args, env, PoolClass });
   assert.deepEqual(result, { ok: true, command: "identity-bind", result: "created", provider: "chatgpt", subject: "subject-42", member_id: ids.member, organization_id: ids.organization });
   const pool = FakePool.instances[0];
   assert.deepEqual(pool.client.calls[0].params, ["8000ms"]);
-  assert.match(pool.client.calls[3].text, /organization_id=\$1/);
-  assert.match(pool.client.calls[3].text, /member_id=\$2/);
-  assert.match(pool.client.calls[3].text, /status='active'/);
-  assert.match(pool.client.calls[3].text, /FOR UPDATE/);
-  assert.deepEqual(pool.client.calls[4].params, ["chatgpt", "subject-42", ids.member]);
+  assert.match(pool.client.calls[3].text, /agentpass_human_identity_bind/);
+  assert.deepEqual(pool.client.calls[3].params, ["chatgpt", "subject-42", ids.member, ids.organization]);
   assert.equal(pool.client.calls.at(-1).text, "COMMIT");
   assert.equal(pool.client.released, false);
   assert.equal(pool.ended, true);
 });
 
 test("reports an idempotent repeat without changing the mapping", async () => {
-  const PoolClass = usePool([
-    { rowCount: 1, rows: [{ organization_id: ids.organization, member_id: ids.member, role: "owner" }] },
-    { rowCount: 0, rows: [] },
-    { rowCount: 1, rows: [{ member_id: ids.member }] }
-  ]);
+  const PoolClass = usePool([{ rowCount: 1, rows: [{ result: "already_exists" }] }]);
   const result = await runIdentityBind({ argv: args, env, PoolClass });
   assert.equal(result.result, "already_exists");
   const pool = FakePool.instances[0];
-  assert.match(pool.client.calls[5].text, /SELECT member_id FROM upstream_identities/);
+  assert.match(pool.client.calls[3].text, /agentpass_human_identity_bind/);
   assert.equal(pool.client.calls.some(({ text }) => /^(UPDATE|DELETE)\s/.test(text)), false);
 });
 
 test("rejects a rebind and rolls back without emitting database details", async () => {
-  const PoolClass = usePool([
-    { rowCount: 1, rows: [{ organization_id: ids.organization, member_id: ids.member, role: "owner" }] },
-    { rowCount: 0, rows: [] },
-    { rowCount: 1, rows: [{ member_id: ids.otherMember }] }
-  ]);
+  const PoolClass = usePool([Object.assign(new Error("identity mapping conflict"), { code: "42501" })]);
   await assert.rejects(() => runIdentityBind({ argv: args, env, PoolClass }), (error) => error instanceof IdentityBindError && error.code === "identity_rebind_forbidden");
   const pool = FakePool.instances[0];
   assert.equal(pool.client.calls.at(-1).text, "ROLLBACK");
@@ -98,7 +86,7 @@ test("rejects a rebind and rolls back without emitting database details", async 
 });
 
 test("fails closed when the exact membership is missing", async () => {
-  const PoolClass = usePool([{ rowCount: 0, rows: [] }]);
+  const PoolClass = usePool([Object.assign(new Error("membership missing"), { code: "23503" })]);
   await assert.rejects(() => runIdentityBind({ argv: args, env, PoolClass }), { code: "membership_not_active" });
   const pool = FakePool.instances[0];
   assert.equal(pool.client.calls.at(-1).text, "ROLLBACK");
@@ -110,17 +98,15 @@ test("requires named arguments and verified PostgreSQL TLS configuration before 
     constructor() { throw new Error("must not connect"); }
   }
   await assert.rejects(() => runIdentityBind({ argv: ["--provider", "github"], env, PoolClass: ExplodingPool }), { code: "invalid_arguments" });
-  await assert.rejects(() => runIdentityBind({ argv: args, env: { AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=require" }, PoolClass: ExplodingPool }), { code: "database_config_invalid" });
+  await assert.rejects(() => runIdentityBind({ argv: args, env: { AGENTPASS_IDENTITY_BIND_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=require" }, PoolClass: ExplodingPool }), { code: "database_config_invalid" });
+  await assert.rejects(() => runIdentityBind({ argv: args, env: { AGENTPASS_IDENTITY_BIND_DATABASE_URL: "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full" }, PoolClass: ExplodingPool }), { code: "database_config_invalid" });
 });
 
 test("uses the existing TLS runtime settings and help output contains no connection material", async () => {
-  const result = await runIdentityBind({ argv: ["--help"], env: { AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=require" } });
+  const result = await runIdentityBind({ argv: ["--help"], env: { AGENTPASS_IDENTITY_BIND_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=require" } });
   assert.deepEqual(result.required, ["--provider VALUE", "--subject VALUE", "--member-id VALUE", "--organization-id VALUE"]);
 
-  const PoolClass = usePool([
-    { rowCount: 1, rows: [{ organization_id: ids.organization, member_id: ids.member, role: "owner" }] },
-    { rowCount: 1, rows: [{ provider: "github", subject: "s", member_id: ids.member }] }
-  ]);
+  const PoolClass = usePool([{ rowCount: 1, rows: [{ result: "created" }] }]);
   await runIdentityBind({ argv: ["--provider", "github", "--subject", "s", "--member-id", ids.member, "--organization-id", ids.organization], env, PoolClass });
   const poolOptions = FakePool.instances[0].options;
   assert.deepEqual(poolOptions.ssl, { rejectUnauthorized: true });

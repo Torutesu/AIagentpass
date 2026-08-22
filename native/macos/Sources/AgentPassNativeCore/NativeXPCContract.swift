@@ -19,6 +19,7 @@ public enum AgentPassNativeXPCContract {
         case management
         case agent
         case host
+        case hostControl = "host_control"
         case childGit
     }
 
@@ -110,7 +111,7 @@ public enum AgentPassNativeXPCContract {
     // This is deliberately a literal. Any intentional contract change must
     // update the version and this value together, making the change visible to
     // binaries and CI rather than deriving a new identity silently.
-    public static let frozenFingerprint = "SHA256:62fc2dc6a1ba7731b031e06250a762239dd6cb7e01b009786b82e976068d831e"
+    public static let frozenFingerprint = "SHA256:f74fea0f9d0a4c2394a7e5c248353f80613f39b289de400eb007369e8a6224ae"
 
     public static let managementProtocol = ProtocolInventory(
         name: "AgentPassNativeServiceProtocol",
@@ -184,6 +185,14 @@ public enum AgentPassNativeXPCContract {
             method("closeHostSession:withReply:", .host, ["AgentPassHostCloseRequest"], ["AgentPassHostCloseResponse", "NSError"], "v32@0:8@16@?24"),
         ])
 
+    public static let hostControlProtocol = ProtocolInventory(
+        name: "AgentPassHostControlXPCProtocol",
+        version: AgentPassHostControlXPCContract.protocolVersion,
+        purpose: .hostControl,
+        methods: [
+            method("closeHostSessionFromControl:withReply:", .hostControl, ["AgentPassHostControlCloseRequest"], ["AgentPassHostControlCloseResponse", "NSError"], "v32@0:8@16@?24"),
+        ])
+
     public static let childGitProtocol = ProtocolInventory(
         name: "AgentPassChildGitXPCProtocol",
         version: AgentPassChildGitXPCContract.protocolVersion,
@@ -205,7 +214,7 @@ public enum AgentPassNativeXPCContract {
             ),
         ])
 
-    public static let protocolInventories = [managementProtocol, agentProtocol, hostProtocol, childGitProtocol]
+    public static let protocolInventories = [managementProtocol, agentProtocol, hostProtocol, hostControlProtocol, childGitProtocol]
 
     public static let dtoInventories: [DTOInventory] = [
         dto("AgentPassAgentBootstrapRequest", .request, "bootstrapAgent:withReply:"),
@@ -228,6 +237,8 @@ public enum AgentPassNativeXPCContract {
         hostDTO("AgentPassHostStatusResponse", .response, "hostSessionStatus:withReply:"),
         hostDTO("AgentPassHostCloseRequest", .request, "closeHostSession:withReply:"),
         hostDTO("AgentPassHostCloseResponse", .response, "closeHostSession:withReply:"),
+        hostControlDTO("AgentPassHostControlCloseRequest", .request, "closeHostSessionFromControl:withReply:"),
+        hostControlDTO("AgentPassHostControlCloseResponse", .response, "closeHostSessionFromControl:withReply:"),
         childGitDTO("AgentPassChildGitAttachRequest", .request, "attachChildGit:withReply:"),
         childGitDTO("AgentPassChildGitAttachResponse", .response, "attachChildGit:withReply:"),
         childGitDTO("AgentPassChildGitSignRequest", .request, "signChildGitCommit:withReply:"),
@@ -364,10 +375,12 @@ public enum AgentPassNativeXPCContract {
         try verifyProtocolRuntime(AgentPassNativeServiceProtocol.self, inventory: managementProtocol)
         try verifyProtocolRuntime(AgentPassAgentXPCProtocol.self, inventory: agentProtocol)
         try verifyProtocolRuntime(AgentPassHostXPCProtocol.self, inventory: hostProtocol)
+        try verifyProtocolRuntime(AgentPassHostControlXPCProtocol.self, inventory: hostControlProtocol)
         try verifyProtocolRuntime(AgentPassChildGitXPCProtocol.self, inventory: childGitProtocol)
         try verifyRuntimeDTOs()
         try verifyAgentInterface()
         try verifyHostInterface()
+        try verifyHostControlInterface()
         try verifyChildGitInterface()
     }
 
@@ -454,6 +467,26 @@ public enum AgentPassNativeXPCContract {
         }
     }
 
+    private static func verifyHostControlInterface() throws {
+        let interface = AgentPassHostControlXPCInterface.make()
+        for method in hostControlProtocol.methods {
+            let requestDTOs = dtoInventories.filter { $0.selector == method.selector && $0.role == .request }
+            let responseDTOs = dtoInventories.filter { $0.selector == method.selector && $0.role == .response }
+            let selector = NSSelectorFromString(method.selector)
+            let actualRequests = classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: false))
+            let actualResponses = classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: true))
+            let expectedRequests = Set(requestDTOs.map(\.objcName))
+            let expectedResponses = Set(responseDTOs.map(\.objcName))
+            guard actualRequests == expectedRequests, actualResponses == expectedResponses else {
+                throw ValidationError.interfaceDTORegistrationDrift(
+                    selector: method.selector,
+                    expected: (expectedRequests.union(expectedResponses)).sorted(),
+                    actual: (actualRequests.union(actualResponses)).sorted()
+                )
+            }
+        }
+    }
+
     private static func verifyChildGitInterface() throws {
         for method in childGitProtocol.methods {
             let requestDTOs = dtoInventories.filter { $0.selector == method.selector && $0.role == .request }
@@ -517,6 +550,8 @@ public enum AgentPassNativeXPCContract {
         case "AgentPassHostStatusResponse": return NSStringFromClass(AgentPassHostStatusResponse.self)
         case "AgentPassHostCloseRequest": return NSStringFromClass(AgentPassHostCloseRequest.self)
         case "AgentPassHostCloseResponse": return NSStringFromClass(AgentPassHostCloseResponse.self)
+        case "AgentPassHostControlCloseRequest": return NSStringFromClass(AgentPassHostControlCloseRequest.self)
+        case "AgentPassHostControlCloseResponse": return NSStringFromClass(AgentPassHostControlCloseResponse.self)
         case "AgentPassChildGitAttachRequest": return NSStringFromClass(AgentPassChildGitAttachRequest.self)
         case "AgentPassChildGitAttachResponse": return NSStringFromClass(AgentPassChildGitAttachResponse.self)
         case "AgentPassChildGitSignRequest": return NSStringFromClass(AgentPassChildGitSignRequest.self)
@@ -564,6 +599,17 @@ public enum AgentPassNativeXPCContract {
             name: name,
             objcName: name,
             purpose: .host,
+            role: role,
+            selector: selector,
+            secureCoding: true
+        )
+    }
+
+    private static func hostControlDTO(_ name: String, _ role: DTORole, _ selector: String) -> DTOInventory {
+        DTOInventory(
+            name: name,
+            objcName: name,
+            purpose: .hostControl,
             role: role,
             selector: selector,
             secureCoding: true

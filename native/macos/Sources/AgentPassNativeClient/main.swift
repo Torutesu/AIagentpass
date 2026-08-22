@@ -108,6 +108,32 @@ guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" 
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
 let sessionApprovalKeyTag = "dev.agentpass.session-approval.v1"
+if command == "host-control-close" {
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    do {
+        guard request.count > 0, request.count <= 16 * 1024,
+              let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
+              Set(object.keys) == Set(["session_id", "operation_id", "reason"]),
+              let sessionID = object["session_id"] as? String,
+              let operationID = object["operation_id"] as? String,
+              let reasonText = object["reason"] as? String,
+              let reason = AgentPassHostXPCContract.CloseReason(rawValue: reasonText),
+              let controlRequest = AgentPassHostControlCloseRequest(sessionID: sessionID, operationID: operationID, reason: reason) else {
+            throw AgentPassNativeError.invalidConfiguration("Native Host control close request is invalid")
+        }
+        let client = NativeAgentAuthenticatedHostControlXPCClient(machServiceName: serviceName)
+        let closed = try client.close(sessionID: controlRequest.sessionID, operationID: controlRequest.operationID, reason: reason)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "status": "closed",
+            "operation_id": closed.operationID,
+            "session_id": closed.sessionID,
+            "closed_at_ms": closed.closedAtMilliseconds
+        ], options: [.sortedKeys])
+        emit(Output(ok: true, version: nil, stdout_base64: data.base64EncodedString(), public_key: nil, error: nil))
+    } catch {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription), status: 1)
+    }
+}
 if command == "approval-public-key" {
     do {
         let key = try SecureEnclaveKeyStore(applicationTag: sessionApprovalKeyTag, accessGroup: approvalKeyAccessGroup(), requiresUserPresence: true)

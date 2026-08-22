@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import http from "node:http";
-import test from "node:test";
+import nodeTest from "node:test";
 
 import { createCloudApi } from "../src/server.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
+import { createLoopbackAwareTest } from "./support/loopback-test.mjs";
+
+const test = createLoopbackAwareTest(nodeTest);
 
 const ORIGIN = "https://console.agentpass.test";
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";

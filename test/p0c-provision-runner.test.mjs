@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = path.join(repository, 'scripts/release/p0c');
 const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
+  'p0c/verify-runner-attestation.mjs',
   'generate-release-attestation.mjs',
   'release-candidate-identity.mjs',
   'n3e/controller-candidate-contract.mjs',

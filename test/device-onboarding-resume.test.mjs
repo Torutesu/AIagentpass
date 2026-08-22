@@ -84,6 +84,51 @@ test("advances only through the closed monotonic state machine", async () => {
   assert.throws(() => store.record_delivery({ delivery_id: "delivery-2", delivery_hash: HASHES.delivery, delivered_at: TIMES[6] }), { code: "INVALID_TRANSITION" });
 });
 
+test("can resume after the invitation boundary without persisting invitation secrets", () => {
+  const { store, file } = tempStore();
+  const descriptor = recoveryDescriptor();
+  const created = store.create_invitation_issued({
+    release_id: "release-1",
+    organization_id: descriptor.candidate_binding.organization_id,
+    device_id: descriptor.candidate_binding.device_id,
+    resume_id: "resume-1",
+    recovery_descriptor: descriptor,
+    invitation_id: descriptor.enrollment_id,
+    invitation_hash: HASHES.invitation,
+    issued_at: TIMES[0]
+  });
+  assert.equal(created.state, "invitation_issued");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).revision, 1);
+  assert.doesNotMatch(fs.readFileSync(file, "utf8"), /credential|nonce|signature|private.?key/iu);
+
+  const resumed = new DeviceOnboardingResumeStore(file);
+  assert.equal(resumed.read().state, "invitation_issued");
+  assert.equal(resumed.record_delivery({ delivery_id: "delivery-1", delivery_hash: HASHES.delivery, delivered_at: TIMES[1] }).state, "delivered");
+});
+
+test("repairs a journal-ahead invitation snapshot after process loss", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-invitation-loss-"));
+  const file = path.join(directory, "resume.json");
+  let crash = true;
+  const descriptor = recoveryDescriptor();
+  const crashing = new DeviceOnboardingResumeStore(file, { fault: (stage) => { if (crash && stage === "after_journal") throw new Error("interrupted"); } });
+  assert.throws(() => crashing.create_invitation_issued({
+    release_id: "release-1",
+    organization_id: descriptor.candidate_binding.organization_id,
+    device_id: descriptor.candidate_binding.device_id,
+    resume_id: "resume-1",
+    recovery_descriptor: descriptor,
+    invitation_id: descriptor.enrollment_id,
+    invitation_hash: HASHES.invitation,
+    issued_at: TIMES[0]
+  }), /interrupted/u);
+  crash = false;
+  const resumed = new DeviceOnboardingResumeStore(file);
+  assert.equal(resumed.read().state, "invitation_issued");
+  assert.equal(resumed.record_delivery({ delivery_id: "delivery-1", delivery_hash: HASHES.delivery, delivered_at: TIMES[1] }).state, "delivered");
+  assert.doesNotMatch(fs.readFileSync(file, "utf8"), /credential|nonce|signature|private.?key/iu);
+});
+
 test("persists no secret material and denies caller-selected authority", () => {
   const { store, file } = tempStore();
   createThroughUncertain(store);

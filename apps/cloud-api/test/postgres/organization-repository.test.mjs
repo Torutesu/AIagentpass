@@ -60,6 +60,32 @@ class QueueClient {
     if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
       return response([{ result: { state: "revoked", capabilities: [], capability_ids: [], revoked_count: 0 } }]);
     }
+    if (text.startsWith("SELECT public.agentpass_human_member_session_revoke(")) {
+      return response([{ result: { sessions: [], session_count: 0, challenge_count: 0 } }]);
+    }
+    if (text.includes("agentpass_organization_create_with_owner")) {
+      if (this.idempotency && typeof this.idempotency === "object") {
+        return response([{ outcome: "replayed", replayed: true, response_json: this.idempotency.response_json }]);
+      }
+      return response([{
+        outcome: "created", replayed: false, ...orgRow({ name: params[3] }),
+        membership_id: params[2], member_id: params[1], role: "owner", status: "active",
+        membership_version: 1, membership_created_at: NOW, membership_updated_at: NOW,
+        response_json: null
+      }]);
+    }
+    if (text.includes("agentpass_organization_rename")) {
+      if (params[1] === ids.viewer) return response();
+      return response([orgRow({ name: params[2], version: Number(params[3]) + 1 })]);
+    }
+    if (text.includes("agentpass_human_membership_role_update")) {
+      return response([membershipRow({ member_id: params[2], role: params[3], version: Number(params[4]) + 1 })]);
+    }
+    if (text.includes("agentpass_human_membership_remove")) {
+      return response([membershipRow({ member_id: params[2], status: "revoked", version: Number(params[3]) + 1, updated_at: params[4] })]);
+    }
+    if (text.startsWith("SELECT pg_advisory_xact_lock") && text.includes("agentpass:human:authority:")) return response([{ locked: true }]);
+    if (text.startsWith("SELECT pg_advisory_xact_lock") && text.includes("agentpass:human:sessions:")) return response([{ locked: true }]);
     if (text.startsWith("SELECT s.id AS session_id")) {
       return this.sessionAuthority === undefined ? response([], 0) : response(this.sessionAuthority === null ? [] : [this.sessionAuthority]);
     }
@@ -75,6 +101,16 @@ function response(rows = [], rowCount = rows.length) { return { rows, rowCount }
 function orgRow(overrides = {}) { return { organization_id: ids.organization, name: "Example", version: 1, created_at: NOW, updated_at: NOW, ...overrides }; }
 function membershipRow(overrides = {}) { return { organization_id: ids.organization, membership_id: ids.membership, member_id: ids.owner, role: "owner", status: "active", version: 1, created_at: NOW, updated_at: NOW, ...overrides }; }
 function invitationRow(overrides = {}) { return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin, created_at: NOW, expires_at: LATER, consumed_by: null, consumed_at: null, revoked_at: null, version: 1, ...overrides }; }
+function invitationAuthorityRow(overrides = {}) {
+  return {
+    organization_id: ids.organization, invitation_id: ids.invitation, invitation_role: "viewer",
+    invitation_created_by: ids.admin, invitation_created_at: NOW, invitation_expires_at: LATER,
+    invitation_consumed_by: ids.viewer, invitation_consumed_at: NOW, invitation_revoked_at: null,
+    invitation_version: 2, membership_id: ids.membership, member_id: ids.viewer,
+    membership_role: "viewer", membership_status: "active", membership_version: 2,
+    membership_created_at: NOW, membership_updated_at: NOW, ...overrides
+  };
+}
 function txResponses(...responses) { return [response(), response(), ...responses, response(), response(), response(), response(), response(), response()]; }
 
 function repo(client, options = {}) { return createPostgresOrganizationRepository({ client, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }), ...options }); }
@@ -169,9 +205,9 @@ test("creates an organization and owner, then appends audit and outbox in the sa
   const result = await repo(client).createOrganizationWithOwner({ organization_id: ids.organization, owner_member_id: ids.owner, name: "New Org", created_at: NOW, idempotency_key: "create-org-1" });
   assert.equal(result.organization_id, ids.organization);
   assert.equal(result.owner.member_id, ids.owner);
-  assert.deepEqual(client.calls.slice(0, 2).map((call) => call.text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"]);
-  const orgInsert = client.calls.find((call) => call.text.startsWith("INSERT INTO organizations"));
-  assert.deepEqual(orgInsert.params, [ids.organization, "New Org", NOW]);
+  assert.deepEqual(client.calls.slice(0, 2).map((call) => call.text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended('agentpass:human:authority:' || $1::text, 0)) AS locked"]);
+  const orgInsert = client.calls.find((call) => call.text.includes("agentpass_organization_create_with_owner"));
+  assert.deepEqual(orgInsert.params.slice(0, 4), [ids.organization, ids.owner, orgInsert.params[2], "New Org"]);
   const audit = client.calls.find((call) => call.text.startsWith("INSERT INTO admin_audit_events"));
   assert.match(audit.text, /previous_hash,event_hash/);
   assert.equal(audit.params[0], ids.organization);
@@ -188,24 +224,22 @@ test("create organization derives one tenant scope across retries without a rand
     response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
   ]);
   await repo(firstClient).createOrganizationWithOwner(input);
-  const firstInsert = firstClient.calls.find((call) => call.text.startsWith("INSERT INTO organizations"));
+  const firstInsert = firstClient.calls.find((call) => call.text.includes("agentpass_organization_create_with_owner"));
   const derivedOrganizationId = firstInsert.params[0];
 
   const requestHash = organizationMutationRequestHash("organization.create", {
     organization_id: null, actor_id: ids.owner, actor_principal: "human-owner", name: "Derived Org"
   });
-  const firstIdempotencyInsert = firstClient.calls.find((call) => call.text.startsWith("INSERT INTO idempotency_records"));
-  assert.equal(firstIdempotencyInsert.params[3], requestHash);
+  assert.equal(firstInsert.params[6], requestHash);
   const secondClient = new QueueClient([response(), response(), response()], {
     idempotency: { request_hash: requestHash, response_json: { organization_id: derivedOrganizationId, name: "Derived Org", version: 1, created_at: NOW, updated_at: NOW, owner: membershipRow({ member_id: ids.owner }) } }
   });
   const replay = await repo(secondClient).createOrganizationWithOwner(input);
-  const secondInsert = secondClient.calls.find((call) => call.text.startsWith("INSERT INTO organizations"));
+  const secondInsert = secondClient.calls.find((call) => call.text.includes("agentpass_organization_create_with_owner"));
   assert.equal(secondInsert.params[0], derivedOrganizationId);
   assert.equal(replay.replayed, true);
   assert.equal(secondClient.calls.some((call) => call.text.startsWith("INSERT INTO memberships")), false);
-  const secondIdempotencyInsert = secondClient.calls.find((call) => call.text.startsWith("INSERT INTO idempotency_records"));
-  assert.equal(secondIdempotencyInsert.params[3], requestHash);
+  assert.equal(secondInsert.params[6], requestHash);
   assert.match(derivedOrganizationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
 
@@ -213,25 +247,15 @@ test("rename and role mutations use optimistic versions and return null out of s
   const renameClient = new QueueClient([response(), response(), response()]);
   assert.equal(await repo(renameClient).renameOrganization({ organization_id: ids.organization, actor_member_id: ids.viewer, name: "Denied", expected_version: 1, idempotency_key: "rename-denied-1" }), null);
   assert.equal(renameClient.calls.at(-1).text, "COMMIT");
-  const renameSql = renameClient.calls.find((call) => call.text.startsWith("UPDATE organizations"));
-  assert.match(renameSql.text, /o\.version=\$3/);
-  assert.match(renameSql.text, /actor\.role IN \('owner','admin'\)/);
+  const renameSql = renameClient.calls.find((call) => call.text.includes("agentpass_organization_rename"));
+  assert.deepEqual(renameSql.params.slice(0, 4), [ids.organization, ids.viewer, "Denied", 1]);
   assert.equal(renameClient.calls.some((call) => call.text.startsWith("DELETE FROM idempotency_records") && call.text.includes("request_hash=$4")), true);
 
   const roleClient = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "admin", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
   const role = await repo(roleClient).updateMemberRole({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, role: "admin", expected_version: 1, idempotency_key: "role-update-1" });
   assert.equal(role.role, "admin");
-  const roleSql = roleClient.calls.find((call) => call.text.startsWith("UPDATE memberships"));
-  assert.match(roleSql.text, /target\.version=\$3/);
-  assert.match(roleSql.text, /target\.organization_id=\$1/);
-  assert.deepEqual(roleSql.params.slice(0, 5), [ids.organization, ids.viewer, 1, "admin", ids.owner]);
-  const roleSessionRevoke = roleClient.calls.find((call) => call.text.startsWith("UPDATE human_sessions"));
-  assert.match(roleSessionRevoke.text, /recent_auth_at=NULL/);
-  assert.match(roleSessionRevoke.text, /recent_auth_challenge_id=NULL/);
-  assert.deepEqual(roleSessionRevoke.params, [ids.organization, ids.viewer, NOW, "membership_role_changed"]);
-  const roleChallengeConsume = roleClient.calls.find((call) => call.text.startsWith("UPDATE webauthn_challenges"));
-  assert.match(roleChallengeConsume.text, /status='consumed'/);
-  assert.deepEqual(roleChallengeConsume.params, [ids.organization, ids.viewer, NOW]);
+  const roleSql = roleClient.calls.find((call) => call.text.includes("agentpass_human_membership_role_update"));
+  assert.deepEqual(roleSql.params.slice(0, 5), [ids.organization, ids.owner, ids.viewer, "admin", 1]);
   const roleCapabilityTenant = roleClient.calls.find((call) => call.text.startsWith("SELECT set_config('agentpass.organization_id'"));
   assert.deepEqual(roleCapabilityTenant.params, [ids.organization]);
   const roleCapabilityRevoke = roleClient.calls.find((call) => call.text.startsWith("SELECT public.agentpass_capability_authority_revoke_member("));
@@ -266,9 +290,10 @@ test("revalidates the exact actor session, consumed proof, and authority epochs 
   assert.match(authorization.text, /s\.recent_auth_consumed_at IS NOT NULL/);
   assert.match(authorization.text, /FOR UPDATE OF s,m,o/);
   const lockIndex = activeClient.calls.findIndex((call) => call.text.includes("pg_advisory_xact_lock"));
+  const sessionLockIndex = activeClient.calls.findIndex((call) => call.text.includes("agentpass:human:sessions:"));
   const authorizationIndex = activeClient.calls.indexOf(authorization);
   const idempotencyIndex = activeClient.calls.findIndex((call) => call.text.startsWith("INSERT INTO idempotency_records"));
-  assert.ok(lockIndex < authorizationIndex && authorizationIndex < idempotencyIndex);
+  assert.ok(lockIndex < sessionLockIndex && sessionLockIndex < authorizationIndex && authorizationIndex < idempotencyIndex);
 
   for (const [label, method, overrides] of [
     ["revoked session", "updateMemberRole", {}],
@@ -366,7 +391,7 @@ test("idempotency acquisition is serialized after the organization lock and befo
   const expiryCleanupIndex = client.calls.findIndex((call) => call.text.startsWith("DELETE FROM idempotency_records") && call.text.includes("expires_at<="));
   const acquireIndex = client.calls.findIndex((call) => call.text.startsWith("INSERT INTO idempotency_records"));
   const checkIndex = client.calls.findIndex((call) => call.text.startsWith("SELECT request_hash,response_status,response_json"));
-  const mutationIndex = client.calls.findIndex((call) => call.text.startsWith("UPDATE organizations"));
+  const mutationIndex = client.calls.findIndex((call) => call.text.includes("agentpass_organization_rename"));
   assert.ok(lockIndex < expiryCleanupIndex && expiryCleanupIndex < acquireIndex);
   assert.ok(acquireIndex < checkIndex);
   assert.ok(checkIndex < mutationIndex);
@@ -376,7 +401,7 @@ test("idempotency acquisition is serialized after the organization lock and befo
 
 test("canonical idempotency identity excludes generated tokens, IDs, and server timestamps", async () => {
   async function invitationHash({ token_hash, invitation_id, created_at }) {
-    const client = new QueueClient([], { failOn: (text) => text.startsWith("INSERT INTO organization_invitations") });
+    const client = new QueueClient([], { failOn: (text) => text.includes("agentpass_organization_invitation_create") });
     await assert.rejects(repo(client).createInvitation({ organization_id: ids.organization, actor_member_id: ids.owner, invitation_id, role: "viewer", token_hash, expires_at: LATER, created_at, idempotency_key: "invite-stable-1" }), /mock query failure/);
     return client.calls.find((call) => call.text.startsWith("INSERT INTO idempotency_records")).params[3];
   }
@@ -386,14 +411,14 @@ test("canonical idempotency identity excludes generated tokens, IDs, and server 
   );
 
   async function removalHash(removed_at) {
-    const client = new QueueClient([], { failOn: (text) => text.startsWith("UPDATE memberships") });
+    const client = new QueueClient([], { failOn: (text) => text.includes("agentpass_human_membership_remove") });
     await assert.rejects(repo(client).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at, idempotency_key: "remove-stable-1" }), /mock query failure/);
     return client.calls.find((call) => call.text.startsWith("INSERT INTO idempotency_records")).params[3];
   }
   assert.equal(await removalHash(NOW), await removalHash("2026-08-12T00:02:00.000Z"));
 
   async function acceptanceHash(accepted_at) {
-    const client = new QueueClient([response(), response([invitationRow()]), response()], { failOn: (text) => text.startsWith("INSERT INTO memberships") });
+    const client = new QueueClient([response(), response([{ organization_id: ids.organization }]), response()], { failOn: (text) => text.includes("agentpass_organization_invitation_accept") });
     await assert.rejects(repo(client).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, accepted_at, idempotency_key: "accept-stable-1" }), /mock query failure/);
     return client.calls.find((call) => call.text.startsWith("INSERT INTO idempotency_records")).params[3];
   }
@@ -422,14 +447,8 @@ test("removeMember is role-gated, versioned, tenant-scoped, session-revoking, an
   const reductions = [];
   const result = await repo(client, { onAuthorityReduction: async (input) => { reductions.push(input); return { generation: 2 }; } }).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at: NOW, idempotency_key: "remove-member-1" });
   assert.equal(result.status, "revoked");
-  const update = client.calls.find((call) => call.text.startsWith("UPDATE memberships"));
-  assert.match(update.text, /status='revoked'/);
-  assert.match(update.text, /actor\.status='active'/);
-  assert.match(update.text, /target\.organization_id=\$1/);
-  const sessionRevoke = client.calls.find((call) => call.text.startsWith("UPDATE human_sessions"));
-  assert.match(sessionRevoke.text, /recent_auth_consumed_at=NULL/);
-  assert.deepEqual(sessionRevoke.params, [ids.organization, ids.viewer, NOW, "membership_removed"]);
-  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE webauthn_challenges") && call.text.includes("status='consumed'")), true);
+  const update = client.calls.find((call) => call.text.includes("agentpass_human_membership_remove"));
+  assert.match(update.text, /agentpass_human_membership_remove/);
   const capabilityTenant = client.calls.find((call) => call.text.startsWith("SELECT set_config('agentpass.organization_id'"));
   assert.deepEqual(capabilityTenant.params, [ids.organization]);
   const capabilityRevoke = client.calls.find((call) => call.text.startsWith("SELECT public.agentpass_capability_authority_revoke_member("));
@@ -467,7 +486,7 @@ test("rolls back a membership reduction when generation propagation is unavailab
 
 test("maps the PostgreSQL final-owner constraint to a stable repository error", async () => {
   const constraintError = Object.assign(new Error("database detail"), { code: "23514", constraint: "memberships_last_active_owner" });
-  const client = new QueueClient([], { failOn: (text) => text.startsWith("UPDATE memberships") ? constraintError : false });
+  const client = new QueueClient([], { failOn: (text) => text.includes("agentpass_human_membership_remove") ? constraintError : false });
   await assert.rejects(
     repo(client).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.owner, expected_version: 1, idempotency_key: "remove-final-owner" }),
     (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_LAST_OWNER" && !error.message.includes("database detail")
@@ -480,9 +499,8 @@ test("invitation creation and listing never return token hashes", async () => {
   const invitation = await repo(createClient).createInvitation({ organization_id: ids.organization, actor_member_id: ids.admin, invited_member_id: ids.viewer, role: "viewer", token_hash: TOKEN, expires_at: LATER, idempotency_key: "invite-create-1" });
   assert.equal(invitation.invitation_id, ids.invitation);
   assert.equal(Object.hasOwn(invitation, "token_hash"), false);
-  const insert = createClient.calls.find((call) => call.text.startsWith("INSERT INTO organization_invitations"));
-  assert.match(insert.text, /INSERT INTO organization_invitations AS i/);
-  assert.match(insert.text, /actor\.organization_id=\$1/);
+  const insert = createClient.calls.find((call) => call.text.includes("agentpass_organization_invitation_create"));
+  assert.ok(insert);
   assert.ok(Buffer.isBuffer(insert.params[2]));
   assert.equal(insert.params[2].toString("hex"), TOKEN);
   const idempotencyResponse = createClient.calls.find((call) => call.text.startsWith("UPDATE idempotency_records"));
@@ -493,7 +511,8 @@ test("invitation creation and listing never return token hashes", async () => {
   assert.equal(listed[0].invitation_id, ids.invitation);
   assert.equal(listed[0].status, "pending");
   assert.equal(Object.hasOwn(listed[0], "token_hash"), false);
-  assert.match(listClient.calls[0].text, /i\.organization_id=\$1/);
+  assert.match(listClient.calls[0].text, /agentpass_organization_invitation_list/);
+  assert.deepEqual(listClient.calls[0].params.slice(0, 2), [ids.organization, ids.admin]);
 
   const expiredClient = new QueueClient([response([invitationRow({ expires_at: NOW })])]);
   const expired = await repo(expiredClient).listInvitations({ organization_id: ids.organization, actor_member_id: ids.admin });
@@ -504,8 +523,8 @@ test("revokeInvitation is idempotence-safe through status, version, actor, and t
   const client = new QueueClient([response(), response(), response([invitationRow({ revoked_at: NOW, version: 2 })]), response(), response([{ last_hash: ZERO_HASH }]), response(), response(), response(), response()]);
   const result = await repo(client).revokeInvitation({ organization_id: ids.organization, actor_member_id: ids.admin, invitation_id: ids.invitation, expected_version: 1, revoked_at: NOW, idempotency_key: "invite-revoke-1" });
   assert.equal(result.revoked_at, NOW);
-  const update = client.calls.find((call) => call.text.startsWith("UPDATE organization_invitations"));
-  assert.match(update.text, /i\.revoked_at IS NULL AND i\.consumed_at IS NULL/);
+  const update = client.calls.find((call) => call.text.includes("agentpass_organization_invitation_revoke"));
+  assert.ok(update);
   assert.deepEqual(update.params, [ids.organization, ids.invitation, 1, NOW, ids.admin, "revoked_by_operator"]);
 });
 
@@ -513,7 +532,6 @@ test("reissueInvitation rotates the digest in place and appends audit/outbox ato
   const newExpiry = "2999-08-14T00:00:00.000Z";
   const client = new QueueClient([
     response(), response(),
-    response([{ version: 1, expires_at: NOW, consumed_at: null, revoked_at: null }]),
     response([invitationRow({ expires_at: newExpiry, version: 2 })]),
     response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response()
   ]);
@@ -522,12 +540,9 @@ test("reissueInvitation rotates the digest in place and appends audit/outbox ato
   assert.equal(result.status, "pending");
   assert.equal(result.version, 2);
   assert.equal(Object.hasOwn(result, "token_hash"), false);
-  const update = client.calls.find((call) => call.text.startsWith("UPDATE organization_invitations"));
-  assert.match(update.text, /SET token_hash=\$3,expires_at=\$4/);
-  assert.match(update.text, /i\.version=\$5/);
-  assert.match(update.text, /i\.revoked_at IS NULL AND i\.consumed_at IS NULL/);
-  assert.match(update.text, /actor\.organization_id=\$1 AND actor\.member_id=\$6/);
-  assert.deepEqual(update.params, [ids.organization, ids.invitation, Buffer.from(TOKEN, "hex"), newExpiry, 1, ids.admin]);
+  const update = client.calls.find((call) => call.text.includes("agentpass_organization_invitation_reissue"));
+  assert.ok(update);
+  assert.deepEqual(update.params, [ids.organization, ids.invitation, Buffer.from(TOKEN, "hex"), newExpiry, NOW, 1, ids.admin]);
   const audit = client.calls.find((call) => call.text.startsWith("INSERT INTO admin_audit_events"));
   assert.equal(JSON.parse(audit.params.at(-1)).action, "invitation.reissued");
   assert.doesNotMatch(JSON.stringify(audit.params), /token_hash|ab{10,}/i);
@@ -543,13 +558,11 @@ test("reissueInvitation replays without rotating again and keeps tenant/version 
   const replay = await repo(replayClient).reissueInvitation(input);
   assert.equal(replay.replayed, true);
   assert.equal(replay.invitation_id, ids.invitation);
-  assert.equal(replayClient.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+  assert.equal(replayClient.calls.some((call) => call.text.includes("agentpass_organization_invitation_reissue")), false);
 
   const denied = new QueueClient([response(), response(), response()]);
   assert.equal(await repo(denied).reissueInvitation({ ...input, organization_id: ids.organization2, idempotency_key: "invite-reissue-3" }), null);
-  const target = denied.calls.find((call) => call.text.startsWith("SELECT i.version"));
-  assert.match(target.text, /i\.organization_id=\$1/);
-  assert.match(target.text, /actor\.organization_id=\$1/);
+  assert.ok(denied.calls.find((call) => call.text.includes("agentpass_organization_invitation_reissue")));
   assert.equal(denied.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
 });
 
@@ -558,7 +571,8 @@ test("reissueInvitation permits expired pending invitations but rejects terminal
     { expires_at: LATER, consumed_at: NOW, revoked_at: null },
     { expires_at: LATER, consumed_at: null, revoked_at: NOW }
   ].entries()) {
-    const client = new QueueClient([response(), response(), response([invitationRow({ ...state })])]);
+    const terminalError = Object.assign(new Error("terminal invitation"), { code: "23000", constraint: "organization_invitations_terminal" });
+    const client = new QueueClient([response(), response()], { failOn: (text) => text.includes("agentpass_organization_invitation_reissue") ? terminalError : false });
     await assert.rejects(
       () => repo(client).reissueInvitation({ organization_id: ids.organization, actor_member_id: ids.admin, invitation_id: ids.invitation, expected_version: 1, token_hash: TOKEN, expires_at: LATER, reissued_at: NOW, idempotency_key: `invite-reissue-terminal-${index}` }),
       { code: "ERR_INVITATION_REPLAYED" }
@@ -570,8 +584,8 @@ test("reissueInvitation permits expired pending invitations but rejects terminal
 
 test("acceptInvitation consumes the exact token once and returns a sanitized invitation/member composite", async () => {
   const client = new QueueClient([
-    response(), response([invitationRow({ role: "viewer" })]), response(),
-    response([membershipRow({ member_id: ids.viewer, role: "viewer", version: 2 })]), response([invitationRow({ consumed_by: ids.viewer, consumed_at: NOW })]), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
+    response(), response([{ organization_id: ids.organization }]), response(), response([invitationAuthorityRow()]),
+    response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
   ]);
   const result = await repo(client).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, organization_id: ids.organization, member_id: ids.admin, role: "owner", accepted_at: NOW, idempotency_key: "invite-accept-1" });
   assert.equal(result.member.member_id, ids.viewer);
@@ -579,34 +593,58 @@ test("acceptInvitation consumes the exact token once and returns a sanitized inv
   assert.deepEqual(result.invitation, {
     organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin,
     created_at: NOW, expires_at: LATER, consumed_at: NOW, accepted_at: NOW,
-    accepted_member_id: ids.viewer, revoked_at: null, status: "accepted", version: 1
+    accepted_member_id: ids.viewer, revoked_at: null, status: "accepted", version: 2
   });
-  const consume = client.calls.find((call) => call.text.startsWith("SELECT") && call.text.includes("i.token_hash=$1"));
-  assert.match(consume.text, /i\.token_hash=\$1/);
-  assert.match(consume.text, /FOR UPDATE/);
-  assert.deepEqual(consume.params, [Buffer.from(TOKEN, "hex")]);
-  const consumeUpdate = client.calls.find((call) => call.text.startsWith("UPDATE organization_invitations"));
-  assert.match(consumeUpdate.text, /i\.token_hash=\$5/);
-  const membershipInsert = client.calls.find((call) => call.text.startsWith("INSERT INTO memberships"));
-  assert.deepEqual(membershipInsert.params.slice(2), [ids.viewer, "viewer"]);
-  assert.doesNotMatch(membershipInsert.text, /\$.*member_id.*\$.*role/i);
+  const invitationLookup = client.calls.find((call) => call.text.startsWith("SELECT i.organization_id"));
+  const organizationLock = client.calls.find((call) => call.text.startsWith("SELECT pg_advisory_xact_lock") && call.params[0] === `agentpass:organization:${ids.organization}`);
+  const consume = client.calls.find((call) => call.text.includes("agentpass_organization_invitation_accept"));
+  assert.ok(invitationLookup);
+  assert.ok(organizationLock);
+  assert.ok(consume);
+  assert.ok(client.calls.indexOf(invitationLookup) < client.calls.indexOf(organizationLock));
+  assert.ok(client.calls.indexOf(organizationLock) < client.calls.indexOf(consume));
+  assert.doesNotMatch(invitationLookup.text, /FOR UPDATE/);
+  assert.deepEqual(invitationLookup.params, [Buffer.from(TOKEN, "hex")]);
+  assert.deepEqual(consume.params.slice(0, 3), [ids.organization, ids.viewer, Buffer.from(TOKEN, "hex")]);
+  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+  assert.equal(client.calls.some((call) => call.text.startsWith("INSERT INTO memberships")), false);
   assert.equal(client.calls.at(-1).text, "COMMIT");
 
   const acceptHash = organizationMutationRequestHash("invitation.accept", {
     organization_id: ids.organization, actor_id: ids.viewer, actor_principal: ids.viewer,
     token_hash: TOKEN
   });
-  const replayClient = new QueueClient([response(), response([invitationRow({ consumed_at: NOW })]), response()], {
+  const replayClient = new QueueClient([response(), response([{ organization_id: ids.organization }]), response()], {
     idempotency: { request_hash: acceptHash, response_json: { invitation: result.invitation, member: result.member } }
   });
   const replay = await repo(replayClient).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, accepted_at: NOW, idempotency_key: "invite-accept-1" });
   assert.equal(replay.replayed, true);
   assert.deepEqual({ invitation: replay.invitation, member: replay.member }, { invitation: result.invitation, member: result.member });
-  assert.equal(replayClient.calls.some((call) => call.text.startsWith("INSERT INTO memberships")), false);
+  assert.equal(replayClient.calls.some((call) => call.text.includes("agentpass_organization_invitation_accept")), false);
 
   const consumedAgain = new QueueClient([response(), response()]);
   assert.equal(await repo(consumedAgain).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, organization_id: ids.organization, idempotency_key: "invite-accept-2" }), null);
   assert.equal(consumedAgain.calls.at(-1).text, "COMMIT");
+});
+
+test("acceptInvitation acquires the organization lock before the invitation row lock and rolls back failed membership writes", async () => {
+  const client = new QueueClient([
+    response(), response([{ organization_id: ids.organization }]), response()
+  ], { failOn: (text) => text.includes("agentpass_organization_invitation_accept") });
+
+  await assert.rejects(
+    repo(client).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, accepted_at: NOW, idempotency_key: "invite-accept-rollback-1" }),
+    /mock query failure/
+  );
+
+  const organizationLock = client.calls.find((call) => call.text.startsWith("SELECT pg_advisory_xact_lock") && call.params[0] === `agentpass:organization:${ids.organization}`);
+  const invitationLock = client.calls.find((call) => call.text.includes("agentpass_organization_invitation_accept"));
+  assert.ok(organizationLock);
+  assert.ok(invitationLock);
+  assert.ok(client.calls.indexOf(organizationLock) < client.calls.indexOf(invitationLock));
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
+  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+  assert.equal(client.calls.some((call) => call.text.startsWith("INSERT INTO admin_audit_events")), false);
 });
 
 test("all mutation failures roll back and never append audit or outbox after a failed write", async () => {
@@ -640,7 +678,7 @@ test("canonical mutation request hashing is deterministic across object key orde
 });
 
 test("transaction rollback error is wrapped without exposing token material", async () => {
-  const client = new QueueClient([response(), response(), response()], { failOn: (text) => text === "ROLLBACK" || text.startsWith("UPDATE organizations") });
+  const client = new QueueClient([response(), response(), response()], { failOn: (text) => text === "ROLLBACK" || text.includes("agentpass_organization_rename") });
   await assert.rejects(repo(client).renameOrganization({ organization_id: ids.organization, actor_member_id: ids.owner, name: "New", expected_version: 1, idempotency_key: "rename-rollback-1" }), (error) => {
     assert.equal(error instanceof OrganizationRepositoryError, true);
     return error.code === "ERR_ROLLBACK";

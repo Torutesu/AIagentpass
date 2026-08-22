@@ -15,10 +15,12 @@ import {
   migrationChecksum,
   migrationStatus
 } from "../../apps/cloud-api/src/postgres/migration-runner.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 export const QUALIFICATION_ID = "postgres-c3-migration-0047";
 export const TARGET_VERSION = 47;
 export const TARGET_NAME = "0047_platform_promotion_issuance.sql";
+export const CURRENT_SCHEMA_HEAD_VERSION = POSTGRES_SCHEMA_HEAD.version;
 export const DEFAULT_QUALIFICATION_INPUT_ARTIFACT_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../contracts/postgres",
@@ -534,7 +536,7 @@ export async function runC3Migration0047Qualification({
     await applyRoleContract(client, rolesSql);
     const server = await client.query("SELECT current_setting('server_version') AS server_version, current_database() AS database_name, inet_server_port() AS server_port");
     const status = await migrationStatus({ client, migrations: Promise.resolve(migrations) });
-    if (status.currentVersion !== TARGET_VERSION || status.pending.length !== 0
+    if (status.currentVersion !== CURRENT_SCHEMA_HEAD_VERSION || status.pending.length !== 0
       || status.modified.length !== 0 || status.dirty === true) {
       throw qualificationError(QUALIFICATION_DIAGNOSTICS.MIGRATION_FAILED);
     }
@@ -1196,7 +1198,7 @@ export function normalizeQualificationEvidence(evidence, {
   }
   if (evidence.status === "passed") {
     if (evidence.reason !== null || typeof evidence.migration_checksum !== "string" || !/^[0-9a-f]{64}$/u.test(evidence.migration_checksum)
-      || evidence.current_version !== TARGET_VERSION || !SERVER_VERSION_PATTERN.test(evidence.server_version ?? "")
+      || evidence.current_version !== CURRENT_SCHEMA_HEAD_VERSION || !SERVER_VERSION_PATTERN.test(evidence.server_version ?? "")
       || typeof evidence.database_name !== "string" || !DATABASE_NAME_PATTERN.test(evidence.database_name)
       || !Number.isSafeInteger(evidence.server_port) || evidence.server_port < 1 || evidence.server_port > 65535
       || typeof evidence.tls_version !== "string" || !TLS_VERSION_PATTERN.test(evidence.tls_version)

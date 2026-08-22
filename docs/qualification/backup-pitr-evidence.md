@@ -18,10 +18,15 @@ that it reports a replayed WAL LSN and is either still recovering or promoted.
 
 The input is a canonical JSON file with mode `0600`, one hard link, and no
 symlink. Its top-level `kind` is
-`agentpass-backup-pitr-execution-result`; it contains the exact candidate
-source commit/tree, CI run ID/attempt, job ID, artifact SHA-256, millisecond UTC
+`agentpass-backup-pitr-execution-result`; it contains the exact source
+commit/tree, CI run ID/attempt, job ID, artifact SHA-256, millisecond UTC
 start/completion timestamps, `execution.real_execution: true`, an external
-runner ID, and the two typed checks:
+runner ID, and a `verification` block produced from three distinct live
+PostgreSQL endpoints (`source`, `restore`, and `pitr`). Each endpoint must
+report the exact local schema head over TLS as `agentpass_backup`, with
+`read_only: true` and `dml_denied: true`. The `restore` and `pitr` endpoint
+identity digests must differ. The block also contains a digest of a non-null
+`pg_last_wal_replay_lsn()` and its recovery state. The two typed checks remain:
 
 ```json
 {
@@ -84,6 +89,38 @@ identity checks. It does not prove that a real PostgreSQL backup, restore, PITR,
 external runner, CI run, artifact, or source-tree lookup occurred. Those are
 separate protected external gates and must be independently verified.
 
+## Protected-runner preflight
+
+Run the PostgreSQL environment preflight before starting `pg_dump`,
+`pg_restore`, or `psql`:
+
+```sh
+node scripts/postgres/require-live-qualification-env.mjs
+```
+
+The preflight is configuration-only: it does not load a PostgreSQL client,
+open a socket, run a database command, or claim that a database was reached.
+It requires all three endpoint URLs (`AGENTPASS_DATABASE_URL`,
+`AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL`, and
+`AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL`) to use exactly one query parameter,
+`sslmode=verify-full`. The endpoint identities are compared without retaining
+usernames or passwords; source, restore, and PITR must all be distinct.
+
+It also requires an absolute, readable, regular CA file with one link and no
+group/other permission bits; the two exact
+`isolated-disposable` confirmations; a runner ID beginning with
+`protected-postgresql/`; and explicit source commit, source tree, CI run ID,
+run attempt, job ID, and artifact SHA-256 bindings. It never falls back to a
+local/test DSN or a GitHub value for these protected bindings. If any required
+value is absent or invalid, it emits only
+`{"status":"not_proven","reason":"<stable-code>"}` and exits nonzero;
+URLs, credentials, CA paths, and filesystem/provider error text are not
+printed.
+
+If any `AGENTPASS_TEST_*` role DSN is supplied, the complete existing
+role-profile set is validated as well. Omitting that optional profile is the
+recommended configuration for the isolated backup/PITR job.
+
 ## Real backup/restore/PITR run
 
 For a protected run, provide the source, disposable restore target, and
@@ -117,12 +154,16 @@ node scripts/qualification/backup-pitr-evidence.mjs run \
 ```
 
 The command uses only `pg_dump`, `pg_restore`, and `psql` with fixed arguments,
-`shell: false`, bounded execution time, and discarded stdout/stderr. The dump
-and probe files are private temporary files and are removed on every exit.
-The restore probe requires a successful SQL query. The PITR probe requires a
-non-null `pg_last_wal_replay_lsn()` and accepts either `pg_is_in_recovery()`
-state, because providers differ on whether a recovered target is left in
-recovery or promoted.
+`shell: false`, bounded execution time, and discarded stdout/stderr. It runs a
+schema/role probe against source, restore, and PITR, then a separate WAL probe
+against PITR. The dump and probe files are private temporary files and are
+removed on every exit. The role probe requires the exact schema head, TLS,
+`agentpass_backup`, no DML privilege, and read-only database/schema access.
+The WAL probe requires a non-null `pg_last_wal_replay_lsn()` and accepts either
+`pg_is_in_recovery()` state, because providers differ on whether a recovered
+target is left in recovery or promoted. Only SHA-256 digests of instance
+identity, role evidence, and replay LSN are retained; raw probe output is never
+written to evidence or stdout.
 
 If PostgreSQL utilities, TLS, credentials, target isolation, backup, restore,
 or WAL replay is unavailable, the command exits non-zero and does not create

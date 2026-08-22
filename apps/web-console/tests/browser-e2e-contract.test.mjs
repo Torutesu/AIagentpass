@@ -17,14 +17,17 @@ test("browser E2E has a deterministic loopback server contract", () => {
   assert.match(config, /url: `http:\/\/127\.0\.0\.1:\$\{e2ePort\}\/`/);
   assert.match(config, /reuseExistingServer: false/);
   assert.match(config, /env -u NODE_OPTIONS -u NODE_DEBUG/);
-  assert.match(runner, /server\.listen\(\{ host: "127\.0\.0\.1", port \}/);
+  assert.match(runner, /spawn\([^\n]+\["run", "dev", "--", "--hostname", "127\.0\.0\.1", "--port", String\(port\)\]/u);
   assert.match(packageManifest.scripts.e2e, /env -u NODE_OPTIONS -u NODE_DEBUG/);
   assert.match(runner, /delete env\.NODE_OPTIONS/);
   assert.match(runner, /delete env\.NODE_DEBUG/);
+  assert.match(runner, /server\.once\("error"/u);
+  assert.match(runner, /child\.once\("error"/u);
   assert.match(runner, /port_collision/);
   assert.match(runner, /sandbox_eperm/);
   assert.match(runner, /status: "not_run"/);
   assert.match(runner, /expectedTests/);
+  assert.match(runner, /\?\? "83"/u);
   assert.match(runner, /incomplete_execution/);
   assert.match(runner, /AGENTPASS_BROWSER_E2E_RESULT_PATH/);
   assert.match(config, /retries: 0/);
@@ -39,12 +42,13 @@ test("the CI E2E command cannot report success without executed browser tests", 
 });
 
 test("CI binds the complete browser E2E result to source, run, attempt, job, and upload success", () => {
-  assert.match(preflight, /assertBrowserE2eEvidence/u);
-  assert.match(preflight, /browser E2E result is not a complete passing execution/u);
+  assert.match(preflight, /assertTerminalResults/u);
+  assert.match(preflight, /terminal results (?:require|contain)/u);
   assert.match(ciWorkflow, /ci-preflight\.mjs browser-e2e/u);
   assert.match(ciWorkflow, /GITHUB_RUN_ATTEMPT/u);
   assert.match(ciWorkflow, /GITHUB_JOB/u);
   assert.match(ciWorkflow, /Retain typed browser E2E result\n\s+if: success\(\)/u);
+  assert.equal((ciWorkflow.match(/AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "83"/gu) ?? []).length, 2);
 });
 
 test("WebAuthn unattended qualification is a dedicated fail-closed execution within browser-e2e", () => {

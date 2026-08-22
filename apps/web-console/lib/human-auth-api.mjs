@@ -11,11 +11,12 @@ const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organ
 const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
   ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", methods: ["POST", "DELETE"], session: "bootstrap", bodies: { POST: "session-bootstrap", DELETE: "none" }, requireSetCookie: true, delete: Object.freeze({ session: "human", requireCookie: true, requireCsrf: true, allowSetCookie: true, clearCookieOnly: true, requireClearedSessionBody: true }) })],
-  ["/api/auth/session/resume", Object.freeze({ cloudPath: "/api/auth/session/resume", methods: ["POST"], session: "resume", body: "session-resume", requireCookie: true, forwardSessionCookie: true, allowSetCookie: true, requireSetCookie: true, normalizeSessionResponse: true })],
+  ["/api/auth/session/resume", Object.freeze({ cloudPath: "/api/auth/session/resume", methods: ["POST"], session: "resume", body: "session-resume", requireCookie: true, forwardSessionCookie: true, allowSetCookie: true, allowClearedSessionCookieOnError: true, requireSetCookie: true, normalizeSessionResponse: true })],
+  ["/api/auth/session/organization-switch", Object.freeze({ cloudPath: "/api/auth/session/organization-switch", methods: ["POST"], session: "human", body: "organization-switch", requireCookie: true, requireCsrf: true, forwardSessionCookie: true, allowSetCookie: true, requireSetCookie: true, normalizeSessionResponse: true })],
   ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
-  ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
-  ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: "human", requireCookie: true, requireCsrf: true })],
+  ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true, allowRecentAuth: true })],
+  ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: "human", requireCookie: true, requireCsrf: true, allowRecentAuth: true })],
   ["/api/auth/security/passkeys", Object.freeze({ cloudPath: "/api/auth/management/credentials", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
   ["/api/auth/security/sessions", Object.freeze({ cloudPath: "/api/auth/management/sessions", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
   ["/api/auth/security/sessions/revoke-others", Object.freeze({ cloudPath: "/api/auth/management/sessions/revoke-others", session: "human", methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "empty" })],
@@ -134,7 +135,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap", normalizeSessionResponse: route.normalizeSessionResponse === true, passkeyMutation: route.passkeyMutation });
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, allowClearedSessionCookieOnError: route.allowClearedSessionCookieOnError === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap", normalizeSessionResponse: route.normalizeSessionResponse === true, passkeyMutation: route.passkeyMutation });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -185,6 +186,10 @@ function validateBody(value, shape) {
   }
   if (shape === "session-resume") {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The session request is invalid");
+    return;
+  }
+  if (shape === "organization-switch") {
+    if (!isExactObject(value, ["organization_id"]) || !isUuid(value.organization_id)) fail(400, "invalid_request", "The session request is invalid");
     return;
   }
   if (shape === "empty") {
@@ -244,7 +249,7 @@ function isInvitationReissueBody(bytes) {
   }
 }
 
-async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false, passkeyMutation = undefined } = {}) {
+async function relayResponse(response, { allowSetCookie = false, allowClearedSessionCookieOnError = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false, passkeyMutation = undefined } = {}) {
   if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
@@ -262,10 +267,11 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (requireSetCookie && response.status >= 200 && response.status < 300 && setCookie === null) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (allowSetCookie && setCookie !== null) {
-    const cookiePattern = clearCookieOnly
-      ? /^__Host-agentpass_session=; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=0$/
-      : /^__Host-agentpass_session=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/;
-    if (!cookiePattern.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    const clearCookiePattern = /^__Host-agentpass_session=; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=0$/;
+    const sessionCookiePattern = /^__Host-agentpass_session=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/;
+    const cookiePattern = clearCookieOnly ? clearCookiePattern : sessionCookiePattern;
+    const clearedOnError = allowClearedSessionCookieOnError && response.status >= 400 && clearCookiePattern.test(setCookie);
+    if (!cookiePattern.test(setCookie) && !clearedOnError) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     headers.set("set-cookie", setCookie);
   }
   return new Response(JSON.stringify(value), { status: response.status, headers });

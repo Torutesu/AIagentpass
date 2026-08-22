@@ -46,6 +46,8 @@ import { createPostgresPlatformOperatorAssignmentRepository } from "./platform-o
 import { createPostgresPlatformSessionRepository } from "./platform-session-repository.mjs";
 import { createPostgresPlatformSessionWebAuthnRepository } from "./platform-session-webauthn-repository.mjs";
 import { createPostgresPlatformSessionBootstrapRepository } from "./platform-session-bootstrap-repository.mjs";
+import { createPostgresDeviceAuditInboxRepository } from "./device-audit-inbox-repository.mjs";
+import { createDeviceAuditInboxWorker } from "./device-audit-inbox-worker.mjs";
 import { createPostgresHostedIdentityBootstrapRepository } from "./hosted-identity-bootstrap-repository.mjs";
 import {
   createDrainController,
@@ -54,12 +56,13 @@ import {
 } from "./operational-health.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "./schema-head.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, MaintenancePoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {}, agentSessionSigningCapabilityMaintenanceAutoStart = true, agentSessionSigningCapabilityMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, MaintenancePoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, expectedDatabaseSchemaDigest: expectedDatabaseSchemaDigestOverride, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {}, agentSessionSigningCapabilityMaintenanceAutoStart = true, agentSessionSigningCapabilityMaintenanceWorkerOptions = {}, deviceAuditInboxAutoStart = true, deviceAuditInboxWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   if (typeof managedSignerProviderOperationMaintenanceAutoStart !== "boolean" || !managedSignerProviderOperationMaintenanceWorkerOptions || typeof managedSignerProviderOperationMaintenanceWorkerOptions !== "object" || Array.isArray(managedSignerProviderOperationMaintenanceWorkerOptions)) throw new TypeError("managed signer provider-operation maintenance runtime configuration is invalid");
   if (typeof agentSessionSigningCapabilityMaintenanceAutoStart !== "boolean" || !agentSessionSigningCapabilityMaintenanceWorkerOptions || typeof agentSessionSigningCapabilityMaintenanceWorkerOptions !== "object" || Array.isArray(agentSessionSigningCapabilityMaintenanceWorkerOptions)) throw new TypeError("Agent Session signing capability maintenance runtime configuration is invalid");
+  if (typeof deviceAuditInboxAutoStart !== "boolean" || !deviceAuditInboxWorkerOptions || typeof deviceAuditInboxWorkerOptions !== "object" || Array.isArray(deviceAuditInboxWorkerOptions)) throw new TypeError("device audit inbox runtime configuration is invalid");
   if (typeof platformPromotionVerifyEvidence !== "function") throw new TypeError("platform promotion evidence verifier is required");
   const normalizedPlatformPromotionLifecycle = normalizePlatformPromotionLifecycle(platformPromotionLifecycle);
   createManagedSignerProviderOperationMaintenanceWorker({
@@ -79,6 +82,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const config = loadPostgresConfig(env);
+  const expectedDatabaseSchemaDigest = expectedDatabaseSchemaDigestOverride ?? config.expectedDatabaseSchemaDigest;
   const poolOptions = (connectionString, max) => ({ connectionString, ssl: { rejectUnauthorized: true }, max, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const pool = new PoolClass(poolOptions(config.connectionString, config.maxConnections));
   const migrationPool = new MigrationPoolClass(poolOptions(config.migrationConnectionString, 2));
@@ -99,6 +103,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let sharedControlMaintenanceWorker;
   let providerOperationMaintenanceWorker;
   let agentSessionSigningCapabilityMaintenanceWorker;
+  let deviceAuditInboxWorker;
   let refreshHintNotifier;
 
   function releaseMigrationClient(destroy = false) {
@@ -137,7 +142,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       [ownerRecoveryOutboxWorker, (worker) => worker.close({ timeout_ms: 0 })],
       [refreshHintNotifier, (notifier) => notifier.close()],
       [providerOperationMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })],
-      [agentSessionSigningCapabilityMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })]
+      [agentSessionSigningCapabilityMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })],
+      [deviceAuditInboxWorker, (worker) => worker.close({ timeoutMs: 0 })]
     ];
     for (const [resource, close] of closers) {
       if (!resource) continue;
@@ -215,7 +221,30 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
         ...(await ownerRecoveryOutboxRepository.health()),
         worker_state: ownerRecoveryOutboxWorker?.snapshot().state ?? "unavailable"
       })
-    })
+    }),
+    deviceAuditInboxStatus: async () => {
+      const health = await deviceAuditInboxMaintenanceRepository.health();
+      const worker = deviceAuditInboxWorker.snapshot();
+      return Object.freeze({
+        version: 1,
+        states: Object.freeze({
+          pending: health.pending,
+          processing: health.processing,
+          accepted: health.accepted,
+          uncertain: health.uncertain,
+          dead_letter: health.dead_letter
+        }),
+        oldest_pending_at: health.oldest_pending_at,
+        oldest_processing_at: health.oldest_processing_at,
+        oldest_uncertain_at: health.oldest_uncertain_at,
+        expired_processing: health.expired_processing,
+        worker_state: worker.state,
+        worker_cycles: worker.cycles,
+        consecutive_failures: worker.consecutive_failures,
+        last_cycle_at: worker.last_cycle_at,
+        last_success_at: worker.last_success_at
+      });
+    }
   });
   const readiness = expectedDatabaseSchemaDigest === undefined ? operationalHealth.readiness : async () => {
     const report = await operationalHealth.readiness();
@@ -255,6 +284,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     const maintenanceDrain = sharedControlMaintenanceWorker?.close({ timeoutMs });
     const providerOperationMaintenanceDrain = providerOperationMaintenanceWorker?.close({ timeoutMs });
     const signingCapabilityMaintenanceDrain = agentSessionSigningCapabilityMaintenanceWorker?.close({ timeoutMs });
+    const deviceAuditInboxDrain = deviceAuditInboxWorker?.close({ timeoutMs });
     return drainController.drain({
       ...options,
       timeoutMs,
@@ -267,6 +297,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
         if (providerOperationMaintenanceResult && providerOperationMaintenanceResult.drained !== true) throw Object.assign(new Error("Managed signer provider-operation maintenance worker drain timed out"), { code: "managed_signer_provider_operation_maintenance_worker_drain_timeout" });
         const signingCapabilityMaintenanceResult = await signingCapabilityMaintenanceDrain;
         if (signingCapabilityMaintenanceResult && signingCapabilityMaintenanceResult.drained !== true) throw Object.assign(new Error("Agent Session signing capability maintenance worker drain timed out"), { code: "agent_session_signing_capability_maintenance_worker_drain_timeout" });
+        const deviceAuditInboxResult = await deviceAuditInboxDrain;
+        if (deviceAuditInboxResult && deviceAuditInboxResult.drained !== true) throw Object.assign(new Error("Device audit inbox worker drain timed out"), { code: "device_audit_inbox_worker_drain_timeout" });
         await closePool();
       }
     });
@@ -425,6 +457,27 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     onAuthorityReduction,
     onDeviceEnrollmentActivated
   });
+  // Enqueue remains on the tenant-scoped application role. Claim, settle, and
+  // aggregate health run through the dedicated deployment-wide maintenance
+  // identity so the request process cannot read every tenant's raw payload.
+  const deviceAuditInboxRepository = createPostgresDeviceAuditInboxRepository({ client: pool });
+  const deviceAuditInboxMaintenanceRepository = createPostgresDeviceAuditInboxRepository({ client: maintenancePool });
+  deviceAuditInboxWorker = createDeviceAuditInboxWorker({
+    ...deviceAuditInboxWorkerOptions,
+    repository: deviceAuditInboxMaintenanceRepository,
+    processor: {
+      async process(entry) {
+        await controlPlaneStore.ingestDeviceAuditEvents({
+          organizationId: entry.organization_id,
+          deviceId: entry.device_id,
+          events: entry.events,
+          idempotencyKey: entry.batch_id
+        });
+        return { outcome: "accepted" };
+      }
+    },
+    metrics: operationalMetrics
+  });
   const runtime = Object.freeze({
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
@@ -466,6 +519,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ...(ownerRecoveryOutboxWorker ? { ownerRecoveryOutboxWorker } : {}),
     sharedControlRepository,
     sharedControlMaintenanceWorker,
+    deviceAuditInboxRepository,
+    deviceAuditInboxWorker,
     controlPlaneStore,
     refreshHintNotifier,
     tenants: createTenantRepositoryFactory({ client: pool }),
@@ -493,6 +548,13 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   if (agentSessionSigningCapabilityMaintenanceAutoStart) {
     await agentSessionSigningCapabilityMaintenanceWorker.runOnce();
     agentSessionSigningCapabilityMaintenanceWorker.start();
+  }
+  if (deviceAuditInboxAutoStart) {
+    // Establish one successful claim boundary before advertising readiness;
+    // a merely scheduled worker is not evidence that the maintenance role or
+    // inbox function contract is usable.
+    await deviceAuditInboxWorker.runOnce();
+    deviceAuditInboxWorker.start();
   }
   return runtime;
   } catch (error) {
@@ -630,7 +692,8 @@ export function loadPostgresAppConfig(env = {}) {
     connectionTimeoutMs: integer(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS ?? "5000", 250, 30_000),
     idleTimeoutMs: integer(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS ?? "30000", 1_000, 300_000),
     statementTimeoutMs: integer(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS ?? "8000", 250, 60_000),
-    lockTimeoutMs: integer(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS ?? "2000", 100, 30_000)
+    lockTimeoutMs: integer(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS ?? "2000", 100, 30_000),
+    ...(env.AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST === undefined ? {} : { expectedDatabaseSchemaDigest: env.AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST })
   });
 }
 

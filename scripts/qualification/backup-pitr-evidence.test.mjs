@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 import {
   BACKUP_PITR_EVIDENCE_ERROR_CODES,
   BACKUP_PITR_EXECUTION_RESULT_KIND,
@@ -28,6 +29,20 @@ const binding = Object.freeze({
   artifactSha256: "c".repeat(64)
 });
 
+const schemaHead = Object.freeze({ version: POSTGRES_SCHEMA_HEAD.version, name: POSTGRES_SCHEMA_HEAD.name, checksum: POSTGRES_SCHEMA_HEAD.checksum });
+const roleEvidence = (purpose) => ({
+  dml_denied: true,
+  identity_sha256: `${purpose === "source" ? "1" : purpose === "restore" ? "2" : "3"}`.repeat(64),
+  purpose,
+  read_only: true,
+  role: "agentpass_backup",
+  schema_head: schemaHead,
+  tls: true
+});
+const roleEvidenceDigest = (purpose) => crypto.createHash("sha256").update(canonicalJson({
+  dml_denied: true, purpose, read_only: true, role: "agentpass_backup", schema_head: schemaHead, tls: true
+}), "utf8").digest("hex");
+
 const executionResult = () => ({
   schema_version: 1,
   kind: BACKUP_PITR_EXECUTION_RESULT_KIND,
@@ -40,6 +55,13 @@ const executionResult = () => ({
   started_at: "2026-08-20T01:00:00.000Z",
   completed_at: "2026-08-20T01:15:00.000Z",
   execution: { environment: "postgresql", real_execution: true, runner_id: "github-actions/backup-pitr" },
+  verification: {
+    instances: ["source", "restore", "pitr"].map((purpose) => ({
+      ...roleEvidence(purpose),
+      role_evidence_sha256: roleEvidenceDigest(purpose)
+    })),
+    wal_replay: { recovery_state: "promoted", replay_lsn_sha256: "4".repeat(64), status: "passed" }
+  },
   backup_restore: { expected: "passed", observed: "passed", status: "passed" },
   pitr_recovery: { expected: "passed", observed: "passed", status: "passed" }
 });
@@ -79,9 +101,9 @@ function runnerEnv(directory, overrides = {}) {
   return {
     ...bindingEnv(),
     PATH: "/protected/bin",
-    AGENTPASS_DATABASE_URL: "postgresql://source:source-secret@source.example.test/source?sslmode=verify-full",
-    AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL: "postgresql://restore:restore-secret@restore.example.test/restore?sslmode=verify-full",
-    AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL: "postgresql://pitr:pitr-secret@pitr.example.test/pitr?sslmode=verify-full",
+    AGENTPASS_DATABASE_URL: "postgresql://agentpass_backup:source-secret@source.example.test/source?sslmode=verify-full",
+    AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL: "postgresql://agentpass_backup:restore-secret@restore.example.test/restore?sslmode=verify-full",
+    AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL: "postgresql://agentpass_backup:pitr-secret@pitr.example.test/pitr?sslmode=verify-full",
     AGENTPASS_BACKUP_PITR_CA_CERT_FILE: path.join(directory, "ca.pem"),
     AGENTPASS_BACKUP_PITR_RESTORE_CONFIRMATION: "isolated-disposable",
     AGENTPASS_BACKUP_PITR_PITR_CONFIRMATION: "isolated-disposable",
@@ -97,7 +119,17 @@ function fakeSpawn(calls, { failCommand = null, pitrResult = "replayed:ready" } 
     const outputIndex = args.indexOf("--output");
     if (command === "pg_dump") writeFileSync(args[args.indexOf("--file") + 1], "dump", { mode: 0o600 });
     if (command === "psql" && outputIndex >= 0) {
-      writeFileSync(args[outputIndex + 1], args.includes("SELECT 'restore-ok'") ? "restore-ok\n" : `${pitrResult}\n`);
+      if (args.some((arg) => arg.includes("pg_last_wal_replay_lsn"))) {
+        writeFileSync(args[outputIndex + 1], pitrResult === "replayed:ready"
+          ? JSON.stringify({ replay_lsn: "0/16B6C50", recovery_state: "promoted" }) + "\n"
+          : JSON.stringify({ replay_lsn: null, recovery_state: "promoted" }) + "\n");
+      } else {
+        writeFileSync(args[outputIndex + 1], JSON.stringify({
+          current_user: "agentpass_backup", session_user: "agentpass_backup", ssl: true,
+          schema_version: POSTGRES_SCHEMA_HEAD.version, schema_checksum: POSTGRES_SCHEMA_HEAD.checksum,
+          schema_count: POSTGRES_SCHEMA_HEAD.migration_count, read_only: true, dml_denied: true
+        }) + "\n");
+      }
     }
     queueMicrotask(() => child.emit("exit", command === failCommand ? 1 : 0, null));
     return child;
@@ -236,8 +268,8 @@ test("run performs fixed real PostgreSQL command sequence and writes only redact
       return () => values.shift();
     })()
   });
-  assert.deepEqual(calls.map(({ command }) => command), ["pg_dump", "pg_restore", "psql", "psql"]);
-  assert.match(calls[1].args.at(-1), /\/base\.dump$/u);
+  assert.deepEqual(calls.map(({ command }) => command), ["pg_dump", "psql", "pg_restore", "psql", "psql", "psql"]);
+  assert.match(calls[2].args.at(-1), /\/base\.dump$/u);
   assert.deepEqual(Object.keys(evidence).sort(), [
     "artifact_sha256", "backup_restore", "ci_job_id", "ci_run_attempt", "ci_run_id",
     "pitr_recovery", "redacted", "schema_version", "source_commit", "source_tree"

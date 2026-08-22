@@ -179,3 +179,37 @@ release-evidence verifier. `verify-macos-release.sh` remains the only path in
 this release tooling that performs the live stapler, Gatekeeper, code-signing,
 and package checks on macOS. Missing credentials or hardware must remain
 `not_proven` in the matrix.
+
+## Native XPC contract gate
+
+The macOS release verifier also invokes the release-only native XPC contract
+gate. It reads the contract from the exact source checkout selected by the
+signed release manifest:
+
+```sh
+node scripts/release/native-xpc-contract-gate.mjs \
+  "$PWD" RELEASE_SOURCE_COMMIT RELEASE_SOURCE_TREE
+```
+
+The gate fails closed unless
+[`native/macos/Qualification/native-xpc-contract-v1.json`](../../native/macos/Qualification/native-xpc-contract-v1.json)
+is present as a single regular file, canonical JSON, and byte-identical to the
+blob at that path in the expected Git tree. Every source reference listed by
+the contract is checked the same way. The contract's frozen Swift contract
+version and fingerprint must also match `NativeXPCContract.swift`, and the
+Mach-service, host-control selector/DTO, authorization principal, and
+`agentpass close` route are checked against the source references.
+
+This is source and fingerprint provenance, not runtime proof. It does not
+replace the signed Developer ID artifact checks, launchd/NSXPC execution, or
+the separate physical macOS qualification; those remain `not_proven` until
+the protected macOS job produces their evidence.
+
+The protected release-preflight.yml workflow also resolves exactly one
+successful release-candidate.yml run for the candidate source (or requires an
+explicit run ID), downloads both candidate artifacts, and independently
+derives the product/manifest/source binding. It requires the protected
+AGENTPASS_RELEASE_EVIDENCE_INDEX_JSON value and invokes
+scripts/release/release-evidence-index.mjs verify against that derived
+candidate. Missing source commit/tree, artifact digest, manifest digest, or
+run tuple therefore stops preflight before the result is retained.

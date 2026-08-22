@@ -35,14 +35,17 @@ jobs:
   qualify:
     name: ${{ matrix.architecture }}
     if: ${{ github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    environment: ${{ matrix.environment }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - architecture: arm64
             runner: agentpass-hardware-apple-silicon
+            environment: agentpass-macos-apple-silicon
           - architecture: x86_64
             runner: agentpass-hardware-intel
+            environment: agentpass-macos-intel
     runs-on: ["self-hosted", "macOS", "${{ matrix.runner }}"]
     timeout-minutes: 30
     env:
@@ -52,6 +55,9 @@ jobs:
       RUNNER_ATTESTATION: /opt/agentpass/macos/runner-attestation.json
       RUNNER_ATTESTATION_SIGNATURE: /opt/agentpass/macos/runner-attestation.sig
       RUNNER_ATTESTATION_PUBLIC_KEY: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_PUBLIC_KEY_PATH }}
+      QUALIFICATION_TOOL_ROOT: /opt/agentpass/macos/qualification-tool
+      QUALIFICATION_TOOL_MANIFEST_SHA256: ${{ vars.AGENTPASS_MACOS_QUALIFICATION_TOOL_MANIFEST_SHA256 }}
+      QUALIFICATION_TOOL_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_MACOS_QUALIFICATION_TOOL_MANIFEST_FINGERPRINT }}
       RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_RUNNER_ATTESTATION_FINGERPRINT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,6 +105,220 @@ jobs:
           done
           /usr/bin/arch >/dev/null
           /usr/sbin/sysctl -n kern.hv_vmm_present >/dev/null
+      - name: Verify independently installed qualification toolchain
+        env:
+          TOOL_ROOT: ${{ env.QUALIFICATION_TOOL_ROOT }}
+          TOOL_MANIFEST_SHA256: ${{ env.QUALIFICATION_TOOL_MANIFEST_SHA256 }}
+          TOOL_MANIFEST_FINGERPRINT: ${{ env.QUALIFICATION_TOOL_MANIFEST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOL_ROOT" == /opt/agentpass/macos/qualification-tool ]] || { echo "qualification tool root is not fixed" >&2; exit 1; }
+          [[ "$TOOL_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "qualification tool manifest digest is missing or invalid" >&2; exit 1; }
+          [[ "$TOOL_MANIFEST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9_-]{43}$ ]] || { echo "qualification tool manifest fingerprint is missing or invalid" >&2; exit 1; }
+          /usr/bin/node "$TOOL_ROOT/verify-installed-toolchain.mjs" "$TOOL_ROOT" "$TOOL_MANIFEST_SHA256" "$TOOL_MANIFEST_FINGERPRINT"
+      - name: Configure reproducible SwiftPM cache and evidence paths
+        env:
+          NATIVE_SWIFT_ROOT: ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          [[ "$NATIVE_SWIFT_ROOT" == "$RUNNER_TEMP/agentpass-native-swift-${{ matrix.architecture }}" ]] || { echo "native Swift root is not runner-temporary" >&2; exit 1; }
+          mkdir -m 700 -p \
+            "$NATIVE_SWIFT_ROOT/module-cache" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-cache" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-config" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-security" \
+            "$NATIVE_SWIFT_ROOT/scratch" \
+            "$NATIVE_SWIFT_ROOT/logs"
+          for path in \
+            "$NATIVE_SWIFT_ROOT" \
+            "$NATIVE_SWIFT_ROOT/module-cache" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-cache" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-config" \
+            "$NATIVE_SWIFT_ROOT/swiftpm-security" \
+            "$NATIVE_SWIFT_ROOT/scratch" \
+            "$NATIVE_SWIFT_ROOT/logs"; do
+            [[ -d "$path" && ! -L "$path" && -w "$path" ]] || { echo "native Swift path is not a writable non-symlink directory: $path" >&2; exit 1; }
+          done
+          {
+            echo "AGENTPASS_NATIVE_SWIFT_ROOT=$NATIVE_SWIFT_ROOT"
+            echo "AGENTPASS_NATIVE_SWIFT_EVIDENCE=$NATIVE_SWIFT_ROOT/evidence.json"
+            echo "AGENTPASS_NATIVE_SWIFT_LOG_DIR=$NATIVE_SWIFT_ROOT/logs"
+            echo "AGENTPASS_SWIFT_MODULE_CACHE_PATH=$NATIVE_SWIFT_ROOT/module-cache"
+            echo "CLANG_MODULE_CACHE_PATH=$NATIVE_SWIFT_ROOT/module-cache"
+            echo "AGENTPASS_DISABLE_SWIFTPM_SANDBOX=1"
+          } >> "$GITHUB_ENV"
+      - name: Run source-bound SwiftPM and ad-hoc bundle qualification
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_SOURCE_TREE: ${{ inputs.source_tree }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          EXPECTED_RUNNER_ID: ${{ runner.name }}
+          NATIVE_SWIFT_ROOT: ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_COMMIT" ]] || { echo "Swift qualification checkout commit drifted" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD^{tree})" == "$EXPECTED_SOURCE_TREE" ]] || { echo "Swift qualification checkout tree drifted" >&2; exit 1; }
+          observed_architecture="$(/usr/bin/uname -m)"
+          case "$EXPECTED_ARCHITECTURE:$observed_architecture" in
+            arm64:arm64|x86_64:x86_64) ;;
+            *) echo "Swift qualification architecture mismatch: expected $EXPECTED_ARCHITECTURE, observed $observed_architecture" >&2; exit 1 ;;
+          esac
+          module_cache="$NATIVE_SWIFT_ROOT/module-cache"
+          swiftpm_cache="$NATIVE_SWIFT_ROOT/swiftpm-cache"
+          swiftpm_config="$NATIVE_SWIFT_ROOT/swiftpm-config"
+          swiftpm_security="$NATIVE_SWIFT_ROOT/swiftpm-security"
+          scratch="$NATIVE_SWIFT_ROOT/scratch"
+          log_dir="$NATIVE_SWIFT_ROOT/logs"
+          swift_log="$log_dir/swift-test.log"
+          bundle_log="$log_dir/test-app-bundle.log"
+          swift_test_command="CLANG_MODULE_CACHE_PATH=$module_cache swift test --package-path native/macos --disable-sandbox --cache-path $swiftpm_cache --config-path $swiftpm_config --security-path $swiftpm_security --scratch-path $scratch --manifest-cache local"
+          bundle_test_command="native/macos/scripts/test-app-bundle.sh"
+
+          set +e
+          MACOSX_DEPLOYMENT_TARGET=14.0 CLANG_MODULE_CACHE_PATH="$module_cache" \
+            swift test --package-path native/macos --disable-sandbox \
+            --cache-path "$swiftpm_cache" --config-path "$swiftpm_config" \
+            --security-path "$swiftpm_security" --scratch-path "$scratch" \
+            --manifest-cache local 2>&1 | tee "$swift_log"
+          swift_test_exit="${PIPESTATUS[0]}"
+          MACOSX_DEPLOYMENT_TARGET=14.0 CLANG_MODULE_CACHE_PATH="$module_cache" \
+            native/macos/scripts/test-app-bundle.sh 2>&1 | tee "$bundle_log"
+          bundle_test_exit="${PIPESTATUS[0]}"
+          set -e
+
+          export OBSERVED_ARCHITECTURE="$observed_architecture"
+          export XCODE_SELECT_PATH="$(/usr/bin/xcode-select -p)"
+          export XCODE_VERSION="$(/usr/bin/xcodebuild -version | /usr/bin/tr '\n' ' ')"
+          export SWIFT_VERSION="$(swift --version | /usr/bin/tr '\n' ' ')"
+          export SWIFT_TEST_COMMAND="$swift_test_command"
+          export BUNDLE_TEST_COMMAND="$bundle_test_command"
+          export SWIFT_TEST_EXIT="$swift_test_exit"
+          export BUNDLE_TEST_EXIT="$bundle_test_exit"
+
+          /usr/bin/node - "$AGENTPASS_NATIVE_SWIFT_EVIDENCE" "$swift_log" "$bundle_log" "$module_cache" "$swiftpm_cache" "$swiftpm_config" "$swiftpm_security" "$scratch" <<'NODE'
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+          const [outputPath, swiftLog, bundleLog, moduleCache, swiftpmCache, swiftpmConfig, swiftpmSecurity, scratch] = process.argv.slice(2);
+          const read = (file) => fs.readFileSync(file);
+          const digest = (file) => crypto.createHash("sha256").update(read(file)).digest("hex");
+          const stat = (file) => ({ bytes: fs.statSync(file).size, sha256: digest(file) });
+          const canonicalPath = (file) => fs.realpathSync(file);
+          const evidence = {
+            schema_version: 1,
+            kind: "agentpass-native-swift-ci-evidence",
+            source: {
+              commit: process.env.EXPECTED_SOURCE_COMMIT,
+              tree: process.env.EXPECTED_SOURCE_TREE,
+            },
+            execution: {
+              workflow: process.env.GITHUB_WORKFLOW,
+              run_id: process.env.GITHUB_RUN_ID,
+              run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+              job: process.env.GITHUB_JOB,
+              runner_id: process.env.EXPECTED_RUNNER_ID,
+              architecture: process.env.EXPECTED_ARCHITECTURE,
+              observed_architecture: process.env.OBSERVED_ARCHITECTURE,
+            },
+            toolchain: {
+              xcode_select: process.env.XCODE_SELECT_PATH,
+              xcode_version: process.env.XCODE_VERSION,
+              swift_version: process.env.SWIFT_VERSION,
+            },
+            cache: {
+              module_cache: canonicalPath(moduleCache),
+              swiftpm_cache: canonicalPath(swiftpmCache),
+              swiftpm_config: canonicalPath(swiftpmConfig),
+              swiftpm_security: canonicalPath(swiftpmSecurity),
+              scratch: canonicalPath(scratch),
+              swiftpm_sandbox_disabled: true,
+            },
+            commands: {
+              swift_test: process.env.SWIFT_TEST_COMMAND,
+              bundle_test: process.env.BUNDLE_TEST_COMMAND,
+            },
+            results: {
+              swift_test_exit: Number(process.env.SWIFT_TEST_EXIT),
+              bundle_test_exit: Number(process.env.BUNDLE_TEST_EXIT),
+              ok: Number(process.env.SWIFT_TEST_EXIT) === 0 && Number(process.env.BUNDLE_TEST_EXIT) === 0,
+            },
+            logs: {
+              swift_test: { path: canonicalPath(swiftLog), ...stat(swiftLog) },
+              bundle_test: { path: canonicalPath(bundleLog), ...stat(bundleLog) },
+            },
+          };
+          for (const [name, value] of Object.entries({
+            source_commit: evidence.source.commit,
+            source_tree: evidence.source.tree,
+            workflow: evidence.execution.workflow,
+            run_id: evidence.execution.run_id,
+            run_attempt: evidence.execution.run_attempt,
+            job: evidence.execution.job,
+            runner_id: evidence.execution.runner_id,
+            architecture: evidence.execution.architecture,
+            observed_architecture: evidence.execution.observed_architecture,
+          })) {
+            if (!value) throw new Error(`missing evidence binding: ${name}`);
+          }
+          fs.writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "w" });
+          NODE
+          if [[ "$swift_test_exit" -ne 0 || "$bundle_test_exit" -ne 0 ]]; then
+            exit 1
+          fi
+      - name: Verify source-bound Swift evidence
+        if: ${{ always() }}
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_SOURCE_TREE: ${{ inputs.source_tree }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          EXPECTED_RUNNER_ID: ${{ runner.name }}
+          EVIDENCE: ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}/evidence.json
+          NATIVE_SWIFT_ROOT: ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          test -f "$EVIDENCE" && test ! -L "$EVIDENCE"
+          /usr/bin/node - "$EVIDENCE" "$EXPECTED_SOURCE_COMMIT" "$EXPECTED_SOURCE_TREE" "$EXPECTED_ARCHITECTURE" "$EXPECTED_RUNNER_ID" "$NATIVE_SWIFT_ROOT" <<'NODE'
+          const assert = require("node:assert/strict");
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const [evidencePath, expectedCommit, expectedTree, expectedArchitecture, expectedRunner, root] = process.argv.slice(2);
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+          assert.equal(evidence.kind, "agentpass-native-swift-ci-evidence");
+          assert.equal(evidence.schema_version, 1);
+          assert.equal(evidence.source.commit, expectedCommit);
+          assert.equal(evidence.source.tree, expectedTree);
+          assert.equal(evidence.execution.architecture, expectedArchitecture);
+          assert.equal(evidence.execution.observed_architecture, expectedArchitecture);
+          assert.equal(evidence.execution.runner_id, expectedRunner);
+          assert.equal(evidence.cache.swiftpm_sandbox_disabled, true);
+          for (const field of ["module_cache", "swiftpm_cache", "swiftpm_config", "swiftpm_security", "scratch"]) {
+            const value = evidence.cache[field];
+            assert.equal(fs.realpathSync(value), path.join(root, field === "module_cache" ? "module-cache" : field === "swiftpm_cache" ? "swiftpm-cache" : field === "swiftpm_config" ? "swiftpm-config" : field === "swiftpm_security" ? "swiftpm-security" : "scratch"));
+          }
+          assert.match(evidence.commands.swift_test, /--disable-sandbox/u);
+          assert.match(evidence.commands.swift_test, /--cache-path/u);
+          assert.match(evidence.commands.swift_test, /--config-path/u);
+          assert.match(evidence.commands.swift_test, /--security-path/u);
+          assert.match(evidence.commands.swift_test, /--scratch-path/u);
+          assert.match(evidence.commands.swift_test, /--manifest-cache local/u);
+          assert.equal(evidence.results.swift_test_exit, 0);
+          assert.equal(evidence.results.bundle_test_exit, 0);
+          assert.equal(evidence.results.ok, true);
+          for (const log of Object.values(evidence.logs)) {
+            const bytes = fs.readFileSync(log.path);
+            assert.equal(bytes.length, log.bytes);
+            assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), log.sha256);
+          }
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: macos-native-swift-${{ matrix.architecture }}-${{ inputs.source_commit }}
+          path: |
+            ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}/evidence.json
+            ${{ runner.temp }}/agentpass-native-swift-${{ matrix.architecture }}/logs/*.log
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify the signed manifest, package, notarization, and Developer ID Team ID
         env:
           MANIFEST: ${{ inputs.release_manifest_path }}
@@ -170,7 +390,7 @@ jobs:
           check_probe_binding() {
             local digest="$1" identity="$2" label="$3"
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "$label exact expected SHA-256 is required and invalid" >&2; exit 1; }
-            [[ -z "$identity" || "$identity" =~ $developer_id_re ]] || { echo "$label expected signing identity is invalid" >&2; exit 1; }
+            [[ "$identity" =~ $developer_id_re ]] || { echo "$label Developer ID Application signing identity is required and invalid" >&2; exit 1; }
           }
           check_probe_binding "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SHA256" "$AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY" "launchd host-child probe"
           check_probe_binding "$AGENTPASS_NSXPC_PROBE_SHA256" "$AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY" "NSXPC probe"
@@ -186,6 +406,8 @@ jobs:
           AGENTPASS_QUALIFICATION_SOURCE_TREE: ${{ inputs.source_tree }}
           AGENTPASS_QUALIFICATION_EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
           AGENTPASS_QUALIFICATION_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          AGENTPASS_QUALIFICATION_EXPECTED_RUNNER_ID: ${{ runner.name }}
+          AGENTPASS_QUALIFICATION_TOOL_ROOT: ${{ env.QUALIFICATION_TOOL_ROOT }}
           AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR: ${{ vars.AGENTPASS_QUALIFICATION_PROBE_STAGING_DIR }}
           AGENTPASS_QUALIFICATION_OUTPUT: ${{ runner.temp }}/agentpass-macos-${{ matrix.architecture }}-qualification.json
           AGENTPASS_RUNNER_ATTESTATION: ${{ env.RUNNER_ATTESTATION }}
@@ -201,9 +423,9 @@ jobs:
           AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_LAUNCHD_HOST_CHILD_PROBE_SIGNING_IDENTITY }}
           AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_NSXPC_PROBE_SIGNING_IDENTITY }}
           AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY: ${{ vars.AGENTPASS_CRASH_RESTART_PROBE_SIGNING_IDENTITY }}
-        run: native/macos/scripts/qualification/run-hardware-qualification.sh
+        run: /opt/agentpass/macos/qualification-tool/run-hardware-qualification.sh
       - name: Independently verify canonical evidence and all bound digests
-        run: node native/macos/Qualification/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
+        run: /usr/bin/node /opt/agentpass/macos/qualification-tool/hardware-qualification.mjs --verify "${RUNNER_TEMP}/agentpass-macos-${{ matrix.architecture }}-qualification.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-hardware-qualification-${{ matrix.architecture }}-${{ inputs.source_commit }}

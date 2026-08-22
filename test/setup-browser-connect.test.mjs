@@ -24,6 +24,7 @@ const HANDOFF_PATH = `/v1/browser-cli-handoffs/${"a".repeat(43)}`;
 const ENROLLMENT = "11111111-1111-4111-8111-111111111111";
 const ORGANIZATION = "22222222-2222-4222-8222-222222222222";
 const DEVICE = "33333333-3333-4333-8333-333333333333";
+let loopbackUnavailable = false;
 
 function preflight(overrides = {}) {
   return { version: 1, platform: "macos", candidate_id: CANDIDATE, device_key_fingerprint: FINGERPRINT, ...overrides };
@@ -86,6 +87,23 @@ function localHandoffFromLaunch(url) {
   return parsed.hash.slice(1);
 }
 
+async function runOrSkipWhenLoopbackUnavailable(t, operation) {
+  if (loopbackUnavailable) {
+    t.skip("loopback listener is unavailable in this sandbox; external browser E2E remains not_proven");
+    return undefined;
+  }
+  try {
+    return await operation();
+  } catch (error) {
+    if (error?.code === SETUP_BROWSER_CONNECT_ERRORS.LOOPBACK_UNAVAILABLE) {
+      loopbackUnavailable = true;
+      t.skip("loopback listener is unavailable in this sandbox; external browser E2E remains not_proven");
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 test("validates Console root and Cloud /v1 independently", () => {
   assert.equal(normalizeConsoleBaseUrl(CONSOLE), "https://console.example/");
   assert.equal(normalizeConsoleBaseUrl(`${CONSOLE}/`), "https://console.example/");
@@ -137,7 +155,8 @@ test("system opener uses the fixed executable, no shell, and minimal environment
   });
 });
 
-test("opens Console and returns exactly one invitation from memory", async () => {
+test("opens Console and returns exactly one invitation from memory", async (t) => {
+  await runOrSkipWhenLoopbackUnavailable(t, async () => {
   let launchUrl;
   const value = invitation();
   const received = await connectSetupInBrowser({
@@ -165,9 +184,11 @@ test("opens Console and returns exactly one invitation from memory", async () =>
   assert.equal(launch.search, "", "Cloud query parameters must not become the Console query");
   assert.equal(launchUrl.includes(CLOUD), false, "Cloud /v1 must not be inferred into the Console launch URL");
   assert.equal(launch.hash.startsWith("#http://127.0.0.1:"), true);
+  });
 });
 
-test("closes the listener after opener failure and keeps errors path/secret-free", async () => {
+test("closes the listener after opener failure and keeps errors path/secret-free", async (t) => {
+  await runOrSkipWhenLoopbackUnavailable(t, async () => {
   let launchUrl;
   const secret = "credential-secret-/tmp/private-key";
   await assert.rejects(
@@ -188,9 +209,43 @@ test("closes the listener after opener failure and keeps errors path/secret-free
     }
   );
   await assert.rejects(request(`${localHandoffFromLaunch(launchUrl)}/preflight`));
+  });
 });
 
-test("bounds a stuck opener and closes the listener", async () => {
+test("classifies loopback listener permission and availability failures without exposing cause data", async () => {
+  const originalListen = http.Server.prototype.listen;
+  const secretPath = "/private/agentpass/credential-secret.pem";
+  const failureCodes = ["EPERM", "EACCES", "EADDRINUSE", "EADDRNOTAVAIL"];
+
+  try {
+    for (const failureCode of failureCodes) {
+      http.Server.prototype.listen = function patchedListen() {
+        process.nextTick(() => this.emit("error", Object.assign(new Error(`listen ${failureCode}: ${secretPath}`), { code: failureCode })));
+        return this;
+      };
+
+      await assert.rejects(
+        connectSetupInBrowser({ consoleBaseUrl: CONSOLE, preflight: preflight() }),
+        (error) => {
+          assert.equal(error.code, SETUP_BROWSER_CONNECT_ERRORS.LOOPBACK_UNAVAILABLE);
+          assert.equal(error.message, "The local browser handoff is unavailable");
+          assert.equal(error.cause, undefined);
+          assert.equal(Object.hasOwn(error, "cause"), false);
+          assert.equal(error.message.includes(secretPath), false);
+          assert.equal(error.message.includes(failureCode), false);
+          assert.equal(JSON.stringify(error).includes(secretPath), false);
+          assert.equal(JSON.stringify(error).includes(failureCode), false);
+          return error instanceof SetupBrowserConnectError;
+        }
+      );
+    }
+  } finally {
+    http.Server.prototype.listen = originalListen;
+  }
+});
+
+test("bounds a stuck opener and closes the listener", async (t) => {
+  await runOrSkipWhenLoopbackUnavailable(t, async () => {
   let launchUrl;
   const started = Date.now();
   await assert.rejects(
@@ -207,9 +262,11 @@ test("bounds a stuck opener and closes the listener", async () => {
   );
   assert.ok(Date.now() - started < 2_000);
   await assert.rejects(request(`${localHandoffFromLaunch(launchUrl)}/preflight`));
+  });
 });
 
-test("propagates AbortSignal to the bounded journey and tears down the listener", async () => {
+test("propagates AbortSignal to the bounded journey and tears down the listener", async (t) => {
+  await runOrSkipWhenLoopbackUnavailable(t, async () => {
   const controller = new AbortController();
   let launchUrl;
   const pending = connectSetupInBrowser({
@@ -226,6 +283,7 @@ test("propagates AbortSignal to the bounded journey and tears down the listener"
   controller.abort();
   await assert.rejects(pending, (error) => error.code === SETUP_BROWSER_CONNECT_ERRORS.ABORTED);
   await assert.rejects(request(`${localHandoffFromLaunch(launchUrl)}/preflight`));
+  });
 });
 
 test("rejects unknown options and malformed public preflight without echoing input", async () => {
@@ -242,9 +300,11 @@ test("rejects unknown options and malformed public preflight without echoing inp
   });
 });
 
-test("maps handoff expiry to a stable error", async () => {
+test("maps handoff expiry to a stable error", async (t) => {
+  await runOrSkipWhenLoopbackUnavailable(t, async () => {
   await assert.rejects(
     connectSetupInBrowser({ consoleBaseUrl: CONSOLE, preflight: preflight(), opener: () => {}, ttlMs: 1_000 }),
     (error) => error.code === SETUP_BROWSER_CONNECT_ERRORS.TIMEOUT
   );
+  });
 });

@@ -12,12 +12,19 @@ Runbooks:
   CI, evidence binding, stop conditions, and promotion.
 - [`PROTECTED_OPERATOR_PREFLIGHT_RUNBOOK.md`](PROTECTED_OPERATOR_PREFLIGHT_RUNBOOK.md)
   — CA, backup/PITR, artifact, external-evidence, expiry, and rollback stop gate.
+- [`OPERATIONS_EVIDENCE_BUNDLE_RUNBOOK.md`](OPERATIONS_EVIDENCE_BUNDLE_RUNBOOK.md)
+  — structure-only readiness checks, independent qualification bundles, and
+  fail-closed verification.
 - [`INCIDENT_REVOKE_RUNBOOK.md`](INCIDENT_REVOKE_RUNBOOK.md) — containment,
   scoped revoke, uncertain operations, rollback, and closure evidence.
 - [`KMS_POSTGRES_QUALIFICATION_RUNBOOK.md`](KMS_POSTGRES_QUALIFICATION_RUNBOOK.md)
   — managed signer/KMS and PostgreSQL 16/17 qualification.
 - [`MACOS_RELEASE_NOTARIZATION_RUNBOOK.md`](MACOS_RELEASE_NOTARIZATION_RUNBOOK.md)
   — universal PKG, Developer ID, notarization, Gatekeeper, and hardware proof.
+- [`MACOS_HOST_CONTROL_QUALIFICATION_HANDOFF.md`](MACOS_HOST_CONTROL_QUALIFICATION_HANDOFF.md)
+  — protected probe provisioning, launchd installation, separate-process
+  `agentpass close`, post-close signing denial, response-loss retry, and
+  physical evidence handoff.
 - [`STAGING_DRILL_SECURITY_REVIEW_RUNBOOK.md`](STAGING_DRILL_SECURITY_REVIEW_RUNBOOK.md)
   — staging deployment, failure drills, independent security review, and go/no-go.
 - [`STAGING_DEPLOYMENT_READINESS_RUNBOOK.md`](STAGING_DEPLOYMENT_READINESS_RUNBOOK.md)

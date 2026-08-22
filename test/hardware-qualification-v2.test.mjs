@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import { deriveReleaseCandidateId } from '../lib/release-candidate-identity.mjs';
+import { validateHardwareQualification } from '../scripts/release/validate-hardware-qualification.mjs';
 
 const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const validator = join(root, 'scripts/release/validate-hardware-qualification.mjs');
@@ -16,7 +17,23 @@ const sorted = (value) => Array.isArray(value) ? value.map(sorted) : value && ty
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const fingerprint = (key) => `SHA256:${crypto.createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('base64url')}`;
 const writeSignature = (path, bytes, privateKey) => writeFileSync(path, `${crypto.sign(null, bytes, privateKey).toString('base64')}\n`);
-const run = (args) => spawnSync(process.execPath, [validator, ...args], { encoding: 'utf8' });
+const run = (args) => {
+  const testManifestPath = join(dirname(args[0]), 'gate-manifest.json');
+  let stdout = '';
+  try {
+    validateHardwareQualification({ argv: args, gateManifestPath: testManifestPath, write: (line) => { stdout += `${line}\n`; } });
+    return { status: 0, stdout, stderr: '' };
+  } catch (error) {
+    return { status: 1, stdout, stderr: `${error?.stack ?? error}\n` };
+  }
+};
+
+test('production validation explicitly rejects an unqualified report', () => {
+  const report = join(mkdtempSync(join(tmpdir(), 'agentpass-hardware-require-qualified-')), 'report.json');
+  writeFileSync(report, canonical({ schema_version: 1, qualified: false }));
+  const result = run([report, '--require-qualified']);
+  assert.notEqual(result.status, 0);
+});
 
 const makeFixture = ({ manifestVersion = 4 } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'agentpass-hardware-v2-'));
@@ -102,7 +119,9 @@ const makeFixture = ({ manifestVersion = 4 } = {}) => {
   const operatorKeys = crypto.generateKeyPairSync('ed25519');
   const operatorSignaturePath = join(dir, 'operator.sig'); const operatorPublicKeyPath = join(dir, 'operator-public.pem');
   const requiredGates = ['gatekeeper-notarization', 'clean-install-launchd-xpc', 'secure-enclave-enrollment', 'cloud-possession-verification', 'claude-code-unattended-sign', 'cursor-code-unattended-sign', 'audit-upload-observation', 'policy-reduction-refresh-ack', 'offline-expiry', 'revoke-emergency-stop', 'crash-restart-recovery', 'sleep-wake-network-clock', 'upgrade-preserves-state', 'uninstall-reinstall-recovery', 'current-user-purge', 'negative-identity-and-entitlement-cases'];
-  const gates = requiredGates.map((name, index) => { const evidence = { name: `gate-${String(index).padStart(2, '0')}.txt`, bytes: Buffer.byteLength(`${name} passed\n`), sha256: digest(Buffer.from(`${name} passed\n`)) }; writeFileSync(join(evidenceDir, evidence.name), `${name} passed\n`); return { name, status: 'passed', evidence: [evidence] }; });
+  const gates = requiredGates.map((name, index) => { const content = Buffer.from(canonical({ schema_version: 1, kind: 'p0c-gate-result', name, status: 'passed', driver_sha256: 'a'.repeat(64), exit_code: 0, signal: null, timed_out: false, output_limit: false, duration_ms: 1, stdout_bytes: 0, stdout_sha256: digest(Buffer.alloc(0)), stderr_bytes: 0, stderr_sha256: digest(Buffer.alloc(0)) })); const evidence = { name: `gate-${String(index).padStart(2, '0')}.json`, bytes: content.length, sha256: digest(content) }; writeFileSync(join(evidenceDir, evidence.name), content); return { name, status: 'passed', evidence: [evidence] }; });
+  const gateManifestPath = join(dir, 'gate-manifest.json');
+  writeFileSync(gateManifestPath, canonical({ schema_version: 1, gates: [...gates].sort((left, right) => left.name.localeCompare(right.name)).map((item) => ({ gate: item.name, sha256: 'a'.repeat(64) })) }));
   const requiredTests = ['exact-pkg-install', 'launchd-xpc-approval', 'secure-enclave-key-creation', 'secure-enclave-nonexportability', 'cloud-possession-proof', 'claude-code-unattended-sign', 'cursor-code-unattended-sign', 'unrelated-process-denied', 'audit-console-observation', 'policy-reduction-denied', 'offline-expiry-denied', 'revoke-denied', 'emergency-stop-denied', 'service-crash-recovery', 'os-reboot-recovery', 'sleep-wake-recovery', 'network-clock-failure', 'upgrade-preserves-state', 'uninstall-reinstall-recovery', 'current-user-purge'];
   const tests = requiredTests.map((name, index) => { const content = Buffer.from(`${name} passed\n`); const evidence = { name: `test-${String(index).padStart(2, '0')}.txt`, bytes: content.length, sha256: digest(content) }; writeFileSync(join(evidenceDir, evidence.name), content); return { name, status: 'passed', evidence: [evidence] }; });
   const suiteRecord = { schema_version: 1, kind: 'agentpass-n3e-qualification-suite-evidence', suite_input_sha256: digest(Buffer.from('suite-input')), release_trust_sha256: digest(Buffer.from('release-trust')), candidate_checkpoint_sha256: digest(Buffer.from('candidate-checkpoint')), source_commit: sourceCommit, artifact_sha256: digest(productContent), team_id: teamID, lane_class: 'apple_silicon', started_at: '2026-08-13T00:01:00.000Z', completed_at: '2026-08-13T00:09:00.000Z', teardown_proof_sha256: digest(Buffer.from('teardown')), steps: [
@@ -115,9 +134,9 @@ const makeFixture = ({ manifestVersion = 4 } = {}) => {
     { kind: 'scenario', scenario: 'transport-reply-loss', phase: 'transport-reply', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-6')) }
   ] };
   const suiteBinding = { schema_version: 1, record: suiteRecord, record_sha256: digest(Buffer.from(`${JSON.stringify(sorted(suiteRecord), null, 2)}\n`)) };
-  const report = { schema_version: 2, source_commit: sourceCommit, dependency_lock_sha256: digest(lockContent), release_manifest_sha256: digest(manifestBytes), artifact_name: 'AgentPass-v0.18.0-macos-universal.pkg', artifact_sha256: digest(productContent), architecture: 'arm64', hardware_class: 'apple_silicon', model_identifier: 'Mac15,7', macos_version: '26.0.1', macos_build: '25A100', secure_enclave: true, team_id: teamID, nested_code_identities: nestedCodeIdentities, notarization: manifest.evidence.notarization, cloud_image_digest: cloudImageDigest, database_migration_manifest_sha256: digest(migrationContent), signer_key_versions: signerKeyVersions, browser_versions: browserVersions, started_at: '2026-08-13T00:00:00.000Z', completed_at: '2026-08-13T00:10:00.000Z', operator: 'qualification@example.com', operator_key_fingerprint: fingerprint(operatorKeys.publicKey), qualified: true, tests, gates, n3e_qualification_suite_evidence: suiteBinding };
+  const report = { schema_version: 2, source_commit: sourceCommit, source_tree: sourceTree, dependency_lock_sha256: digest(lockContent), release_manifest_sha256: digest(manifestBytes), artifact_name: 'AgentPass-v0.18.0-macos-universal.pkg', artifact_sha256: digest(productContent), architecture: 'arm64', hardware_class: 'apple_silicon', model_identifier: 'Mac15,7', macos_version: '26.0.1', macos_build: '25A100', secure_enclave: true, team_id: teamID, nested_code_identities: nestedCodeIdentities, notarization: manifest.evidence.notarization, cloud_image_digest: cloudImageDigest, database_migration_manifest_sha256: digest(migrationContent), signer_key_versions: signerKeyVersions, browser_versions: browserVersions, started_at: '2026-08-13T00:00:00.000Z', completed_at: '2026-08-13T00:10:00.000Z', operator: 'qualification@example.com', operator_key_fingerprint: fingerprint(operatorKeys.publicKey), qualified: true, tests, gates, n3e_qualification_suite_evidence: suiteBinding };
   const reportPath = join(dir, 'qualification.json'); writeFileSync(reportPath, canonical(report)); writeSignature(operatorSignaturePath, Buffer.from(canonical(report)), operatorKeys.privateKey); writeFileSync(operatorPublicKeyPath, operatorKeys.publicKey.export({ type: 'spki', format: 'pem' }));
-  return { dir, evidenceDir, releaseDir, report, reportPath, manifestPath, manifestSignaturePath, manifestPublicKeyPath, operatorSignaturePath, operatorPublicKeyPath, operatorPrivateKey: operatorKeys.privateKey, manifestPrivateKey: releaseKeys.privateKey, artifactPath: join(releaseDir, 'AgentPass-v0.18.0-macos-universal.pkg'), releaseFingerprint: fingerprint(releaseKeys.publicKey), operatorFingerprint: fingerprint(operatorKeys.publicKey) };
+  return { dir, evidenceDir, releaseDir, gateManifestPath, report, reportPath, manifestPath, manifestSignaturePath, manifestPublicKeyPath, operatorSignaturePath, operatorPublicKeyPath, operatorPrivateKey: operatorKeys.privateKey, manifestPrivateKey: releaseKeys.privateKey, artifactPath: join(releaseDir, 'AgentPass-v0.18.0-macos-universal.pkg'), releaseFingerprint: fingerprint(releaseKeys.publicKey), operatorFingerprint: fingerprint(operatorKeys.publicKey) };
 };
 
 const argsFor = (fixture) => [fixture.reportPath, fixture.artifactPath, fixture.manifestPath, fixture.manifestSignaturePath, fixture.manifestPublicKeyPath, fixture.releaseFingerprint, fixture.operatorSignaturePath, fixture.operatorPublicKeyPath, fixture.operatorFingerprint, fixture.evidenceDir];
@@ -130,6 +149,39 @@ test('v2 report accepts a signed release manifest v4 with an external controller
   assert.deepEqual({ qualified: output.qualified, production: output.production, release_manifest_signature_verified: output.release_manifest_signature_verified, operator_signature_verified: output.operator_signature_verified }, { qualified: true, production: true, release_manifest_signature_verified: true, operator_signature_verified: true });
   assert.equal(output.artifact_name, fixture.report.artifact_name);
   assert.equal(output.source_commit, fixture.report.source_commit);
+});
+
+test('qualified hardware evidence rejects a gate projection without driver_sha256', () => {
+  const fixture = makeFixture();
+  const gateEvidence = fixture.report.gates[0].evidence[0].name;
+  const projection = JSON.parse(fs.readFileSync(join(fixture.evidenceDir, gateEvidence), 'utf8'));
+  delete projection.driver_sha256;
+  const content = Buffer.from(canonical(projection));
+  writeFileSync(join(fixture.evidenceDir, gateEvidence), content);
+  fixture.report.gates[0].evidence[0].bytes = content.length;
+  fixture.report.gates[0].evidence[0].sha256 = digest(content);
+  writeFileSync(fixture.reportPath, canonical(fixture.report));
+  writeSignature(fixture.operatorSignaturePath, Buffer.from(canonical(fixture.report)), fixture.operatorPrivateKey);
+  const result = run(argsFor(fixture));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /driver digest/u);
+});
+
+test('qualified hardware evidence driver_sha256 must match the fixed gate manifest digest', () => {
+  const fixture = makeFixture();
+  const manifest = JSON.parse(fs.readFileSync(fixture.gateManifestPath, 'utf8'));
+  manifest.gates[0].sha256 = 'b'.repeat(64);
+  writeFileSync(fixture.gateManifestPath, canonical(manifest));
+  const result = run(argsFor(fixture));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /does not match the fixed gate manifest/u);
+});
+
+test('production validation refuses a caller-selected gate manifest path', () => {
+  const fixture = makeFixture();
+  const result = spawnSync(process.execPath, [validator, ...argsFor(fixture), fixture.gateManifestPath], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Usage: validate-hardware-qualification/u);
 });
 
 test('independently revalidates the seven-step N3-E binding and rejects evidence attacks', () => {

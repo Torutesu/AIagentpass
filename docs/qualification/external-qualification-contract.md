@@ -10,7 +10,10 @@ macOS behavior. The machine-readable contract is
 
 `status: "passed"` and `qualified: true` are valid only when all five required
 gates below contain a passed, source-bound, run-bound, artifact-bound
-`external_runner` record. A missing gate, an extra gate, a failed check, a
+`external_runner` record. The external runner workflow also retains a
+source/run-bound Platform Auth companion artifact; promotion validates that
+companion with the same fail-closed rules even though it is not a sixth
+aggregate gate. A missing gate or companion, an extra gate, a failed check, a
 `not_run` result, or a locally produced result is not a degraded pass; it is a
 failed qualification decision.
 
@@ -50,6 +53,20 @@ object:
 - GitHub run ID and attempt, plus the qualifying job ID;
 - canonical artifact SHA-256 and immutable evidence bytes; and
 - start/completion timestamps and a non-secret external runner identity.
+
+The aggregate also records a distinct controller identity. The controller
+binding covers the qualification run/attempt, aggregate job, source commit/tree,
+release artifact, child evidence digests, and aggregate bundle digest. Its
+detached Ed25519 signature is verified against the pinned public-key fingerprint
+before the PostgreSQL aggregate can be considered passed. Child lanes must use
+distinct job, runner, and environment identities; reusing a lane identity is a
+binding failure, not an equivalent execution.
+
+The retained execution projection must include `kind: "external_runner"`,
+`real_execution: true`, a non-local runner ID, and a non-local environment
+identity. Empty, `unknown`, `unidentified`, `placeholder`, `redacted`, or
+similar identities are not evidence. The release verifier rejects a missing
+execution projection before applying the gate-specific semantic verifier.
 
 The producer must emit canonical JSON and only redacted, typed observations.
 Credentials, private keys, WebAuthn assertions, bearer tokens, database URLs,
@@ -108,6 +125,11 @@ Stop promotion and retain the evidence for review when any gate is missing,
 dirty, or produced outside the required environment. The release record must
 state the unresolved gate and reason. Re-running static tests can confirm that
 the contract remains intact, but cannot close an external qualification gap.
+
+The Platform Auth companion is included in the same stop conditions. A
+missing, `not_run`, locally labelled, placeholder-identity, or substituted
+Platform Auth report stops promotion even when the five aggregate gates are
+otherwise present.
 
 ## Current checkout boundary
 

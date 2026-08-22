@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
+import { verifyManifestDeclaredAssets } from './roundtrip-release-assets.mjs';
 
 const [manifestArg, privateKeyArg, signatureArg] = process.argv.slice(2);
 if (!manifestArg || !privateKeyArg || !signatureArg || process.argv.slice(2).length !== 3) throw new Error('Usage: sign-manifest.mjs MANIFEST PRIVATE-KEY SIGNATURE');
@@ -47,6 +48,7 @@ const controllerArtifacts = Array.isArray(parsedManifest.artifacts) ? parsedMani
 if (controllerArtifacts.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || controllerArtifacts[0].bytes !== identity.archive_bytes || controllerArtifacts[0].sha256 !== identity.archive_sha256) throw new Error('controller identity does not bind the declared external archive');
 if (external.notarization.status !== 'accepted_stapled' || !Array.isArray(external.notarization.submission_ids) || external.notarization.submission_ids.length === 0 || !Array.isArray(external.notarization.evidence) || external.notarization.evidence.length !== 2) throw new Error('controller notarization binding is incomplete');
 for (const item of external.notarization.evidence) exactKeys(item, ['kind', 'name', 'bytes', 'sha256'], 'controller notarization evidence item');
+verifyManifestDeclaredAssets(parsedManifest, dirname(resolve(manifestArg)));
 const privateBytes = readRegular(privateKeyArg, 16 * 1024, true);
 let key;
 try { key = crypto.createPrivateKey(privateBytes); }

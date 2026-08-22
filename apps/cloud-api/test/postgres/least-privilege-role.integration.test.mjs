@@ -10,7 +10,22 @@ import { Pool } from "pg";
 
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 
-const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
+const ADMIN_DATABASE_URL = process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL
+  ?? process.env.AGENTPASS_TEST_DATABASE_URL
+  ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
+const ROLE_DATABASE_URLS = Object.freeze({
+  app: process.env.AGENTPASS_TEST_APP_DATABASE_URL,
+  signer: process.env.AGENTPASS_TEST_SIGNER_DATABASE_URL,
+  migrator: process.env.AGENTPASS_TEST_MIGRATION_DATABASE_URL,
+  backup: process.env.AGENTPASS_TEST_BACKUP_DATABASE_URL,
+});
+const MISSING_ROLE_CONNECTIONS = [
+  ["AGENTPASS_TEST_POSTGRES_ADMIN_URL", ADMIN_DATABASE_URL],
+  ["AGENTPASS_TEST_APP_DATABASE_URL", ROLE_DATABASE_URLS.app],
+  ["AGENTPASS_TEST_SIGNER_DATABASE_URL", ROLE_DATABASE_URLS.signer],
+  ["AGENTPASS_TEST_MIGRATION_DATABASE_URL", ROLE_DATABASE_URLS.migrator],
+  ["AGENTPASS_TEST_BACKUP_DATABASE_URL", ROLE_DATABASE_URLS.backup],
+].filter(([, value]) => typeof value !== "string" || value.length === 0).map(([name]) => name);
 const ROLE_NAMES = Object.freeze({ app: "agentpass_app", signer: "agentpass_signer", migrator: "agentpass_migrator", backup: "agentpass_backup" });
 const SIGNER_FUNCTIONS = Object.freeze([
   "agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)",
@@ -142,24 +157,35 @@ function applyRoles(parsed) {
     "role application passed credentials in argv");
 }
 
-async function withSessionAuthorization(pool, roleName, callback) {
-  if (!Object.values(ROLE_NAMES).includes(roleName)) throw new TypeError("unsupported qualification role");
+async function withRoleConnection(roleName, callback) {
+  const roleEntry = Object.entries(ROLE_NAMES).find(([, value]) => value === roleName);
+  if (!roleEntry) throw new TypeError("unsupported qualification role");
+  const connectionString = ROLE_DATABASE_URLS[roleEntry[0]];
+  if (!connectionString) throw new Error(`missing connection for ${roleName}`);
+  const pool = new Pool({
+    connectionString,
+    max: 1,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: 2_000,
+    statement_timeout: 10_000,
+    query_timeout: 15_000,
+  });
   const client = await pool.connect();
   try {
-    // This connection starts as the database administrator, but session
-    // authorization changes both session_user and current_user. The client
-    // is destroyed afterwards so it can never regain or leak admin authority.
-    await client.query(`SET SESSION AUTHORIZATION ${roleName}`);
-    const principal = await client.query("SELECT session_user,current_user");
-    assert.equal(principal.rows[0].session_user, roleName);
-    assert.equal(principal.rows[0].current_user, roleName);
+    const principal = await client.query(`
+      SELECT session_user, current_user,
+             (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl,
+             (SELECT version FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS tls_version,
+             (SELECT cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS cipher`);
+    assert.deepEqual(principal.rows[0].session_user, roleName);
+    assert.deepEqual(principal.rows[0].current_user, roleName);
+    assert.equal(principal.rows[0].ssl, true, `${roleName} connection must use TLS`);
+    assert.match(principal.rows[0].tls_version, /^TLSv[0-9.]+$/u, `${roleName} TLS version`);
+    assert.ok(typeof principal.rows[0].cipher === "string" && principal.rows[0].cipher.length > 0, `${roleName} TLS cipher`);
     return await callback(client);
   } finally {
-    try {
-      await client.query("RESET SESSION AUTHORIZATION");
-    } finally {
-      client.release(true);
-    }
+    client.release(true);
+    await pool.end();
   }
 }
 
@@ -189,16 +215,18 @@ function quoteIdentifier(identifier) {
 }
 
 test("qualifies least-privilege roles against real PostgreSQL migrations and smoke operations", {
-  skip: DATABASE_URL ? false : "set AGENTPASS_TEST_DATABASE_URL to run PostgreSQL role qualification",
+  skip: MISSING_ROLE_CONNECTIONS.length === 0
+    ? false
+    : `set independent PostgreSQL role URLs to run qualification; missing ${MISSING_ROLE_CONNECTIONS.join(", ")}`,
   timeout: 120_000,
 }, async (t) => {
-  const parsed = parseDatabaseUrl(DATABASE_URL);
+  const parsed = parseDatabaseUrl(ADMIN_DATABASE_URL);
   const password = decodeURIComponent(parsed.password);
   assert.equal(process.argv.some((argument) => argument.includes(password) || argument.includes(parsed.toString())), false,
     "test credentials appeared in the test process argv");
 
-  const pool = new Pool({
-    connectionString: DATABASE_URL,
+  const adminPool = new Pool({
+    connectionString: ADMIN_DATABASE_URL,
     max: 2,
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 2_000,
@@ -211,7 +239,7 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
   const authorityUpdateColumns = new Map();
 
   t.after(async () => {
-    const cleanup = await pool.connect();
+    const cleanup = await adminPool.connect();
     try {
       // The full schema has audit-head foreign keys rooted at organizations;
       // this database is created solely for this qualification, so truncate
@@ -219,23 +247,39 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
       if (migrationApplied) await cleanup.query("TRUNCATE organizations CASCADE");
       if (smokeTableCreated) await cleanup.query(`DROP TABLE IF EXISTS public.${SMOKE_TABLE_NAME}`);
       if (sequenceCreated) await cleanup.query(`DROP SEQUENCE IF EXISTS public.${SEQUENCE_NAME}`);
+      if (migrationApplied) {
+        const remaining = await cleanup.query(`
+          SELECT (SELECT count(*) FROM public.organizations) AS organizations,
+                 to_regclass($1) AS smoke_table,
+                 to_regclass($2) AS smoke_sequence`,
+        [`public.${SMOKE_TABLE_NAME}`, `public.${SEQUENCE_NAME}`]);
+        assert.deepEqual(remaining.rows[0], {
+          organizations: "0", smoke_table: null, smoke_sequence: null,
+        }, "least-privilege qualification cleanup left rows or objects behind");
+      }
     } finally {
       cleanup.release();
-      await pool.end();
+      await adminPool.end();
     }
   });
+
+  const adminPrincipal = await adminPool.query(`
+    SELECT session_user, current_user,
+           (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl,
+           (SELECT version FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS tls_version,
+           (SELECT cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS cipher`);
+  assert.equal(adminPrincipal.rows[0].session_user, parsed.username ? decodeURIComponent(parsed.username) : "postgres");
+  assert.equal(adminPrincipal.rows[0].current_user, adminPrincipal.rows[0].session_user);
+  assert.equal(adminPrincipal.rows[0].ssl, true, "administrator connection must use TLS");
+  assert.match(adminPrincipal.rows[0].tls_version, /^TLSv[0-9.]+$/u, "administrator TLS version");
+  assert.ok(typeof adminPrincipal.rows[0].cipher === "string" && adminPrincipal.rows[0].cipher.length > 0, "administrator TLS cipher");
 
   // The database administrator applies the credential-free role policy. The
   // second application after migrations closes the same boundary for tables
   // created by migrations (including the migration attempt ledger).
   applyRoles(parsed);
 
-  const migrationClient = await pool.connect();
-  try {
-    await migrationClient.query(`SET SESSION AUTHORIZATION ${ROLE_NAMES.migrator}`);
-    const migrationPrincipal = await migrationClient.query("SELECT session_user,current_user");
-    assert.equal(migrationPrincipal.rows[0].session_user, ROLE_NAMES.migrator);
-    assert.equal(migrationPrincipal.rows[0].current_user, ROLE_NAMES.migrator);
+  await withRoleConnection(ROLE_NAMES.migrator, async (migrationClient) => {
     const migration = await createMigrationRunner({
       client: migrationClient,
       applicationVersion: "q2a-least-privilege-role-qualification",
@@ -246,18 +290,12 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
     smokeTableCreated = true;
     await migrationClient.query("CREATE SEQUENCE public.q2a_least_privilege_role_sequence");
     sequenceCreated = true;
-  } finally {
-    try {
-      await migrationClient.query("RESET SESSION AUTHORIZATION");
-    } finally {
-      migrationClient.release(true);
-    }
-  }
+  });
 
   // Reconcile grants after the full migration set has created its objects.
   applyRoles(parsed);
 
-  const metadataClient = await pool.connect();
+  const metadataClient = await adminPool.connect();
   try {
     for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
       const columns = await metadataClient.query(
@@ -275,7 +313,12 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
     metadataClient.release();
   }
 
-  await withSessionAuthorization(pool, ROLE_NAMES.app, async (client) => {
+  await adminPool.query(
+    "INSERT INTO organizations (id,name) VALUES ($1,$2)",
+    [SMOKE_ORGANIZATION_ID, "q2a-role-organization"],
+  );
+
+  await withRoleConnection(ROLE_NAMES.app, async (client) => {
     for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
       const relationName = `public.${relation}`;
       const privileges = await client.query(
@@ -325,7 +368,11 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
       await expectPermissionDeniedInSavepoint(client, () => client.query(`SELECT ${call}`));
     }
 
-    await client.query("INSERT INTO organizations (id,name) VALUES ($1,$2)", [SMOKE_ORGANIZATION_ID, "q2a-role-organization"]);
+    const organization = await client.query("SELECT name FROM organizations WHERE id=$1", [SMOKE_ORGANIZATION_ID]);
+    assert.deepEqual(organization.rows, [{ name: "q2a-role-organization" }]);
+    await expectPermissionDenied(() => client.query("INSERT INTO organizations (id,name) VALUES ($1,$2)", [crypto.randomUUID(), "q2a-app-write-denied"]));
+    await expectPermissionDenied(() => client.query("UPDATE organizations SET name=name WHERE id=$1", [SMOKE_ORGANIZATION_ID]));
+    await expectPermissionDenied(() => client.query("DELETE FROM organizations WHERE id=$1", [SMOKE_ORGANIZATION_ID]));
     await client.query(`INSERT INTO ${SMOKE_TABLE_NAME} (id,value) VALUES ($1,$2)`, [SMOKE_ROW_ID, "q2a-role-smoke"]);
     await client.query(`UPDATE ${SMOKE_TABLE_NAME} SET value=$2 WHERE id=$1`, [SMOKE_ROW_ID, "q2a-role-smoke-updated"]);
     const selected = await client.query(`SELECT value FROM ${SMOKE_TABLE_NAME} WHERE id=$1`, [SMOKE_ROW_ID]);
@@ -348,7 +395,7 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
     }
   });
 
-  await withSessionAuthorization(pool, ROLE_NAMES.backup, async (client) => {
+  await withRoleConnection(ROLE_NAMES.backup, async (client) => {
     const selected = await client.query("SELECT name FROM organizations WHERE id=$1", [SMOKE_ORGANIZATION_ID]);
     assert.equal(selected.rows[0].name, "q2a-role-organization");
     const smokeRows = await client.query(`SELECT count(*)::int AS count FROM ${SMOKE_TABLE_NAME}`);
@@ -376,7 +423,7 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
     }
   });
 
-  await withSessionAuthorization(pool, ROLE_NAMES.signer, async (client) => {
+  await withRoleConnection(ROLE_NAMES.signer, async (client) => {
     for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
       const privilege = await client.query(
         "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",
@@ -416,7 +463,7 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_app"));
   });
 
-  await withSessionAuthorization(pool, ROLE_NAMES.migrator, async (client) => {
+  await withRoleConnection(ROLE_NAMES.migrator, async (client) => {
     for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
       const privilege = await client.query(
         "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",

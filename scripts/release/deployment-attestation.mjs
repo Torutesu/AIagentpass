@@ -8,6 +8,8 @@ export const DEPLOYMENT_ATTESTATION_TYPE = "agentpass.deployment-attestation";
 export const DEPLOYMENT_ATTESTATION_ALGORITHM = "ed25519";
 export const DEPLOYMENT_ATTESTATION_DOMAIN = "AgentPass-Deployment-Attestation-v1\0";
 export const DEPLOYMENT_ATTESTATION_TRUST_DOMAIN = "AgentPass-Deployment-Attestation-Trust-v1\0";
+export const DEPLOYMENT_OBSERVATION_TYPE = "agentpass.deployment-observation";
+export const DEPLOYMENT_OBSERVATION_DOMAIN = "AgentPass-Deployment-Observation-v1\0";
 export const DEPLOYMENT_ATTESTATION_MAX_TTL_MS = 15 * 60 * 1000;
 const SHA = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -24,6 +26,12 @@ export const DEPLOYMENT_ATTESTATION_STATEMENT_KEYS = Object.freeze([
   "run_id", "run_attempt", "job_id", "evidence_sha256", "key_id", "key_version", "issued_at", "expires_at"
 ]);
 export const DEPLOYMENT_ATTESTATION_ENVELOPE_KEYS = Object.freeze(["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"]);
+export const DEPLOYMENT_OBSERVATION_STATEMENT_KEYS = Object.freeze([
+  "version", "type", "kind", "phase", "deployment_id", "revision", "rollback_target_revision",
+  "image_digest", "schema_digest", "catalog_digest", "database_schema_digest", "status",
+  "observed_at", "observer_id", "observer_run_id", "observer_job_id"
+]);
+export const DEPLOYMENT_OBSERVATION_ENVELOPE_KEYS = Object.freeze(["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"]);
 const DEPLOYMENT_ATTESTATION_TRUST_PAYLOAD_KEYS = Object.freeze(["schema_version", "type", "keys"]);
 const DEPLOYMENT_ATTESTATION_TRUST_ENVELOPE_KEYS = Object.freeze([...DEPLOYMENT_ATTESTATION_TRUST_PAYLOAD_KEYS, "signature_algorithm", "signer_key_fingerprint", "signature"]);
 
@@ -65,6 +73,70 @@ export function verifyDeploymentAttestation(input, { publicKey, expected = {}, n
   for (const key of DEPLOYMENT_ATTESTATION_STATEMENT_KEYS) if (expected[key] !== undefined && envelope.statement[key] !== expected[key]) throw new DeploymentAttestationError("ERR_DEPLOYMENT_ATTESTATION_BINDING");
   const key = publicKey instanceof crypto.KeyObject ? publicKey : crypto.createPublicKey(publicKey);
   if (!crypto.verify(null, deploymentAttestationSigningData(envelope.statement, { now, allowExpired: true, allowFuture: true }), key, Buffer.from(envelope.signature, "base64url"))) throw new DeploymentAttestationError("ERR_DEPLOYMENT_ATTESTATION_SIGNATURE");
+  return envelope;
+}
+
+export function normalizeDeploymentObservationStatement(input, { now = Date.now(), allowFuture = false, maxAgeMs = DEPLOYMENT_ATTESTATION_MAX_TTL_MS } = {}) {
+  exactObject(input, DEPLOYMENT_OBSERVATION_STATEMENT_KEYS);
+  const value = { ...input };
+  if (value.version !== 1 || value.type !== DEPLOYMENT_OBSERVATION_TYPE || !["health", "traffic"].includes(value.kind)
+    || !["deployment", "rollback"].includes(value.phase) || !ID.test(value.deployment_id) || !ID.test(value.revision)
+    || !ID.test(value.rollback_target_revision) || !IMAGE.test(value.image_digest) || !SHA.test(value.schema_digest)
+    || !SHA.test(value.catalog_digest) || !SHA.test(value.database_schema_digest) || !["ready", "serving", "restored"].includes(value.status)
+    || !TIME.test(value.observed_at) || !ID.test(value.observer_id) || !RUN.test(value.observer_run_id) || !ID.test(value.observer_job_id)) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_INPUT");
+  }
+  const observed = Date.parse(value.observed_at);
+  if (!Number.isFinite(observed) || (!allowFuture && observed > now) || now - observed > maxAgeMs) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_TIME");
+  }
+  if ((value.kind === "health" && !["ready", "restored"].includes(value.status))
+    || (value.kind === "traffic" && !["serving", "restored"].includes(value.status))) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_INPUT");
+  }
+  return Object.freeze(value);
+}
+
+export function deploymentObservationStatementBytes(statement, options = {}) {
+  return Buffer.from(canonicalJson(normalizeDeploymentObservationStatement(statement, options)), "utf8");
+}
+
+export function deploymentObservationStatementHash(statement, options = {}) {
+  return crypto.createHash("sha256").update(deploymentObservationStatementBytes(statement, options)).digest("hex");
+}
+
+export function deploymentObservationSigningData(statement, options = {}) {
+  return Buffer.concat([Buffer.from(DEPLOYMENT_OBSERVATION_DOMAIN, "utf8"), deploymentObservationStatementBytes(statement, options)]);
+}
+
+export function normalizeDeploymentObservation(input, options = {}) {
+  exactObject(input, DEPLOYMENT_OBSERVATION_ENVELOPE_KEYS, "ERR_DEPLOYMENT_OBSERVATION_INPUT");
+  const statement = normalizeDeploymentObservationStatement(input.statement, options);
+  if (input.version !== 1 || input.type !== DEPLOYMENT_OBSERVATION_TYPE || input.signature_algorithm !== DEPLOYMENT_ATTESTATION_ALGORITHM
+    || input.statement_hash !== deploymentObservationStatementHash(statement, options) || !FINGERPRINT.test(input.signer_key_fingerprint)
+    || !SIGNATURE.test(input.signature)) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_SIGNATURE");
+  }
+  return Object.freeze({ ...input, statement });
+}
+
+export function verifyDeploymentObservation(input, { publicKey, expected = {}, now = Date.now() } = {}) {
+  const envelope = normalizeDeploymentObservation(input, { now });
+  if (typeof publicKey !== "string" && !Buffer.isBuffer(publicKey) && !(publicKey instanceof crypto.KeyObject)) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_CONFIG");
+  }
+  const key = publicKey instanceof crypto.KeyObject ? publicKey : crypto.createPublicKey(publicKey);
+  if (envelope.signer_key_fingerprint !== deploymentAttestationPublicKeyFingerprint(key)) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_BINDING");
+  }
+  for (const keyName of DEPLOYMENT_OBSERVATION_STATEMENT_KEYS) {
+    if (expected[keyName] !== undefined && envelope.statement[keyName] !== expected[keyName]) {
+      throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_BINDING");
+    }
+  }
+  if (!crypto.verify(null, deploymentObservationSigningData(envelope.statement, { now, allowFuture: true }), key, Buffer.from(envelope.signature, "base64url"))) {
+    throw new DeploymentAttestationError("ERR_DEPLOYMENT_OBSERVATION_SIGNATURE");
+  }
   return envelope;
 }
 

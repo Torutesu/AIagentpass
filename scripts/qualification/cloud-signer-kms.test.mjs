@@ -1,19 +1,30 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 import {
   CLOUD_SIGNER_KMS_QUALIFICATION_KIND,
+  CLOUD_SIGNER_KMS_IAM_ATTESTATION_KIND,
   CLOUD_SIGNER_KMS_PURPOSES,
   CLOUD_SIGNER_KMS_SCENARIOS,
   canonicalCloudSignerKmsQualificationEvidence,
   normalizeCloudSignerKmsProviderEvidence,
   cloudSignerKmsQualificationSHA256,
+  identityChallengeDigest,
+  identityAttestationNonce,
+  iamAttestationSigningData,
   normalizeCloudSignerKmsQualificationEvidence,
+  preflightCloudSignerKmsQualification,
   runCloudSignerKmsQualification,
   verifyCloudSignerKmsQualificationEvidence
 } from "./cloud-signer-kms.mjs";
 import { SIGNER_PURPOSE_REGISTRY } from "../../apps/cloud-api/src/signer-purpose-registry.mjs";
+import {
+  KMS_PROVIDER_IDENTITY_ATTESTATION_KIND,
+  attestationSigningData,
+  publicKeyFingerprint
+} from "./kms-provider-identity-attestation.mjs";
 
 const SOURCE_COMMIT = "a".repeat(40);
 const SOURCE_TREE = "b".repeat(40);
@@ -24,10 +35,11 @@ const NOW = new Date("2026-08-20T00:00:00.000Z");
 const protectedBinding = { sourceCommit: SOURCE_COMMIT, sourceTree: SOURCE_TREE, deploymentDigest: DEPLOYMENT_DIGEST, artifactSha256: "d".repeat(64), runId: RUN_ID, jobId: JOB_ID };
 const qualificationEnv = {
   AGENTPASS_KMS_QUALIFICATION_ENABLED: "true",
-  AGENTPASS_KMS_QUALIFICATION_EXECUTION: "external",
-  AGENTPASS_KMS_QUALIFICATION_REAL_EXECUTION: "true",
-  AGENTPASS_KMS_QUALIFICATION_RUNNER_ID: "github-actions-kms-qualification",
-  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_MODE: "multi_provider_workload_identity"
+  AGENTPASS_KMS_QUALIFICATION_EXECUTION: "injected_test",
+  AGENTPASS_KMS_QUALIFICATION_REAL_EXECUTION: "false",
+  AGENTPASS_KMS_QUALIFICATION_TEST_INJECTION: "true",
+  AGENTPASS_KMS_QUALIFICATION_RUNNER_ID: "test-injection",
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_MODE: "test_injection"
 };
 
 function binding(name) {
@@ -53,15 +65,140 @@ function binding(name) {
   };
 }
 
+function expectedProviderBindings() {
+  const identities = {
+    "aws-kms": { account_or_project: "123456789012", identity: "aws-role-agentpass", identity_fingerprint: "1".repeat(64), region: "us-east-1" },
+    "gcp-cloud-kms": { account_or_project: "agentpass", identity: "gcp-service-agentpass", identity_fingerprint: "2".repeat(64), region: "global" }
+  };
+  return Object.fromEntries(CLOUD_SIGNER_KMS_PURPOSES.map((name) => {
+    const item = binding(name);
+    return [name, {
+      ...identities[item.provider], provider: item.provider, provider_resource_id: item.provider_resource_id,
+      key_id: item.key_id, key_version: item.key_version, public_key_fingerprint: item.public_key_fingerprint
+    }];
+  }));
+}
+
+function identityAttestationFixture() {
+  return Object.fromEntries(["aws-kms", "gcp-cloud-kms"].map((provider) => {
+    const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+    return [provider, {
+      privateKey,
+      key_id: `${provider}-identity-attestor-v1`,
+      public_key: publicKey.export({ type: "spki", format: "pem" }).toString(),
+      fingerprint: publicKeyFingerprint(publicKey)
+    }];
+  }));
+}
+
+function attestorPublicKeys() {
+  return Object.fromEntries(Object.entries(identityAttestors).map(([provider, value]) => [provider, {
+    key_id: value.key_id,
+    public_key_der_base64url: crypto.createPublicKey(value.public_key).export({ type: "spki", format: "der" }).toString("base64url"),
+    public_key_fingerprint: value.fingerprint
+  }]));
+}
+
+const identityAttestors = identityAttestationFixture();
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS = JSON.stringify(expectedProviderBindings());
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST = JSON.stringify(
+  Object.fromEntries(Object.entries(identityAttestors).map(([provider, value]) => [provider, {
+    fingerprint: value.fingerprint, key_id: value.key_id, public_key: value.public_key
+  }]))
+);
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_IAM_ATTESTATION = JSON.stringify(
+  Object.fromEntries(["aws-kms", "gcp-cloud-kms"].map((provider) => {
+    const expected = Object.values(expectedProviderBindings()).filter((item) => item.provider === provider);
+    const first = expected[0];
+    const attestation = {
+      artifact_sha256: protectedBinding.artifactSha256,
+      attestor_key_id: identityAttestors[provider].key_id,
+      attestor_public_key_fingerprint: identityAttestors[provider].fingerprint,
+      deployment_digest: protectedBinding.deploymentDigest,
+      expires_at: new Date(NOW.getTime() + 300_000).toISOString(),
+      identity: first.identity,
+      identity_fingerprint: first.identity_fingerprint,
+      issued_at: NOW.toISOString(),
+      kind: CLOUD_SIGNER_KMS_IAM_ATTESTATION_KIND,
+      policy_digest: (provider === "aws-kms" ? "a" : "b").repeat(64),
+      provider,
+      account_or_project: first.account_or_project,
+      region: first.region,
+      resource_ids: expected.map((item) => item.provider_resource_id).sort(),
+      run_id: protectedBinding.runId,
+      job_id: protectedBinding.jobId,
+      schema_version: 1,
+      signature_base64url: "placeholder",
+      source_commit: protectedBinding.sourceCommit,
+      source_tree: protectedBinding.sourceTree
+    };
+    attestation.signature_base64url = crypto.sign(null, iamAttestationSigningData(attestation), identityAttestors[provider].privateKey).toString("base64url");
+    return [provider, attestation];
+  }))
+);
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_SOURCE = "multi_provider_workload_identity";
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_ARTIFACT_SHA256 = protectedBinding.artifactSha256;
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_ISSUED_AT = NOW.toISOString();
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_EXPIRES_AT = new Date(NOW.getTime() + 300_000).toISOString();
+qualificationEnv.AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_MAX_TTL_SECONDS = "300";
+const productionQualificationEnv = {
+  ...qualificationEnv,
+  AGENTPASS_KMS_QUALIFICATION_EXECUTION: "external",
+  AGENTPASS_KMS_QUALIFICATION_REAL_EXECUTION: "true",
+  AGENTPASS_KMS_QUALIFICATION_TEST_INJECTION: undefined,
+  AGENTPASS_KMS_QUALIFICATION_RUNNER_ID: "protected-kms-runner",
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_MODE: "multi_provider_workload_identity",
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_SOURCE: "multi_provider_workload_identity",
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_ISSUED_AT: NOW.toISOString(),
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_EXPIRES_AT: new Date(NOW.getTime() + 300_000).toISOString(),
+  AGENTPASS_KMS_QUALIFICATION_CREDENTIAL_MAX_TTL_SECONDS: "900"
+};
+
+test("preflight fixture is armed explicitly before injected probes", () => {
+  try {
+    const result = preflightCloudSignerKmsQualification({ env: productionQualificationEnv, now: () => NOW, ...protectedBinding });
+    assert.equal(result.credential_mode, "multi_provider_workload_identity");
+  } catch (error) {
+    assert.fail(error?.preflight_reason ?? error?.message ?? error);
+  }
+});
+
 function dependencies(overrides = {}) {
   const calls = { purposes: [], iam: [], scenarios: [], postgres: 0 };
   const handles = new Map(CLOUD_SIGNER_KMS_PURPOSES.map((name) => [name, { secret: "never serialized" }]));
   return {
     calls,
-    identityProbe: async () => [
-      { account_or_project: "123456789012", authenticated: true, credential_source: "aws_workload_identity", identity: "aws-role-agentpass", identity_fingerprint: "1".repeat(64), provider: "aws-kms", region: "us-east-1" },
-      { account_or_project: "agentpass", authenticated: true, credential_source: "gcp_workload_identity", identity: "gcp-service-agentpass", identity_fingerprint: "2".repeat(64), provider: "gcp-cloud-kms", region: "global" }
-    ],
+    identityProbe: async ({ binding: qualificationBinding, identity_challenges: challenges }) => challenges.map((challenge) => {
+      const provider = challenge.provider;
+      const info = provider === "aws-kms"
+        ? { account_or_project: "123456789012", credential_source: "aws_workload_identity", identity: "aws-role-agentpass", identity_fingerprint: "1".repeat(64), region: "us-east-1", response_digest: "3".repeat(64), proof_kind: "aws_sts_get_caller_identity" }
+        : { account_or_project: "agentpass", credential_source: "gcp_workload_identity", identity: "gcp-service-agentpass", identity_fingerprint: "2".repeat(64), region: "global", response_digest: "4".repeat(64), proof_kind: "gcp_iam_credentials_principal" };
+      const attestation = {
+        schema_version: 1,
+        kind: KMS_PROVIDER_IDENTITY_ATTESTATION_KIND,
+        provider,
+        account_or_project: info.account_or_project,
+        identity: info.identity,
+        identity_fingerprint: info.identity_fingerprint,
+        region: info.region,
+        resource_ids: challenge.resource_ids,
+        challenge: {
+          nonce: challenge.nonce,
+          binding_digest: challenge.binding_digest,
+          issued_at: challenge.issued_at,
+          expires_at: challenge.expires_at
+        },
+        provider_claims: {
+          identity_document_digest: "5".repeat(64), request_digest: "6".repeat(64), response_digest: info.response_digest
+        },
+        signature_algorithm: "ed25519",
+        attestor_key_id: identityAttestors[provider].key_id,
+        attestor_public_key_fingerprint: identityAttestors[provider].fingerprint,
+        signature_base64url: "placeholder"
+      };
+      attestation.signature_base64url = crypto.sign(null, attestationSigningData(attestation), identityAttestors[provider].privateKey).toString("base64url");
+      return { ...info, authenticated: true, challenge_digest: identityChallengeDigest(provider, qualificationBinding), observed_at: challenge.issued_at, provider, attestation };
+    }),
     purposeFactory: async ({ name }) => {
       calls.purposes.push(name);
       return { binding: binding(name), handle: handles.get(name) };
@@ -87,7 +224,7 @@ function dependencies(overrides = {}) {
       } : scenario === "non_exportability" ? {
         export_attempted: true, export_rejected: true, exportable: false, private_material_observed: false, status: "passed"
       } : scenario === "lifecycle_fence" ? {
-        fenced: true, provider_called_after_fence: true, reserved: true, status: "passed"
+      fenced: true, provider_called_after_fence: false, reserved: true, status: "passed"
       } : scenario === "response_loss_reconciliation" ? {
         blind_retries: 0, lookup_calls: 1, provider_calls: 1, reconciled: true,
         status: "passed", uncertain_transitions: 1
@@ -154,6 +291,16 @@ test("executes exactly the complete typed matrix without serializing provider ha
   });
   assert.equal(report.status, "passed");
   assert.equal(report.qualified, true);
+  for (const identity of report.provider_identities) {
+    assert.equal(identity.attestation.challenge.nonce, identityAttestationNonce(identity.provider, {
+      source_commit: report.source_commit,
+      source_tree: report.source_tree,
+      deployment_digest: report.deployment_digest,
+      artifact_sha256: report.artifact_sha256,
+      run_id: report.run_id,
+      job_id: report.job_id
+    }));
+  }
   assert.equal(fixture.calls.purposes.length, 8);
   assert.equal(fixture.calls.iam.length, 64);
   assert.equal(fixture.calls.scenarios.length, 64);
@@ -165,6 +312,52 @@ test("executes exactly the complete typed matrix without serializing provider ha
     source_tree: protectedBinding.sourceTree, deployment_digest: protectedBinding.deploymentDigest, artifact_sha256: protectedBinding.artifactSha256,
     run_id: protectedBinding.runId, job_id: protectedBinding.jobId
   });
+});
+
+test("accepts the runner's DER attestor trust schema and remains successful after the attestation TTL", async () => {
+  const clock = [NOW, NOW, new Date(NOW.getTime() + 301_000)];
+  const report = await runCloudSignerKmsQualification({
+    env: {
+      ...qualificationEnv,
+      AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST: undefined,
+      AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTOR_PUBLIC_KEYS: JSON.stringify(attestorPublicKeys())
+    },
+    now: () => clock.shift() ?? new Date(NOW.getTime() + 301_000),
+    ...protectedBinding,
+    ...dependencies()
+  });
+  assert.equal(report.status, "passed");
+  assert.equal(report.qualified, true);
+  assert.ok(Date.parse(report.completed_at) > Date.parse(report.provider_identities[0].attestation.challenge.expires_at));
+});
+
+test("fails closed when identity attestation expires before collection", async () => {
+  const clock = [NOW, new Date(NOW.getTime() + 301_000)];
+  const report = await runCloudSignerKmsQualification({
+    env: qualificationEnv,
+    now: () => clock.shift() ?? new Date(NOW.getTime() + 301_000),
+    ...protectedBinding,
+    ...dependencies()
+  });
+  assert.equal(report.status, "failed");
+  assert.equal(report.qualified, false);
+  assert.equal(report.reason, "invalid_provider_output");
+});
+
+test("fails closed when both trust environment schemas disagree", async () => {
+  const mismatched = attestorPublicKeys();
+  mismatched["aws-kms"].key_id = "substituted-attestor-v1";
+  const report = await runCloudSignerKmsQualification({
+    env: {
+      ...qualificationEnv,
+      AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTOR_PUBLIC_KEYS: JSON.stringify(mismatched)
+    },
+    now: () => NOW,
+    ...protectedBinding,
+    ...dependencies()
+  });
+  assert.equal(report.status, "not_run");
+  assert.equal(report.reason, "provider_identity_attestation_invalid");
 });
 
 test("passes one immutable source/artifact/run binding to every provider probe", async () => {
@@ -206,14 +399,50 @@ test("does not qualify an authenticated AWS identity for a different KMS account
     now: () => NOW,
     ...protectedBinding,
     ...base,
-    identityProbe: async () => [
-      { account_or_project: "999999999999", authenticated: true, credential_source: "aws_workload_identity", identity: "aws-role-agentpass", identity_fingerprint: "1".repeat(64), provider: "aws-kms", region: "us-east-1" },
-      { account_or_project: "agentpass", authenticated: true, credential_source: "gcp_workload_identity", identity: "gcp-service-agentpass", identity_fingerprint: "2".repeat(64), provider: "gcp-cloud-kms", region: "global" }
-    ]
+    identityProbe: async (input) => {
+      const identities = await base.identityProbe(input);
+      return identities.map((item, index) => index === 0 ? { ...item, account_or_project: "999999999999" } : item);
+    }
   });
   assert.equal(report.status, "failed");
   assert.equal(report.qualified, false);
   assert.equal(report.reason, "invalid_provider_output");
+});
+
+test("requires protected identity-attestor trust and rejects response-digest substitution", async () => {
+  const missingTrust = await runCloudSignerKmsQualification({
+    env: { ...qualificationEnv, AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST: undefined },
+    now: () => NOW,
+    ...protectedBinding,
+    ...dependencies()
+  });
+  assert.deepEqual({ status: missingTrust.status, reason: missingTrust.reason }, {
+    status: "not_run", reason: "provider_identity_attestation_missing"
+  });
+
+  const invalidTrust = await runCloudSignerKmsQualification({
+    env: { ...qualificationEnv, AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST: "{}" },
+    now: () => NOW,
+    ...protectedBinding,
+    ...dependencies()
+  });
+  assert.deepEqual({ status: invalidTrust.status, reason: invalidTrust.reason }, {
+    status: "not_run", reason: "provider_identity_attestation_invalid"
+  });
+
+  const base = dependencies();
+  const substituted = await runCloudSignerKmsQualification({
+    env: qualificationEnv,
+    now: () => NOW,
+    ...protectedBinding,
+    ...base,
+    identityProbe: async (input) => {
+      const identities = await base.identityProbe(input);
+      return identities.map((item, index) => index === 0 ? { ...item, response_digest: "f".repeat(64) } : item);
+    }
+  });
+  assert.equal(substituted.status, "failed");
+  assert.equal(substituted.reason, "invalid_provider_output");
 });
 
 test("rejects IAM substitution, missing scenarios, response-loss retries, raw fields, getters, and cycles", async () => {
@@ -230,6 +459,9 @@ test("rejects IAM substitution, missing scenarios, response-loss retries, raw fi
   const good = await runCloudSignerKmsQualification({
     env: qualificationEnv, now: () => NOW, ...protectedBinding, ...dependencies()
   });
+  const unknownProviderIdentity = structuredClone(good);
+  unknownProviderIdentity.provider_identities[0].identity = "unknown";
+  assert.throws(() => normalizeCloudSignerKmsQualificationEvidence(unknownProviderIdentity));
   assert.throws(() => normalizeCloudSignerKmsQualificationEvidence({
     ...good,
     iam_matrix: good.iam_matrix.slice(0, -1)

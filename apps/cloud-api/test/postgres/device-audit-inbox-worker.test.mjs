@@ -36,3 +36,23 @@ test("worker quarantines processor exceptions instead of blindly retrying", asyn
   assert.deepEqual(await worker.runOnce(), { claimed: 1, accepted: 0, retryable_failure: 0, uncertain: 1 });
   assert.equal(settleCalls[0].outcome, "uncertain");
 });
+
+test("worker exposes bounded failure state for readiness without leaving the running state", async () => {
+  const now = 1_700_000_000_000;
+  const worker = createDeviceAuditInboxWorker({
+    now: () => now,
+    repository: { async claimBatch() { throw new Error("database unavailable"); }, async settle() {} },
+    processor: { async process() { return { outcome: "accepted" }; } },
+    setTimeoutFn: () => ({ unref() {} }),
+    clearTimeoutFn: () => {}
+  });
+  worker.start();
+  await assert.rejects(() => worker.runOnce(), { code: "ERR_DEVICE_AUDIT_INBOX_WORKER_UNAVAILABLE" });
+  const snapshot = worker.snapshot();
+  assert.equal(snapshot.state, "running");
+  assert.equal(snapshot.cycles, 1);
+  assert.equal(snapshot.consecutive_failures, 1);
+  assert.equal(snapshot.last_cycle_at, now);
+  assert.equal(snapshot.last_success_at, null);
+  await worker.close();
+});

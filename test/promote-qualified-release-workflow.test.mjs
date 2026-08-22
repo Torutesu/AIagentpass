@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 
 const root = resolve(import.meta.dirname, '..');
 const workflow = readFileSync(resolve(root, '.github/workflows/promote-qualified-release.yml'), 'utf8');
@@ -26,6 +27,19 @@ const step = (name) => {
   return after.slice(0, next === -1 ? after.length : next + 1);
 };
 
+const stringArray = (source, name) => {
+  const match = source.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`, 'u'));
+  assert.ok(match, `missing explicit ${name} inventory`);
+  return [...match[1].matchAll(/'([^']+)'/gu)].map(([, value]) => value);
+};
+
+test('promotion workflow YAML parses with unique keys', () => {
+  const parsed = parse(workflow, { uniqueKeys: true });
+  assert.equal(parsed.name, 'Promote qualified release');
+  assert.ok(parsed.jobs?.promote);
+  assert.ok(parsed.jobs.promote.steps?.length > 0);
+});
+
 test('promotion is manual-dispatch only, canonical-main only, and protected with no secret inputs', () => {
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
   for (const event of ['push', 'pull_request', 'pull_request_target', 'repository_dispatch', 'workflow_call', 'schedule', 'workflow_run']) {
@@ -45,7 +59,7 @@ test('promotion is manual-dispatch only, canonical-main only, and protected with
 
 test('all actions are immutable SHAs and only trusted built-in actions are used', () => {
   const uses = [...workflow.matchAll(/uses:\s*([^\s]+)/g)].map(([, value]) => value);
-  assert.equal(uses.length, 7, 'expected checkout, setup-node, and five exact artifact downloads');
+  assert.equal(uses.length, 8, 'expected checkout, setup-node, and six exact artifact downloads');
   for (const use of uses) {
     assert.match(use, /^actions\/(?:checkout|setup-node|download-artifact)@[0-9a-f]{40}$/);
   }
@@ -56,6 +70,7 @@ test('all actions are immutable SHAs and only trusted built-in actions are used'
 test('inputs identify exact runs and preflight validates both runs and every artifact through the API', () => {
   assert.match(workflow, /release_run_id:\n\s+description: Successful Release candidate workflow run ID/);
   assert.match(workflow, /qualification_run_id:\n\s+description: Successful P0-C hardware qualification workflow run ID/);
+  assert.match(workflow, /preflight_run_id:\n\s+description: Successful Release preflight workflow run ID/);
   const preflight = step('Validate exact successful source and qualification runs through the GitHub API');
   assert.match(preflight, /RELEASE_RUN_ID" =~ \^\[1-9\]\[0-9\]\{0,18\}\$/);
   assert.match(preflight, /QUALIFICATION_RUN_ID" =~ \^\[1-9\]\[0-9\]\{0,18\}\$/);
@@ -63,6 +78,10 @@ test('inputs identify exact runs and preflight validates both runs and every art
   assert.match(preflight, /actions\/runs\/\$QUALIFICATION_RUN_ID/);
   assert.match(preflight, /actions\/runs\/\$RELEASE_RUN_ID\/artifacts/);
   assert.match(preflight, /actions\/runs\/\$QUALIFICATION_RUN_ID\/artifacts/);
+  assert.match(preflight, /actions\/runs\/\$PREFLIGHT_RUN_ID\/artifacts/);
+  assert.match(preflight, /\.name == "Release preflight"/);
+  assert.match(preflight, /\.path == "\.github\/workflows\/release-preflight\.yml"/);
+  assert.match(preflight, /release-preflight-result-\$\{release_head_sha\}-\$\{PREFLIGHT_RUN_ID\}-\$\{preflight_run_attempt\}/);
   for (const expected of [
     '.name == "Release candidate"',
     '.path == ".github/workflows/release-candidate.yml"',
@@ -79,11 +98,15 @@ test('inputs identify exact runs and preflight validates both runs and every art
   for (const artifact of ['EXPECTED_CANDIDATE_ARTIFACT', 'EXPECTED_APPLE_ARTIFACT', 'EXPECTED_INTEL_ARTIFACT', 'EXPECTED_SUMMARY_ARTIFACT']) assert.match(preflight, new RegExp(`\\$${artifact}`));
 });
 
-test('downloads candidate, release integrity, and all three P0-C artifacts from exact runs', () => {
+test('downloads preflight, candidate, release integrity, and all three P0-C artifacts from exact runs', () => {
   const downloads = [...promote.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}[\s\S]*?(?=\n\n      - uses:|\n\n      - id:|\n\n      - name:|$)/g)].map((match) => match[0]);
-  assert.equal(downloads.length, 5);
-  assert.match(downloads[0], /name: notarized-release-candidate/);
-  assert.match(downloads[0], /run-id: \$\{\{ steps\.preflight\.outputs\.release_run_id \}\}/);
+  assert.equal(downloads.length, 6);
+  const preflight = downloads.find((value) => value.includes('preflight_artifact_name'));
+  assert.ok(preflight, 'missing release preflight result download');
+  assert.match(preflight, /run-id: \$\{\{ steps\.preflight\.outputs\.preflight_run_id \}\}/);
+  const candidate = downloads.find((value) => value.includes('name: notarized-release-candidate'));
+  assert.ok(candidate, 'missing candidate download');
+  assert.match(candidate, /run-id: \$\{\{ steps\.preflight\.outputs\.release_run_id \}\}/);
   const integrity = downloads.find((value) => value.includes('name: release-integrity-evidence'));
   assert.ok(integrity, 'missing release integrity evidence download');
   assert.match(integrity, /run-id: \$\{\{ steps\.preflight\.outputs\.release_run_id \}\}/);
@@ -94,16 +117,79 @@ test('downloads candidate, release integrity, and all three P0-C artifacts from 
     assert.match(found, /repository: Torutesu\/AIagentpass/);
   }
   const catalog = step('Catalog only the exact downloaded candidate and qualification evidence');
-  for (const name of ['release-manifest.json', 'release-manifest.sig', 'release-manifest.public.pem', 'report.json', 'report.sig', 'operator-public.pem', 'qualification-summary.json', 'qualification-dispatch-binding.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const name of ['release-manifest.json', 'release-manifest.sig', 'release-manifest.public.pem', 'report.json', 'report.sig', 'operator-public.pem', 'runner-attestation.payload.json', 'runner-attestation.sig', 'runner-attestation.pem', 'qualification-summary.json', 'qualification-dispatch-binding.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(catalog, /candidate artifact contains unexpected or missing files/);
   assert.match(catalog, /qualification artifact has unexpected files/);
+});
+
+test('recomputes GitHub artifact archive digests after download-artifact and binds each archive to source/tree', () => {
+  const provenance = step('Recompute every downloaded GitHub artifact archive digest');
+  assert.match(provenance, /actions\/artifacts\/\$artifact_id\/zip/u);
+  assert.match(provenance, /artifact-provenance\.mjs archive/u);
+  assert.match(provenance, /SOURCE_COMMIT/u);
+  assert.match(provenance, /SOURCE_TREE/u);
+  assert.equal((provenance.match(/fetch_and_verify /g) ?? []).length, 5);
+  assert.match(provenance, /PREFLIGHT_ARTIFACTS/);
+  assert.match(provenance, /release-preflight-artifact\.metadata\.json/);
+  assert.match(provenance, /release-preflight-artifact\.zip/);
+  assert.match(provenance, /release-preflight-artifact-provenance\.json/);
+  assert.match(provenance, /artifact_id/);
+  assert.match(provenance, /digest/);
+  assert.match(promote, /downloaded-artifact-provenance\.json/);
+});
+
+test('aggregate downloaded-artifact provenance inventories all six downloaded archives, including preflight', () => {
+  const provenance = step('Recompute every downloaded GitHub artifact archive digest');
+  const namesStart = provenance.indexOf('const names = [');
+  const namesEnd = provenance.indexOf('];', namesStart);
+  assert.ok(namesStart >= 0 && namesEnd > namesStart, 'missing aggregate downloaded-artifact inventory');
+  const names = provenance.slice(namesStart, namesEnd);
+  for (const name of ['EXPECTED_CANDIDATE_ARTIFACT', 'EXPECTED_INTEGRITY_ARTIFACT', 'EXPECTED_APPLE_ARTIFACT', 'EXPECTED_INTEL_ARTIFACT', 'EXPECTED_SUMMARY_ARTIFACT', 'PREFLIGHT_ARTIFACT_NAME']) {
+    assert.match(names, new RegExp(name, 'u'), `downloaded-artifact provenance is missing ${name}`);
+  }
+});
+
+test('promotion generates an API-bound external run binding with exact jobs, runner identities, and archive digests', () => {
+  const binding = step('Revalidate the external qualification API run and generate its binding');
+  for (const value of [
+    'actions/runs/$EXTERNAL_QUALIFICATION_RUN_ID',
+    'actions/runs/$EXTERNAL_QUALIFICATION_RUN_ID/jobs?per_page=100',
+    'actions/runs/$EXTERNAL_QUALIFICATION_RUN_ID/artifacts?per_page=100',
+    'git/commits/$EXPECTED_SOURCE_COMMIT',
+    'external-qualification-provenance-',
+    'runner_id',
+    'runner_name',
+    'source_tree',
+    'run_attempt',
+    'workflow_run',
+    'digest',
+    'archive_sha256',
+    'evidence_sha256',
+    'external-qualification-run-binding.json',
+    'external-qualification-provenance.json',
+    'O_EXCL',
+    'archive-secret-scan.mjs'
+  ]) assert.match(binding, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const job of ['validate', 'kms', 'platform-auth', 'webauthn', 'postgres-authority-16', 'postgres-authority-17', 'postgres-gate', 'external-qualification-provenance']) {
+    assert.match(binding, new RegExp(`'${job}'`, 'u'));
+  }
+  assert.match(binding, /jobsEnvelope\.total_count/);
+  assert.match(binding, /artifactsEnvelope\.total_count/);
+  assert.match(binding, /external qualification job inventory is missing a required job/);
+  assert.match(binding, /external artifact inventory is missing a required artifact/);
 });
 
 test('promotion requires canonical, passed, exact-SHA KMS and Platform Auth evidence without changing the existing artifact download contract', () => {
   const catalog = step('Catalog only the exact downloaded candidate and qualification evidence');
   const evidence = step('Verify canonical KMS and Platform Auth qualification evidence for the exact release SHA');
-  assert.match(catalog, /integrityNames\.length !== 4/);
-  for (const name of ['kms-qualification.json', 'platform-auth-qualification.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(catalog, /expectedIntegrityNames/);
+  for (const name of ['kms-qualification.json', 'platform-auth-qualification.json', 'macos-provenance.json', 'macos-distribution-evidence.json', 'macos-promotion-artifact-gate.json', 'release-preflight-artifact-provenance.json']) assert.match(catalog, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(catalog, /agentpass-macos-promotion-artifact-gate/u);
+  assert.match(catalog, /gatePackage\.artifact_sha256 !== product\[0\]\.sha256/u);
+  assert.match(catalog, /readCanonicalEvidence/);
+  assert.match(catalog, /macOS artifact inventory entry is unsafe/);
+  assert.match(catalog, /macOS distribution inventory descriptor is mismatched/);
+  assert.match(catalog, /macOS notarization evidence is not exact or product-bound/);
   assert.match(evidence, /canonicalJson/);
   assert.match(evidence, /status !== 'passed'/);
   assert.match(evidence, /qualified !== true/);
@@ -136,7 +222,7 @@ test('promotion requires canonical, passed, exact-SHA KMS and Platform Auth evid
   assert.match(deployment, /secret-scan/);
   assert.match(deployment, /scripts\/release\/ci-preflight\.mjs/);
   assert.doesNotMatch(deployment, /scripts\/ci-preflight\.mjs/);
-  assert.equal([...promote.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}/g)].length, 5,
+  assert.equal([...promote.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}/g)].length, 6,
     'KMS and Platform Auth evidence must remain inside the existing integrity artifact download');
 });
 
@@ -144,7 +230,14 @@ test('promotion requires the aggregate external qualification envelope and candi
   const aggregate = step('Verify aggregate external qualification before promotion');
   assert.match(promote, /EXTERNAL_QUALIFICATION_EVIDENCE_JSON: \$\{\{ vars\.AGENTPASS_EXTERNAL_QUALIFICATION_EVIDENCE_JSON \}\}/);
   assert.match(promote, /EXTERNAL_QUALIFICATION_BINDING_JSON: \$\{\{ vars\.AGENTPASS_EXTERNAL_QUALIFICATION_BINDING_JSON \}\}/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_SIGNATURE_BASE64/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_PUBLIC_KEY_BASE64/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_PUBLIC_KEY_FINGERPRINT/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_TRUST_MANIFEST_JSON/);
   assert.match(aggregate, /ci-preflight\.mjs external-qualification/);
+  assert.match(aggregate, /verify-external-qualification-signature\.mjs/);
+  assert.match(aggregate, /manifest\.pub.*aggregate/);
+  assert.match(aggregate, /protected aggregate qualification signature is required/);
   assert.match(aggregate, /secret-scan/);
   assert.match(aggregate, /EXTERNAL_QUALIFICATION_EVIDENCE_JSON/);
   assert.match(aggregate, /EXPECTED_SOURCE_TREE/);
@@ -152,7 +245,79 @@ test('promotion requires the aggregate external qualification envelope and candi
   assert.match(aggregate, /ci_run_attempt/);
   assert.match(aggregate, /O_EXCL/);
   assert.match(promote, /external-qualification\.json/);
+  assert.match(promote, /external-qualification-binding\.json/);
   assert.match(promote, /external-qualification-verification\.json/);
+});
+
+test('promotion recomputes every external child evidence digest and fails closed without the protected bundle', () => {
+  assert.match(promote, /EXTERNAL_QUALIFICATION_CHILD_EVIDENCE_JSON: \$\{\{ vars\.AGENTPASS_EXTERNAL_QUALIFICATION_CHILD_EVIDENCE_JSON \}\}/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_CHILD_SIGNATURE_BASE64/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_CHILD_PUBLIC_KEY_BASE64/);
+  assert.match(promote, /AGENTPASS_EXTERNAL_QUALIFICATION_CHILD_PUBLIC_KEY_FINGERPRINT/);
+  const child = step('Recompute every external qualification child evidence digest');
+  assert.match(child, /child evidence bundle is required/);
+  assert.match(child, /external-qualification-child-signature-verification\.json/);
+  assert.match(child, /artifact-provenance\.mjs children/);
+  assert.match(child, /source_commit/);
+  assert.match(child, /independent_tree_sha/);
+  assert.match(child, /product_artifact_sha256/);
+  assert.match(child, /secret-scan/);
+  assert.match(child, /external-qualification-child-evidence-verification\.json/);
+  assert.match(promote, /external-qualification-child-evidence\.json/);
+});
+
+test('promotion verifies the externally reviewed evidence index against a locally derived signed-manifest candidate', () => {
+  const gate = step('Verify externally reviewed release evidence index operator gate');
+  assert.match(gate, /EVIDENCE_INDEX_JSON: \$\{\{ env\.RELEASE_EVIDENCE_INDEX_JSON \}\}/);
+  assert.match(gate, /INDEX_EXPECTED_CANDIDATE/);
+  assert.match(gate, /INDEX_VERIFICATION_OUTPUT/);
+  assert.match(gate, /manifestBytes/);
+  assert.match(gate, /productBytes/);
+  assert.match(gate, /release_manifest_sha256/);
+  assert.match(gate, /candidate_id is not product-bound/);
+  assert.match(gate, /release-evidence-index\.mjs verify/);
+  assert.match(gate, /"\$INDEX_INPUT" "\$INDEX_EXPECTED_CANDIDATE" > "\$INDEX_VERIFICATION_OUTPUT"/);
+  assert.match(gate, /fs\.constants\.O_EXCL/);
+  assert.match(gate, /archive-secret-scan\.mjs "\$INDEX_OUTPUT"/);
+  assert.match(gate, /archive-secret-scan\.mjs "\$INDEX_VERIFICATION_OUTPUT"/);
+  assert.doesNotMatch(gate, /DEPLOYMENT_EVIDENCE|RELEASE_RUN|QUALIFICATION_RUN|CI_RUN/);
+});
+
+test('raw production readiness is a required fail-closed stage before signed-manifest/evidence-index promotion', () => {
+  assert.match(promote, /PRODUCTION_READINESS_EVIDENCE_JSON: \$\{\{ vars\.AGENTPASS_PRODUCTION_READINESS_EVIDENCE_JSON \}\}/);
+  assert.match(promote, /PRODUCTION_READINESS_RUN_BINDINGS_JSON: \$\{\{ vars\.AGENTPASS_PRODUCTION_READINESS_RUN_BINDINGS_JSON \}\}/);
+  const readiness = step('Verify raw production readiness evidence before release-evidence-index promotion');
+  for (const required of [
+    'RAW_EVIDENCE_JSON', 'RUN_BINDINGS_JSON', 'RAW_EVIDENCE_INPUT', 'RUN_BINDINGS_INPUT', 'GATE_OUTPUT',
+    'EXPECTED_SOURCE_COMMIT', 'EXPECTED_SOURCE_TREE', 'EXPECTED_ARTIFACT_SHA256', 'EXPECTED_CANDIDATE_ID',
+    'RELEASE_RUN_ID', 'CI_RUN_ID', 'EXTERNAL_QUALIFICATION_RUN_ID', 'QUALIFICATION_RUN_ID',
+    'RELEASE_RUN_RECORD', 'CI_RUN_RECORD', 'EXTERNAL_RUN_RECORD', 'QUALIFICATION_RUN_RECORD'
+  ]) assert.match(readiness, new RegExp(required));
+  assert.match(readiness, /protected raw production readiness evidence is required/);
+  assert.match(readiness, /protected production readiness run bindings are required/);
+  assert.match(readiness, /canonical JSON without a trailing newline/);
+  assert.match(readiness, /has unknown or missing fields/);
+  assert.match(readiness, /unknown or duplicate rows/);
+  assert.match(readiness, /missing rows/);
+  assert.match(readiness, /run binding mismatch/);
+  assert.match(readiness, /candidate binding mismatch/);
+  assert.match(readiness, /cannot be derived from workflow and signed manifest/);
+  assert.match(readiness, /selected workflow runs/);
+  assert.match(readiness, /production-readiness-gate\.mjs verify "\$RAW_EVIDENCE_INPUT"/);
+  assert.match(readiness, /archive-secret-scan\.mjs "\$RAW_EVIDENCE_INPUT"/);
+  assert.match(readiness, /archive-secret-scan\.mjs "\$RUN_BINDINGS_INPUT"/);
+  assert.match(readiness, /archive-secret-scan\.mjs "\$GATE_OUTPUT"/);
+  assert.match(readiness, /O_EXCL/);
+  assert.doesNotMatch(readiness, /secrets\./);
+  const index = step('Verify externally reviewed release evidence index operator gate');
+  assert.ok(promote.indexOf('Verify raw production readiness evidence before release-evidence-index promotion') < promote.indexOf('Verify externally reviewed release evidence index operator gate'));
+  assert.ok(promote.indexOf('Verify raw production readiness evidence before release-evidence-index promotion') < promote.indexOf('Create draft release after every verification gate'));
+  for (const slot of [
+    'release:candidate', 'ci:canonical', 'qualification:aggregate', 'external:aggregate',
+    'postgresql:protected', 'kms:protected', 'webauthn:external',
+    'macos:apple_silicon', 'macos:intel_t2', 'staging:readiness', 'deployment:rollback'
+  ]) assert.match(readiness, new RegExp(slot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(index, /release-evidence-index\.mjs verify/);
 });
 
 test('promotion catalogs the v4 external controller and keeps its archive out of the product binding', () => {
@@ -183,6 +348,9 @@ test('re-runs signed macOS and cross-hardware qualification verification, includ
   assert.match(promote, /APPROVED_OPERATOR_POLICY_JSON: \$\{\{ vars\.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON \}\}/);
   assert.match(qualification, /APPLE_OPERATOR_FINGERPRINT/);
   assert.match(qualification, /INTEL_OPERATOR_FINGERPRINT/);
+  assert.match(qualification, /verify-runner-attestation\.mjs/);
+  assert.match(qualification, /AGENTPASS_P0C_APPLE_SILICON_RUNNER_ATTESTATION_FINGERPRINT/);
+  assert.match(qualification, /AGENTPASS_P0C_INTEL_T2_RUNNER_ATTESTATION_FINGERPRINT/);
   assert.match(qualification, /cmp -s "\$GENERATED_SUMMARY" "\$RETAINED_SUMMARY"/);
   assert.match(qualification, /summary\.release_manifest_sha256 !== expectedManifestDigest/);
   assert.match(qualification, /summary\.artifact_sha256 !== product\.sha256/);
@@ -199,6 +367,8 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   const upload = step('Upload only the explicit signed-manifest-bound release list');
   assert.match(upload, /manifest\.artifacts\.map/);
   assert.match(upload, /MANIFEST_PUBLIC_KEY: \$\{\{ steps\.catalog\.outputs\.public_key \}\}/);
+  assert.match(upload, /archive-secret-scan\.mjs "\$INTEGRITY_DIR"/);
+  assert.match(upload, /scanArchives\(files\.filter/);
   assert.match(upload, /manifest\.evidence\.notarization\.evidence\.map/);
   assert.match(upload, /manifest\.evidence\.checksums/);
   assert.match(upload, /manifest\.external_qualification_controller\.identity_document\.name/);
@@ -210,18 +380,19 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.match(upload, /spawnSync\('gh', \['release', 'upload', tag, '--repo', repository, \.\.\.files\]/);
   assert.match(upload, /shell: false/);
   const materialize = step('Materialize the final P0-C release assets');
-  for (const name of ['p0c-apple-silicon-report.json', 'p0c-intel-t2-report.json', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'P0C-SHA256SUMS']) assert.match(materialize, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const name of ['p0c-apple-silicon-report.json', 'p0c-apple-silicon-runner-attestation.json', 'p0c-apple-silicon-runner-attestation.sig', 'p0c-apple-silicon-runner-attestation.pem', 'p0c-intel-t2-report.json', 'p0c-intel-t2-runner-attestation.json', 'p0c-intel-t2-runner-attestation.sig', 'p0c-intel-t2-runner-attestation.pem', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'p0c-approved-operator-policy.sig', 'p0c-approved-operator-policy.pub', 'P0C-SHA256SUMS']) assert.match(materialize, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(materialize, /p0c-apple-silicon-evidence\.tar\.gz/);
   assert.match(materialize, /p0c-intel-t2-evidence\.tar\.gz/);
   assert.doesNotMatch(materialize, /gh release upload/);
   const finalGate = step('Final P0-C asset gate: secret scan, regular-file\/hardlink checks, and SHA256SUMS binding');
   assert.match(finalGate, /ci-preflight\.mjs artifact-scan/);
+  assert.match(finalGate, /archive-secret-scan\.mjs "\$QUALIFICATION_ASSETS"/);
   assert.match(finalGate, /P0-C SHA256SUMS is not bound/);
   assert.match(finalGate, /cmp -s "\$expected_sums" "\$QUALIFICATION_ASSETS\/P0C-SHA256SUMS"/);
   assert.doesNotMatch(finalGate, /gh release upload/);
   const qualificationAssets = step('Upload the verified signed qualification evidence');
   assert.match(qualificationAssets, /gh release upload/);
-  for (const name of ['p0c-apple-silicon-report.json', 'p0c-intel-t2-report.json', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'P0C-SHA256SUMS']) assert.match(qualificationAssets, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const name of ['p0c-apple-silicon-report.json', 'p0c-apple-silicon-runner-attestation.json', 'p0c-apple-silicon-runner-attestation.sig', 'p0c-apple-silicon-runner-attestation.pem', 'p0c-intel-t2-report.json', 'p0c-intel-t2-runner-attestation.json', 'p0c-intel-t2-runner-attestation.sig', 'p0c-intel-t2-runner-attestation.pem', 'p0c-hardware-qualification-summary.json', 'p0c-approved-operator-policy.json', 'p0c-approved-operator-policy.sig', 'p0c-approved-operator-policy.pub', 'P0C-SHA256SUMS']) assert.match(qualificationAssets, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(qualificationAssets, /p0c-apple-silicon-evidence\.tar\.gz/);
   assert.match(qualificationAssets, /p0c-intel-t2-evidence\.tar\.gz/);
   const reinspect = step('Re-inspect uploaded P0-C assets before publishing');
@@ -232,8 +403,12 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.match(reinspect, /uploaded P0-C assets no longer match P0C-SHA256SUMS/);
   const allAssets = step('Re-inspect every uploaded release asset before publishing');
   assert.match(allAssets, /release download/);
-  assert.match(allAssets, /release-asset-roundtrip\.mjs/);
+  assert.match(allAssets, /roundtrip-release-assets\.mjs/);
+  assert.doesNotMatch(allAssets, /release-asset-roundtrip\.mjs/);
   assert.match(allAssets, /verifyReleaseAssetRoundTrip/);
+  assert.match(allAssets, /requireSupplemental: true/);
+  assert.match(allAssets, /release-asset-inventory\.json/);
+  assert.match(allAssets, /version !== 2|version: 2/);
   assert.match(allAssets, /verify-release\.mjs/);
   assert.match(allAssets, /database-schema-evidence\.json/);
   const retained = step('Retain release asset round-trip evidence');
@@ -244,7 +419,8 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.match(retainedCheck, /release-asset-roundtrip\.json/);
   assert.match(retainedCheck, /cmp -s/);
   assert.match(retainedCheck, /canonicalJson/);
-  assert.match(retainedCheck, /secret-scan/);
+  assert.match(retainedCheck, /archive-secret-scan\.mjs/);
+  assert.match(retainedCheck, /version !== 2/);
   const publish = step('Publish the fully uploaded public release');
   assert.match(publish, /gh release edit "\$RELEASE_TAG" --repo "\$CANONICAL_REPOSITORY" --draft=false/);
   assert.ok(promote.indexOf('verify-hardware-qualification-set.mjs') < promote.indexOf('gh release create'));
@@ -257,6 +433,30 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.ok(promote.indexOf('Re-inspect retained release asset evidence before publishing') < promote.indexOf('Publish the fully uploaded public release'));
   assert.ok(promote.indexOf('Retain release asset round-trip evidence') < promote.indexOf('Publish the fully uploaded public release'));
   assert.ok(promote.indexOf('gh release upload') < promote.indexOf('gh release edit'));
+});
+
+test('explicit integrity upload inventory is synchronized with the later full-release round-trip inventory', () => {
+  const upload = step('Upload only the explicit signed-manifest-bound release list');
+  const roundtrip = step('Re-inspect every uploaded release asset before publishing');
+  const uploadedEvidence = stringArray(upload, 'supplementalEvidence');
+  const reinspectedEvidence = stringArray(roundtrip, 'supplemental');
+  assert.deepEqual([...reinspectedEvidence].sort(), [...uploadedEvidence].sort(), 'round-trip inventory must cover every explicit integrity upload');
+});
+
+test('explicit release upload inventory includes every independent macOS evidence artifact', () => {
+  const upload = step('Upload only the explicit signed-manifest-bound release list');
+  const uploadedEvidence = stringArray(upload, 'supplementalEvidence');
+  for (const name of [
+    'macos-artifact-inventory.json',
+    'macos-notary.json',
+    'macos-staple.json',
+    'macos-gatekeeper.json',
+    'macos-identity.json',
+    'macos-verification.json',
+    'macos-provenance.json',
+    'macos-distribution-evidence.json',
+    'macos-promotion-artifact-gate.json'
+  ]) assert.ok(uploadedEvidence.includes(name), `independent macOS evidence is not in the upload inventory: ${name}`);
 });
 
 test('no untrusted downloaded content is executed and cleanup is unconditional', () => {

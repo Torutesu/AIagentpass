@@ -32,6 +32,21 @@ test("launch accepts the bounded public arguments, then remains fail-closed with
   });
 });
 
+test("launch accepts Cursor as a bounded public agent and remains fail-closed without a native Host", () => {
+  const result = run("launch", "--agent", "cursor", "--project", "/tmp/project", "--ttl", "600");
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), {
+    ok: false,
+    operation: "launch",
+    error: {
+      code: "AGENT_LIFECYCLE_NOT_AVAILABLE",
+      message: "The process-bound Agent lifecycle is not available in this build"
+    }
+  });
+});
+
 test("launch contract failures remain stable fail-closed JSON and never echo forbidden values", () => {
   const secret = "launch-secret-must-not-appear";
   const result = run("launch", "--agent", "claude-code", "--token", secret);

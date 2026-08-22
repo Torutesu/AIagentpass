@@ -156,7 +156,7 @@ test("N3-E physical contract freezes the scenario and evidence-verifier inventor
   for (const verifier of EVIDENCE_VERIFIERS) {
     assert.ok(fs.statSync(join(ROOT, verifier)).isFile(), `${verifier} is part of the evidence verifier inventory`);
   }
-  assert.match(read(EVIDENCE_VERIFIERS[2]), /argv\.length !== 16/u);
+  assert.match(read(EVIDENCE_VERIFIERS[2]), /argv\.length !== 33/u);
   assert.match(read(EVIDENCE_VERIFIERS[2]), /apple_silicon/u);
   assert.match(read(EVIDENCE_VERIFIERS[2]), /intel_t2/u);
 });
@@ -183,14 +183,15 @@ test("N3-E physical evidence is candidate-bound and secret-free by construction"
   assert.match(workflow, /verify-release\.mjs/u);
   assert.match(workflow, /verify-macos-release\.sh/u);
   assert.match(workflow, /verify-hardware-qualification-set\.mjs/u);
-  assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/u);
+  assert.match(workflow, /ref: \$\{\{ needs\.validate-candidate\.outputs\.candidate_head_sha \}\}/u);
 
-  const evidenceFunction = qualification.match(/const resultEvidence = \(kind, name, result, status\) =>([\s\S]*?);\nconst failedResult/u)?.[1] ?? "";
+  const evidenceFunction = qualification.match(/const resultEvidence = \(kind, name, result, status, driverSha256 = null\) =>([\s\S]*?);\nconst failedResult/u)?.[1] ?? "";
   assert.notEqual(evidenceFunction, "", "qualification must have a bounded evidence projection");
   assert.match(evidenceFunction, /stdout_bytes/u);
   assert.match(evidenceFunction, /stdout_sha256/u);
   assert.match(evidenceFunction, /stderr_bytes/u);
   assert.match(evidenceFunction, /stderr_sha256/u);
+  assert.match(evidenceFunction, /driver_sha256/u);
   assert.doesNotMatch(evidenceFunction, /stdout:\s*result\.stdout|stderr:\s*result\.stderr/iu);
   assert.doesNotMatch(evidenceFunction, /private[_-]?key|secret|credential|token|password/iu);
   assert.match(workflow, /operator-private\.pem/iu);
@@ -233,6 +234,8 @@ test("N3-E physical entrypoints fail closed instead of accepting simulation or p
   assert.match(source, /status: passed/u);
   assert.match(source, /status: 'skipped'/u);
   assert.match(source, /qualified: production && platform === 'darwin'/u);
+  assert.match(source, /const qualified = result\.report\.qualified === true/u);
+  assert.match(source, /if \(!qualified\) process\.exitCode = 1/u);
 });
 
 test("N3-E qualification control stays closed and separate from Agent authority", () => {

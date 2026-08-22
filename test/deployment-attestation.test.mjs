@@ -7,7 +7,8 @@ import test from "node:test";
 import { canonicalJson } from "../packages/protocol/src/index.mjs";
 import {
   DEPLOYMENT_ATTESTATION_TYPE, deploymentAttestationPublicKeyFingerprint, deploymentAttestationSigningData,
-  deploymentAttestationStatementHash, deploymentAttestationTrustSigningData, normalizeDeploymentAttestation, normalizeDeploymentAttestationTrust, readDeploymentAttestationTrust, verifyDeploymentAttestation, verifyDeploymentAttestationTrust, verifyDeploymentAttestationTrustManifest
+  deploymentAttestationStatementHash, deploymentAttestationTrustSigningData, DEPLOYMENT_OBSERVATION_TYPE, deploymentObservationSigningData,
+  deploymentObservationStatementHash, normalizeDeploymentAttestation, normalizeDeploymentAttestationTrust, readDeploymentAttestationTrust, verifyDeploymentAttestation, verifyDeploymentAttestationTrust, verifyDeploymentAttestationTrustManifest, verifyDeploymentObservation
 } from "../scripts/release/deployment-attestation.mjs";
 
 const NOW = Date.parse("2026-08-20T00:00:00.000Z");
@@ -30,6 +31,26 @@ test("rejects statement substitution, signer substitution, and expired attestati
   const other = crypto.generateKeyPairSync("ed25519");
   assert.throws(() => verifyDeploymentAttestation(value, { publicKey: other.publicKey, now: NOW }), /ERR_DEPLOYMENT_ATTESTATION/u);
   assert.throws(() => normalizeDeploymentAttestation({ ...value, statement: { ...value.statement, expires_at: "2026-08-20T00:00:00.000Z" } }, { now: NOW }), /ERR_DEPLOYMENT_ATTESTATION_TIME/u);
+});
+
+test("verifies independently signed health and traffic observations with immutable deployment bindings", () => {
+  const observer = crypto.generateKeyPairSync("ed25519");
+  const observation = {
+    version: 1, type: DEPLOYMENT_OBSERVATION_TYPE, kind: "health", phase: "rollback", deployment_id: statement.deployment_id,
+    revision: statement.rollback_target_revision, rollback_target_revision: statement.rollback_target_revision,
+    image_digest: statement.image_digest, schema_digest: statement.schema_digest, catalog_digest: statement.catalog_digest,
+    database_schema_digest: statement.database_schema_digest, status: "restored", observed_at: "2026-08-19T23:59:30.000Z",
+    observer_id: "health-controller", observer_run_id: "101", observer_job_id: "health-check"
+  };
+  const value = {
+    version: 1, type: DEPLOYMENT_OBSERVATION_TYPE, statement: observation, statement_hash: deploymentObservationStatementHash(observation, { now: NOW }),
+    signature_algorithm: "ed25519", signer_key_fingerprint: deploymentAttestationPublicKeyFingerprint(observer.publicKey),
+    signature: crypto.sign(null, deploymentObservationSigningData(observation, { now: NOW }), observer.privateKey).toString("base64url")
+  };
+  const verified = verifyDeploymentObservation(value, { publicKey: observer.publicKey, now: NOW, expected: { deployment_id: statement.deployment_id, revision: statement.rollback_target_revision, image_digest: statement.image_digest, database_schema_digest: statement.database_schema_digest } });
+  assert.equal(verified.statement.observer_job_id, "health-check");
+  assert.throws(() => verifyDeploymentObservation({ ...value, statement: { ...observation, image_digest: `sha256:${"a".repeat(64)}` } }, { publicKey: observer.publicKey, now: NOW }), /ERR_DEPLOYMENT_OBSERVATION/u);
+  assert.throws(() => verifyDeploymentObservation(value, { publicKey: pair.publicKey, now: NOW }), /ERR_DEPLOYMENT_OBSERVATION/u);
 });
 
 test("requires the public key fingerprint and key version to be present in the reviewed trust manifest", () => {

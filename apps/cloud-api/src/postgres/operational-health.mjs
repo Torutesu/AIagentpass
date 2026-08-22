@@ -436,6 +436,9 @@ export function createOperationalHealth({
   providerOperationMaxBacklog = 10_000,
   providerOperationMaxLagMs = 15 * 60_000,
   providerOperationMaxMaintenanceAgeMs = 2 * 60_000,
+  deviceAuditInboxStatus,
+  deviceAuditInboxMaxBacklog = 10_000,
+  deviceAuditInboxMaxLagMs = 15 * 60_000,
   readinessTimeoutMs = 5_000,
   now = () => Date.now()
 } = {}) {
@@ -450,7 +453,8 @@ export function createOperationalHealth({
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
   if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();
   if (providerOperationStatus !== undefined && typeof providerOperationStatus !== "function") throw invalidOperationalInput();
-  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxBacklog) || providerOperationMaxBacklog < 0 || providerOperationMaxBacklog > 1_000_000 || !Number.isSafeInteger(providerOperationMaxLagMs) || providerOperationMaxLagMs < 1_000 || providerOperationMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxMaintenanceAgeMs) || providerOperationMaxMaintenanceAgeMs < 1_000 || providerOperationMaxMaintenanceAgeMs > 24 * 60 * 60_000 || !Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 10 || readinessTimeoutMs > 30_000 || typeof now !== "function") throw invalidOperationalInput();
+  if (deviceAuditInboxStatus !== undefined && typeof deviceAuditInboxStatus !== "function") throw invalidOperationalInput();
+  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxBacklog) || providerOperationMaxBacklog < 0 || providerOperationMaxBacklog > 1_000_000 || !Number.isSafeInteger(providerOperationMaxLagMs) || providerOperationMaxLagMs < 1_000 || providerOperationMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxMaintenanceAgeMs) || providerOperationMaxMaintenanceAgeMs < 1_000 || providerOperationMaxMaintenanceAgeMs > 24 * 60 * 60_000 || !Number.isSafeInteger(deviceAuditInboxMaxBacklog) || deviceAuditInboxMaxBacklog < 0 || deviceAuditInboxMaxBacklog > 1_000_000 || !Number.isSafeInteger(deviceAuditInboxMaxLagMs) || deviceAuditInboxMaxLagMs < 1_000 || deviceAuditInboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 10 || readinessTimeoutMs > 30_000 || typeof now !== "function") throw invalidOperationalInput();
   const configuredMax = positiveInteger(maxConnections ?? pool.options?.max);
 
   async function readiness() {
@@ -468,25 +472,28 @@ export function createOperationalHealth({
         drain,
         ...(outboxStatus === undefined ? {} : { outbox: skippedOutbox("draining") }),
         ...(providerOperationStatus === undefined ? {} : { providerOperations: skippedProviderOperations("draining") }),
+        ...(deviceAuditInboxStatus === undefined ? {} : { deviceAuditInbox: skippedDeviceAuditInbox("draining") }),
         metrics: metricSnapshot
       });
     }
 
-    const [databaseResult, migrationResult, outboxResult, providerOperationResult] = await Promise.allSettled([
+    const [databaseResult, migrationResult, outboxResult, providerOperationResult, deviceAuditInboxResult] = await Promise.allSettled([
       withTimeout(Promise.resolve().then(() => probe(pool)), readinessTimeoutMs),
       withTimeout(Promise.resolve().then(() => migrationStatus()), readinessTimeoutMs),
       outboxStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => outboxStatus()), readinessTimeoutMs),
-      providerOperationStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => providerOperationStatus()), readinessTimeoutMs)
+      providerOperationStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => providerOperationStatus()), readinessTimeoutMs),
+      deviceAuditInboxStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => deviceAuditInboxStatus()), readinessTimeoutMs)
     ]);
     recordObservedLockWaits(metrics, databaseResult);
     const database = normalizeProbeResult(databaseResult);
     const schema = normalizeSchemaResult(migrationResult, expectedSchemaVersion);
     const outbox = outboxStatus === undefined ? undefined : normalizeOutboxResult(outboxResult, { outboxMaxPending, outboxMaxLagMs, now });
     const providerOperations = providerOperationStatus === undefined ? undefined : normalizeProviderOperationResult(providerOperationResult, { providerOperationMaxBacklog, providerOperationMaxLagMs, providerOperationMaxMaintenanceAgeMs, now });
+    const deviceAuditInbox = deviceAuditInboxStatus === undefined ? undefined : normalizeDeviceAuditInboxResult(deviceAuditInboxResult, { deviceAuditInboxMaxBacklog, deviceAuditInboxMaxLagMs, now });
     const poolReady = poolCheck.ok;
     const metricsReady = metricSnapshot.valid !== false;
-    const ready = database.ok && schema.ok && poolReady && metricsReady && (outbox === undefined || outbox.ok) && (providerOperations === undefined || providerOperations.ok);
-    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady, outbox, providerOperations });
+    const ready = database.ok && schema.ok && poolReady && metricsReady && (outbox === undefined || outbox.ok) && (providerOperations === undefined || providerOperations.ok) && (deviceAuditInbox === undefined || deviceAuditInbox.ok);
+    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady, outbox, providerOperations, deviceAuditInbox });
     return contract({
       ready,
       status: ready ? "ready" : "not_ready",
@@ -497,6 +504,7 @@ export function createOperationalHealth({
       drain,
       ...(outbox === undefined ? {} : { outbox }),
       ...(providerOperations === undefined ? {} : { providerOperations }),
+      ...(deviceAuditInbox === undefined ? {} : { deviceAuditInbox }),
       metrics: metricSnapshot
     });
   }
@@ -516,13 +524,13 @@ export function createOperationalHealth({
   return Object.freeze({ readiness, health: readiness, operationalSnapshot });
 }
 
-function contract({ ready, status, code, database, schema, pool, drain, outbox, providerOperations, metrics }) {
+function contract({ ready, status, code, database, schema, pool, drain, outbox, providerOperations, deviceAuditInbox, metrics }) {
   return Object.freeze({
     version: OPERATIONAL_HEALTH_VERSION,
     ready: Boolean(ready),
     status,
     code,
-    checks: Object.freeze({ database, schema, pool, drain, ...(outbox === undefined ? {} : { owner_recovery_outbox: outbox }), ...(providerOperations === undefined ? {} : { managed_signer_provider_operations: providerOperations }) }),
+    checks: Object.freeze({ database, schema, pool, drain, ...(outbox === undefined ? {} : { owner_recovery_outbox: outbox }), ...(providerOperations === undefined ? {} : { managed_signer_provider_operations: providerOperations }), ...(deviceAuditInbox === undefined ? {} : { device_audit_inbox: deviceAuditInbox }) }),
     metrics
   });
 }
@@ -565,6 +573,49 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
 
 function skippedOutbox(code) {
   return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, uncertain_count: null, dead_letter_count: null, oldest_pending_age_ms: null, oldest_uncertain_age_ms: null });
+}
+
+function normalizeDeviceAuditInboxResult(result, { deviceAuditInboxMaxBacklog, deviceAuditInboxMaxLagMs, now }) {
+  if (result.status !== "fulfilled" || !plainHealthObject(result.value)) return skippedDeviceAuditInbox("unavailable");
+  const value = result.value;
+  const states = value.states;
+  const stateNames = ["pending", "processing", "accepted", "uncertain", "dead_letter"];
+  const rootNames = ["version", "states", "oldest_pending_at", "oldest_processing_at", "oldest_uncertain_at", "expired_processing", "worker_state", "worker_cycles", "consecutive_failures", "last_cycle_at", "last_success_at"];
+  if (Reflect.ownKeys(value).length !== rootNames.length || !rootNames.every((field) => Object.hasOwn(value, field))
+    || value.version !== 1 || !plainHealthObject(states) || Reflect.ownKeys(states).length !== stateNames.length
+    || stateNames.some((state) => !Number.isSafeInteger(states[state]) || states[state] < 0)
+    || !Number.isSafeInteger(value.expired_processing) || value.expired_processing < 0
+    || !["running", "idle", "draining", "closed"].includes(value.worker_state)
+    || !Number.isSafeInteger(value.worker_cycles) || value.worker_cycles < 0
+    || !Number.isSafeInteger(value.consecutive_failures) || value.consecutive_failures < 0
+    || (value.last_cycle_at !== null && (!Number.isSafeInteger(value.last_cycle_at) || value.last_cycle_at < 0))
+    || (value.last_success_at !== null && (!Number.isSafeInteger(value.last_success_at) || value.last_success_at < 0))) return skippedDeviceAuditInbox("unavailable");
+  let current;
+  try { current = Number(now()); } catch { return skippedDeviceAuditInbox("unavailable"); }
+  if (!Number.isSafeInteger(current) || current < 0) return skippedDeviceAuditInbox("unavailable");
+  const age = (timestamp, count) => {
+    if (timestamp === null) return count === 0 ? null : undefined;
+    const parsed = Date.parse(String(timestamp));
+    return !Number.isFinite(parsed) || parsed > current ? undefined : Math.min(Number.MAX_SAFE_INTEGER, current - parsed);
+  };
+  const pendingAge = age(value.oldest_pending_at, states.pending);
+  const processingAge = age(value.oldest_processing_at, states.processing);
+  const uncertainAge = age(value.oldest_uncertain_at, states.uncertain);
+  if (pendingAge === undefined || processingAge === undefined || uncertainAge === undefined) return skippedDeviceAuditInbox("unavailable");
+  const backlog = states.pending + states.processing;
+  const code = value.worker_state !== "running" ? "worker_unavailable"
+    : value.consecutive_failures > 0 ? "worker_failed"
+      : value.last_success_at === null ? "worker_unavailable"
+        : value.expired_processing > 0 ? "expired_processing_present"
+          : states.uncertain > 0 ? "uncertain_present"
+            : states.dead_letter > 0 ? "dead_letter_present"
+              : backlog > deviceAuditInboxMaxBacklog ? "backlog_exceeded"
+                : [pendingAge, processingAge].some((ageMs) => ageMs !== null && ageMs > deviceAuditInboxMaxLagMs) ? "lag_exceeded" : "ok";
+  return Object.freeze({ ok: code === "ok", code, worker_state: value.worker_state, pending_count: states.pending, processing_count: states.processing, accepted_count: states.accepted, uncertain_count: states.uncertain, dead_letter_count: states.dead_letter, expired_processing_count: value.expired_processing, worker_cycles: value.worker_cycles, consecutive_failures: value.consecutive_failures, oldest_pending_age_ms: pendingAge, oldest_processing_age_ms: processingAge, oldest_uncertain_age_ms: uncertainAge });
+}
+
+function skippedDeviceAuditInbox(code) {
+  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, processing_count: null, accepted_count: null, uncertain_count: null, dead_letter_count: null, expired_processing_count: null, worker_cycles: null, consecutive_failures: null, oldest_pending_age_ms: null, oldest_processing_age_ms: null, oldest_uncertain_age_ms: null });
 }
 
 function outboxGauges(outbox) {
@@ -802,7 +853,7 @@ function safeMetricSnapshot(metrics) {
   }
 }
 
-function firstFailureCode({ database, schema, pool, metricsReady, outbox, providerOperations }) {
+function firstFailureCode({ database, schema, pool, metricsReady, outbox, providerOperations, deviceAuditInbox }) {
   if (!database.ok) return "database_unavailable";
   if (!schema.ok) {
     if (schema.checksum_status === "drift") return "migration_drift";
@@ -813,6 +864,7 @@ function firstFailureCode({ database, schema, pool, metricsReady, outbox, provid
   if (!metricsReady) return "metrics_unavailable";
   if (outbox && !outbox.ok) return `owner_recovery_outbox_${outbox.code}`;
   if (providerOperations && !providerOperations.ok) return `managed_signer_provider_operations_${providerOperations.code}`;
+  if (deviceAuditInbox && !deviceAuditInbox.ok) return `device_audit_inbox_${deviceAuditInbox.code}`;
   return "health_check_failed";
 }
 

@@ -39,11 +39,13 @@ test("0080 is the contiguous discovered migration and has a catalog contract", a
   const migration = migrations.find((entry) => entry.version === 80);
   const catalogEntry = catalog.entries.find((entry) => entry.kind === "postgres-migration" && entry.version === 80);
   assert.equal(migration?.name, "0080_device_audit_insert_validation.sql");
+  assert.match(migration?.checksum ?? "", /^[0-9a-f]{64}$/u);
   assert.deepEqual(catalogEntry, {
     id: "migration.0080_device_audit_insert_validation",
     kind: "postgres-migration",
     source: "postgres/0080_device_audit_insert_validation.sql",
     version: 80,
+    sha256: migration.checksum,
     profile: "migration-tenant",
     purpose: "migration.0080.device-audit-insert-validation",
     implementation_status: "implemented",

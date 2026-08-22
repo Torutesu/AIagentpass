@@ -10,6 +10,7 @@ import { acquireAnchorPruneLease, anchorRecoveryAuthorization, createAnchorPrune
 import { audit, createAuditCheckpoint, publicKeyFingerprint, readAuditCheckpoints } from "../lib/audit.mjs";
 import { canonicalJson, createAuditIdentity } from "../lib/identity.mjs";
 import { nativeAuditPublicKeyFingerprint, verifyNativeCheckpointRecord } from "../lib/native-audit.mjs";
+import { startInMemoryHttpServer } from "./support/http-test-transport.mjs";
 
 const P256_ORDER = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
 const P256_HALF_ORDER = P256_ORDER / 2n;
@@ -639,7 +640,7 @@ test("HTTP key-transitions endpoint accepts v3 and restart history remains verif
   const value = nativeRecoveryFixture();
   const transition = nativeRecoveryTransition(value, nativeKeyPair());
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   const endpoint = `http://127.0.0.1:${server.address().port}/v1/key-transitions/recovery-host`;
   const originalNow = Date.now;
   Date.now = () => Date.parse("2030-01-01T00:00:03.000Z");
@@ -654,7 +655,7 @@ test("HTTP key-transitions endpoint accepts v3 and restart history remains verif
   await new Promise((resolve) => server.close(resolve));
 
   const restarted = createAnchorServer(value.anchor);
-  await new Promise((resolve) => restarted.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(restarted);
   t.after(() => new Promise((resolve) => restarted.close(resolve)));
   const latest = await fetch(`http://127.0.0.1:${restarted.address().port}/v1/key-transitions/recovery-host/latest`);
   assert.equal(latest.status, 200);
@@ -666,7 +667,7 @@ test("audit prune endpoint signs the exact v1 receipt, replays safely, and survi
   const value = nativePruneFixture();
   const authorization = nativePruneAuthorization(value);
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   const endpoint = `http://127.0.0.1:${server.address().port}/v1/audit-prunes/prune-host`;
   const base = `http://127.0.0.1:${server.address().port}`;
   const originalNow = Date.now;
@@ -694,7 +695,7 @@ test("audit prune endpoint signs the exact v1 receipt, replays safely, and survi
   }).receipt_hash, receipt.receipt_hash);
   await new Promise((resolve) => server.close(resolve));
   const restarted = createAnchorServer(value.anchor);
-  await new Promise((resolve) => restarted.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(restarted);
   t.after(() => new Promise((resolve) => restarted.close(resolve)));
   assert.equal(verifyAnchorTenant(value.anchor, "prune-host").records, 2);
   const replacement = nativeKeyPair();
@@ -742,7 +743,7 @@ test("audit prune head is canonical, read-only, exact, and survives restart", as
   }).receipt_hash, expected.receipt_hash);
 
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   const endpoint = pruneHeadURL(`http://127.0.0.1:${server.address().port}`, "prune-host", PRUNE_HEAD_NONCE);
   const response = await fetch(endpoint);
   assert.equal(response.status, 200);
@@ -753,7 +754,7 @@ test("audit prune head is canonical, read-only, exact, and survives restart", as
   await new Promise((resolve) => server.close(resolve));
 
   const restarted = createAnchorServer(value.anchor);
-  await new Promise((resolve) => restarted.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(restarted);
   t.after(() => new Promise((resolve) => restarted.close(resolve)));
   const restartedResponse = await fetch(pruneHeadURL(`http://127.0.0.1:${restarted.address().port}`, "prune-host", PRUNE_HEAD_NONCE_2));
   assert.equal(restartedResponse.status, 200);
@@ -781,7 +782,7 @@ test("audit prune head is canonical, read-only, exact, and survives restart", as
 test("audit prune head distinguishes empty and unknown tenants without path confusion", async (t) => {
   const value = nativePruneFixture();
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -876,7 +877,7 @@ test("audit prune lease HTTP requires canonical authenticated acquisition and GE
   const authorization = nativePruneAuthorization(value);
   const fixedNow = Date.parse("2029-02-01T00:00:04.000Z");
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const originalNow = Date.now; Date.now = () => fixedNow;
@@ -944,7 +945,7 @@ test("audit prune head fails closed on rollback, corruption, unsafe paths, and a
     const lock = path.join(tenantDir, ".update.lock");
     const authorization = nativePruneAuthorization(value);
     const server = createAnchorServer(value.anchor);
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    startInMemoryHttpServer(server);
     const base = `http://127.0.0.1:${server.address().port}`;
     const initialHead = readAnchorPruneHead(value.anchor, "prune-host", PRUNE_HEAD_NONCE, Date.parse("2029-02-01T00:00:04.000Z"));
     const signedLeaseRequest = pruneLeaseRequest(value, PRUNE_HEAD_NONCE, "submit", authorization.operation_id, initialHead, Date.parse("2029-02-01T00:00:04.000Z"));
@@ -1003,7 +1004,7 @@ test("HTTP prune head uses only the fixed snapshot while startup repairs absence
   {
     const value = nativePruneFixture();
     const server = createAnchorServer(value.anchor);
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    startInMemoryHttpServer(server);
     t.after(() => new Promise((resolve) => server.close(resolve)));
     const records = path.join(value.anchor, "tenants", "prune-host", "records.jsonl");
     const hidden = `${records}.offline`;
@@ -1069,7 +1070,7 @@ test("running server monotonic floor rejects replay, coherent nonce rollback, eq
   const snapshotFile = path.join(tenantDir, ".audit-prune-head.snapshot.json");
   const initialSnapshot = fs.readFileSync(snapshotFile);
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -1125,7 +1126,7 @@ test("strict-ahead snapshot is rejected when its durable nonce history was rolle
   const value = nativePruneFixture();
   const tenantDir = path.join(value.anchor, "tenants", "prune-host");
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const now = Date.now();
@@ -1146,7 +1147,7 @@ test("unknown prune-head tenants consume the global IP bucket without loading or
   const value = nativePruneFixture();
   const server = createAnchorServer(value.anchor);
   assert.equal(server.maxConnections, 128); assert.equal(server.maxRequestsPerSocket, 100);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const originalReadFileSync = fs.readFileSync;
@@ -1301,7 +1302,7 @@ test("audit prune CLI is equivalent and tenant/path confusion fails before stora
   assert.throws(() => submitAnchorPrune(value.anchor, "../prune-host", authorization), /tenant slug/i);
 
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const traversal = await fetch(`${base}/v1/audit-prunes/%2e%2e%2fprune-host`, { method: "POST", body: "{}" });
@@ -1517,7 +1518,7 @@ test("legacy high-S v1 transition history remains readable and migrates once int
 test("HTTP anchor accepts native checkpoints and rejects algorithm confusion", async (t) => {
   const value = nativeFixture();
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const endpoint = `http://127.0.0.1:${server.address().port}/v1/checkpoints/native-host`;
   const accepted = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ checkpoint: value.first }) });
@@ -1560,10 +1561,7 @@ test("anchor rejects forged, rolled-back, and locally corrupted records", () => 
 test("client pushes checkpoints in order, verifies receipts, and retries safely", async (t) => {
   const value = fixture();
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const address = server.address();
   const config = {
@@ -1597,7 +1595,7 @@ test("client pushes checkpoints in order, verifies receipts, and retries safely"
 test("stored receipt tampering fails closed", async (t) => {
   const value = fixture();
   const server = createAnchorServer(value.anchor);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const config = {
     audit_signing: { public_key: value.identity.public_key },

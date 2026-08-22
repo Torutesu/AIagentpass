@@ -9,8 +9,10 @@ import {
   CURSOR_RUNTIME_INDEX,
   CURSOR_RUNTIME_NODE,
   CursorAdapterError,
+  createCursorLifecycleDescriptor,
   createCursorLaunchPlan,
   cursorAdapterErrorEnvelope,
+  launchCursorLifecycle,
   projectCursorAdapterError,
   projectCursorState,
   validateCursorLaunchPlan
@@ -39,6 +41,20 @@ test("launch plan rejects executable, flags, environment, and path substitutions
     { ...plan, project_directory: "/work/../escape" },
     { ...plan, extra: true }
   ]) assert.throws(() => validateCursorLaunchPlan(mutation), (error) => error.code === "invalid_arguments");
+});
+
+test("Cursor lifecycle descriptor contains only bounded public launch data", () => {
+  const descriptor = createCursorLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600 });
+  assert.deepEqual(descriptor, { version: 1, operation: "launch", agent: "cursor", project: "/work/project", ttl_seconds: 600, handoff_fd: 3 });
+  assert.throws(() => createCursorLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600, key: "secret" }), { code: "invalid_arguments" });
+  assert.throws(() => createCursorLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600, authority: "secret" }), { code: "invalid_arguments" });
+});
+
+test("Cursor lifecycle fails closed outside macOS without consuming authority", async () => {
+  await assert.rejects(
+    launchCursorLifecycle({ projectDirectory: "/work/project", ttlSeconds: 600 }, { platform: "linux" }),
+    (error) => error.code === "runtime_unavailable"
+  );
 });
 
 test("state projection is closed and rejects raw detail or unsafe values", () => {

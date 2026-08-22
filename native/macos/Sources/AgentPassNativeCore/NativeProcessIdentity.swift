@@ -228,6 +228,26 @@ public struct NativeProcessIdentity: Sendable {
         return NativeProcessIdentityCanonical.hex(SHA256.hash(data: Data(representation.utf8)))
     }
 
+    /// Stable principal identity used for an explicitly authorized control
+    /// operation. Unlike `canonicalBindingHash`, this intentionally excludes
+    /// PID, PID generation, executable inode/mtime, and ancestry: a separate
+    /// process of the same signed product may perform a control close, while
+    /// an executable substitution may not. This is an identity label, never
+    /// a bearer credential and never serialized into an XPC request.
+    public var canonicalControlPrincipalHash: String {
+        let representation = NativeProcessIdentityCanonical.object([
+            ("version", NativeProcessIdentityCanonical.string("native_control_principal/v1")),
+            ("uid", String(process.uid)),
+            ("boot_identity", NativeProcessIdentityCanonical.string(process.bootIdentity)),
+            ("code_directory_hash", NativeProcessIdentityCanonical.string(process.codeDirectoryHash)),
+            ("bundle_identifier", NativeProcessIdentityCanonical.optionalString(process.bundleIdentifier)),
+            ("team_identifier", NativeProcessIdentityCanonical.optionalString(process.teamIdentifier)),
+            ("signature_kind", NativeProcessIdentityCanonical.string(process.signatureKind.rawValue)),
+            ("entitlements", NativeProcessIdentityCanonical.entitlements(process.entitlements))
+        ])
+        return NativeProcessIdentityCanonical.hex(SHA256.hash(data: Data(representation.utf8)))
+    }
+
     public func matches(policy: NativeProcessIdentityPolicy) -> Bool {
         evaluate(policy: policy).isAllowed
     }

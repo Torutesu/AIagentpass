@@ -17,6 +17,7 @@ const MAX_DIAGNOSTIC_OUTPUT = 4096;
 const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup', 'agentpass_maintenance'];
 const REPORT_CHECKS = [
   'role_attributes_ok',
+  'tls_session_ok',
   'role_memberships_ok',
   'schema_privileges_ok',
   'database_privileges_ok',
@@ -171,6 +172,7 @@ signer_function_allowlist(routine_signature) AS (
 ),
 app_function_allowlist(routine_signature) AS (
   VALUES
+    ('agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)'),
     ('agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)'),
     ('agentpass_consume_human_identity_assertion(bytea,timestamptz)'),
     ('agentpass_valid_webauthn_transports(text[])'),
@@ -195,6 +197,48 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_agent_session_consume(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,text,text,uuid,boolean)'),
     ('agentpass_agent_session_lifecycle_expire_due(uuid,integer,timestamptz)'),
     ('agentpass_agent_session_lifecycle_revoke(uuid,uuid,uuid,uuid,uuid,boolean,timestamptz)'),
+    ('agentpass_human_session_find_by_token(bytea)'),
+    ('agentpass_human_session_touch(uuid,timestamptz,timestamptz)'),
+    ('agentpass_human_session_logout(uuid,uuid,uuid,bytea,timestamptz,text)'),
+    ('agentpass_human_session_revoke(uuid,timestamptz,text)'),
+    ('agentpass_human_session_create(uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz)'),
+    ('agentpass_human_session_reduce_to_ceiling(uuid,timestamptz,integer,text)'),
+    ('agentpass_human_session_create_with_ceiling(uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,integer,text,timestamptz)'),
+    ('agentpass_human_session_bind_recent_auth(uuid,uuid,uuid,text,uuid,bytea,timestamptz)'),
+    ('agentpass_human_session_consume_recent_auth(uuid,uuid,uuid,text,uuid,bytea,timestamptz)'),
+    ('agentpass_human_session_list(uuid)'),
+    ('agentpass_human_session_list_safe(uuid,uuid,timestamptz,uuid,integer)'),
+    ('agentpass_human_list_credentials_for_session(uuid,uuid)'),
+    ('agentpass_human_find_credential_for_session(uuid,uuid,bytea)'),
+    ('agentpass_human_update_credential_counter(uuid,uuid,bytea,bigint,bigint,boolean,boolean,boolean,boolean)'),
+    ('agentpass_human_quarantine_credential_clone(uuid,uuid,bytea,bigint,bigint)'),
+    ('agentpass_human_register_credential(uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean)'),
+    ('agentpass_human_list_credential_metadata_for_session(uuid,uuid,uuid,timestamptz,uuid,integer)'),
+    ('agentpass_human_update_credential_label(uuid,uuid,uuid,bytea,text,bigint)'),
+    ('agentpass_human_revoke_credential(uuid,uuid,uuid,bytea,bigint,timestamptz,text)'),
+    ('agentpass_human_get_registration_user(uuid,uuid,uuid)'),
+    ('agentpass_human_session_rotate(uuid,bytea,uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz,text)'),
+    ('agentpass_human_session_switch(uuid,bytea,uuid,uuid,uuid,uuid,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz,text)'),
+    ('agentpass_human_session_revoke_managed(uuid,uuid,uuid,uuid,bigint,timestamptz,text)'),
+    ('agentpass_human_session_revoke_others(uuid,uuid,uuid,timestamptz,text)'),
+    ('agentpass_human_member_session_revoke(uuid,uuid,timestamptz,text)'),
+    ('agentpass_organization_create_with_owner(uuid,uuid,uuid,text,text,text,text,timestamptz)'),
+    ('agentpass_organization_rename(uuid,uuid,text,bigint)'),
+    ('agentpass_human_membership_role_update(uuid,uuid,uuid,text,bigint,timestamptz)'),
+    ('agentpass_human_membership_remove(uuid,uuid,uuid,bigint,timestamptz)'),
+    ('agentpass_organization_invitation_create(uuid,uuid,bytea,text,uuid,timestamptz,timestamptz)'),
+    ('agentpass_organization_invitation_revoke(uuid,uuid,bigint,timestamptz,uuid,text)'),
+    ('agentpass_organization_invitation_reissue(uuid,uuid,bytea,timestamptz,timestamptz,bigint,uuid)'),
+    ('agentpass_organization_invitation_accept(uuid,uuid,bytea,uuid,timestamptz)'),
+    ('agentpass_organization_invitation_list(uuid,uuid,timestamptz,uuid,integer)'),
+    ('agentpass_human_identity_resolve(text,text,uuid)'),
+    ('agentpass_human_identity_find(text,text)'),
+    ('agentpass_human_identity_list_memberships(text,text,uuid)'),
+    ('agentpass_human_credential_registration_status(uuid,uuid,uuid,bytea)'),
+    ('agentpass_owner_recovery_register_credential(uuid,uuid,uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean,timestamptz)'),
+    ('agentpass_owner_recovery_find_credential(uuid,uuid,uuid,uuid,bytea,bytea,timestamptz)'),
+    ('agentpass_owner_recovery_update_credential_counter(uuid,uuid,uuid,uuid,uuid,bytea,bigint,bigint,boolean,boolean,boolean,boolean,timestamptz)'),
+    ('agentpass_owner_recovery_credential_exists(uuid,uuid,uuid,uuid,bytea,timestamptz)'),
     ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
     ('agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)'),
     ('agentpass_platform_session_challenge_find(uuid)'),
@@ -235,7 +279,11 @@ signing_capability_function_allowlist(routine_signature) AS (
 ),
 maintenance_function_allowlist(routine_signature) AS (
   VALUES
-    ('agentpass_agent_signing_capability_recover_expired(integer)')
+    ('agentpass_agent_signing_capability_recover_expired(integer)'),
+    ('agentpass_human_identity_bind(text,text,uuid,uuid)'),
+    ('agentpass_device_audit_inbox_claim(bytea,integer,integer)'),
+    ('agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)'),
+    ('agentpass_device_audit_inbox_health()')
 ),
 signing_authority_table_allowlist(relname) AS (
   VALUES
@@ -492,6 +540,9 @@ default_acl AS (
   JOIN target_schema AS s ON s.oid = d.defaclnamespace
   WHERE d.defaclrole = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')
 ),
+app_write_protected_relations(relname) AS (
+  VALUES ('organizations'), ('memberships'), ('organization_invitations')
+),
 role_attributes_ok AS (
   SELECT count(*) = ${ROLES.length}
     AND bool_and(
@@ -621,41 +672,64 @@ device_audit_boundary_ok AS (
     AND (SELECT value FROM device_audit_function_ok) AS value
   FROM device_audit_boundary_observations
 ),
+device_audit_inbox_boundary_ok AS (
+  SELECT EXISTS (SELECT 1 FROM tables WHERE relname = 'device_audit_inbox')
+    AND (SELECT relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')
+           AND relrowsecurity IS TRUE AND relforcerowsecurity IS TRUE
+           FROM tables WHERE relname = 'device_audit_inbox')
+    AND (SELECT count(*) = 2 FROM pg_policy p JOIN tables t ON p.polrelid = t.oid WHERE t.relname = 'device_audit_inbox')
+    AND has_table_privilege('agentpass_backup', 'public.device_audit_inbox', 'SELECT')
+    AND NOT has_table_privilege('agentpass_app', 'public.device_audit_inbox', 'SELECT')
+    AND NOT has_table_privilege('agentpass_maintenance', 'public.device_audit_inbox', 'SELECT')
+    AND NOT has_table_privilege('agentpass_signer', 'public.device_audit_inbox', 'SELECT')
+    AND has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)', 'EXECUTE')
+    AND NOT has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE')
+    AND NOT has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)', 'EXECUTE')
+    AND has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE')
+    AND has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)', 'EXECUTE')
+    AND has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_health()', 'EXECUTE') AS value
+),
 table_privilege_observations AS (
   SELECT t.relname,
     t.relkind,
-    CASE WHEN t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+    CASE WHEN t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger')
         OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(t.relname, length('platform_')) = 'platform_'
         OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-        OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions') THEN 'authority'
+        OR t.relname IN ('human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets') THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
       CASE WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions')
+          OR t.relname IN ('human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets')
         THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END
         ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select_missing' END END,
-      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+      CASE WHEN t.relname IN (SELECT relname FROM app_write_protected_relations)
+          THEN CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN 'app:insert' END
+        WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
+          OR t.relname IN ('human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert_missing' END END,
-      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+      CASE WHEN t.relname IN (SELECT relname FROM app_write_protected_relations)
+          THEN CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN 'app:update' END
+        WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
+          OR t.relname IN ('human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update_missing' END END,
-      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+      CASE WHEN t.relname IN (SELECT relname FROM app_write_protected_relations)
+          THEN CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN 'app:delete' END
+        WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR t.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions'))
+          OR t.relname IN ('human_sessions', 'webauthn_credentials', 'webauthn_challenges', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets'))
           THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete' END
           ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete_missing' END END,
       CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN NULL ELSE 'app:truncate' END,
@@ -685,13 +759,13 @@ table_privilege_observations AS (
       CASE WHEN t.relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator') THEN NULL ELSE 'owner:not_migrator' END
     ]::text[], NULL::text) AS failures
   FROM tables AS t
-  WHERE t.relname NOT IN ('device_audit_events', 'device_audit_heads', 'device_audit_gaps')
+  WHERE t.relname NOT IN ('device_audit_events', 'device_audit_heads', 'device_audit_gaps', 'device_audit_inbox')
 ),
 table_privileges_ok AS (
   SELECT NOT EXISTS (
     SELECT 1 FROM table_privilege_observations
     WHERE cardinality(failures) > 0
-  ) AND (SELECT value FROM device_audit_boundary_ok) AS value
+  ) AND (SELECT value FROM device_audit_boundary_ok) AND (SELECT value FROM device_audit_inbox_boundary_ok) AS value
 ),
 sequence_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
@@ -751,7 +825,9 @@ default_privileges_ok AS (
       WHERE grantee IN ('agentpass_signer', 'agentpass_maintenance')) AS value
 ),
 checks AS (
-  SELECT current_user = 'agentpass_migrator'
+  SELECT session_user = 'agentpass_migrator'
+    AND current_user = 'agentpass_migrator'
+    AND (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) IS TRUE
     AND (SELECT value FROM migration_head_ok)
     AND (SELECT value FROM role_attributes_ok)
     AND (SELECT value FROM role_memberships_ok)
@@ -767,7 +843,9 @@ checks AS (
 )
 SELECT json_build_object(
   'ok', (SELECT ok FROM checks),
+  'session_user', session_user,
   'current_user', current_user,
+  'tls_session_ok', (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) IS TRUE,
   'role_attributes_ok', (SELECT value FROM role_attributes_ok),
   'role_memberships_ok', (SELECT value FROM role_memberships_ok),
   'schema_privileges_ok', (SELECT value FROM schema_privileges_ok),
@@ -865,7 +943,7 @@ SELECT json_build_object(
               .digest('hex');
             if (report.ok !== true) {
               const failedChecks = [
-                ...(report.current_user === 'agentpass_migrator' ? [] : ['current_user']),
+                ...(report.session_user === 'agentpass_migrator' && report.current_user === 'agentpass_migrator' ? [] : ['role_identity']),
                 ...REPORT_CHECKS.filter((name) => report[name] !== true),
               ];
               const tableDiagnostics = report.table_privileges_ok === true

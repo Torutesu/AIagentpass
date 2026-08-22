@@ -68,15 +68,23 @@ export function createPostgresDeviceAuditInboxRepository({ client, randomBytes =
 
   async function health() {
     try {
-      const result = await client.query(`SELECT state,count(*)::integer AS count,min(created_at) FILTER (WHERE state IN ('pending','processing','uncertain')) AS oldest_at FROM public.device_audit_inbox GROUP BY state`, []);
+      const result = await client.query(`SELECT state,row_count AS count,oldest_at,expired_processing FROM public.agentpass_device_audit_inbox_health()`, []);
       const counts = { pending: 0, processing: 0, accepted: 0, uncertain: 0, dead_letter: 0 };
-      let oldestAt = null;
+      let oldestPendingAt = null;
+      let oldestUncertainAt = null;
+      let oldestProcessingAt = null;
+      let expiredProcessing = 0;
       for (const row of result.rows ?? []) {
         if (!Object.hasOwn(counts, row.state)) throw unavailable();
         counts[row.state] = Number(row.count);
-        if (row.oldest_at !== null && (oldestAt === null || Date.parse(row.oldest_at) < Date.parse(oldestAt))) oldestAt = row.oldest_at;
+        if (row.state === "pending" && row.oldest_at !== null) oldestPendingAt = new Date(row.oldest_at).toISOString();
+        if (row.state === "uncertain" && row.oldest_at !== null) oldestUncertainAt = new Date(row.oldest_at).toISOString();
+        if (row.state === "processing" && row.oldest_at !== null) oldestProcessingAt = new Date(row.oldest_at).toISOString();
+        if (row.state === "processing") expiredProcessing = Number(row.expired_processing);
       }
-      return Object.freeze({ ...counts, oldest_at: oldestAt });
+      if (Object.values(counts).some((count) => !Number.isSafeInteger(count) || count < 0)
+        || !Number.isSafeInteger(expiredProcessing) || expiredProcessing < 0) throw unavailable();
+      return Object.freeze({ ...counts, oldest_pending_at: oldestPendingAt, oldest_processing_at: oldestProcessingAt, oldest_uncertain_at: oldestUncertainAt, expired_processing: expiredProcessing });
     } catch (error) {
       if (error instanceof DeviceAuditInboxRepositoryError) throw error;
       throw unavailable();

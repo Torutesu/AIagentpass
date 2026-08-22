@@ -6,6 +6,7 @@ import {
   getOrganizationVisibility,
   isAmbiguousOrganizationMutationError,
   OrganizationClientError,
+  resolveOrganizationSelection,
   type InvitationRole,
   type Organization,
   type OrganizationClient,
@@ -25,10 +26,14 @@ export type OrganizationPanelProps = Readonly<{
 }>;
 
 type LoadStatus = "idle" | "loading" | "ready" | "empty" | "error";
-type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode | "last_owner_protected" | "reconciliation_required" | "invitation_terminal" | "invitation_unavailable" }>;
+type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode | "last_owner_protected" | "reconciliation_required" | "invitation_terminal" | "invitation_unavailable"; serverCode?: string }>;
 type Rollback = () => void;
-type MutationOptions = Readonly<{ optimistic?: () => Rollback; reconcile?: () => Promise<void>; reconcileOnConflict?: boolean; reconciliationMessage?: string; retry?: () => Promise<void>; retryLabel?: string }>;
+type MutationOptions = Readonly<{ optimistic?: () => Rollback; reconcile?: () => Promise<void>; reconcileOnConflict?: boolean; reconciliationMessage?: string; retry?: () => Promise<void | boolean>; retryLabel?: string }>;
 type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
+
+function isRetryableMutationError(code: string | undefined): boolean {
+  return code === "aborted" || code === "recent_auth_required" || code === "expired";
+}
 
 const INITIAL_RESOURCE: ResourceState = Object.freeze({ status: "idle" });
 const ROLES: readonly OrganizationRole[] = ["owner", "admin", "auditor", "viewer"];
@@ -324,6 +329,42 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setMutationError(INITIAL_RESOURCE);
   };
 
+  const selectOrganization = async (id: string): Promise<void> => {
+    const next = resolveOrganizationSelection(organizations, id);
+    if (next === undefined) {
+      setMutationError({ status: "error", code: "validation_failed", error: "選択した組織を確認できないため、操作を中止しました。" });
+      return;
+    }
+    if (next.id === sessionOrganizationId) {
+      applyOrganizationSelection(next.id);
+      return;
+    }
+    if (pendingAction !== null) return;
+    setPendingAction("switch-organization");
+    setMutationError(INITIAL_RESOURCE);
+    try {
+      const session = await client.switchOrganization({ organizationId: next.id });
+      setSessionRole(session.role);
+      setSessionOrganizationId(session.organizationId);
+      setSessionMemberId(session.memberId);
+      setRoleOverrides((current) => ({ ...current, [session.organizationId]: session.role }));
+      applyOrganizationSelection(session.organizationId);
+      onOrganizationSwitched?.(session);
+    } catch (error) {
+      const responseMayHaveCommitted = isAmbiguousOrganizationMutationError(error);
+      const message = responseMayHaveCommitted
+        ? "組織切替の通信結果を確認できませんでした。安全のため再送せず、セッションを再読み込みしてください。"
+        : error instanceof OrganizationClientError && error.code === "forbidden"
+          ? "この組織へ切り替える権限がありません。"
+          : error instanceof OrganizationClientError && error.code === "unauthorized"
+            ? "セッションの有効期限が切れています。再認証してください。"
+            : "組織を切り替えられませんでした。現在の組織は変更していません。";
+      setMutationError({ status: "error", code: error instanceof OrganizationClientError ? error.code : "http_failed", error: message });
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
   const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<boolean> => {
     if (pendingAction !== null) return false;
     setPendingAction(action);
@@ -380,7 +421,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       // an authoritative refresh. Only an explicitly cancelled/expired
       // human-auth step is safe to retry as the same UI operation.
       if (options.retry !== undefined && isRetryableMutationError(nextError.code)) {
-        setRetryAction({ label: options.retryLabel ?? "本人確認をやり直す", run: options.retry });
+        setRetryAction({ label: options.retryLabel ?? "本人確認をやり直す", run: async () => { await options.retry?.(); } });
       }
       return false;
     } finally {
@@ -507,11 +548,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     await submitInvitationReissue(invitation, expiresAt);
   };
 
-  const changeMemberRole = (member: OrganizationMember, role: OrganizationRole): Promise<boolean> => {
-    if (!visibility.canManageMembers || (role === "owner" && !visibility.canAssignOwner) || role === member.role || member.status !== "active") return Promise.resolve(false);
+  const changeMemberRole = async (member: OrganizationMember, role: OrganizationRole): Promise<void> => {
+    if (!visibility.canManageMembers || (role === "owner" && !visibility.canAssignOwner) || role === member.role || member.status !== "active") return;
     if (isFinalOwnerProtection(member, role)) {
       showLastOwnerProtection(member);
-      return Promise.resolve(false);
+      return;
     }
     const previousMembers = members;
     const isCurrentSessionMember = member.memberId === sessionMemberId && member.organizationId === sessionOrganizationId;
@@ -535,7 +576,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       }
       await reconcileResources(member.organizationId, { members: true });
     };
-    return runMutation(`member-role-${member.memberId}`, async () => {
+    await runMutation(`member-role-${member.memberId}`, async () => {
       const result = await client.updateMemberRole({ organizationId: member.organizationId, memberId: member.memberId, role, expectedVersion: member.version });
       setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
       setRoleDrafts((current) => ({ ...current, [member.memberId]: result.member.role }));
@@ -558,11 +599,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     });
   };
 
-  const removeMember = (member: OrganizationMember): Promise<boolean> => {
-    if (!visibility.canManageMembers || (member.role === "owner" && !visibility.canAssignOwner) || member.status !== "active") return Promise.resolve(false);
+  const removeMember = async (member: OrganizationMember): Promise<void> => {
+    if (!visibility.canManageMembers || (member.role === "owner" && !visibility.canAssignOwner) || member.status !== "active") return;
     if (isFinalOwnerProtection(member, undefined)) {
       showLastOwnerProtection(member);
-      return Promise.resolve(false);
+      return;
     }
     const previousMembers = members;
     setRemovalConfirmationId(null);
@@ -587,7 +628,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       }
       await reconcileResources(member.organizationId, { members: true });
     };
-    return runMutation(`member-remove-${member.memberId}`, async () => {
+    await runMutation(`member-remove-${member.memberId}`, async () => {
       const result = await client.removeMember({ organizationId: member.organizationId, memberId: member.memberId, expectedVersion: member.version });
       setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
       if (isCurrentSessionMember) {
@@ -609,11 +650,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     });
   };
 
-  const revokeInvitation = (invitation: OrganizationInvitation): Promise<void> => {
-    if (!visibility.canRevokeInvitations || invitation.status !== "pending" || isInvitationExpired(invitation, nowMs)) return Promise.resolve();
+  const revokeInvitation = async (invitation: OrganizationInvitation): Promise<void> => {
+    if (!visibility.canRevokeInvitations || invitation.status !== "pending" || isInvitationExpired(invitation, nowMs)) return;
     setOneTimeToken(null);
     const previousInvitations = invitations;
-    return runMutation(`invitation-revoke-${invitation.id}`, async () => {
+    await runMutation(`invitation-revoke-${invitation.id}`, async () => {
       const result = await client.revokeInvitation({ organizationId: invitation.organizationId, invitationId: invitation.id, expectedVersion: invitation.version });
       setInvitations((current) => current.map((item) => item.id === invitation.id ? result.invitation : item));
     }, {
@@ -680,7 +721,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         <section style={panelStyle.card} aria-labelledby="organization-selector-title">
           <div style={panelStyle.row}>
             <div><h2 id="organization-selector-title" style={panelStyle.cardTitle}>組織</h2><p style={panelStyle.muted}>現在の権限: {roleLabel}</p></div>
-            <label style={{ ...panelStyle.label, minWidth: 260 }}><span className="sr-only">組織を選択</span><select value={selectedOrganizationId} onChange={(event) => selectOrganization(event.target.value)} style={panelStyle.select} aria-label="組織を選択" disabled={pendingAction !== null}>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></label>
+            <label style={{ ...panelStyle.label, minWidth: 260 }}><span className="sr-only">組織を選択</span><select value={selectedOrganizationId} onChange={(event) => void selectOrganization(event.target.value)} style={panelStyle.select} aria-label="組織を選択" disabled={pendingAction !== null}>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></label>
           </div>
           {selectedOrganization && <div style={panelStyle.row}><span>{selectedOrganization.name} · v{selectedOrganization.version}</span><span style={panelStyle.muted}>更新: {formatDate(selectedOrganization.updatedAt)}</span></div>}
           {visibility.canManageOrganization && selectedOrganization && <form onSubmit={renameOrganization} style={panelStyle.actionRow}><label style={{ ...panelStyle.label, flex: "1 1 280px" }}><span>組織名を変更</span><input value={renameName} onChange={(event) => setRenameName(event.target.value)} maxLength={128} style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pendingAction !== null}>{pendingAction === "rename-organization" ? "変更中…" : "名前を変更"}</button></form>}
@@ -977,6 +1018,7 @@ function abortError(): OrganizationClientError {
 }
 
 function pendingActionLabel(action: string): string {
+  if (action === "switch-organization") return "組織を切り替えています…";
   if (action === "rename-organization") return "組織名を変更しています…";
   if (action === "create-invitation") return "招待を発行しています…";
   if (action.startsWith("invitation-reissue-")) return "招待を再発行しています…";

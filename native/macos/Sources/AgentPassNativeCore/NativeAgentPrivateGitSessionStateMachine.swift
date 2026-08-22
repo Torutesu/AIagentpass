@@ -11,6 +11,7 @@ public enum NativeAgentPrivateGitSessionQuarantineReason: String, Equatable, Sen
     case wrongResponse = "wrong_response"
     case wrongMessage = "wrong_message"
     case closeWhileOutstanding = "close_while_outstanding"
+    case incomplete
     case unexpectedEOF = "unexpected_eof"
     case trafficAfterClose = "traffic_after_close"
     case duplicateClose = "duplicate_close"
@@ -36,6 +37,7 @@ public enum NativeAgentPrivateGitSessionStateMachineError: Error, Equatable, Sen
     case wrongResponse
     case wrongMessage
     case closeWhileOutstanding
+    case incomplete
     case unexpectedEOF
     case trafficAfterClose
     case duplicateClose
@@ -55,7 +57,8 @@ public enum NativeAgentPrivateGitSessionStateMachineError: Error, Equatable, Sen
         switch self {
         case .malformed, .concurrentRequest, .replay, .skippedSequence,
              .excess, .wrongResponse, .wrongMessage,
-             .unexpectedEOF, .trafficAfterClose, .duplicateClose, .terminal:
+             .incomplete, .unexpectedEOF, .trafficAfterClose,
+             .duplicateClose, .terminal:
             return .transportQuarantined
         case .closeWhileOutstanding:
             return .outcomeUnknown
@@ -85,10 +88,26 @@ public enum NativeAgentPrivateGitSessionStateMachineError: Error, Equatable, Sen
 /// instance to a terminal quarantine state. The lock makes the one-outstanding
 /// invariant hold even when callers race `beginRequest` from different threads.
 public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable {
-    private let stateLock = NSLock()
-    private var currentState: NativeAgentPrivateGitSessionState = .ready(nextSequence: 1)
+    public enum Role: Sendable {
+        case client
+        case server
+    }
 
-    public init() {}
+    private let stateLock = NSLock()
+    private let role: Role
+    private var currentState: NativeAgentPrivateGitSessionState = .ready(nextSequence: 1)
+    private enum ClosePhase: Equatable {
+        case notStarted
+        case localCloseSentAwaitingPeer
+        case peerCloseReceivedAwaitingAck
+        case bothCloseFramesExchangedAwaitingEOF
+        case ackSentAwaitingEOF
+    }
+    private var closePhase: ClosePhase = .notStarted
+
+    public init(role: Role = .client) {
+        self.role = role
+    }
 
     public var state: NativeAgentPrivateGitSessionState {
         stateLock.lock()
@@ -101,6 +120,11 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
     public func beginRequest(commitPayload: Data) throws -> Data {
         stateLock.lock()
         defer { stateLock.unlock() }
+
+        guard role == .client else {
+            quarantine(.wrongMessage)
+            throw Self.error(for: .wrongMessage)
+        }
 
         switch currentState {
         case .ready(let nextSequence):
@@ -138,6 +162,11 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
     public func acceptResponse(_ frame: Data) throws -> Data {
         stateLock.lock()
         defer { stateLock.unlock() }
+
+        guard role == .client else {
+            quarantine(.wrongMessage)
+            throw Self.error(for: .wrongMessage)
+        }
 
         switch currentState {
         case .ready(let nextSequence):
@@ -199,6 +228,117 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
         }
     }
 
+    /// Validates and consumes one request on a server-role session. The
+    /// request is accepted only at the next exact sequence and reserves the
+    /// single response slot before returning its payload to the signer.
+    /// There is no server-side buffering or pipelining state: a second request
+    /// while that slot is reserved is a terminal concurrent-request failure.
+    public func acceptRequest(_ frame: Data) throws -> Data {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard role == .server else {
+            quarantine(.wrongMessage)
+            throw Self.error(for: .wrongMessage)
+        }
+
+        switch currentState {
+        case .ready(let nextSequence):
+            guard let message = tryDecodeOrQuarantine(frame) else {
+                throw Self.error(for: .malformed)
+            }
+            guard case let .request(sequence, payload) = message else {
+                quarantine(.wrongMessage)
+                throw Self.error(for: .wrongMessage)
+            }
+            if sequence < nextSequence {
+                quarantine(.replay)
+                throw Self.error(for: .replay)
+            }
+            if sequence > nextSequence {
+                let reason: NativeAgentPrivateGitSessionQuarantineReason =
+                    sequence > NativeAgentPrivateGitSessionFrameCodec.maximumAcceptedSigns
+                        ? .excess
+                        : .skippedSequence
+                quarantine(reason)
+                throw Self.error(for: reason)
+            }
+            currentState = .awaitingResponse(sequence: sequence)
+            return payload
+
+        case .awaitingResponse:
+            quarantine(.concurrentRequest)
+            throw Self.error(for: .concurrentRequest)
+        case .completed:
+            quarantine(.excess)
+            throw Self.error(for: .excess)
+        case .closing:
+            quarantine(.trafficAfterClose)
+            throw Self.error(for: .trafficAfterClose)
+        case .closed:
+            throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
+        case .quarantined:
+            throw NativeAgentPrivateGitSessionStateMachineError.terminal
+        }
+    }
+
+    /// Creates the exact response for the server's one outstanding request.
+    /// The response sequence is taken from the state machine, never from a
+    /// caller-supplied value, so a signer cannot accidentally skip or replay.
+    public func makeResponse(signature: Data) throws -> Data {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard role == .server else {
+            quarantine(.wrongMessage)
+            throw Self.error(for: .wrongMessage)
+        }
+
+        switch currentState {
+        case .awaitingResponse(let sequence):
+            do {
+                let frame = try NativeAgentPrivateGitSessionFrameCodec.encode(
+                    .response(sequence: sequence, signature: signature))
+                if sequence == NativeAgentPrivateGitSessionFrameCodec.maximumAcceptedSigns {
+                    currentState = .completed
+                } else {
+                    currentState = .ready(nextSequence: sequence + 1)
+                }
+                return frame
+            } catch {
+                quarantine(.malformed)
+                throw Self.error(for: .malformed)
+            }
+        case .ready:
+            quarantine(.wrongResponse)
+            throw Self.error(for: .wrongResponse)
+        case .completed:
+            quarantine(.excess)
+            throw Self.error(for: .excess)
+        case .closing:
+            quarantine(.trafficAfterClose)
+            throw Self.error(for: .trafficAfterClose)
+        case .closed:
+            throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
+        case .quarantined:
+            throw NativeAgentPrivateGitSessionStateMachineError.terminal
+        }
+    }
+
+    /// Records that the result of the outstanding sign operation is unknown.
+    /// This is used when the transport fails after a request was accepted; it
+    /// is deliberately terminal and never permits a retry.
+    public func markOutcomeUnknown() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        switch currentState {
+        case .closed, .quarantined:
+            return
+        default:
+            currentState = .quarantined(.outcomeUnknown)
+        }
+    }
+
     /// Produces the explicit terminal close frame and begins the local close
     /// handshake. EOF is required before the lifecycle becomes `closed`.
     /// Closing while a response is outstanding quarantines the transport so
@@ -209,9 +349,17 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
         defer { stateLock.unlock() }
 
         switch currentState {
-        case .ready, .completed:
+        case .ready:
+            quarantine(.incomplete)
+            throw Self.error(for: .incomplete)
+        case .completed:
+            guard role == .client else {
+                quarantine(.wrongMessage)
+                throw Self.error(for: .wrongMessage)
+            }
             let frame = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
             currentState = .closing
+            closePhase = .localCloseSentAwaitingPeer
             return frame
         case .awaitingResponse:
             quarantine(.closeWhileOutstanding)
@@ -232,21 +380,80 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
         defer { stateLock.unlock() }
 
         switch currentState {
-        case .ready, .completed:
+        case .ready:
             try decodeClose(frame)
+            if role == .server {
+                quarantine(.incomplete)
+                throw Self.error(for: .incomplete)
+            }
+            quarantine(.wrongMessage)
+            throw Self.error(for: .wrongMessage)
+        case .completed:
+            try decodeClose(frame)
+            guard role == .server else {
+                quarantine(.wrongMessage)
+                throw Self.error(for: .wrongMessage)
+            }
             currentState = .closing
+            closePhase = .peerCloseReceivedAwaitingAck
         case .awaitingResponse:
             try decodeClose(frame)
             quarantine(.closeWhileOutstanding)
             throw Self.error(for: .closeWhileOutstanding)
         case .closing:
             try decodeClose(frame)
-            quarantine(.duplicateClose)
-            throw Self.error(for: .duplicateClose)
+            guard role == .client,
+                  closePhase == .localCloseSentAwaitingPeer else {
+                quarantine(.duplicateClose)
+                throw Self.error(for: .duplicateClose)
+            }
+            closePhase = .bothCloseFramesExchangedAwaitingEOF
         case .closed:
             throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
         case .quarantined:
             throw NativeAgentPrivateGitSessionStateMachineError.terminal
+        }
+    }
+
+    /// Creates the peer's close acknowledgement after a valid close frame was
+    /// consumed. The state remains `closing` until the transport observes EOF.
+    /// This is intentionally separate from `close()`, which initiates the
+    /// local side of the handshake.
+    public func acknowledgeClose() throws -> Data {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard role == .server else {
+            switch currentState {
+            case .closed:
+                throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
+            case .quarantined:
+                throw NativeAgentPrivateGitSessionStateMachineError.terminal
+            default:
+                quarantine(.wrongMessage)
+                throw Self.error(for: .wrongMessage)
+            }
+        }
+
+        guard case .closing = currentState,
+              closePhase == .peerCloseReceivedAwaitingAck else {
+            switch currentState {
+            case .closed:
+                throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
+            case .quarantined:
+                throw NativeAgentPrivateGitSessionStateMachineError.terminal
+            default:
+                quarantine(.wrongMessage)
+                throw Self.error(for: .wrongMessage)
+            }
+        }
+        do {
+            let frame = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+            closePhase = .ackSentAwaitingEOF
+            return frame
+        } catch {
+            quarantine(.malformed)
+            throw Self.error(for: .malformed)
         }
     }
 
@@ -258,7 +465,14 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
 
         switch currentState {
         case .closing:
-            currentState = .closed
+            switch (role, closePhase) {
+            case (.client, .bothCloseFramesExchangedAwaitingEOF),
+                 (.server, .ackSentAwaitingEOF):
+                currentState = .closed
+            default:
+                quarantine(.unexpectedEOF)
+                throw Self.error(for: .unexpectedEOF)
+            }
         case .awaitingResponse:
             quarantine(.outcomeUnknown)
             throw NativeAgentPrivateGitSessionStateMachineError.outcomeUnknown
@@ -269,6 +483,35 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
             throw NativeAgentPrivateGitSessionStateMachineError.alreadyClosed
         case .quarantined:
             throw NativeAgentPrivateGitSessionStateMachineError.terminal
+        }
+    }
+
+    /// Records EOF/truncation while a close frame was still expected. This is
+    /// separate from `acceptEOF()`: calling `acceptEOF()` after both close
+    /// frames have exchanged would incorrectly commit a clean close.
+    public func markUnexpectedEOF() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        switch currentState {
+        case .closed, .quarantined:
+            return
+        case .awaitingResponse:
+            currentState = .quarantined(.outcomeUnknown)
+        default:
+            currentState = .quarantined(.unexpectedEOF)
+        }
+    }
+
+    /// Records bytes observed after the close exchange. Such traffic is a
+    /// terminal protocol violation and must never be mistaken for EOF.
+    public func markTrafficAfterClose() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        switch currentState {
+        case .closed, .quarantined:
+            return
+        default:
+            currentState = .quarantined(.trafficAfterClose)
         }
     }
 
@@ -312,6 +555,7 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
         case .wrongResponse: return .wrongResponse
         case .wrongMessage: return .wrongMessage
         case .closeWhileOutstanding: return .closeWhileOutstanding
+        case .incomplete: return .incomplete
         case .unexpectedEOF: return .unexpectedEOF
         case .trafficAfterClose: return .trafficAfterClose
         case .duplicateClose: return .duplicateClose

@@ -11,6 +11,10 @@ on:
         description: Successful CI workflow run ID with all six protected lanes green on the tag commit
         required: true
         type: string
+      ci_run_attempt:
+        description: Exact attempt of the selected canonical CI workflow run
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,6 +31,7 @@ jobs:
       tree: ${{ steps.verify.outputs.tree }}
       tag: ${{ steps.verify.outputs.tag }}
       ci_run_id: ${{ steps.verify.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.verify.outputs.ci_run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,6 +42,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
           ALLOWED_SIGNERS: ${{ vars.AGENTPASS_RELEASE_ALLOWED_SIGNERS }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -44,6 +50,7 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || { echo "Invalid release tag" >&2; exit 1; }
           [[ -n "$ALLOWED_SIGNERS" ]] || { echo "AGENTPASS_RELEASE_ALLOWED_SIGNERS is not configured" >&2; exit 1; }
           [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "ci_run_attempt must be an exact attempt" >&2; exit 1; }
           allowed_signers="$RUNNER_TEMP/agentpass-release.allowed-signers"
           umask 077
           printf '%s\n' "$ALLOWED_SIGNERS" > "$allowed_signers"
@@ -58,16 +65,24 @@ jobs:
           ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
-          node --input-type=module - "$ci_run" "$ci_jobs" "$commit" "$tree" "$tree" <<'NODE'
+          ci_commit="$RUNNER_TEMP/agentpass-ci-commit.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/git/commits/$commit" > "$ci_commit"
+          node --input-type=module - "$ci_run" "$ci_jobs" "$ci_commit" "$commit" "$tree" "$GITHUB_REPOSITORY" "$CI_RUN_ID" <<'NODE'
           import fs from 'node:fs';
-          import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
-          const [runPath, jobsPath, expectedCommit, expectedTree, workflowTree] = process.argv.slice(2);
-          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree, workflowTree });
+          import { assertGithubCiRun, assertGithubCommit } from './scripts/release/ci-preflight.mjs';
+          const [runPath, jobsPath, commitPath, expectedCommit, expectedTree, repository, expectedRunId] = process.argv.slice(2);
+          const run = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+          const jobsEnvelope = JSON.parse(fs.readFileSync(jobsPath, 'utf8'));
+          if (!Number.isSafeInteger(jobsEnvelope.total_count)) throw new Error('GitHub CI jobs response must include an exact total_count');
+          assertGithubCiRun(run, jobsEnvelope.jobs, { expectedSha: expectedCommit, repository, expectedRunId, expectedRunAttempt: process.env.CI_RUN_ATTEMPT, jobsTotalCount: jobsEnvelope.total_count });
+          const commit = assertGithubCommit(JSON.parse(fs.readFileSync(commitPath, 'utf8')), { repository, expectedSha: expectedCommit });
+          if (commit.tree_sha !== expectedTree) throw new Error('GitHub commit API tree differs from the signed tag tree');
           NODE
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "ci_run_attempt=$CI_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   signed-candidate:
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
@@ -99,6 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ needs.verify-source.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.verify-source.outputs.ci_run_attempt }}
           EXPECTED_COMMIT: ${{ needs.verify-source.outputs.commit }}
           EXPECTED_TREE: ${{ needs.verify-source.outputs.tree }}
         run: |
@@ -107,12 +123,39 @@ jobs:
           ci_jobs="$RUNNER_TEMP/agentpass-ci-jobs.json"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID" > "$ci_run"
           gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs"
-          node --input-type=module - "$ci_run" "$ci_jobs" "$EXPECTED_COMMIT" "$EXPECTED_TREE" "$EXPECTED_TREE" <<'NODE'
+          ci_commit="$RUNNER_TEMP/agentpass-ci-commit.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/git/commits/$EXPECTED_COMMIT" > "$ci_commit"
+          node --input-type=module - "$ci_run" "$ci_jobs" "$ci_commit" "$EXPECTED_COMMIT" "$EXPECTED_TREE" "$GITHUB_REPOSITORY" "$CI_RUN_ID" <<'NODE'
           import fs from 'node:fs';
-          import { assertGithubCiRun } from './scripts/release/ci-preflight.mjs';
-          const [runPath, jobsPath, expectedCommit, expectedTree, workflowTree] = process.argv.slice(2);
-          assertGithubCiRun({ run: JSON.parse(fs.readFileSync(runPath, 'utf8')), jobs: JSON.parse(fs.readFileSync(jobsPath, 'utf8')), expectedCommit, expectedTree, workflowTree });
+          import { assertGithubCiRun, assertGithubCommit } from './scripts/release/ci-preflight.mjs';
+          const [runPath, jobsPath, commitPath, expectedCommit, expectedTree, repository, expectedRunId] = process.argv.slice(2);
+          const run = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+          const jobsEnvelope = JSON.parse(fs.readFileSync(jobsPath, 'utf8'));
+          if (!Number.isSafeInteger(jobsEnvelope.total_count)) throw new Error('GitHub CI jobs response must include an exact total_count');
+          assertGithubCiRun(run, jobsEnvelope.jobs, { expectedSha: expectedCommit, repository, expectedRunId, expectedRunAttempt: process.env.CI_RUN_ATTEMPT, jobsTotalCount: jobsEnvelope.total_count });
+          const commit = assertGithubCommit(JSON.parse(fs.readFileSync(commitPath, 'utf8')), { repository, expectedSha: expectedCommit });
+          if (commit.tree_sha !== expectedTree) throw new Error('GitHub commit API tree differs from the signed tag tree');
           NODE
+      - name: Persist exact canonical CI evidence into the signed candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.verify-source.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.verify-source.outputs.ci_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,18}$ || "$CI_RUN_ID" =~ ^[1-9][0-9]{19}$ ]] || { echo "ci_run_id must be a decimal run ID" >&2; exit 1; }
+          mkdir -m 0700 -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/agentpass-ci-preflight"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" > "$RUNNER_TEMP/agentpass-ci-preflight/run.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/agentpass-ci-preflight/jobs.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/git/commits/$AGENTPASS_RELEASE_COMMIT" > "$RUNNER_TEMP/agentpass-ci-preflight/commit.json"
+          node scripts/release/ci-preflight.mjs github-commit \
+            "$RUNNER_TEMP/agentpass-ci-preflight/commit.json" "$GITHUB_REPOSITORY" "$AGENTPASS_RELEASE_COMMIT" > "$RUNNER_TEMP/agentpass-ci-preflight/commit-binding.json"
+          [[ "$(jq -er '.tree_sha' "$RUNNER_TEMP/agentpass-ci-preflight/commit-binding.json")" == "$AGENTPASS_RELEASE_TREE" ]] || { echo "GitHub commit API tree differs from the signed tag tree" >&2; exit 1; }
+          node scripts/release/ci-preflight.mjs github \
+            "$RUNNER_TEMP/agentpass-ci-preflight/run.json" \
+            "$RUNNER_TEMP/agentpass-ci-preflight/jobs.json" \
+            "$AGENTPASS_RELEASE_COMMIT" "$GITHUB_REPOSITORY" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" > "$RUNNER_TEMP/candidate/ci-preflight.json"
+
       - name: Require protected signing inputs
         env:
           AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64 }}
@@ -337,24 +380,268 @@ jobs:
             "$RUNNER_TEMP/candidate/AgentPassQualificationController-${AGENTPASS_RELEASE_TAG#v}-macos-universal.tar"
           node scripts/release/sign-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig"
           node scripts/release/verify-release.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT"
-          scripts/release/verify-macos-release.sh "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT" "$AGENTPASS_TEAM_ID"
+      - name: Inventory exact post-staple installer artifact
+        env:
+          PACKAGE: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}-macos-universal.pkg
+          INVENTORY: ${{ runner.temp }}/distribution-input/artifact-inventory.json
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 0700 -p "$RUNNER_TEMP/distribution-input" "$RUNNER_TEMP/distribution-evidence"
+          node native/macos/scripts/generate-artifact-inventory.mjs \
+            "$RUNNER_TEMP/candidate" "$PACKAGE" "$INVENTORY"
+      - name: Independently verify and canonicalize macOS distribution command evidence
+        env:
+          PACKAGE: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}-macos-universal.pkg
+          APP: ${{ runner.temp }}/candidate/AgentPass.app
+          NOTARY_RAW: ${{ runner.temp }}/candidate/notarytool-result.json
+          STAPLE_RAW: ${{ runner.temp }}/distribution-input/stapler-command.txt
+          GATEKEEPER_RAW: ${{ runner.temp }}/distribution-input/gatekeeper-command.txt
+          CODESIGN_RAW: ${{ runner.temp }}/distribution-input/codesign-command.txt
+          SIGNATURE_RAW: ${{ runner.temp }}/distribution-input/pkgutil-signature.txt
+          NOTARY_INPUT: ${{ runner.temp }}/distribution-input/notary.json
+          STAPLE_INPUT: ${{ runner.temp }}/distribution-input/staple.json
+          GATEKEEPER_INPUT: ${{ runner.temp }}/distribution-input/gatekeeper.json
+          IDENTITY_INPUT: ${{ runner.temp }}/distribution-input/identity.json
+          VERIFICATION: ${{ runner.temp }}/distribution-input/verification.json
+          EXPECTED_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/xcrun stapler validate "$PACKAGE" > "$STAPLE_RAW" 2>&1
+          /usr/bin/grep -Eiq 'The validate action worked!' "$STAPLE_RAW"
+          /usr/sbin/spctl --assess --type install --verbose=4 "$PACKAGE" > "$GATEKEEPER_RAW" 2>&1
+          /usr/sbin/pkgutil --check-signature "$PACKAGE" > "$SIGNATURE_RAW" 2>&1
+          /usr/bin/codesign --verify --strict --verbose=4 "$APP" > "$CODESIGN_RAW" 2>&1
+          node --input-type=module - "$PACKAGE" "$NOTARY_RAW" "$STAPLE_RAW" "$GATEKEEPER_RAW" "$SIGNATURE_RAW" "$CODESIGN_RAW" "$NOTARY_INPUT" "$STAPLE_INPUT" "$GATEKEEPER_INPUT" "$IDENTITY_INPUT" "$VERIFICATION" "$EXPECTED_TEAM_ID" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+
+          const [artifact, notaryRawPath, stapleRawPath, gatekeeperRawPath, signatureRawPath, codesignRawPath, notaryPath, staplePath, gatekeeperPath, identityPath, verificationPath, expectedTeam] = process.argv.slice(2);
+          const digest = createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+          const writeOnce = (output, value) => {
+            const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+            try { fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          };
+          const notary = JSON.parse(fs.readFileSync(notaryRawPath, 'utf8'));
+          if (notary.status !== 'Accepted' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(String(notary.id ?? ''))) throw new Error('notarytool result is not an accepted UUID submission');
+          if (!fs.readFileSync(stapleRawPath, 'utf8').trim() || !fs.readFileSync(gatekeeperRawPath, 'utf8').trim() || !fs.readFileSync(codesignRawPath, 'utf8').trim()) throw new Error('macOS verification command output is empty');
+          const signatureOutput = fs.readFileSync(signatureRawPath, 'utf8');
+          if (!/Status: signed by a certificate trusted by Mac OS X/u.test(signatureOutput)) throw new Error('pkgutil did not prove a trusted package signature');
+          const match = signatureOutput.match(/Developer ID Installer:[^\r\n]+\(([A-Z0-9]{10})\)/u);
+          if (!match || match[1] !== expectedTeam) throw new Error('pkgutil Developer ID Installer identity is not bound to the expected Team ID');
+          const identity = match[0];
+          writeOnce(notaryPath, { status: 'Accepted', id: String(notary.id) });
+          writeOnce(staplePath, { status: 'validated', artifact_sha256: digest });
+          writeOnce(gatekeeperPath, { assessment: 'accepted', artifact_sha256: digest });
+          writeOnce(identityPath, { format: 'Developer ID Installer', identity, team_id: expectedTeam, verified: true });
+          writeOnce(verificationPath, { schema_version: 1, kind: 'agentpass.macos-distribution-verification-v1', status: 'verified', artifact_sha256: digest, signature_verified: true, notarization_verified: true, staple_verified: true, gatekeeper_verified: true });
+          NODE
+      - name: Produce canonical independent macOS distribution evidence
+        env:
+          PACKAGE: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}-macos-universal.pkg
+          INVENTORY: ${{ runner.temp }}/distribution-input/artifact-inventory.json
+          EVIDENCE_ROOT: ${{ runner.temp }}/distribution-evidence
+          NOTARY_INPUT: ${{ runner.temp }}/distribution-input/notary.json
+          STAPLE_INPUT: ${{ runner.temp }}/distribution-input/staple.json
+          GATEKEEPER_INPUT: ${{ runner.temp }}/distribution-input/gatekeeper.json
+          IDENTITY_INPUT: ${{ runner.temp }}/distribution-input/identity.json
+          VERIFICATION: ${{ runner.temp }}/distribution-input/verification.json
+          EVIDENCE: ${{ runner.temp }}/distribution-evidence/distribution-evidence.json
+        run: |
+          set -euo pipefail
+          node scripts/ops/create-macos-distribution-evidence.mjs \
+            "$PACKAGE" "$INVENTORY" "$EVIDENCE_ROOT" "$NOTARY_INPUT" "$STAPLE_INPUT" "$GATEKEEPER_INPUT" \
+            "$IDENTITY_INPUT" "$VERIFICATION" "$EVIDENCE"
+      - name: Enforce independent macOS promotion artifact gate
+        env:
+          EXPECTED_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
+          APP: ${{ runner.temp }}/candidate/AgentPass.app
+          PACKAGE: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}-macos-universal.pkg
+          GATE: ${{ runner.temp }}/distribution-input/promotion-artifact-gate.json
+        run: |
+          set -euo pipefail
+          : "${EXPECTED_TEAM_ID:?Developer ID Team ID is required}"
+          node scripts/release/macos-promotion-artifact-gate.mjs \
+            "$EXPECTED_TEAM_ID" "$APP" "$PACKAGE" > "$GATE"
+      - name: Strictly verify produced macOS distribution evidence
+        env:
+          AGENTPASS_DISTRIBUTION_EVIDENCE: ${{ runner.temp }}/distribution-evidence/distribution-evidence.json
+          AGENTPASS_DISTRIBUTION_INVENTORY: ${{ runner.temp }}/distribution-input/artifact-inventory.json
+          AGENTPASS_DISTRIBUTION_EVIDENCE_ROOT: ${{ runner.temp }}/distribution-evidence
+          AGENTPASS_DISTRIBUTION_VERIFICATION: ${{ runner.temp }}/distribution-input/verification.json
+          AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+          AGENTPASS_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-macos-release.sh \
+            "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" \
+            "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" \
+            "$RUNNER_TEMP/candidate/release-manifest.public.pem" \
+            "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT" "$AGENTPASS_TEAM_ID"
+      - name: Bind macOS distribution evidence to exact workflow provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE: ${{ runner.temp }}/distribution-input/provenance.json
+          PACKAGE: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}-macos-universal.pkg
+          CI_RUN_ID: ${{ needs.verify-source.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.verify-source.outputs.ci_run_attempt }}
+          SOURCE_COMMIT: ${{ needs.verify-source.outputs.commit }}
+          SOURCE_TREE: ${{ needs.verify-source.outputs.tree }}
+          RELEASE_TAG: ${{ needs.verify-source.outputs.tag }}
+        run: |
+          set -euo pipefail
+          artifact_sha256="$(shasum -a 256 "$PACKAGE" | awk '{print $1}')"
+          jobs_json="$RUNNER_TEMP/distribution-input/verification-jobs.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          verification_job_id="$(node --input-type=module - "$GITHUB_JOB" "$jobs_json" <<'NODE'
+          import fs from 'node:fs';
+          const [jobName, jobsPath] = process.argv.slice(2);
+          const jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf8')).jobs;
+          const matches = jobs.filter((job) => job.name === jobName && job.runner_name);
+          if (matches.length !== 1 || !Number.isSafeInteger(matches[0].id)) throw new Error('current GitHub verification job identity is ambiguous');
+          process.stdout.write(String(matches[0].id));
+          NODE
+          )"
+          runner_name="${RUNNER_NAME:-unknown}"
+          runner_id="github-actions/$(printf '%s' "$runner_name" | sed 's/[^A-Za-z0-9._:\/-]/_/g')"
+          node scripts/ops/create-macos-distribution-provenance.mjs \
+            "$artifact_sha256" "$SOURCE_COMMIT" "$SOURCE_TREE" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
+            "$CI_RUN_ID" "$CI_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$verification_job_id" "$runner_id" "$PROVENANCE"
+          rm -f "$jobs_json"
+      - name: Require source-bound external qualification evidence inputs
+        env:
+          AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON: ${{ secrets.AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON: ${{ secrets.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON }}
+          AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST }}
+          AGENTPASS_KMS_QUALIFICATION_RUN_ID: ${{ vars.AGENTPASS_KMS_QUALIFICATION_RUN_ID }}
+          AGENTPASS_KMS_QUALIFICATION_JOB_ID: ${{ vars.AGENTPASS_KMS_QUALIFICATION_JOB_ID }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID }}
+          MANIFEST: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}.release-manifest.json
+          EXPECTED_TREE: ${{ needs.verify-source.outputs.tree }}
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON:?protected KMS qualification evidence input is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON:?protected Platform Auth qualification evidence input is required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST:?protected KMS deployment digest is required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_RUN_ID:?protected KMS qualification run ID is required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_JOB_ID:?protected KMS qualification job ID is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST:?protected Platform Auth primary deployment digest is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST:?protected Platform Auth secondary deployment digest is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID:?protected Platform Auth qualification run ID is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID:?protected Platform Auth qualification job ID is required}"
+          product_sha256="$(node --input-type=module - "$MANIFEST" <<'NODE'
+          import fs from 'node:fs';
+          const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const products = manifest.artifacts?.filter((item) => item.role === 'product');
+          if (products?.length !== 1 || !/^[0-9a-f]{64}$/.test(products[0].sha256)) throw new Error('release manifest product digest is invalid');
+          process.stdout.write(products[0].sha256);
+          NODE
+          )"
+          mkdir -m 0700 -p "$RUNNER_TEMP/integrity-evidence"
+          node --input-type=module - "$RUNNER_TEMP/integrity-evidence/kms-qualification.json" "$RUNNER_TEMP/integrity-evidence/platform-auth-qualification.json" "$AGENTPASS_RELEASE_COMMIT" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [kmsPath, platformPath, expectedSourceCommit] = process.argv.slice(2);
+          for (const [output, input] of [[kmsPath, process.env.AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON], [platformPath, process.env.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON]]) {
+            if (typeof input !== 'string' || input.length === 0) throw new Error('protected qualification evidence input is missing');
+            let value;
+            try { value = JSON.parse(input); } catch { throw new Error('protected qualification evidence input is not JSON'); }
+            if (input !== canonicalJson(value)) throw new Error('protected qualification evidence input must be canonical JSON');
+            if (value.status !== 'passed' || value.qualified !== true || value.source_commit !== expectedSourceCommit) throw new Error('protected qualification evidence is not passed and source-bound');
+            const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+            try { fs.writeSync(fd, input, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          }
+          NODE
+          node scripts/release/ci-preflight.mjs kms-qualification "$RUNNER_TEMP/integrity-evidence/kms-qualification.json" "$AGENTPASS_RELEASE_COMMIT" "$EXPECTED_TREE" "$AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST" "$product_sha256" "$AGENTPASS_KMS_QUALIFICATION_RUN_ID" "$AGENTPASS_KMS_QUALIFICATION_JOB_ID" >/dev/null
+          node scripts/release/ci-preflight.mjs platform-auth-qualification "$RUNNER_TEMP/integrity-evidence/platform-auth-qualification.json" "$AGENTPASS_RELEASE_COMMIT" "$EXPECTED_TREE" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID" >/dev/null
+          node scripts/release/archive-secret-scan.mjs "$RUNNER_TEMP/integrity-evidence/kms-qualification.json" "$RUNNER_TEMP/integrity-evidence/platform-auth-qualification.json" >/dev/null
       - name: CI candidate/source digest preflight
         env:
           MANIFEST: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}.release-manifest.json
           CANDIDATE_ROOT: ${{ runner.temp }}/candidate
         run: |
-          node scripts/release/ci-preflight.mjs \
-            --repo-root "$GITHUB_WORKSPACE" \
-            --manifest "$MANIFEST" \
-            --expected-commit "$AGENTPASS_RELEASE_COMMIT" \
-            --expected-tree "$AGENTPASS_RELEASE_TREE" \
-            --event-name "$GITHUB_EVENT_NAME" \
-            --ref "$GITHUB_REF" \
-            --repository "$GITHUB_REPOSITORY"
-          node --input-type=module <<'NODE'
-          import { assertProtectedArtifactDirectory } from './scripts/release/ci-preflight.mjs';
-          assertProtectedArtifactDirectory({ directory: process.env.CANDIDATE_ROOT });
+          node --input-type=module - "$MANIFEST" <<'NODE'
+          import { assertCandidateBinding, assertWorkflowBoundary } from './scripts/release/ci-preflight.mjs';
+          assertWorkflowBoundary({ eventName: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, repository: process.env.GITHUB_REPOSITORY });
+          assertCandidateBinding({ repoRoot: process.env.GITHUB_WORKSPACE, manifestPath: process.argv[2], expectedCommit: process.env.AGENTPASS_RELEASE_COMMIT, expectedTree: process.env.AGENTPASS_RELEASE_TREE });
           NODE
+      - name: Derive immutable release evidence candidate binding
+        env:
+          MANIFEST: ${{ runner.temp }}/candidate/AgentPass-${{ needs.verify-source.outputs.tag }}.release-manifest.json
+          INTEGRITY_DIR: ${{ runner.temp }}/integrity-evidence
+          EXPECTED_CANDIDATE: ${{ runner.temp }}/integrity-evidence/release-evidence-expected-candidate.json
+          EXPECTED_COMMIT: ${{ needs.verify-source.outputs.commit }}
+          EXPECTED_TREE: ${{ needs.verify-source.outputs.tree }}
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 -p "$INTEGRITY_DIR"
+          node --input-type=module - "$MANIFEST" "$EXPECTED_CANDIDATE" "$EXPECTED_COMMIT" "$EXPECTED_TREE" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+          import { basename } from 'node:path';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [manifestPath, output, expectedCommit, expectedTree] = process.argv.slice(2);
+          const manifestBytes = fs.readFileSync(manifestPath);
+          const manifest = JSON.parse(manifestBytes);
+          const product = manifest.artifacts?.filter((item) => item?.role === 'product');
+          if (product?.length !== 1 || product[0].name !== basename(product[0].name) || !/^[0-9a-f]{64}$/u.test(product[0].sha256)) throw new Error('signed release manifest product inventory is incomplete');
+          if (manifest.source?.commit !== expectedCommit || manifest.source?.tree !== expectedTree) throw new Error('signed release manifest source binding differs from the verified candidate');
+          const packagePath = `${manifestPath.slice(0, manifestPath.lastIndexOf('/'))}/${product[0].name}`;
+          const packageBytes = fs.readFileSync(packagePath);
+          const artifactSha256 = createHash('sha256').update(packageBytes).digest('hex');
+          const manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex');
+          if (product[0].sha256 !== artifactSha256) throw new Error('signed release manifest product digest differs from the exact PKG');
+          const expected = {
+            artifact_name: product[0].name,
+            artifact_sha256: artifactSha256,
+            candidate_id: manifest.candidate_id,
+            release_manifest_sha256: manifestSha256,
+            source_commit: expectedCommit,
+            source_tree: expectedTree
+          };
+          if (expected.candidate_id !== `release-pkg-sha256-v1-${artifactSha256}`) throw new Error('release candidate identity is not product-bound');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, canonicalJson(expected), 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+      - name: Secret-scan every candidate artifact, archive, and expanded PKG before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_evidence="$RUNNER_TEMP/agentpass-candidate-artifact-scan.json"
+          ci_preflight_scan_root="$RUNNER_TEMP/agentpass-ci-preflight-scan"
+          ci_preflight_scan_evidence="$RUNNER_TEMP/agentpass-ci-preflight-scan.json"
+          integrity_dir="$RUNNER_TEMP/integrity-evidence"
+          mkdir -m 0700 -p "$integrity_dir" "$ci_preflight_scan_root"
+          [[ ! -e "$scan_evidence" && ! -e "$ci_preflight_scan_evidence" ]] || { echo "candidate scan evidence path already exists" >&2; exit 1; }
+          install -m 0600 "$RUNNER_TEMP/candidate/ci-preflight.json" "$ci_preflight_scan_root/ci-preflight.json"
+          node scripts/release/ci-preflight.mjs artifact-scan "$ci_preflight_scan_root" "$ci_preflight_scan_evidence"
+          install -m 0644 "$RUNNER_TEMP/candidate/ci-preflight.json" "$integrity_dir/ci-preflight.json"
+          rm -f "$RUNNER_TEMP/candidate/ci-preflight.json"
+          node scripts/release/ci-preflight.mjs artifact-scan "$RUNNER_TEMP/candidate" "$scan_evidence"
+          install -m 0644 "$scan_evidence" "$integrity_dir/artifact-scan.json"
+      - name: Stage exact macOS distribution evidence for promotion
+        shell: bash
+        run: |
+          set -euo pipefail
+          integrity_dir="$RUNNER_TEMP/integrity-evidence"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/artifact-inventory.json" "$integrity_dir/macos-artifact-inventory.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/notary.json" "$integrity_dir/macos-notary.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/staple.json" "$integrity_dir/macos-staple.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/gatekeeper.json" "$integrity_dir/macos-gatekeeper.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/identity.json" "$integrity_dir/macos-identity.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/verification.json" "$integrity_dir/macos-verification.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/provenance.json" "$integrity_dir/macos-provenance.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-evidence/distribution-evidence.json" "$integrity_dir/macos-distribution-evidence.json"
+          install -m 0644 "$RUNNER_TEMP/distribution-input/promotion-artifact-gate.json" "$integrity_dir/macos-promotion-artifact-gate.json"
+      - name: Archive-scan the final raw evidence upload inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/archive-secret-scan.mjs "$RUNNER_TEMP/integrity-evidence" >/dev/null
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: notarized-release-candidate
@@ -382,6 +669,8 @@ jobs:
             ${{ runner.temp }}/integrity-evidence/artifact-scan.json
             ${{ runner.temp }}/integrity-evidence/kms-qualification.json
             ${{ runner.temp }}/integrity-evidence/platform-auth-qualification.json
+            ${{ runner.temp }}/integrity-evidence/release-evidence-expected-candidate.json
+            ${{ runner.temp }}/integrity-evidence/macos-*.json
           if-no-files-found: error
       - name: Remove signing material
         if: always()
@@ -394,3 +683,4 @@ jobs:
           rm -f "$RUNNER_TEMP/agentpass-ci-preflight-scan.json"
           rm -rf "$RUNNER_TEMP/agentpass-ci-preflight-scan"
           rm -rf "$RUNNER_TEMP/integrity-evidence"
+          rm -rf "$RUNNER_TEMP/distribution-input" "$RUNNER_TEMP/distribution-evidence"

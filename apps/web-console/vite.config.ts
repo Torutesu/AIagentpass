@@ -51,6 +51,9 @@ export default defineConfig(async () => {
       vinext(),
       sites(),
       cloudflare({
+        // Browser qualification must not open an unrelated inspector listener.
+        // The inspector is not part of the Console runtime contract.
+        inspectorPort: false,
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
       }),

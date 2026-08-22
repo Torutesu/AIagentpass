@@ -92,6 +92,44 @@ private func makeSocketPair() throws -> (Int32, Int32) {
     }
 }
 
+@Test func versionedSessionInvocationIsExplicitAndNeverAcceptsNormalGitArguments() throws {
+    let invocation = try NativeAgentGitSessionSigningInvocation(arguments: [
+        "--protocol", "versioned_session_v1", "--payload", "/tmp/one", "--payload", "/tmp/two"
+    ])
+    #expect(invocation.payloadPaths == ["/tmp/one", "/tmp/two"])
+
+    #expect(throws: NativeAgentGitSigningHelperError.invalidInvocation) {
+        _ = try NativeAgentGitSessionSigningInvocation(arguments: [
+            "-Y", "sign", "-n", "git", "-f", "agentpass-managed", "/tmp/one"
+        ])
+    }
+    #expect(throws: NativeAgentGitSigningHelperError.invalidInvocation) {
+        _ = try NativeAgentGitSessionSigningInvocation(arguments: [
+            "--protocol", "legacy_fd3", "--payload", "/tmp/one", "--payload", "/tmp/two"
+        ])
+    }
+    #expect(throws: NativeAgentGitSigningHelperError.invalidInvocation) {
+        _ = try NativeAgentGitSessionSigningInvocation(arguments: [
+            "--protocol", "versioned_session_v1", "--payload", "/tmp/one", "--payload", "/tmp/one"
+        ])
+    }
+}
+
+@Test func hostVersionedSessionCommandFixesExecutableProtocolAndPayloadShape() throws {
+    let command = try NativeAgentHostVersionedSessionCommand(
+        payloadPaths: ["/tmp/one", "/tmp/two"])
+    #expect(command.executablePath == NativeAgentHostGitConfiguration.versionedSessionHelperExecutablePath)
+    #expect(command.arguments == [
+        "--protocol", "versioned_session_v1", "--payload", "/tmp/one", "--payload", "/tmp/two"
+    ])
+    #expect(throws: NativeAgentHostVersionedSessionCommandError.invalidPayloads) {
+        _ = try NativeAgentHostVersionedSessionCommand(payloadPaths: ["relative", "/tmp/two"])
+    }
+    #expect(throws: NativeAgentHostVersionedSessionCommandError.invalidPayloads) {
+        _ = try NativeAgentHostVersionedSessionCommand(payloadPaths: ["/tmp/one", "/tmp/one"])
+    }
+}
+
 @Test func helperConsumesFd3EquivalentSocketOnceAndWritesGitSignature() throws {
     try withTemporaryPayload(Data("tree abc\n\nmessage\n".utf8)) { payloadPath in
         let (serverDescriptor, helperDescriptor) = try makeSocketPair()
@@ -128,6 +166,51 @@ private func makeSocketPair() throws -> (Int32, Int32) {
         let signature = try Data(contentsOf: URL(fileURLWithPath: payloadPath + ".sig"))
         #expect(String(data: signature, encoding: .utf8)?.contains("BEGIN SSH SIGNATURE") == true)
     }
+}
+
+@Test func explicitVersionedSessionHelperPerformsTwoSignsBeforeWritingOutputs() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agentpass-git-session-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let firstPath = directory.appendingPathComponent("first").path
+    let secondPath = directory.appendingPathComponent("second").path
+    try Data("first payload\n".utf8).write(to: URL(fileURLWithPath: firstPath), options: .atomic)
+    try Data("second payload\n".utf8).write(to: URL(fileURLWithPath: secondPath), options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: firstPath)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secondPath)
+
+    let (serverDescriptor, helperDescriptor) = try makeSocketPair()
+    let serverTransport = try NativeAgentPrivateGitSessionTransport(
+        fd: serverDescriptor,
+        ownership: .owned)
+    let calls = HelperErrorBox()
+    let finished = DispatchSemaphore(value: 0)
+    let server = NativeAgentPrivateGitBridgeSessionServer(
+        transport: serverTransport,
+        signer: { payload in
+            if payload == Data("first payload\n".utf8) {
+                return Data("-----BEGIN SSH SIGNATURE-----\nfirst\n-----END SSH SIGNATURE-----\n".utf8)
+            }
+            guard payload == Data("second payload\n".utf8) else {
+                throw NativeAgentGitSigningHelperError.payloadChanged
+            }
+            return Data("-----BEGIN SSH SIGNATURE-----\nsecond\n-----END SSH SIGNATURE-----\n".utf8)
+        })
+    DispatchQueue.global().async {
+        do { try server.serveTwoCommits() }
+        catch { calls.set(error) }
+        finished.signal()
+    }
+
+    try NativeAgentGitSigningHelper.runVersionedSession(
+        payloadPaths: [firstPath, secondPath],
+        bridgeFileDescriptor: helperDescriptor)
+
+    #expect(finished.wait(timeout: .now() + .seconds(2)) == .success)
+    #expect(calls.get() == nil)
+    #expect(String(data: try Data(contentsOf: URL(fileURLWithPath: firstPath + ".sig")), encoding: .utf8)?.contains("first") == true)
+    #expect(String(data: try Data(contentsOf: URL(fileURLWithPath: secondPath + ".sig")), encoding: .utf8)?.contains("second") == true)
 }
 
 @Test func helperRejectsMissingOrWrongBridgeBeforeAnySignatureOutput() throws {

@@ -4,7 +4,12 @@ import Foundation
 import Security
 
 enum AgentHostContract {
-    static let machServiceName = "dev.agentpass.agent-session"
+    // Agent Session activation is separate from Host/Child signing. Signing
+    // uses the dedicated `dev.agentpass.agent-host` connection owned by the
+    // child supervisor, never this activation endpoint.
+    static let activationMachServiceName = "dev.agentpass.agent-session"
+    // Compatibility name for the read-only probe paths below.
+    static let machServiceName = activationMachServiceName
     static let probeSessionID = "00000000-0000-4000-8000-000000000000"
     static let activationDocumentFD: Int32 = 3
     static let nonceBytes = 32
@@ -72,7 +77,7 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
     }
 
     do {
-        let serviceClient = AgentHostServiceClient(handoff: handoff)
+        let serviceClient = AgentHostActivationClient(handoff: handoff)
         let terminalController = ActivationSignalController()
         terminalController.install()
         defer { terminalController.shutdown() }
@@ -88,7 +93,7 @@ private func runHostLaunchPlan(projectPath: String) -> Never {
             plan: plan,
             connection: connection,
             supervisor: NativeAgentHostChildSupervisor(),
-            adapter: AgentHostServiceLifecycleAdapter(client: serviceClient)
+            adapter: AgentHostActivationLifecycleAdapter(client: serviceClient)
         )
         let coordinator = try runtime.start()
         terminalController.markBootstrapKnown()
@@ -207,14 +212,17 @@ private func randomNonce() -> Data? {
 /// The launch command owns one authenticated Service connection. All
 /// lifecycle hooks below use that same connection; no session identifier or
 /// binding material is accepted from argv, environment, or the child.
-private final class AgentHostServiceClient: @unchecked Sendable {
+/// Service client for Agent Session activation and authority re-observation.
+/// It intentionally has no signing method. Git payloads use the dedicated
+/// Host XPC client created by the child supervisor.
+private final class AgentHostActivationClient: @unchecked Sendable {
     let connection: NSXPCConnection
     let proxy: AgentPassAgentXPCProtocol
     let handoff: NativeAgentLaunchAuthorityHandoff
 
     init(handoff: NativeAgentLaunchAuthorityHandoff) {
         self.handoff = handoff
-        let connection = NSXPCConnection(machServiceName: AgentHostContract.machServiceName, options: .privileged)
+        let connection = NSXPCConnection(machServiceName: AgentHostContract.activationMachServiceName, options: .privileged)
         connection.remoteObjectInterface = AgentPassAgentXPCInterface.make()
         connection.resume()
         self.connection = connection
@@ -235,8 +243,8 @@ private final class AgentHostServiceClient: @unchecked Sendable {
     }
 }
 
-private struct AgentHostServiceLifecycleAdapter: NativeAgentHostLifecycleAdapter {
-    let client: AgentHostServiceClient
+private struct AgentHostActivationLifecycleAdapter: NativeAgentHostLifecycleAdapter {
+    let client: AgentHostActivationClient
 
     func hooks(for plan: NativeAgentHostLaunchPlan) throws -> NativeAgentHostLifecycleCoordinatorHooks {
         guard plan.authorityHandoff == client.handoff else {

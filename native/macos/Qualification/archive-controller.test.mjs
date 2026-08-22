@@ -102,7 +102,7 @@ test("writes a reproducible ustar archive with normalized metadata and preserved
   }
 });
 
-test("rejects symlinks, hard links, special modes, and injected extended attributes", () => {
+test("rejects symlinks, hard links, special modes, and injected extended attributes", (t) => {
   const root = tempRoot();
   const symlinkApp = makeApp(root);
   fs.symlinkSync("Info.plist", path.join(symlinkApp, "Contents", "link"));
@@ -116,6 +116,10 @@ test("rejects symlinks, hard links, special modes, and injected extended attribu
   const modeRoot = tempRoot();
   const modeApp = makeApp(modeRoot);
   fs.chmodSync(path.join(modeApp, "Contents", "Info.plist"), 0o4644);
+  if ((fs.statSync(path.join(modeApp, "Contents", "Info.plist")).mode & 0o4000) === 0) {
+    t.skip("the test filesystem does not preserve setuid mode bits");
+    return;
+  }
   assert.throws(() => archiveController({ source: modeApp, output: archivePath(modeRoot), version: VERSION, inspectXattrs: NO_XATTRS }), /setuid/u);
 
   const xattrRoot = tempRoot();

@@ -8,7 +8,11 @@ private func failClosed() -> Never {
 
 #if !AGENTPASS_GIT_SIGNING_HELPER_TESTING
 do {
-    try NativeAgentGitSigningHelper.run(arguments: Array(CommandLine.arguments.dropFirst()))
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    // This executable is Git's one-payload gpg.ssh.program. The versioned
+    // two-payload protocol has a separate binary and must never be selected
+    // by an overloaded or ambiguous Git invocation.
+    try NativeAgentGitSigningHelper.run(arguments: arguments)
     exit(0)
 } catch {
     failClosed()

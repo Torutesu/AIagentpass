@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   assertRedactedQualificationEvidence,
   computeQualificationInputArtifactSha256,
+  CURRENT_SCHEMA_HEAD_VERSION,
   DEFAULT_QUALIFICATION_INPUT_ARTIFACT_PATH,
   downgradeSuccessfulQualificationOnCleanupFailure,
   QUALIFICATION_DIAGNOSTICS,
@@ -303,7 +304,7 @@ test("C3 evidence verification binds source, tree, run, job, and PostgreSQL majo
     migration_name: TARGET_NAME,
     migration_checksum: "e".repeat(64),
     migration_applied_this_run: true,
-    current_version: TARGET_VERSION,
+    current_version: CURRENT_SCHEMA_HEAD_VERSION,
     server_version: "16.4",
     database_name: "agentpass_c3_16",
     server_port: 5432,

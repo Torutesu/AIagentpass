@@ -15,6 +15,7 @@ public enum NativeAgentHostAdapterKind: String, Codable, CaseIterable, Sendable 
 /// Explicit child Git transport. XPC mode never creates or inherits FD3.
 public enum NativeAgentHostGitTransport: String, Codable, CaseIterable, Sendable {
     case legacyFD3 = "legacy_fd3"
+    case versionedSessionV1 = "versioned_session_v1"
     case authenticatedXPC = "authenticated_xpc"
 }
 
@@ -390,7 +391,10 @@ public struct NativeAgentHostChildLaunchRequest: Equatable, Sendable {
         adapter: NativeAgentHostAdapterKind,
         projectDirectory: NativeAgentHostProjectDirectory,
         trustedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        gitTransport: NativeAgentHostGitTransport = .legacyFD3
+        // The authenticated XPC boundary is the only production default.
+        // Legacy FD3 remains available only when an explicit qualification
+        // caller selects it; it must never be inherited accidentally.
+        gitTransport: NativeAgentHostGitTransport = .authenticatedXPC
     ) throws {
         guard trustedEnvironment.count <= Self.maximumEnvironmentEntries else {
             throw NativeAgentHostChildLaunchRequestError.invalidEnvironment
@@ -779,10 +783,12 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
         )
         if request.gitTransport == .authenticatedXPC {
             environment.merge(NativeAgentHostGitConfiguration.authenticatedXPCEnvironment) { _, fixed in fixed }
+        } else if request.gitTransport == .versionedSessionV1 {
+            environment.merge(NativeAgentHostGitConfiguration.versionedSessionEnvironment) { _, fixed in fixed }
         }
         let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair?
         let privateGitBridgeHandoff: NativeAgentPrivateGitBridgeChildEndpointHandoff?
-        if request.gitTransport == .legacyFD3 {
+        if request.gitTransport == .legacyFD3 || request.gitTransport == .versionedSessionV1 {
             do {
                 let bridge = try NativeAgentPrivateGitBridgeSocketPair()
                 privateGitBridge = bridge

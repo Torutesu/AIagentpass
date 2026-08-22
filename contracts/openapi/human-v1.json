@@ -67,6 +67,24 @@
         }
       }
     },
+    "/auth/session/organization-switch": {
+      "post": {
+        "operationId": "switchHumanSessionOrganization",
+        "summary": "Switch the active organization for the current human session",
+        "description": "Validates the current HttpOnly session and CSRF token, resolves the caller's active target membership server-side, atomically revokes the old session, and returns a replacement session cookie and CSRF token. Role and authority epochs are never accepted from the request.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["organization_id"], "properties": { "organization_id": { "type": "string", "format": "uuid" } } } } } },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-agentpass-runtime-path": "/api/auth/session/organization-switch"
+      }
+    },
     "/auth/session/resume": {
       "post": {
         "operationId": "resumeHumanSession",
@@ -777,6 +795,7 @@
         "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": { "$ref": "#/components/requestBodies/DeviceEnrollmentIssue" },
         "responses": { "201": { "$ref": "#/components/responses/DeviceEnrollmentIssued" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/InternalError" } },
+        "x-agentpass-transport": { "cache-control": "no-store" },
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
         "x-agentpass-minimum-role": "admin",
         "x-agentpass-enrollment-v2": {

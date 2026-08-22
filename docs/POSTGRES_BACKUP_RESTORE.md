@@ -92,15 +92,16 @@ node scripts/postgres/authority-manifest.mjs compare \
 
 ## 証跡
 
-個別のmanifest比較や単一DBのrole checkerの成功だけでは、実PostgreSQL資格証跡をclosedとは扱わない。二つの異なるDB instanceで `role-privilege-check.mjs` を実行し、各結果のopaque digest、同一のローカルschema head、元artifact／復旧artifact、PITR recovery target、同一candidate idを一つのcanonical envelopeへ束ねてから、次の固定 verifier で検証する。
+個別のmanifest比較や単一DBのrole checkerの成功だけでは、実PostgreSQL資格証跡をclosedとは扱わない。保護された外部runnerで、restore用とPITR用の二つの異なるDB instanceに対してrole/schema probeを実行し、各結果のopaque digest、instance attestation、同一のローカルschema head、元artifact／復旧artifact、PITR recovery target、WAL replay、同一candidate／source tree／runを一つのcanonical envelopeへ束ねてから、次の固定 verifier で検証する。
 
 ```sh
 node scripts/postgres/backup-restore-qualification.mjs verify \
   /secure/backup/postgres-qualification.json \
-  release-pkg-sha256-<64-hex> <40-hex-source-commit>
+  release-pkg-sha256-<64-hex> <40-hex-source-commit> <40-hex-source-tree> \
+  <ci-run-id> <ci-run-attempt> <ci-job-id>
 ```
 
-envelopeは `candidate_id`、`source_commit`、artifact／before／after manifest digest、異なる二つのinstance id、各role evidence digest、現在のschema head、`pitr.status=verified`、`compare_same=true` を必須とする。PITRの復旧manifest digestは元manifest digestと一致しなければならず、全instanceのcandidate bindingも一致しなければならない。成功時だけ `status=closed` を返し、入力がない、live DB資格証跡がない、head／role／candidate／PITRのいずれかが未検証なら、秘密や接続情報を出さず `status=not_proven` と非0終了を返す。従ってlive PostgreSQLが無い環境の実行結果を資格証跡の成功に数えてはならない。
+envelopeは `candidate_id`、`source_commit`、`source_tree`、candidate artifact、backup／restore artifact、同じrun binding、`restore`／`pitr`という異なる二つのinstance purpose、異なるinstance identity／attestation digest、各instanceの`agentpass_backup` role evidence、現在のschema head、`pitr.status=verified`、`compare_same=true`、`wal_replay.status=verified`を必須とする。PITRの復旧manifest digestは元manifest digestと一致し、recovery target digestとreplay LSN digestにbindされなければならない。成功時だけ `status=closed` を返し、入力がない、live DB資格証跡がない、head／role／candidate／run／artifact／PITR／WALのいずれかが未検証なら、秘密や接続情報を出さず `status=not_proven` と非0終了を返す。従ってlive PostgreSQLが無い環境の実行結果を資格証跡の成功に数えてはならない。
 
 バックアップ世代ごとに、値そのものではなく次の証跡をアクセス制御された運用領域へ保存する。
 

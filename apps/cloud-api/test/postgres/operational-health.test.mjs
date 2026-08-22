@@ -404,6 +404,90 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   assert.equal((await health.operationalSnapshot()).valid, false);
 });
 
+test("device audit inbox readiness is aggregate-only and fails closed on uncertain, dead-letter, lag, or stopped-worker state", async () => {
+  const now = Date.parse("2026-08-14T00:15:00.000Z");
+  let inbox = {
+    version: 1,
+    states: { pending: 0, processing: 0, accepted: 0, uncertain: 0, dead_letter: 0 },
+    oldest_pending_at: null,
+    oldest_processing_at: null,
+    oldest_uncertain_at: null,
+    expired_processing: 0,
+    worker_state: "running",
+    worker_cycles: 1,
+    consecutive_failures: 0,
+    last_cycle_at: now,
+    last_success_at: now
+  };
+  const health = createOperationalHealth({
+    pool: pool(),
+    migrationStatus: async () => APPLIED,
+    metrics: createOperationalMetrics(),
+    drainController: createDrainController(),
+    probe: async () => true,
+    deviceAuditInboxStatus: async () => inbox,
+    deviceAuditInboxMaxBacklog: 10,
+    deviceAuditInboxMaxLagMs: 60_000,
+    now: () => now
+  });
+  let report = await health.readiness();
+  assert.equal(report.ready, true);
+  assert.deepEqual(report.checks.device_audit_inbox, {
+    ok: true, code: "ok", worker_state: "running", pending_count: 0, processing_count: 0,
+    accepted_count: 0, uncertain_count: 0, dead_letter_count: 0, expired_processing_count: 0,
+    worker_cycles: 1, consecutive_failures: 0, oldest_pending_age_ms: null, oldest_processing_age_ms: null, oldest_uncertain_age_ms: null
+  });
+
+  inbox = { ...inbox, states: { pending: 1, processing: 0, accepted: 0, uncertain: 0, dead_letter: 0 }, oldest_pending_at: new Date(now - 61_000).toISOString() };
+  report = await health.readiness();
+  assert.equal(report.code, "device_audit_inbox_lag_exceeded");
+
+  inbox = { ...inbox, states: { pending: 0, processing: 0, accepted: 0, uncertain: 1, dead_letter: 0 }, oldest_pending_at: null, oldest_uncertain_at: new Date(now - 1_000).toISOString() };
+  report = await health.readiness();
+  assert.equal(report.code, "device_audit_inbox_uncertain_present");
+
+  inbox = { ...inbox, states: { pending: 0, processing: 0, accepted: 0, uncertain: 0, dead_letter: 1 }, oldest_uncertain_at: null };
+  report = await health.readiness();
+  assert.equal(report.code, "device_audit_inbox_dead_letter_present");
+
+  inbox = { ...inbox, states: { pending: 0, processing: 0, accepted: 0, uncertain: 0, dead_letter: 0 }, worker_state: "idle" };
+  report = await health.readiness();
+  assert.equal(report.code, "device_audit_inbox_worker_unavailable");
+
+  inbox = { ...inbox, worker_state: "running", last_success_at: now, consecutive_failures: 2 };
+  assert.equal((await health.readiness()).code, "device_audit_inbox_worker_failed");
+
+  inbox = { ...inbox, consecutive_failures: 0, expired_processing: 1 };
+  assert.equal((await health.readiness()).code, "device_audit_inbox_expired_processing_present");
+});
+
+test("device audit inbox readiness rejects malformed failure counters", async () => {
+  const base = {
+    version: 1,
+    states: { pending: 0, processing: 0, accepted: 1, uncertain: 0, dead_letter: 0 },
+    oldest_pending_at: null,
+    oldest_processing_at: null,
+    oldest_uncertain_at: null,
+    expired_processing: 0,
+    worker_state: "running",
+    worker_cycles: 1,
+    consecutive_failures: 0,
+    last_cycle_at: Date.now(),
+    last_success_at: Date.now(),
+  };
+  const dbPool = pool();
+  const health = createOperationalHealth({
+    pool: dbPool,
+    drainController: createDrainController(),
+    probe: async () => true,
+    migrationStatus: async () => APPLIED,
+    deviceAuditInboxStatus: async () => ({ ...base, consecutive_failures: "0" }),
+  });
+  const report = await health.readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "device_audit_inbox_unavailable");
+});
+
 test("managed signer provider-operation readiness is deployment-wide, aggregate-only, and fail-closed", async () => {
   const current = Date.parse("2026-08-15T00:10:00.000Z");
   const base = {

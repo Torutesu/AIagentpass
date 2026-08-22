@@ -18,8 +18,10 @@ const TEXT_SECRET_MARKERS = [
 ];
 const LEGACY_SECRET_MARKERS = [
   ...TEXT_SECRET_MARKERS,
-  /(?:aws_secret_access_key|client_secret|api[_-]?key|access[_-]?token)\s*["']?\s*[:=]/iu,
-  /(?:password|secret|token|private[_-]?key)\s*["']?\s*[:=]\s*["']?[A-Za-z0-9+/=_-]{16,}/iu
+  /(?:aws_secret_access_key|client_secret|api[_-]?(?:key|token)|access[_-]?token)\s*["']?\s*[:=]\s*["']?(?!hidden\b|masked\b|redacted\b|placeholder\b|omitted\b|unset\b|none\b|null\b)[^\s"',;}]+/iu,
+  /(?:database|db|postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|jdbc|amqp)[_-]?(?:url|uri|connection[_-]?string)\s*["']?\s*[:=]\s*["']?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|jdbc|amqps?|https?):\/\/[^\s"'<>]+/iu,
+  /(?:password|passwd|passphrase|secret|token|credential(?:s)?|private[_-]?key)\s*["']?\s*[:=]\s*["']?(?!hidden\b|masked\b|redacted\b|placeholder\b|omitted\b|unset\b|none\b|null\b)[^\s"',;}]+/iu,
+  /(?:password|secret|token|private[_-]?key)\s*["']?\s*[:=]\s*["']?\s*[A-Za-z0-9+/=_-]{16,}/iu
 ];
 const JSON_SECRET_KEYS = new Set([
   "accesstoken",
@@ -27,8 +29,22 @@ const JSON_SECRET_KEYS = new Set([
   "apikey",
   "awssecretaccesskey",
   "clientsecret",
+  "connectionstring",
+  "credential",
+  "credentials",
+  "databaseurl",
+  "dburl",
+  "jdbcurl",
+  "mariadburl",
+  "mongodburl",
+  "mysqlurl",
   "password",
+  "passphrase",
+  "pgpassword",
+  "postgresqlurl",
+  "postgresurl",
   "privatekey",
+  "redisurl",
   "secret",
   "token"
 ]);
@@ -265,11 +281,12 @@ function splitListing(listing, archive) {
 }
 
 function normalizeMemberName(name, maximumMemberPathBytes, archive) {
-  if (typeof name !== "string" || name.length === 0 || name.includes("\0") || name.includes("\\") || Buffer.byteLength(name, "utf8") > maximumMemberPathBytes) {
+  const normalizedName = typeof name === "string" ? name.normalize("NFKC").normalize("NFC") : name;
+  if (typeof normalizedName !== "string" || normalizedName.length === 0 || /[\u0000-\u001f\u007f]/u.test(normalizedName) || normalizedName.includes("\\") || Buffer.byteLength(normalizedName, "utf8") > maximumMemberPathBytes) {
     throw new ArchiveSecretScanError(`tar contains an invalid member path: ${archive}`);
   }
-  if (name.startsWith("/") || /^[A-Za-z]:/u.test(name)) throw new ArchiveSecretScanError(`tar contains an unsafe path: ${name}`);
-  const parts = name.split("/");
+  if (normalizedName.startsWith("/") || /^[A-Za-z]:/u.test(normalizedName)) throw new ArchiveSecretScanError(`tar contains an unsafe path: ${name}`);
+  const parts = normalizedName.split("/");
   if (parts.includes("..")) throw new ArchiveSecretScanError(`tar contains an unsafe path: ${name}`);
   const normalized = parts.filter((part) => part !== "" && part !== ".").join("/");
   return normalized || ".";

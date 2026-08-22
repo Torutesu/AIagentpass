@@ -1,8 +1,14 @@
 # C3 Wave 1 security/completeness review
 
+Disposition: repository-side/static review record only. This file does not claim
+that an independent third party performed or completed a security review. Its
+findings and local evidence remain subject to the production review gate in
+[`INDEPENDENT_SECURITY_REVIEW_CONTRACT.md`](INDEPENDENT_SECURITY_REVIEW_CONTRACT.md)
+and are not production approval.
+
 Date: 2026-08-15  
 Scope: C3 Wave 1 foundation at `fc64b99` in `codex/agent-platform`  
-Reviewer: independent read-only review; no implementation files were changed
+Reviewer: repository-side static read-only analysis; no independent third-party engagement is claimed
 
 ## Executive result
 

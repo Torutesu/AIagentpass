@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createCloudApi } from "../src/server.mjs";
 import { createDrainController, createOperationalMetrics } from "../src/postgres/operational-health.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const PROBE_SECRET = Buffer.alloc(32, 0x41);
 const PROBE_HEADERS = { "AgentPass-Operational-Token": PROBE_SECRET.toString("base64url") };
@@ -13,14 +14,13 @@ test("exposes secret-free readiness and metrics while drain rejects new applicat
   metrics.recordReplayDenial();
   const server = createCloudApi({
     store: {},
-    readiness: async () => Object.freeze({ version: 1, ready: drain.snapshot().state === "running", status: drain.snapshot().state, code: drain.snapshot().state === "running" ? "ready" : "draining" }),
+    readiness: async () => Object.freeze({ version: 1, ready: drain.snapshot().state === "running", status: drain.snapshot().state === "running" ? "ready" : drain.snapshot().state, code: drain.snapshot().state === "running" ? "ready" : "draining" }),
     operationalMetrics: metrics,
     operationalProbeSecret: PROBE_SECRET,
     trackInFlight: drain.track
   });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const base = `http://127.0.0.1:${server.address().port}`;
 
   assert.equal((await fetch(`${base}/health/ready`)).status, 404);
   const ready = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
@@ -48,15 +48,29 @@ test("malformed operational providers fail closed without reflecting their value
     operationalMetrics: { snapshot: () => ({ version: 1, valid: true, counters: { token: 1 } }) },
     operationalProbeSecret: PROBE_SECRET
   });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const base = `http://127.0.0.1:${server.address().port}`;
   const ready = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(ready.status, 503);
   assert.doesNotMatch(await ready.text(), /must-not-leak|password/u);
   const metrics = await fetch(`${base}/health/metrics`, { headers: PROBE_HEADERS });
   assert.equal(metrics.status, 503);
   assert.doesNotMatch(await metrics.text(), /token/u);
+});
+
+test("readiness rejects unknown status and inconsistent ready/code combinations", async (t) => {
+  const cases = [
+    { version: 1, ready: true, status: "unknown", code: "ready" },
+    { version: 1, ready: true, status: "not_ready", code: "ready" },
+    { version: 1, ready: false, status: "ready", code: "not_ready" }
+  ];
+  for (const report of cases) {
+    const server = createCloudApi({ store: {}, readiness: async () => report, operationalProbeSecret: PROBE_SECRET });
+    const base = startInMemoryHttpServer(server);
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    const response = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
+    assert.equal(response.status, 503);
+  }
 });
 
 test("readiness exposes only the exact secret-free deployment identity", async (t) => {
@@ -66,16 +80,16 @@ test("readiness exposes only the exact secret-free deployment identity", async (
     deployment_id: "deployment-staging-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: "f".repeat(64)
   };
   const server = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: { ...identity, provider_token: "must-not-leak" } }), operationalProbeSecret: PROBE_SECRET });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  const response = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 503);
   assert.doesNotMatch(await response.text(), /must-not-leak|provider_token/u);
 
   const healthyServer = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: identity }), operationalProbeSecret: PROBE_SECRET });
-  await new Promise((resolve, reject) => { healthyServer.once("error", reject); healthyServer.listen(0, "127.0.0.1", resolve); });
+  const healthyBase = startInMemoryHttpServer(healthyServer);
   t.after(() => new Promise((resolve) => healthyServer.close(resolve)));
-  const healthy = await fetch(`http://127.0.0.1:${healthyServer.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  const healthy = await fetch(`${healthyBase}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(healthy.status, 200);
   assert.deepEqual((await healthy.json()).deployment_identity, identity);
 });
@@ -87,9 +101,9 @@ test("readiness rejects a configured deployment identity without a database dige
     deployment_id: "deployment-staging-1", revision: "revision-1", schema_digest: "d".repeat(64), catalog_digest: "e".repeat(64), database_schema_digest: null
   };
   const server = createCloudApi({ store: {}, readiness: async () => ({ version: 1, ready: true, status: "ready", code: "ready", deployment_identity: identity }), operationalProbeSecret: PROBE_SECRET });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  const response = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 503);
 });
 
@@ -108,9 +122,9 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
     }
   };
   const server = createCloudApi({ store: {}, readiness: async () => report, operationalMetrics: createOperationalMetrics(), operationalProbeSecret: PROBE_SECRET });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  const response = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 503);
   const body = await response.json();
   assert.deepEqual(body.checks.owner_recovery_outbox, { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500, oldest_uncertain_age_ms: null });
@@ -132,9 +146,9 @@ test("readiness exposes only fixed aggregate managed signer provider-operation s
     }
   };
   const server = createCloudApi({ store: {}, readiness: async () => report, operationalMetrics: createOperationalMetrics(), operationalProbeSecret: PROBE_SECRET });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  const response = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 503);
   const body = await response.json();
   assert.deepEqual(body.checks.managed_signer_provider_operations, { ok: false, code: "uncertain_present", worker_state: "running", pending_count: 0, started_count: 0, accepted_count: 0, uncertain_count: 1, stale_started_count: 0, oldest_nonterminal_age_ms: 500, last_success_age_ms: 100 });
@@ -155,9 +169,9 @@ test("metrics exposes the fixed owner recovery gauges required by the alert poli
     operationalMetrics: { async snapshot() { return { version: 1, valid: true, counters, gauges }; } },
     operationalProbeSecret: PROBE_SECRET
   });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const base = startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/metrics`, { headers: PROBE_HEADERS });
+  const response = await fetch(`${base}/health/metrics`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).gauges, gauges);
 });

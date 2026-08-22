@@ -3,6 +3,10 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
+import {
+  deploymentAttestationPublicKeyFingerprint,
+  verifyDeploymentObservation,
+} from "./deployment-attestation.mjs";
 
 export const DEPLOYMENT_GATE_SCHEMA_VERSION = 1;
 const SHA = /^[0-9a-f]{40}$/u;
@@ -20,6 +24,9 @@ const DEPLOYMENT_KEYS = Object.freeze([
 const CHECK_KEYS = Object.freeze(["check_id", "expected", "observed", "status"]);
 const ROLLBACK_KEYS = Object.freeze(["artifact_sha256", "completed_at", "current_revision", "deployment_digest", "deployment_id", "deployment_identity", "post_rollback_ready", "rollback_target_revision", "run_id", "status", "tested"]);
 const BINDING_KEYS = Object.freeze(["artifactSha256", "catalogDigest", "databaseSchemaDigest", "deploymentDigest", "deploymentId", "environment", "imageDigest", "jobId", "releaseManifestSha256", "revision", "runAttempt", "runId", "schemaDigest", "service", "sourceCommit", "sourceTree"]);
+const EXECUTION_KEYS = Object.freeze(["execution_id", "executed_at", "health_observation", "traffic_observation"]);
+const ROLLBACK_EXECUTION_KEYS = Object.freeze(["execution_id", "executed_at", "health_observation", "traffic_observation", "image_digest", "schema_digest", "catalog_digest", "database_schema_digest"]);
+const BINDING_EXECUTION_KEYS = Object.freeze(["deploymentAttestationPublicKey", "executionId", "rollbackExecutionId", "rollbackImageDigest", "rollbackSchemaDigest", "rollbackCatalogDigest", "rollbackDatabaseSchemaDigest", "healthObserverPublicKey", "trafficObserverPublicKey"]);
 const REQUIRED_CHECK_IDS = Object.freeze(["application_readiness", "traffic_drain", "combined_cutover", "console_readiness"]);
 const MAX_ROLLBACK_AGE_MS = 24 * 60 * 60 * 1_000;
 
@@ -27,8 +34,8 @@ export function deploymentEvidenceSHA256(value) {
   return crypto.createHash("sha256").update(canonicalJson(normalizeDeploymentEvidence(value)), "utf8").digest("hex");
 }
 
-export function normalizeDeploymentEvidence(value) {
-  exactObject(value, DEPLOYMENT_KEYS);
+export function normalizeDeploymentEvidence(value, { requireExecutionProof = false } = {}) {
+  exactObject(value, DEPLOYMENT_KEYS, EXECUTION_KEYS);
   if (value.schema_version !== DEPLOYMENT_GATE_SCHEMA_VERSION || !STATUS.has(value.status)
     || typeof value.qualified !== "boolean" || value.qualified !== (value.status === "passed")
     || !ENVIRONMENTS.has(value.environment) || typeof value.service !== "string" || typeof value.deployment_id !== "string" || typeof value.revision !== "string"
@@ -50,7 +57,7 @@ export function normalizeDeploymentEvidence(value) {
   if (checks.length !== REQUIRED_CHECK_IDS.length || checks.map((item) => item.check_id).sort().join(",") !== REQUIRED_CHECK_IDS.slice().sort().join(",")) {
     throw new TypeError("deployment check inventory is invalid");
   }
-  const rollback = normalizeRollback(value.rollback);
+  const rollback = normalizeRollback(value.rollback, value, { requireExecutionProof });
   if (rollback.artifact_sha256 !== value.artifact_sha256 || rollback.deployment_digest !== value.deployment_digest || rollback.run_id !== value.run_id
     || rollback.deployment_id !== value.deployment_id || rollback.current_revision !== value.revision) {
     throw new TypeError("rollback evidence binding is invalid");
@@ -70,11 +77,12 @@ export function normalizeDeploymentEvidence(value) {
   if (value.status === "passed" && (checks.some((item) => item.status !== "passed") || rollback.status !== "passed" || rollback.tested !== true)) {
     throw new TypeError("deployment evidence is not qualified");
   }
+  if (requireExecutionProof) validateExecutionShape(value, rollback);
   return Object.freeze({ ...value, checks: Object.freeze(checks), rollback });
 }
 
-export function verifyDeploymentEvidence(value, binding = {}) {
-  const normalized = normalizeDeploymentEvidence(value);
+export function verifyDeploymentEvidence(value, binding = {}, { now = Date.now() } = {}) {
+  const normalized = normalizeDeploymentEvidence(value, { requireExecutionProof: true });
   const expectedBinding = normalizeDeploymentBinding(binding);
   if (normalized.status !== "passed") throw new TypeError("deployment evidence is not passed");
   for (const [key, expected] of Object.entries({
@@ -97,6 +105,7 @@ export function verifyDeploymentEvidence(value, binding = {}) {
   })) {
     if (String(normalized[key]) !== String(expected)) throw new TypeError(`deployment binding mismatch: ${key}`);
   }
+  verifyExecutionProof(normalized, expectedBinding, { now });
   return Object.freeze({
     schema_version: normalized.schema_version,
     environment: normalized.environment,
@@ -120,7 +129,7 @@ export function verifyDeploymentEvidence(value, binding = {}) {
 }
 
 function normalizeDeploymentBinding(value) {
-  exactObject(value, BINDING_KEYS);
+  exactObject(value, BINDING_KEYS, BINDING_EXECUTION_KEYS);
   if (typeof value.sourceCommit !== "string" || typeof value.sourceTree !== "string" || typeof value.artifactSha256 !== "string"
     || typeof value.releaseManifestSha256 !== "string" || typeof value.deploymentDigest !== "string"
     || typeof value.schemaDigest !== "string" || typeof value.catalogDigest !== "string" || typeof value.databaseSchemaDigest !== "string"
@@ -151,8 +160,8 @@ function normalizeCheck(value) {
   return Object.freeze({ ...value });
 }
 
-function normalizeRollback(value) {
-  exactObject(value, ROLLBACK_KEYS);
+function normalizeRollback(value, deployment, { requireExecutionProof = false } = {}) {
+  exactObject(value, ROLLBACK_KEYS, ROLLBACK_EXECUTION_KEYS);
   if (typeof value.artifact_sha256 !== "string" || typeof value.deployment_digest !== "string" || typeof value.run_id !== "string"
     || typeof value.deployment_id !== "string" || typeof value.current_revision !== "string" || typeof value.rollback_target_revision !== "string"
     || typeof value.completed_at !== "string" || !isTimestamp(value.completed_at) || typeof value.post_rollback_ready !== "boolean"
@@ -162,8 +171,104 @@ function normalizeRollback(value) {
     || (value.tested ? !["passed", "failed"].includes(value.status) : value.status !== "not_run")) throw new TypeError("rollback evidence is invalid");
   if (value.deployment_identity !== null && !validDeploymentIdentity(value.deployment_identity)) throw new TypeError("rollback deployment identity is invalid");
   if (value.status === "passed" && (value.deployment_identity === null || value.deployment_identity.deployment_id !== value.deployment_id || value.deployment_identity.revision !== value.rollback_target_revision)) throw new TypeError("rollback deployment identity does not prove the target revision");
+  if (!requireExecutionProof && value.status === "passed" && value.deployment_identity !== null && [
+    ["source_commit", deployment.source_commit],
+    ["source_tree", deployment.source_tree],
+    ["image_digest", deployment.image_digest],
+    ["deployment_id", deployment.deployment_id],
+    ["schema_digest", deployment.schema_digest],
+    ["catalog_digest", deployment.catalog_digest],
+    ["database_schema_digest", deployment.database_schema_digest]
+  ].some(([key, expected]) => value.deployment_identity[key] !== expected)) {
+    throw new TypeError("rollback deployment identity does not bind to the deployed candidate");
+  }
   if (value.status === "passed" && value.post_rollback_ready !== true) throw new TypeError("rollback readiness is invalid");
+  if (requireExecutionProof) validateRollbackExecutionShape(value);
   return Object.freeze({ ...value });
+}
+
+function validateExecutionShape(value, rollback) {
+  if (!hasCompleteFields(value, EXECUTION_KEYS) || !isTimestamp(value.executed_at) || !IDENTIFIER.test(value.execution_id)
+    || !hasCompleteFields(rollback, ROLLBACK_EXECUTION_KEYS) || !isTimestamp(rollback.executed_at) || !IDENTIFIER.test(rollback.execution_id)
+    || value.execution_id === rollback.execution_id || Date.parse(value.executed_at) < Date.parse(value.started_at)
+    || Date.parse(value.executed_at) > Date.parse(value.completed_at) || Date.parse(rollback.executed_at) > Date.parse(rollback.completed_at)) {
+    throw new TypeError("deployment execution proof is incomplete");
+  }
+}
+
+function validateRollbackExecutionShape(value) {
+  if (typeof value.image_digest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value.image_digest)
+    || typeof value.schema_digest !== "string" || !DIGEST.test(value.schema_digest)
+    || typeof value.catalog_digest !== "string" || !DIGEST.test(value.catalog_digest)
+    || typeof value.database_schema_digest !== "string" || !DIGEST.test(value.database_schema_digest)
+    || value.health_observation === null || value.traffic_observation === null) {
+    throw new TypeError("rollback execution proof is incomplete");
+  }
+}
+
+function hasCompleteFields(value, fields) {
+  return fields.every((key) => Object.hasOwn(value, key) && value[key] !== undefined);
+}
+
+function verifyExecutionProof(value, binding, { now }) {
+  if (!BINDING_EXECUTION_KEYS.every((key) => Object.hasOwn(binding, key))) throw new TypeError("deployment execution binding is incomplete");
+  if (value.execution_id !== binding.executionId || value.rollback.execution_id !== binding.rollbackExecutionId
+    || value.rollback.image_digest !== binding.rollbackImageDigest || value.rollback.schema_digest !== binding.rollbackSchemaDigest
+    || value.rollback.catalog_digest !== binding.rollbackCatalogDigest || value.rollback.database_schema_digest !== binding.rollbackDatabaseSchemaDigest) {
+    throw new TypeError("deployment execution binding mismatch");
+  }
+  const deploymentKey = binding.deploymentAttestationPublicKey;
+  const healthKey = binding.healthObserverPublicKey;
+  const trafficKey = binding.trafficObserverPublicKey;
+  let deploymentFingerprint;
+  let healthFingerprint;
+  let trafficFingerprint;
+  try {
+    deploymentFingerprint = deploymentAttestationPublicKeyFingerprint(deploymentKey);
+    healthFingerprint = deploymentAttestationPublicKeyFingerprint(healthKey);
+    trafficFingerprint = deploymentAttestationPublicKeyFingerprint(trafficKey);
+  } catch {
+    throw new TypeError("deployment observer keys are invalid");
+  }
+  if (deploymentFingerprint === healthFingerprint || deploymentFingerprint === trafficFingerprint) throw new TypeError("deployment observers must be independent from the deployment signer");
+  if (healthFingerprint === trafficFingerprint) throw new TypeError("deployment observer keys must be independent");
+  verifyObservation(value.health_observation, healthKey, {
+    kind: "health", phase: "deployment", status: "ready", deployment_id: value.deployment_id, revision: value.revision,
+    rollback_target_revision: value.rollback.rollback_target_revision, image_digest: value.image_digest, schema_digest: value.schema_digest,
+    catalog_digest: value.catalog_digest, database_schema_digest: value.database_schema_digest
+  }, value, now);
+  verifyObservation(value.traffic_observation, trafficKey, {
+    kind: "traffic", phase: "deployment", status: "serving", deployment_id: value.deployment_id, revision: value.revision,
+    rollback_target_revision: value.rollback.rollback_target_revision, image_digest: value.image_digest, schema_digest: value.schema_digest,
+    catalog_digest: value.catalog_digest, database_schema_digest: value.database_schema_digest
+  }, value, now);
+  verifyObservation(value.rollback.health_observation, healthKey, {
+    kind: "health", phase: "rollback", status: "restored", deployment_id: value.rollback.deployment_id,
+    revision: value.rollback.rollback_target_revision, rollback_target_revision: value.rollback.rollback_target_revision,
+    image_digest: value.rollback.image_digest, schema_digest: value.rollback.schema_digest,
+    catalog_digest: value.rollback.catalog_digest, database_schema_digest: value.rollback.database_schema_digest
+  }, value, now);
+  verifyObservation(value.rollback.traffic_observation, trafficKey, {
+    kind: "traffic", phase: "rollback", status: "restored", deployment_id: value.rollback.deployment_id,
+    revision: value.rollback.rollback_target_revision, rollback_target_revision: value.rollback.rollback_target_revision,
+    image_digest: value.rollback.image_digest, schema_digest: value.rollback.schema_digest,
+    catalog_digest: value.rollback.catalog_digest, database_schema_digest: value.rollback.database_schema_digest
+  }, value, now);
+  const observations = [value.health_observation, value.traffic_observation, value.rollback.health_observation, value.rollback.traffic_observation];
+  if (observations.some((item) => item.statement.observer_run_id === value.run_id || item.statement.observer_job_id === value.job_id
+    || item.statement.observer_id === value.service)) throw new TypeError("deployment observation is self-reported");
+}
+
+function verifyObservation(input, publicKey, expected, deployment, now) {
+  let observation;
+  try {
+    observation = verifyDeploymentObservation(input, { publicKey, expected, now });
+  } catch {
+    throw new TypeError("deployment health or traffic observation is not independently verified");
+  }
+  if (observation.statement.observer_run_id === deployment.run_id || observation.statement.observer_job_id === deployment.job_id) {
+    throw new TypeError("deployment observation is self-reported");
+  }
 }
 
 function validDeploymentIdentity(value) {
@@ -177,11 +282,12 @@ function validDeploymentIdentity(value) {
     && DIGEST.test(value.schema_digest) && DIGEST.test(value.catalog_digest) && DIGEST.test(value.database_schema_digest);
 }
 
-function exactObject(value, keys) {
+function exactObject(value, keys, optionalKeys = []) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError("object is invalid");
   const actual = Reflect.ownKeys(value);
-  if (actual.length !== keys.length || actual.some((key) => typeof key !== "string" || !keys.includes(key))) throw new TypeError("object fields are invalid");
-  for (const key of keys) {
+  const allowed = [...keys, ...optionalKeys];
+  if (actual.some((key) => typeof key !== "string" || !allowed.includes(key)) || keys.some((key) => !actual.includes(key))) throw new TypeError("object fields are invalid");
+  for (const key of actual) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, "value")) throw new TypeError("object property is not a data property");
   }

@@ -134,8 +134,9 @@ function activationClient() {
     if (text.startsWith("SELECT organization_id,recovery_session_id,request_id,member_id,session_digest")) return { rows: [rows.session], rowCount: 1 };
     if (text.startsWith("SELECT organization_id,challenge_id,recovery_session_id")) return { rows: [rows.challenge], rowCount: 1 };
     if (text.startsWith("SELECT owner_member_id,owner_membership_session_epoch")) return { rows: rows.approvals, rowCount: rows.approvals.length };
-    if (text.startsWith("SELECT id FROM webauthn_credentials")) return { rows: [{ id: CREDENTIAL }], rowCount: 1 };
-    if (text.startsWith("UPDATE webauthn_credentials")) return { rows: [{ id: CREDENTIAL, sign_count: 4, last_used_at: NOW }], rowCount: 1 };
+    if (text.startsWith("SELECT * FROM public.agentpass_owner_recovery_credential_exists")) return { rows: [{ id: CREDENTIAL }], rowCount: 1 };
+    if (text.startsWith("SELECT * FROM public.agentpass_owner_recovery_update_credential_counter")) return { rows: [{ id: CREDENTIAL, sign_count: 4, last_used_at: NOW }], rowCount: 1 };
+    if (text.startsWith("SELECT * FROM public.agentpass_owner_recovery_activate_authority")) return { rows: [{ session_epoch: 8, revoked_count: 1 }], rowCount: 1 };
     if (text.startsWith("SET LOCAL")) return { rows: [], rowCount: 0 };
     if (text.startsWith("UPDATE memberships SET session_epoch")) return { rows: [{ session_epoch: 8 }], rowCount: 1 };
     if (text.startsWith("UPDATE human_sessions SET revoked_at")) return { rows: [], rowCount: 0 };
@@ -202,15 +203,16 @@ test("activation composes inside the coordinator transaction while proof is cons
   assert.equal(auditCalls.length, 1);
   assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE owner_recovery_webauthn_challenges") && text.includes("authorization_consumed_at")), false);
   assert.equal(client.calls.some(({ text }) => text.includes("SET status='consumed'")), false);
-  const counterCall = client.calls.find(({ text }) => text.startsWith("UPDATE webauthn_credentials"));
+  const counterCall = client.calls.find(({ text }) => text.startsWith("SELECT * FROM public.agentpass_owner_recovery_update_credential_counter"));
   assert.ok(counterCall);
-  assert.match(counterCall.text, /SET sign_count=\$4,backup_eligible=\$6,backup_state=\$7,last_used_at=\$5/u);
-  assert.match(counterCall.text, /sign_count=\$3 AND backup_eligible=\$8 AND backup_state=\$9/u);
-  assert.deepEqual(counterCall.params.slice(2), [3, 4, NOW, false, false, false, false]);
-  assert.ok(client.calls.findIndex(({ text }) => text.startsWith("SELECT pg_advisory_xact_lock")) < client.calls.findIndex(({ text }) => text.startsWith("UPDATE webauthn_credentials")));
-  assert.ok(client.calls.findIndex(({ text }) => text.startsWith("UPDATE webauthn_credentials")) < client.calls.findIndex(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")));
+  assert.match(counterCall.text, /agentpass_owner_recovery_update_credential_counter/u);
+  assert.deepEqual(counterCall.params.slice(6), [4, 3, false, false, false, false, NOW]);
+  assert.ok(client.calls.findIndex(({ text }) => text.startsWith("SELECT pg_advisory_xact_lock")) < client.calls.findIndex(({ text }) => text.startsWith("SELECT * FROM public.agentpass_owner_recovery_update_credential_counter")));
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")), false);
   const transitionCall = client.calls.find(({ text }) => text.startsWith("UPDATE owner_recovery_requests SET"));
-  assert.ok(client.calls.indexOf(transitionCall) > client.calls.findIndex(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")));
+  const authorityCall = client.calls.find(({ text }) => text.startsWith("SELECT * FROM public.agentpass_owner_recovery_activate_authority"));
+  assert.ok(authorityCall);
+  assert.ok(client.calls.indexOf(transitionCall) < client.calls.indexOf(authorityCall));
   assert.match(transitionCall.text, /SET state=\$5/u);
   assert.match(transitionCall.text, /AND state=\$4 RETURNING/u);
   assert.deepEqual(transitionCall.params.slice(0, 5), [ORG, REQUEST, 4, "credential_enrolled", "activated"]);
@@ -220,24 +222,24 @@ test("activation composes inside the coordinator transaction while proof is cons
 });
 
 test("counter update is exact-CAS, transaction-composable, and confirms committed", async () => {
-  const client = new ScriptedClient((text) => text.startsWith("UPDATE webauthn_credentials")
+  const client = new ScriptedClient((text) => text.startsWith("SELECT * FROM public.agentpass_owner_recovery_update_credential_counter")
     ? { rows: [{ id: CREDENTIAL, sign_count: 4, last_used_at: NOW }], rowCount: 1 }
     : { rows: [], rowCount: 0 });
   const repository = createPostgresOwnerRecoveryRepository({ client, clock: () => NOW });
-  const result = await repository.updateRecoveryCredentialCounterInTransaction({ tx: client, member_id: SUBJECT, credential_id: CREDENTIAL.toString("base64url"), expected_sign_count: 3, sign_count: 4, updated_at: NOW.toISOString() });
+  const result = await repository.updateRecoveryCredentialCounterInTransaction({ tx: client, organization_id: ORG, request_id: REQUEST, recovery_session_id: RECOVERY_SESSION, challenge_id: AUTHORIZATION, member_id: SUBJECT, credential_id: CREDENTIAL.toString("base64url"), expected_sign_count: 3, sign_count: 4, updated_at: NOW.toISOString() });
   assert.equal(result.committed, true);
-  assert.match(client.calls[0].text, /SET sign_count=\$4,last_used_at=\$5/u);
-  assert.deepEqual(client.calls[0].params.slice(2), [3, 4, NOW]);
+  assert.match(client.calls[0].text, /agentpass_owner_recovery_update_credential_counter/u);
+  assert.deepEqual(client.calls[0].params.slice(6), [4, 3, null, null, null, null, NOW]);
 });
 
 test("counter backup metadata is an exact CAS and reports mismatch as conflict", async () => {
-  const client = new ScriptedClient((text) => text.startsWith("UPDATE webauthn_credentials")
+  const client = new ScriptedClient((text) => text.startsWith("SELECT * FROM public.agentpass_owner_recovery_update_credential_counter")
     ? { rows: [], rowCount: 0 }
     : { rows: [], rowCount: 0 });
   const repository = createPostgresOwnerRecoveryRepository({ client, clock: () => NOW });
   await assert.rejects(() => repository.updateRecoveryCredentialCounterInTransaction({
     tx: client,
-    member_id: SUBJECT,
+    organization_id: ORG, request_id: REQUEST, recovery_session_id: RECOVERY_SESSION, challenge_id: AUTHORIZATION, member_id: SUBJECT,
     credential_id: CREDENTIAL.toString("base64url"),
     expected_sign_count: 3,
     sign_count: 4,
@@ -247,15 +249,14 @@ test("counter backup metadata is an exact CAS and reports mismatch as conflict",
     backup_state: true,
     updated_at: NOW.toISOString()
   }), (error) => error instanceof OwnerRecoveryRepositoryError && error.code === "conflict");
-  assert.match(client.calls[0].text, /backup_eligible=\$8 AND backup_state=\$9/u);
-  assert.deepEqual(client.calls[0].params.slice(2), [3, 4, NOW, false, true, false, false]);
+  assert.match(client.calls[0].text, /agentpass_owner_recovery_update_credential_counter/u);
+  assert.deepEqual(client.calls[0].params.slice(6), [4, 3, false, true, false, false, NOW]);
 });
 
 test("credential lookup resolves the session-bound credential when no credential id is supplied", async () => {
   const digest = crypto.createHash("sha256").update("recovery-token").digest();
   const client = new ScriptedClient((text) => {
-    if (text.startsWith("SELECT credential_id FROM owner_recovery_sessions")) return { rows: [{ credential_id: CREDENTIAL }], rowCount: 1 };
-    if (text.startsWith("SELECT c.id,c.member_id")) return { rows: [{ id: CREDENTIAL, member_id: SUBJECT, public_key: PUBLIC_KEY, sign_count: 0, transports: ["internal"], label: "Recovery", backup_eligible: false, backup_state: false, created_at: NOW, last_used_at: null, revoked_at: null }], rowCount: 1 };
+    if (text.startsWith("SELECT * FROM public.agentpass_owner_recovery_find_credential")) return { rows: [{ id: CREDENTIAL, member_id: SUBJECT, public_key: PUBLIC_KEY, sign_count: 0, transports: ["internal"], label: "Recovery", backup_eligible: false, backup_state: false, created_at: NOW, last_used_at: null, revoked_at: null }], rowCount: 1 };
     return { rows: [], rowCount: 0 };
   });
   const repository = createPostgresOwnerRecoveryRepository({ client, clock: () => NOW });

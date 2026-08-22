@@ -1,27 +1,11 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PROVIDER = /^[a-z][a-z0-9_-]{0,31}$/;
+const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/;
 const ROLE = new Set(["owner", "admin", "auditor", "viewer"]);
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const ASSERTION_KEYS = ["version", "issued_at", "expires_at"];
 const INPUT_KEYS = ["provider", "subject", "organization_id"];
 const CONTEXT_KEYS = new Set(["now", "origin"]);
-const RESOLVE_QUERY = `
-    SELECT ui.member_id,
-           ui.provider,
-           ui.subject,
-           ms.id AS membership_id,
-           ms.organization_id,
-           ms.role
-      FROM upstream_identities AS ui
-      JOIN memberships AS ms
-        ON ms.member_id = ui.member_id
-       AND ms.organization_id = $2::uuid
-       AND ms.status = 'active'
-      JOIN organizations AS o
-        ON o.id = ms.organization_id
-     WHERE ui.provider = $1
-       AND ui.subject = $3
-     LIMIT 2`;
+const RESOLVE_QUERY = "SELECT * FROM public.agentpass_human_identity_resolve($1::text,$2::text,$3::uuid)";
 
 export const IDENTITY_RESOLVER_ERROR_CODES = Object.freeze({
   RESOLUTION_FAILED: "identity_resolution_failed"
@@ -31,7 +15,7 @@ const PUBLIC_FAILURE_MESSAGE = "Identity resolution failed";
 const DEFAULT_ASSERTION_TTL_MS = 30_000;
 const MIN_ASSERTION_TTL_MS = 1_000;
 const MAX_ASSERTION_TTL_MS = 60_000;
-const MAX_SUBJECT_BYTES = 255;
+const MAX_SUBJECT_BYTES = 512;
 const MAX_CLOCK_SKEW_MS = 5_000;
 
 /**
@@ -79,7 +63,7 @@ export function createPostgresIdentityResolver({
     } catch { throw publicFailure(401); }
     let result;
     try {
-      result = await client.query(RESOLVE_QUERY, [request.provider, request.organization_id, request.subject]);
+      result = await client.query(RESOLVE_QUERY, [request.provider, request.subject, request.organization_id]);
     } catch { throw publicFailure(503); }
     if (!result || result.rowCount !== 1 || !Array.isArray(result.rows) || result.rows.length !== 1) {
       throw publicFailure(401);

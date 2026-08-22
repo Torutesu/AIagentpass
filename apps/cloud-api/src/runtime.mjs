@@ -42,9 +42,11 @@ import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PUR
 import { createAuditAnchorPublicKeyResolver } from "./audit-anchor-public-key-resolver.mjs";
 import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
 import { verifyOfflineAuditExport } from "./audit-export-offline-verifier.mjs";
+import { createPlatformAuthenticator } from "./platform-auth.mjs";
 import { createPromotionEvidenceV3Signer } from "./promotion-evidence-v3-signer.mjs";
 import { createPromotionEvidenceV3Verifier } from "./promotion-evidence-v3-verifier.mjs";
 import { createPromotionEvidenceV3PublicKeyResolver } from "./promotion-evidence-v3-public-key-resolver.mjs";
+import { SIGNER_PURPOSE_REGISTRY } from "./signer-purpose-registry.mjs";
 import {
   PROMOTION_EVIDENCE_V3_ALGORITHM,
   PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
@@ -62,6 +64,7 @@ import { createPlatformOperatorAuthorizer } from "./platform-operator-authorizer
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const DEPLOYMENT_IDENTITY_KEYS = Object.freeze(["version", "configured", "ready", "source_commit", "source_tree", "image_digest", "deployment_id", "revision", "schema_digest", "catalog_digest", "database_schema_digest"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_SIGNING_CAPABILITY_PURPOSE = "git.commit.sign";
 
@@ -180,7 +183,7 @@ function normalizeAgentSessionSigningCapabilityBinding({ organization_id, device
   });
 }
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, agentSessionSigningCapabilitySigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, agentSessionSigningCapabilitySigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformPromotionApi, platformAuthenticator, platformAuthFactory = createPlatformAuthenticator, platformAuthConfig: injectedPlatformAuthConfig, platformPrincipalResolver, platformMtlsVerifier, platformWorkloadVerifier, platformWebAuthnVerifier, platformAuditAppender, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   if (profile.isHosted && platformOperatorAuthorizer !== undefined) {
@@ -618,6 +621,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           keyId: config.humanAuth.identityAssertionKeyId,
           publicKey: consoleIdentityPublicKey
         },
+        requireStrongSessionConcurrency: true,
         agentSessionSigner,
         qualificationManifestSigner
       });
@@ -649,12 +653,6 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       });
       if (typeof configuredPlatformAuthenticator !== "function") throw new TypeError("platformAuthFactory must return a function");
     }
-    const effectivePlatformAuditAppender = platformAuditAppender
-      ?? (typeof postgresRuntime?.platformPromotionAuditRepository?.appendPlatformAuditEvent === "function"
-        ? postgresRuntime.platformPromotionAuditRepository.appendPlatformAuditEvent.bind(postgresRuntime.platformPromotionAuditRepository)
-        : undefined);
-    const platformPromotionRouteEnabled = platformPromotionApi !== undefined
-      || platformAuthConfigured;
     const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository, { secret: humanAuthSecret }) : undefined;
     if (profile.isHosted) {
       hostedBootstrapRuntime = createHostedBootstrapRuntime({
@@ -747,19 +745,22 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
         trackInFlight: postgresRuntime.trackInFlight,
         readiness: createHostedReadiness(postgresRuntime.readiness, [
-          { name: "agent_session_signer", purpose: AGENT_SESSION_GRANT_TYPE, unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner },
-          { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
-          { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner },
-          { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner },
-          { name: "capability_signer", purpose: CAPABILITY_SIGNER_PURPOSE, unavailableCode: "capability_signer_unavailable", signer: capabilitySigner },
-          { name: "control_bundle_signer", purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, unavailableCode: "control_bundle_signer_unavailable", signer: controlBundleSigner },
-          { name: "audit_anchor_signer", purpose: AUDIT_ANCHOR_PURPOSE, unavailableCode: "audit_anchor_signer_unavailable", signer: auditAnchorSigner },
-          { name: "promotion_evidence_signer", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, unavailableCode: "promotion_evidence_signer_unavailable", signer: promotionEvidenceSigner }
+          { registryName: "agent_session_grant", name: "agent_session_signer", purpose: AGENT_SESSION_GRANT_TYPE, unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner, lifecycle: durableAgentSession.lifecycle, keyVersion: durableAgentSession.key_version, canary: createHostedSignerCanary({ provider: agentSessionSignerProvider, purpose: AGENT_SESSION_GRANT_TYPE, keyId: agentSessionSignerConfig.keyId, version: AGENT_SESSION_GRANT_VERSION, publicKey: agentSessionSignerConfig.publicKeyPem }) },
+          { registryName: "qualification_manifest", name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner, lifecycle: durableQualificationManifest.lifecycle, keyVersion: durableQualificationManifest.key_version, canary: createHostedSignerCanary({ provider: qualificationManifestSignerProvider, purpose: "agentpass.qualification-grant-batch-manifest", keyId: qualificationSignerConfig.keyId, version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION, publicKey: activeQualificationKey.public_key }) },
+          { registryName: "possession_receipt", name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner, lifecycle: durablePossessionReceipt.lifecycle, keyVersion: durablePossessionReceipt.key_version, canary: createHostedSignerCanary({ provider: possessionReceiptSignerProvider, purpose: POSSESSION_RECEIPT_PURPOSE, keyId: possessionSignerConfig.keyId, version: POSSESSION_RECEIPT_VERSION, publicKey: possessionSignerConfig.publicKeyPem }) },
+          { registryName: "refresh_hint", name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner, lifecycle: durableRefreshHint.lifecycle, keyVersion: durableRefreshHint.key_version, canary: createHostedSignerCanary({ provider: refreshHintSignerProvider, purpose: REFRESH_HINT_TYPE, keyId: config.refreshKeyId, version: PROTOCOL_VERSION, publicKey: config.refreshPublicKey }) },
+          { registryName: "capability", name: "capability_signer", purpose: CAPABILITY_SIGNER_PURPOSE, unavailableCode: "capability_signer_unavailable", signer: capabilitySigner, lifecycle: durableCapability.lifecycle, keyVersion: durableCapability.key_version, canary: createHostedSignerCanary({ provider: capabilitySignerProvider, purpose: CAPABILITY_SIGNER_PURPOSE, keyId: config.capabilityKeyId, version: 1, publicKey: config.capabilityPublicKey }) },
+          { registryName: "control_bundle", name: "control_bundle_signer", purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, unavailableCode: "control_bundle_signer_unavailable", signer: controlBundleSigner, lifecycle: durableControlBundle.lifecycle, keyVersion: durableControlBundle.key_version, canary: createHostedSignerCanary({ provider: controlBundleSignerProvider, purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, keyId: config.keyId, version: CONTROL_BUNDLE_MANAGED_SIGNER_PROTOCOL_VERSION, publicKey: config.controlBundlePublicKey }) },
+          { registryName: "audit_anchor", name: "audit_anchor_signer", purpose: AUDIT_ANCHOR_PURPOSE, unavailableCode: "audit_anchor_signer_unavailable", signer: auditAnchorSigner, lifecycle: durableAuditAnchor.lifecycle, keyVersion: durableAuditAnchor.key_version, canary: createHostedSignerCanary({ provider: auditAnchorSignerProvider, purpose: AUDIT_ANCHOR_PURPOSE, keyId: config.auditAnchorKeyId, version: AUDIT_ANCHOR_PROTOCOL_VERSION, publicKey: config.auditAnchorPublicKey }) },
+          { registryName: "promotion_evidence", name: "promotion_evidence_signer", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, unavailableCode: "promotion_evidence_signer_unavailable", signer: promotionEvidenceSigner, lifecycle: durablePromotionEvidence.lifecycle, keyVersion: durablePromotionEvidence.key_version, canary: createHostedSignerCanary({ provider: promotionEvidenceSignerProvider, purpose: PROMOTION_EVIDENCE_V3_PURPOSE, keyId: config.promotionEvidenceKeyId, version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION, publicKey: config.promotionEvidencePublicKey }) }
         ], platformSessionReadiness, platformPromotionReadiness),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
-      admissionRateLimiter: profile.isHosted ? undefined : createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
+      // Hosted pre-auth admission must use the same shared anonymous buckets
+      // as authenticated APIs. A process-local fallback would let replicas
+      // and attacker-controlled organization paths partition the limit.
+      admissionRateLimiter: profile.isHosted ? hostedRateLimiter : createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
       bundleSigner: profile.isHosted
         ? { ...controlBundleSigner, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs }
         : { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
@@ -775,11 +776,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(agentSessionSigningCapabilityApi ? { agentSessionSigningCapabilityApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
-      ...(platformPromotionApi ? { platformPromotionApi } : configuredPlatformAuthenticator && postgresRuntime?.promotionIssuanceRepository ? { platformPromotionRepository: postgresRuntime.promotionIssuanceRepository, platformAuthenticator: configuredPlatformAuthenticator, platformAuditAppender: effectivePlatformAuditAppender } : {}),
       ...(configuredPlatformAuthenticator ? { platformAuthBinding: effectivePlatformAuthConfig } : {}),
-      ...(platformPromotionRouteEnabled ? { platformPromotionEnabled: true } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
-      ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
+      ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {}),
+      ...(postgresRuntime?.deviceAuditInboxRepository ? { deviceAuditInbox: postgresRuntime.deviceAuditInboxRepository } : {})
     });
   } catch (error) { await ownedKmsProviders?.close?.().catch(() => {}); await postgresRuntime?.close?.().catch(() => {}); await store?.close?.(); throw error; }
   let closed = false;
@@ -1344,10 +1344,24 @@ function isExactPromotionEvidenceV3Metadata(value, { keyId, keyVersion, lifecycl
     && promotionEvidenceV3PublicKeyFingerprint(key) === value.public_key_fingerprint;
 }
 
-function createHostedReadiness(databaseReadiness, signers, platformSessionReadiness = undefined, platformPromotionReadiness = undefined) {
+export function createHostedReadiness(databaseReadiness, signers, deploymentIdentityOrPlatformSessionReadiness = undefined, platformPromotionReadiness = undefined) {
+  const deploymentIdentity = typeof deploymentIdentityOrPlatformSessionReadiness === "function" || deploymentIdentityOrPlatformSessionReadiness === undefined
+    ? undefined
+    : normalizeDeploymentIdentity(deploymentIdentityOrPlatformSessionReadiness);
+  const platformSessionReadiness = typeof deploymentIdentityOrPlatformSessionReadiness === "function" ? deploymentIdentityOrPlatformSessionReadiness : undefined;
+  const canaryPromises = new Map();
   if (typeof databaseReadiness !== "function" || !Array.isArray(signers) || signers.length !== 8
     || signers.some(({ name, purpose, unavailableCode, signer }) => typeof name !== "string" || typeof purpose !== "string" || typeof unavailableCode !== "string"
-      || typeof signer?.publicKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
+      || (typeof signer?.publicKeyMetadata !== "function" && !(typeof signer?.health === "function" && typeof signer?.verificationKeyMetadata === "function")))) throw new Error("Hosted readiness dependencies are unavailable");
+  const registryNames = signers.map(({ registryName }) => registryName);
+  const expectedRegistryNames = Object.keys(SIGNER_PURPOSE_REGISTRY);
+  if (registryNames.some((name) => typeof name !== "string") || signers.some((dependency) => {
+    const expected = SIGNER_PURPOSE_REGISTRY[dependency.registryName];
+    return !expected || dependency.purpose !== expected.purpose;
+  }) || new Set(registryNames).size !== registryNames.length
+    || registryNames.length !== expectedRegistryNames.length || expectedRegistryNames.some((name) => !registryNames.includes(name))) {
+    throw new Error("Hosted readiness signer registry is unavailable");
+  }
   return async function hostedReadiness() {
     const databaseReport = await databaseReadiness();
     const checks = {};
@@ -1355,6 +1369,7 @@ function createHostedReadiness(databaseReadiness, signers, platformSessionReadin
     let signerFailure;
     for (const dependency of signers) {
       let report;
+      let verificationKeys = undefined;
       try {
         if (typeof dependency.signer.health === "function" && typeof dependency.signer.verificationKeyMetadata === "function") {
           const [value, keyRing] = await Promise.all([dependency.signer.health(), dependency.signer.verificationKeyMetadata()]);
@@ -1367,12 +1382,13 @@ function createHostedReadiness(databaseReadiness, signers, platformSessionReadin
             || !keyRing.keys.some((key) => key?.status === "active" && key.key_id === value.key_id)
             || keyRing.keys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
               || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "") || !["active", "retiring"].includes(key.status))) throw new Error("invalid verification key metadata");
+          verificationKeys = keyRing.keys;
           report = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
         } else {
           const metadata = await dependency.signer.publicKeyMetadata();
           if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
             || metadata.purpose !== dependency.purpose || metadata.algorithm !== "ed25519"
-            || metadata.key_id !== dependency.signer.key_id || typeof metadata.public_key !== "string"
+            || (dependency.signer.key_id !== undefined && metadata.key_id !== dependency.signer.key_id) || typeof metadata.public_key !== "string"
             || /PRIVATE\s+KEY/iu.test(metadata.public_key)) throw new Error("invalid signer metadata");
           const publicKey = crypto.createPublicKey(metadata.public_key);
           if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519"
@@ -1392,7 +1408,42 @@ function createHostedReadiness(databaseReadiness, signers, platformSessionReadin
             public_key_fingerprint: configuredFingerprint ?? publicKeyFingerprintHex
           });
         }
-      } catch {
+        if (typeof dependency.canary !== "function") throw new Error("managed signer canary is unavailable");
+        const canaryKey = `${dependency.registryName ?? dependency.name}:${report.key_id}`;
+        if (!canaryPromises.has(canaryKey)) canaryPromises.set(canaryKey, Promise.resolve().then(() => dependency.canary()));
+        const canaryResult = await canaryPromises.get(canaryKey);
+        if (!canaryResult || typeof canaryResult !== "object" || canaryResult.key_id !== report.key_id
+          || !fingerprintsEqual(canaryResult.public_key_fingerprint, report.public_key_fingerprint)) throw new Error("managed signer canary identity mismatch");
+        const lifecycle = dependency.lifecycle;
+        const lifecycleKeys = Array.isArray(lifecycle?.keys) ? lifecycle.keys : [];
+        const activeLifecycleKeys = lifecycleKeys.filter((key) => key?.state === "active");
+        const lifecycleKey = activeLifecycleKeys[0];
+        const expectedKeyVersion = dependency.keyVersion ?? 1;
+        if (!lifecycle || !Number.isSafeInteger(lifecycle.version) || lifecycle.version < 1 || lifecycle.purpose !== dependency.purpose
+          || activeLifecycleKeys.length !== 1 || lifecycleKeys.length < 1 || lifecycleKeys.length > 4
+          || lifecycleKeys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
+            || !Number.isSafeInteger(key.key_version) || key.key_version < 1
+            || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "")
+            || !["active", "retiring"].includes(key.state))
+          || lifecycleKey.key_id !== report.key_id
+          || lifecycleKey.key_version !== expectedKeyVersion
+          || !fingerprintsEqual(lifecycleKey.public_key_fingerprint, report.public_key_fingerprint)) {
+          throw new Error("managed signer lifecycle is unavailable");
+        }
+        if (verificationKeys === undefined) {
+          if (lifecycleKeys.length !== 1) throw new Error("managed signer verification ring is unavailable");
+        } else {
+          if (verificationKeys.length !== lifecycleKeys.length || lifecycleKeys.some((lifecycleEntry) => {
+            const status = lifecycleEntry.state;
+            const matching = verificationKeys.find((key) => key.key_id === lifecycleEntry.key_id);
+            return !matching || matching.status !== status || !fingerprintsEqual(matching.public_key_fingerprint, lifecycleEntry.public_key_fingerprint);
+          })) throw new Error("managed signer verification ring is unavailable");
+        }
+        if (dependency.registryName !== undefined) {
+          const expected = SIGNER_PURPOSE_REGISTRY[dependency.registryName];
+          managedSigners[dependency.registryName] = Object.freeze({ ok: true, code: "ready", state: "active", purpose: expected?.purpose ?? dependency.purpose, domain: expected?.domain ?? null, algorithm: expected?.managed_algorithm ?? "ed25519", registry_version: expected?.registry_version ?? null, protocol_version: expected?.protocol_version ?? null, signing_version: expected?.signing_version ?? null, key_id: report.key_id, key_version: lifecycleKey.key_version, lifecycle_version: lifecycle.version, public_key_fingerprint: report.public_key_fingerprint });
+        }
+      } catch (error) {
         signerFailure ??= dependency.unavailableCode;
         report = Object.freeze({ ok: false, purpose: dependency.purpose, algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
         if (dependency.registryName !== undefined) {
@@ -1429,12 +1480,21 @@ function createHostedReadiness(databaseReadiness, signers, platformSessionReadin
     }
     if (promotionReport) checks.platform_promotion = promotionReport;
     const promotionFailure = promotionReport && promotionReport.ok !== true ? promotionReport.code : undefined;
+    const managedSignerNames = Object.keys(managedSigners);
+    const managedRegistryComplete = managedSignerNames.length === expectedRegistryNames.length
+      && expectedRegistryNames.every((name) => managedSigners[name] !== undefined);
+    const managedSignerFailure = !managedRegistryComplete
+      ? "not_ready"
+      : managedSignerNames.some((name) => managedSigners[name].ok !== true)
+        ? signerFailure ?? "not_ready"
+        : undefined;
     return Object.freeze({
       ...databaseReport,
-      ready: databaseReport.ready === true && signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined,
-      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined ? databaseReport.status : "not_ready",
-      code: databaseReport.ready !== true ? databaseReport.code : signerFailure ?? platformFailure ?? promotionFailure ?? databaseReport.code,
-      checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
+      ready: databaseReport.ready === true && signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined && managedSignerFailure === undefined && (deploymentIdentity === undefined || deploymentIdentity.ready === true),
+      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined && managedSignerFailure === undefined && (deploymentIdentity === undefined || deploymentIdentity.ready === true) ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signerFailure ?? platformFailure ?? promotionFailure ?? managedSignerFailure ?? (deploymentIdentity === undefined || deploymentIdentity.ready === true ? databaseReport.code : "deployment_identity_unavailable"),
+      checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks, managed_signers: Object.freeze({ version: 1, cardinality: signers.length, ok: managedRegistryComplete && managedSignerNames.every((name) => managedSigners[name].ok === true), code: managedSignerFailure ?? "ready", signers: Object.freeze(managedSigners) }) }),
+      ...(deploymentIdentity === undefined ? {} : { deployment_identity: deploymentIdentity })
     });
   };
 }
@@ -1477,10 +1537,24 @@ export function createHostedSignerCanary({ provider, purpose, keyId, version, pu
       ]);
       if (!(Buffer.isBuffer(signature) || signature instanceof Uint8Array) || signature.byteLength !== 64
         || !crypto.verify(null, bytes, pinned, Buffer.from(signature))) throw new Error("managed signer canary verification failed");
+      return Object.freeze({ key_id: keyId, public_key_fingerprint: crypto.createHash("sha256").update(pinned.export({ type: "spki", format: "der" })).digest("hex") });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
   };
+}
+
+function fingerprintsEqual(left, right) {
+  const normalize = (value) => {
+    if (/^[0-9a-f]{64}$/u.test(value ?? "")) return value;
+    if (!/^SHA256:[A-Za-z0-9_-]{43}$/u.test(value ?? "")) return undefined;
+    try {
+      return Buffer.from(value.slice("SHA256:".length), "base64url").toString("hex");
+    } catch {
+      return undefined;
+    }
+  };
+  return normalize(left) !== undefined && normalize(left) === normalize(right);
 }
 
 async function readinessHealthFromMetadata(signer, expectedPurpose) {

@@ -53,6 +53,12 @@ public struct NativeAgentAuthenticatedChildClosureSigner: NativeAgentAuthenticat
 /// attach operation. The child must later connect with the same OS-observed
 /// process binding and worktree digest; request DTOs cannot create entries.
 public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked Sendable {
+    /// Synchronous callback invoked after registry state is committed and
+    /// before the signer is called. It is deliberately not `@Sendable`: the
+    /// callback is never stored or dispatched; it runs on this call's stack so
+    /// the endpoint can update its own connection state safely.
+    public typealias AdmissionObserver = () -> Void
+
     public struct AttachTicket: Equatable, Sendable {
         public let value: Data
         public let expiresAtMilliseconds: Int64
@@ -289,7 +295,8 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         helperIdentity: NativeProcessIdentity,
         worktreeBindingDigest: Data,
         request: AgentPassChildGitSignRequest,
-        nowMilliseconds: Int64
+        nowMilliseconds: Int64,
+        onAdmission: @escaping AdmissionObserver = {}
     ) throws -> (signature: Data, budget: NativeAgentSignatureBudgetLedger.Snapshot) {
         guard attachTicket.count == AgentPassChildGitXPCContract.attachTicketBytes,
               attachTicket.contains(where: { $0 != 0 }),
@@ -459,6 +466,12 @@ public final class NativeAgentAuthenticatedChildGitSessionRegistry: @unchecked S
         entries[key] = entry
         lock.unlock()
 
+        // The ticket is consumed and the signature budget is reserved before
+        // invoking the signer.  This is the point after which a lost reply is
+        // genuinely outcome-unknown.  Keep this callback outside the registry
+        // lock: the endpoint may need to take its own connection-state lock.
+        onAdmission()
+
         do {
             let signature: Data
             if let contextualSigner = signer as? any NativeAgentAuthenticatedChildContextualSigning {
@@ -545,6 +558,7 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
     private var attachRequestID: String?
     private var attachRequestCreatedAtMilliseconds: Int64?
     private var used = false
+    private var admitted = false
     private var usedRequestIdentity: RequestIdentity?
 
     private struct RequestIdentity: Equatable {
@@ -607,6 +621,7 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
         _ request: AgentPassChildGitSignRequest,
         withReply reply: @escaping (AgentPassChildGitSignResponse?, NSError?) -> Void
     ) {
+        var requestIdentityForCleanup: RequestIdentity?
         do {
             stateLock.lock()
             guard let attachTicket else {
@@ -629,6 +644,7 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 requestSequence: request.requestSequence,
                 payloadDigest: Data(SHA256.hash(data: request.commitPayload))
             )
+            requestIdentityForCleanup = requestIdentity
             if used {
                 let sameRequest = usedRequestIdentity == requestIdentity
                 stateLock.unlock()
@@ -642,6 +658,7 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 throw NativeAgentAuthenticatedChildGitError.requestMismatch
             }
             used = true
+            admitted = false
             usedRequestIdentity = requestIdentity
             stateLock.unlock()
             let result = try registry.sign(
@@ -649,7 +666,10 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
                 helperIdentity: identityObserver(),
                 worktreeBindingDigest: worktreeDigestObserver(),
                 request: request,
-                nowMilliseconds: nowMilliseconds()
+                nowMilliseconds: nowMilliseconds(),
+                onAdmission: { [weak self] in
+                    self?.markAdmitted(requestIdentity)
+                }
             )
             guard let response = AgentPassChildGitSignResponse(
                 responseSequence: request.requestSequence,
@@ -662,23 +682,52 @@ public final class NativeAgentAuthenticatedChildGitEndpoint: NSObject, AgentPass
             ) else { throw NativeAgentAuthenticatedChildGitError.signerFailed }
             reply(response, nil)
         } catch {
+            if let requestIdentityForCleanup {
+                clearUnadmittedRequest(requestIdentityForCleanup)
+            }
             reply(nil, Self.makeError(error))
         }
     }
 
     /// Called by the listener after the XPC connection is invalidated. A
     /// ticket is retired only while no sign request has been admitted on this
-    /// connection; `used` deliberately preserves admitted/uncertain work.
+    /// connection; an in-flight request is not enough to preserve it because
+    /// the registry admission boundary may not have been reached yet.
     public func connectionInvalidated() {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard !used, let attachTicket else {
+        guard !admitted, let attachTicket else {
+            stateLock.unlock()
             return
         }
+        stateLock.unlock()
+
         registry.retireAttachTicket(attachTicket)
+
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard self.attachTicket == attachTicket, !admitted else {
+            return
+        }
         self.attachTicket = nil
         attachRequestID = nil
         attachRequestCreatedAtMilliseconds = nil
+        used = false
+        usedRequestIdentity = nil
+    }
+
+    private func markAdmitted(_ requestIdentity: RequestIdentity) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard usedRequestIdentity == requestIdentity else { return }
+        admitted = true
+    }
+
+    private func clearUnadmittedRequest(_ requestIdentity: RequestIdentity) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard usedRequestIdentity == requestIdentity, !admitted else { return }
+        used = false
+        usedRequestIdentity = nil
     }
 
     private static func stableCode(_ error: Error) -> String {

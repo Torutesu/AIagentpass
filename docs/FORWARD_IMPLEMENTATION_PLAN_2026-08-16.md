@@ -21,7 +21,7 @@ Current package ledger:
 | F1 contract/security freeze | source-complete | exact-SHA CI plus review of native/JS canonical vectors |
 | F2a issuance core | source-complete | exact-SHA CI and integration with the reviewed PostgreSQL repository |
 | F2b PostgreSQL reservation | design/review | migration 0074, repository, role matrix, PG16/17 contention/replay tests |
-| F2c Device route | implementation in progress | raw-body Device authentication and adversarial HTTP tests |
+| F2c Device route | source-complete; protected qualification open | raw-body Device authentication, adversarial HTTP tests, real PostgreSQL/KMS/HTTP evidence |
 | F3-F10 | queued | the dependency and exit gates below; no completion claim may skip them |
 
 This is the authoritative day-to-day plan after the native launch, child
@@ -41,8 +41,10 @@ Current facts to preserve:
 - `contracts/openapi/device-v1.json` already declares
   `POST /v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities`
   as `frozen-f1a`. Its body is only `{request_id}`; all authority fields are
-  server-derived. The route is not yet wired into the production handler in
-  `apps/cloud-api/src/agent-session-device-api.mjs`.
+  server-derived. The route is wired through
+  `apps/cloud-api/src/agent-session-device-api.mjs`, `server.mjs`, and the
+  runtime signer/repository composition; protected PostgreSQL/KMS/HTTP
+  qualification remains open.
 - `contracts/schemas/agent-signing-capability-v1.schema.json` and
   `contracts/schemas/agent-session-signing-capability-response-v1.schema.json`
   require tenant-bound, canonical, one-use signing material. The committed
@@ -117,17 +119,28 @@ At this baseline the repository already has:
 - a durable native sign-once transaction that does not retry ambiguous key use;
 - source-complete resumable onboarding through `control_acknowledged`.
 
-It does not yet have a production end-to-end agent path:
+The source-level production path is now composed, but it does not yet have
+external end-to-end qualification:
 
-- `agentpass launch` still returns `unavailable` after validation;
-- the Host executable does not launch Claude Code in its normal command path;
-- the private Git bridge is not wired to a real `git commit -S`;
-- one socketpair currently permits one request, so it cannot support two
-  commits in one approved session;
-- the existing Agent XPC signing method observes the XPC peer, which would be
-  the Host rather than the supervised Claude Code child;
-- no Device-authenticated API issues the next one-use `git.commit.sign`
-  Capability from an active Agent Session Lease without human WebAuthn;
+- `agentpass launch` validates and relays the one-use handoff to the signed
+  Native Host; launcher identity and physical launchd execution remain open;
+- the Host launches the fixed Claude Code/Cursor adapter and defaults to the
+  dedicated authenticated Host XPC child-signing surface;
+- a real Git SSH signing harness has passed locally, while physical-Mac
+  `git commit -S` and two-unattended-commit evidence remain open;
+- the versioned private session helper is explicit qualification tooling and is
+  not silently selected by the ordinary Git helper;
+- Agent Session activation uses the Service Agent endpoint, while Git signing
+  uses the separate Host endpoint and dedicated child registry; the live
+  launchd/XPC identity boundary remains `not_proven`;
+- Host session close now uses a dedicated `dev.agentpass.agent-host-control`
+  Mach service and a separate signed Native Client principal. The bounded
+  registry handles duplicate operations and response-loss retries, while the
+  physical close receipt, post-close sign denial, and launchd connection remain
+  `not_proven` until the protected macOS probe runs;
+- the Device-authenticated API and one-use `git.commit.sign` Capability
+  issuance path are source-wired, but protected PostgreSQL/KMS/HTTP evidence
+  remains open;
 - real managed-KMS, physical-Mac, Developer ID/notarization, staging, and
   independent-review evidence remains external and incomplete.
 
@@ -297,6 +310,12 @@ never treats the Host PID or Host-provided paths as Agent authority.
 
 ### F4 — implement a bounded multi-request private Git session
 
+Current implementation note: the versioned frame codec, client/server,
+bounded transport, close/EOF state machine, and one-time ownership upgrade are
+now present in NativeAgentPrivateGitSession*.swift. The Host has an explicit
+`versioned_session_v1` route, but the protected Swift test and real child
+qualification gates remain open.
+
 Deliverables:
 
 - a message-preserving private transport, preferably an unnamed Unix
@@ -322,13 +341,18 @@ without interleaving authority or leaving a reusable endpoint after close.
 
 Deliverables:
 
-- replace the `agentpass launch` unavailable stub with a fixed-path signed Host
-  launch using the one-use activation handoff;
+- qualify the implemented `agentpass launch` fixed-path signed Host launch
+  using the one-use activation handoff; the remaining work is signed-package,
+  launchd, and physical Host/Child execution proof;
 - compose lifecycle coordinator, child supervisor, private session server, and
   Host XPC client in the production Host executable;
 - configure Claude Code/Git to invoke a fixed `agentpass-git-sign` helper;
 - make the helper read Git's bounded payload, exchange one private message,
   write the SSHSIG result, and exit; missing FD3 fails closed;
+- provide a separate explicit `agentpass-git-session-sign` entrypoint for the
+  versioned session. It accepts exactly two distinct payload paths, performs
+  both exchanges and the close/EOF handshake, then writes both SSHSIG results.
+  The ordinary one-shot helper never silently upgrades to this mode;
 - route Host payload-only signing through F3, F2, and the existing durable
   sign-once transaction.
 
@@ -642,8 +666,9 @@ Dependencies: F2 Device issuance, F3 Host runtime, F4 transport, existing
 
 Files and API surface:
 
-- Replace the validated-but-unavailable path in the root CLI/launch contract
-  with the fixed signed Host launch; keep all authority in the Service.
+- Keep the root CLI/launch contract on the fixed signed Host launch path and
+  keep all authority in the Service; do not regress to the earlier
+  validated-but-unavailable stub.
 - Make `agentpass-git-sign` (native or fixed-path helper as selected by the
   distribution) accept only Git's bounded payload, read only FD3, request one
   signature, write SSHSIG, and exit. Missing or inherited-wrong FD3 fails

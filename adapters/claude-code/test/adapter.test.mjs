@@ -10,7 +10,9 @@ import {
   CLAUDE_CODE_MCP_ARGUMENTS,
   CLAUDE_CODE_MCP_SERVER,
   ClaudeCodeAdapterError,
+  createClaudeCodeLifecycleDescriptor,
   createClaudeCodeLaunchPlan,
+  launchClaudeCodeLifecycle,
   projectClaudeCodeAdapterError,
   projectClaudeCodeState,
   validateClaudeCodeLaunchPlan
@@ -55,6 +57,20 @@ test("plan rejects executable, flags, env, session, key, and path substitutions"
 test("native Host is never claimed by this adapter boundary", () => {
   const plan = createClaudeCodeLaunchPlan({ projectDirectory: "/work/project" });
   assert.equal(plan.native_host, "unavailable");
+});
+
+test("Claude lifecycle descriptor contains only bounded public launch data", () => {
+  const descriptor = createClaudeCodeLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600 });
+  assert.deepEqual(descriptor, { version: 1, operation: "launch", agent: "claude-code", project: "/work/project", ttl_seconds: 600, handoff_fd: 3 });
+  assert.throws(() => createClaudeCodeLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600, key: "secret" }), { code: "invalid_arguments" });
+  assert.throws(() => createClaudeCodeLifecycleDescriptor({ projectDirectory: "/work/project", ttlSeconds: 600, authority: "secret" }), { code: "invalid_arguments" });
+});
+
+test("Claude lifecycle fails closed outside macOS without consuming authority", async () => {
+  await assert.rejects(
+    launchClaudeCodeLifecycle({ projectDirectory: "/work/project", ttlSeconds: 600 }, { platform: "linux" }),
+    (error) => error.code === "native_host_unavailable"
+  );
 });
 
 test("state projection is closed and bounded", () => {

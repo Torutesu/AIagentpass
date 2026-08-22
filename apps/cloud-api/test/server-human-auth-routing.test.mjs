@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import nodeTest from "node:test";
 
 import { createCloudApi } from "../src/server.mjs";
 import { createHumanManagementHttpApi } from "../src/human-auth/management/http-api.mjs";
+import { createLoopbackAwareTest } from "./support/loopback-test.mjs";
+
+const test = createLoopbackAwareTest(nodeTest);
 
 const OPTIONS_PATH = "/api/auth/webauthn/options";
 const VERIFY_PATH = "/api/auth/webauthn/verify";

@@ -52,6 +52,13 @@ private func archiveHostFields(_ fields: [(String, Any)]) -> Data {
         ("reason", AgentPassHostXPCContract.CloseReason.completed.rawValue as NSString),
         ("future_authority", unknown),
     ])
+    let controlCloseData = archiveHostFields([
+        ("protocol_version", NSNumber(value: AgentPassHostControlXPCContract.protocolVersion)),
+        ("session_id", "22222222-2222-4222-8222-222222222222" as NSString),
+        ("operation_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" as NSString),
+        ("reason", AgentPassHostXPCContract.CloseReason.completed.rawValue as NSString),
+        ("future_authority", unknown),
+    ])
 
     // This is an intentionally strict schema test. A future field must not
     // be silently ignored on an authority boundary; it needs an explicit
@@ -61,6 +68,7 @@ private func archiveHostFields(_ fields: [(String, Any)]) -> Data {
     #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassHostSignRequest.self, from: signData)) == nil)
     #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassHostStatusRequest.self, from: statusData)) == nil)
     #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassHostCloseRequest.self, from: closeData)) == nil)
+    #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassHostControlCloseRequest.self, from: controlCloseData)) == nil)
 }
 
 @Test func childGitRequestDecoderRejectsAnUnrecognisedKeyedField() throws {

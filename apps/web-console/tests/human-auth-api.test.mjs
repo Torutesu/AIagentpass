@@ -173,6 +173,29 @@ test("resume relays the Cloud human_session_session_required code without invoki
   assert.equal(calls, 1);
 });
 
+test("resume relays a revoked-session clear cookie only on the failed session path", async () => {
+  const clearCookie = "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+  const api = createHumanAuthBridge({
+    env,
+    fetchImpl: async () => new Response(JSON.stringify({ error: { code: "session_revoked", message: "Session revoked" } }), {
+      status: 401,
+      headers: { "content-type": "application/json", "set-cookie": clearCookie },
+    }),
+  });
+  const response = await api.handle(request("/api/auth/session/resume", { headers: { cookie: sessionCookie } }));
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: { code: "session_revoked", message: "Session revoked" } });
+  assert.equal(response.headers.get("set-cookie"), clearCookie);
+
+  const bootstrap = bridge(async () => new Response(JSON.stringify({ error: { code: "session_revoked", message: "Session revoked" } }), {
+    status: 401,
+    headers: { "content-type": "application/json", "set-cookie": clearCookie },
+  }), undefined, legacyEnv);
+  const rejectedBootstrap = await bootstrap.handle(request("/api/auth/session"));
+  assert.equal(rejectedBootstrap.status, 502);
+  assert.equal(rejectedBootstrap.headers.get("set-cookie"), null);
+});
+
 test("self-logout forwards only the session cookie and CSRF, then relays the exact clear cookie", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {
@@ -361,7 +384,7 @@ test("forwards passkey registration through the same-origin BFF without exposing
   });
   const response = await api.handle(request("/api/auth/webauthn/registration/verify", {
     body: { organization_id: "org", challenge_id: "challenge-id", credential: { id: "opaque-to-bff" } },
-    headers: { cookie: sessionCookie, "agentpass-csrf": csrf },
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "agentpass-recent-auth": "11111111-1111-4111-8111-111111111111" },
   }));
   assert.equal(response.status, 201);
   const responseText = await response.text();
@@ -370,6 +393,7 @@ test("forwards passkey registration through the same-origin BFF without exposing
   assert.equal(calls[0].init.headers.has("authorization"), false);
   assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
   assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
+  assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), "11111111-1111-4111-8111-111111111111");
   assert.equal(calls[0].init.headers.has("agentpass-console-user-id"), false);
   assert.doesNotMatch(responseText, /server-only-token|opaque-to-bff/);
 });

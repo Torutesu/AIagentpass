@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "source_commit", "dependency_lock_sha256", "release_manifest_sha256", "artifact_name", "artifact_sha256",
+    "schema_version", "source_commit", "source_tree", "dependency_lock_sha256", "release_manifest_sha256", "artifact_name", "artifact_sha256",
     "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "team_id",
     "nested_code_identities", "notarization", "cloud_image_digest", "database_migration_manifest_sha256", "signer_key_versions",
     "browser_versions", "started_at", "completed_at", "operator", "operator_key_fingerprint", "qualified", "tests", "gates"
@@ -13,6 +13,7 @@
   "properties": {
     "schema_version": { "const": 2 },
     "source_commit": { "$ref": "#/$defs/sha1" },
+    "source_tree": { "$ref": "#/$defs/sha1" },
     "dependency_lock_sha256": { "$ref": "#/$defs/digest" },
     "release_manifest_sha256": { "$ref": "#/$defs/digest" },
     "artifact_name": { "$ref": "#/$defs/safe_name" },

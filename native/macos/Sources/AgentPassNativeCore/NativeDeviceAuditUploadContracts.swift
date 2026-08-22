@@ -198,15 +198,21 @@ public struct NativeDeviceAuditBatch: Equatable, Sendable {
 
 public struct NativeDeviceAuditIngestionResponse: Equatable, Sendable {
     public let deviceID: String
+    public let deliveryState: String
+    public let queuedBatchID: String?
+    public let queuedInboxID: String?
     public let acceptedEventIDs: [String]
     public let duplicateEventIDs: [String]
     public let gapCount: Int
-    public let headHash: String
+    public let headHash: String?
     public let headEventID: String?
     public let chainStatus: String
 
     public init(deviceID: String, acceptedEventIDs: [String], duplicateEventIDs: [String], gapCount: Int, headHash: String, headEventID: String?, chainStatus: String) {
         self.deviceID = deviceID
+        self.deliveryState = "committed"
+        self.queuedBatchID = nil
+        self.queuedInboxID = nil
         self.acceptedEventIDs = acceptedEventIDs
         self.duplicateEventIDs = duplicateEventIDs
         self.gapCount = gapCount
@@ -215,10 +221,42 @@ public struct NativeDeviceAuditIngestionResponse: Equatable, Sendable {
         self.chainStatus = chainStatus
     }
 
+    private init(deviceID: String, batchID: String, inboxID: String, state: String) {
+        self.deviceID = deviceID
+        self.deliveryState = state
+        self.queuedBatchID = batchID
+        self.queuedInboxID = inboxID
+        self.acceptedEventIDs = []
+        self.duplicateEventIDs = []
+        self.gapCount = 0
+        self.headHash = nil
+        self.headEventID = nil
+        self.chainStatus = "queued"
+    }
+
     public static func decode(_ data: Data, expectedDeviceID: String) throws -> NativeDeviceAuditIngestionResponse {
         let root = try NativeStrictJSON.object(from: data, maxBytes: 64 * 1024, maxDepth: 10)
-        guard Set(root.keys) == Set(["ingestion"]), let ingestion = root["ingestion"] as? [String: Any],
-              Set(ingestion.keys) == Set(["device_id", "accepted", "duplicates", "gaps", "head"]),
+        guard Set(root.keys) == Set(["ingestion"]), let ingestion = root["ingestion"] as? [String: Any] else { throw NativeDeviceSyncContractError(.invalidResult, "audit ingestion response is invalid") }
+        if ingestion["state"] != nil {
+            guard let queued = tryQueued(ingestion, expectedDeviceID: expectedDeviceID) else { throw NativeDeviceSyncContractError(.invalidResult, "audit queued ingestion response is invalid") }
+            return queued
+        }
+        return try decodeCommitted(ingestion, expectedDeviceID: expectedDeviceID)
+    }
+
+    private static func tryQueued(_ ingestion: [String: Any], expectedDeviceID: String) -> NativeDeviceAuditIngestionResponse? {
+        guard Set(ingestion.keys).isSubset(of: Set(["device_id", "batch_id", "inbox_id", "state"])),
+              let deviceID = ingestion["device_id"] as? String, deviceID == expectedDeviceID,
+              let state = ingestion["state"] as? String,
+              ["pending", "processing", "accepted", "uncertain", "dead_letter"].contains(state),
+              let batchID = ingestion["batch_id"] as? String,
+              batchID.range(of: "^audit-[0-9a-f]{64}$", options: .regularExpression) != nil,
+              let inboxID = ingestion["inbox_id"] as? String, uuid(inboxID) else { return nil }
+        return NativeDeviceAuditIngestionResponse(deviceID: deviceID, batchID: batchID, inboxID: inboxID, state: state)
+    }
+
+    private static func decodeCommitted(_ ingestion: [String: Any], expectedDeviceID: String) throws -> NativeDeviceAuditIngestionResponse {
+        guard Set(ingestion.keys) == Set(["device_id", "accepted", "duplicates", "gaps", "head"]),
               let deviceID = ingestion["device_id"] as? String, deviceID == expectedDeviceID,
               let accepted = uuidArray(ingestion["accepted"]), let duplicates = uuidArray(ingestion["duplicates"]),
               let gaps = ingestion["gaps"] as? [[String: Any]], gaps.count <= NativeDeviceAuditBatch.maxEvents,

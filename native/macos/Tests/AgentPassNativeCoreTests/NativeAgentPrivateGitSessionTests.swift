@@ -368,6 +368,7 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
     let close = try machine.close()
     #expect(try NativeAgentPrivateGitSessionFrameCodec.decode(close) == .close)
     #expect(machine.state == .closing)
+    try machine.acceptClose(close)
     try machine.acceptEOF()
     #expect(machine.state == .closed)
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
@@ -377,13 +378,39 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
 
 @Test func privateGitSessionStateMachineRejectsDuplicateCloseAndPostCloseTraffic() throws {
     let machine = NativeAgentPrivateGitSessionStateMachine()
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 1))
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 2))
     _ = try machine.close()
 
     #expect(machine.state == .closing)
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
         _ = try machine.close()
     }
+    let peerClose = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+    try machine.acceptClose(peerClose)
     try machine.acceptEOF()
+    #expect(machine.state == .closed)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        try machine.acceptClose(peerClose)
+    }
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        try machine.acceptEOF()
+    }
+}
+
+@Test func privateGitSessionStateMachineRequiresBothCloseFramesBeforeEOF() throws {
+    let machine = NativeAgentPrivateGitSessionStateMachine()
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 1))
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 2))
+    let close = try machine.close()
+    try machine.acceptClose(close)
+    try machine.acceptEOF()
+    #expect(machine.state == .closed)
+
     #expect(machine.state == .closed)
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
         _ = try machine.beginRequest(commitPayload: sessionPayload)
@@ -418,22 +445,107 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
 }
 
 @Test func privateGitSessionStateMachineAcceptsPeerCloseOnlyAtAStableBoundary() throws {
-    let ready = NativeAgentPrivateGitSessionStateMachine()
+    let ready = NativeAgentPrivateGitSessionStateMachine(role: .server)
     let close = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
-    try ready.acceptClose(close)
-    #expect(ready.state == .closing)
-    try ready.acceptEOF()
-    #expect(ready.state == .closed)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.incomplete) {
+        try ready.acceptClose(close)
+    }
+    #expect(ready.state == .quarantined(.incomplete))
+
+    let clientBeforeLocalClose = NativeAgentPrivateGitSessionStateMachine(role: .client)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.wrongMessage) {
+        try clientBeforeLocalClose.acceptClose(close)
+    }
+    #expect(clientBeforeLocalClose.state == .quarantined(.wrongMessage))
 
     let completed = NativeAgentPrivateGitSessionStateMachine()
     _ = try completed.beginRequest(commitPayload: sessionPayload)
     _ = try completed.acceptResponse(responseFrame(sequence: 1))
     _ = try completed.beginRequest(commitPayload: sessionPayload)
     _ = try completed.acceptResponse(responseFrame(sequence: 2))
-    try completed.acceptClose(close)
-    #expect(completed.state == .closing)
-    try completed.acceptEOF()
-    #expect(completed.state == .closed)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.wrongMessage) {
+        try completed.acceptClose(close)
+    }
+    #expect(completed.state == .quarantined(.wrongMessage))
+
+    let server = NativeAgentPrivateGitSessionStateMachine(role: .server)
+    _ = try server.acceptRequest(
+        NativeAgentPrivateGitSessionFrameCodec.encode(
+            .request(sequence: 1, commitPayload: sessionPayload)))
+    _ = try server.makeResponse(signature: sessionSignature)
+    _ = try server.acceptRequest(
+        NativeAgentPrivateGitSessionFrameCodec.encode(
+            .request(sequence: 2, commitPayload: sessionPayload)))
+    _ = try server.makeResponse(signature: sessionSignature)
+    try server.acceptClose(close)
+    _ = try server.acknowledgeClose()
+    try server.acceptEOF()
+    #expect(server.state == .closed)
+}
+
+@Test func privateGitSessionStateMachineEnforcesRoleSpecificCloseAcknowledgement() throws {
+    let client = NativeAgentPrivateGitSessionStateMachine(role: .client)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.incomplete) {
+        _ = try client.close()
+    }
+    #expect(client.state == .quarantined(.incomplete))
+
+    let server = NativeAgentPrivateGitSessionStateMachine(role: .server)
+    _ = try server.acceptRequest(
+        NativeAgentPrivateGitSessionFrameCodec.encode(
+            .request(sequence: 1, commitPayload: sessionPayload)))
+    _ = try server.makeResponse(signature: sessionSignature)
+    _ = try server.acceptRequest(
+        NativeAgentPrivateGitSessionFrameCodec.encode(
+            .request(sequence: 2, commitPayload: sessionPayload)))
+    _ = try server.makeResponse(signature: sessionSignature)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.wrongMessage) {
+        _ = try server.close()
+    }
+    #expect(server.state == .quarantined(.wrongMessage))
+
+    let clientAck = NativeAgentPrivateGitSessionStateMachine(role: .client)
+    _ = try clientAck.beginRequest(commitPayload: sessionPayload)
+    _ = try clientAck.acceptResponse(responseFrame(sequence: 1))
+    _ = try clientAck.beginRequest(commitPayload: sessionPayload)
+    _ = try clientAck.acceptResponse(responseFrame(sequence: 2))
+    _ = try clientAck.close()
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.wrongMessage) {
+        _ = try clientAck.acknowledgeClose()
+    }
+    #expect(clientAck.state == .quarantined(.wrongMessage))
+}
+
+@Test func privateGitSessionStateMachineRejectsServerConcurrentAndOutOfOrderRequests() throws {
+    let concurrent = NativeAgentPrivateGitSessionStateMachine(role: .server)
+    let first = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 1, commitPayload: sessionPayload))
+    let second = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 2, commitPayload: sessionPayload))
+    _ = try concurrent.acceptRequest(first)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.concurrentRequest) {
+        _ = try concurrent.acceptRequest(second)
+    }
+    #expect(concurrent.state == .quarantined(.concurrentRequest))
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.terminal) {
+        _ = try concurrent.makeResponse(signature: sessionSignature)
+    }
+
+    let skipped = NativeAgentPrivateGitSessionStateMachine(role: .server)
+    let skippedFrame = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 2, commitPayload: sessionPayload))
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.skippedSequence) {
+        _ = try skipped.acceptRequest(skippedFrame)
+    }
+    #expect(skipped.state == .quarantined(.skippedSequence))
+
+    let excess = NativeAgentPrivateGitSessionStateMachine(role: .server)
+    let excessFrame = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 3, commitPayload: sessionPayload))
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.excess) {
+        _ = try excess.acceptRequest(excessFrame)
+    }
+    #expect(excess.state == .quarantined(.excess))
 }
 
 @Test func privateGitSessionStateMachineRejectsEOFWithoutCommittedClose() throws {
@@ -459,6 +571,10 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
 
 @Test func privateGitSessionStateMachineQuarantinesTrafficBeforeEOFCommitsClose() throws {
     let machine = NativeAgentPrivateGitSessionStateMachine()
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 1))
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 2))
     let close = try machine.close()
     #expect(machine.state == .closing)
 
@@ -468,6 +584,11 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
     #expect(machine.state == .quarantined(.trafficAfterClose))
 
     let duplicate = NativeAgentPrivateGitSessionStateMachine()
+    _ = try duplicate.beginRequest(commitPayload: sessionPayload)
+    _ = try duplicate.acceptResponse(responseFrame(sequence: 1))
+    _ = try duplicate.beginRequest(commitPayload: sessionPayload)
+    _ = try duplicate.acceptResponse(responseFrame(sequence: 2))
+    _ = try duplicate.close()
     try duplicate.acceptClose(close)
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.duplicateClose) {
         try duplicate.acceptClose(close)

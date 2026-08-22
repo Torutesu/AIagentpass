@@ -47,7 +47,7 @@ const CANONICAL_DATE = (value) => typeof value === 'string'
   && new Date(value).toISOString() === value;
 
 export const REPORT_KEYS = Object.freeze([
-  'schema_version', 'source_commit', 'dependency_lock_sha256', 'release_manifest_sha256',
+  'schema_version', 'source_commit', 'source_tree', 'dependency_lock_sha256', 'release_manifest_sha256',
   'artifact_name', 'artifact_sha256', 'architecture', 'hardware_class', 'model_identifier',
   'macos_version', 'macos_build', 'secure_enclave', 'team_id', 'nested_code_identities',
   'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256',
@@ -431,6 +431,7 @@ const buildTemplate = ({ release, operator, operatorKeyFingerprint, browserVersi
   const template = {
     schema_version: 2,
     source_commit: release.manifest.source.commit,
+    source_tree: release.manifest.source.tree,
     dependency_lock_sha256: release.attestation.dependency_lock_sha256,
     release_manifest_sha256: release.manifestSha256,
     artifact_name: release.product.name,

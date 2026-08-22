@@ -115,7 +115,7 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
     if (url.endsWith(`/members/${memberId}/role`)) return json({ request_id: requestId, member: member("admin", 4) });
     if (url.endsWith(`/members/${memberId}/remove`)) return json({ request_id: requestId, member: member("admin", 5, "revoked") });
     if (url.endsWith(`/invitations/${invitationId}/revoke`)) return json({ request_id: requestId, invitation: invitation("revoked", 2) });
-    if (url === "/api/auth/invitations/accept") return json({ request_id: requestId, member: member("viewer", 1) }, 201);
+    if (url === "/api/auth/invitations/accept") return json({ request_id: requestId, invitation: invitation("accepted", 2), member: member("viewer", 1) }, 201);
     throw new Error(`unexpected ${init.method} ${url}`);
   };
   const client = createOrganizationClient({
@@ -268,6 +268,7 @@ test("rejects non-terminal invitation mutation responses as invalid without repl
       if (url === "/api/auth/session") return sessionResponse();
       return json({ request_id: requestId, invitation: invitation("pending", 1) });
     },
+    authorizeRecentAuthImpl: async () => ({ authorization_id: recentAuthId }),
   });
   await assert.rejects(() => revokeClient.revokeInvitation({ organizationId, invitationId, expectedVersion: 1 }), (error) => error instanceof OrganizationClientError && error.code === "invalid_response");
   assert.equal(revokeCalls.filter((call) => call.url.endsWith(`/invitations/${invitationId}/revoke`)).length, 1);

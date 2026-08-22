@@ -1,3 +1,6 @@
+// The repository's native Node contract tests load TypeScript modules directly;
+// the bundler resolves the same explicit source extension during production.
+// @ts-expect-error TS5097 is expected because this package's test loader owns .ts resolution.
 import { authenticateRecentAuth, type AuthorizationResult } from "./webauthn-client.ts";
 
 const SESSION_PATH = "/api/auth/session";
@@ -134,6 +137,7 @@ export type OrganizationClientOptions = Readonly<{
 
 export type OrganizationSessionProvider = Readonly<{
   get(signal?: AbortSignal): Promise<OrganizationSession>;
+  replace?(session: OrganizationSession): void;
   clear(session?: OrganizationSession): void;
 }>;
 
@@ -141,6 +145,8 @@ export type OrganizationClient = Readonly<{
   getSession(options?: RequestOptions): Promise<OrganizationSession>;
   /** Invalidate the cached/shared session after a current-user authority change. */
   invalidateSession(): void;
+  /** Switch the server-backed Human Session; callers must not retry an ambiguous response. */
+  switchOrganization(input: Readonly<{ organizationId: string }> & RequestOptions): Promise<OrganizationSession>;
   listOrganizations(options?: RequestOptions & Readonly<{ limit?: number; cursor?: string }>): Promise<OrganizationPage>;
   createOrganization(input: Readonly<{ name: string }> & MutationOptions): Promise<Readonly<{ requestId: string; organization: Organization }>>;
   renameOrganization(input: Readonly<{ organizationId: string; name: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; organization: Organization }>>;
@@ -151,7 +157,7 @@ export type OrganizationClient = Readonly<{
   createInvitation(input: Readonly<{ organizationId: string; role: InvitationRole; expiresAt: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>>;
   reissueInvitation(input: Readonly<{ organizationId: string; invitationId: string; expiresAt: string; expectedVersion: number }> & RequestOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>>;
   revokeInvitation(input: Readonly<{ organizationId: string; invitationId: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation }>>;
-  acceptInvitation(input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; member: OrganizationMember }>>;
+  acceptInvitation(input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }>>;
 }>;
 
 export type OrganizationVisibility = Readonly<{
@@ -200,6 +206,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
   let session: OrganizationSession | undefined;
   let pendingSession: Promise<OrganizationSession> | undefined;
   let sessionGeneration = 0;
+  let switchSequence = 0;
 
   const getSession = async (requestOptions: RequestOptions = {}): Promise<OrganizationSession> => {
     if (sessionProvider !== undefined) return sessionProvider.get(requestOptions.signal);
@@ -238,17 +245,40 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const sequence = ++switchSequence;
     const context = await getRequestContext(input);
     if (context.organizationId === organizationId) throw new OrganizationClientError("validation_failed", "organizationId is already active");
-    const payload = await requestOrganizationJson(fetchImpl, SWITCH_ORGANIZATION_PATH, "POST", { organization_id: organizationId }, context, input, { idempotencyKey: null });
+    let payload: unknown;
+    try {
+      payload = await requestOrganizationJson(fetchImpl, SWITCH_ORGANIZATION_PATH, "POST", { organization_id: organizationId }, context, input, { idempotencyKey: null });
+    } catch (error) {
+      if (isAmbiguousOrganizationMutationError(error)) {
+        // The server may have committed before the response was lost. Fence the
+        // cached authority, reconcile with a fresh session read, and never POST
+        // the switch again from this client.
+          invalidateSession();
+          try {
+            const reconciled = await getSession(input);
+            if (sequence !== switchSequence) throw new OrganizationClientError("conflict", "Organization switch was superseded by a newer session change");
+            if (reconciled.organizationId === organizationId && reconciled.memberId === context.memberId) return reconciled;
+        } catch {
+          // Preserve the original bounded ambiguity below.
+        }
+      }
+      throw error;
+    }
     const next = parseSessionResponse(payload);
     assertSessionActive(next);
     if (next.organizationId !== organizationId || next.memberId !== context.memberId) {
       throw invalidResponse("Organization switch response is not bound to the requested tenant");
     }
-    if (sequence !== switchSequence || session !== context) {
+    if (sequence !== switchSequence || (sessionProvider === undefined && session !== context)) {
       throw new OrganizationClientError("conflict", "Organization switch was superseded by a newer session change");
     }
-    session = next;
-    pendingSession = undefined;
+    if (sessionProvider !== undefined) {
+      if (typeof sessionProvider.replace !== "function") throw new OrganizationClientError("invalid_response", "The shared session authority cannot accept an organization switch");
+      sessionProvider.replace(next);
+    } else {
+      session = next;
+      pendingSession = undefined;
+    }
     return next;
   };
 
@@ -343,7 +373,8 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const invitationId = requiredUuid(input?.invitationId, "invitationId");
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
-    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
+    const recentAuth = await resolveRecentAuth(context, organizationId, input?.recentAuth, "human.organizations.invitation.revoke", input?.signal);
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
     const result = parseInvitationEnvelope(payload, organizationId, invitationId);
     if (result.invitation.status !== "revoked") throw invalidResponse("Invitation revocation response is invalid");
     return result;
@@ -371,7 +402,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     return requiredUuid(authorizationId, "recentAuth");
   }
 
-  async function requestOrganizationJson(requestFetch: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, requestOptions: RequestOptions, controls: Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string; expectedStatus?: number }> = {}): Promise<unknown> {
+  async function requestOrganizationJson(requestFetch: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, requestOptions: RequestOptions, controls: Readonly<{ idempotencyKey?: string | null; expectedVersion?: number; recentAuth?: string; expectedStatus?: number }> = {}): Promise<unknown> {
     try {
       return await requestJson(requestFetch, path, method, body, context, requestOptions, controls);
     } catch (error) {
@@ -387,7 +418,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     }
   }
 
-  return Object.freeze({ invalidateSession, getSession, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, reissueInvitation, revokeInvitation, acceptInvitation });
+  return Object.freeze({ invalidateSession, getSession, switchOrganization, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, reissueInvitation, revokeInvitation, acceptInvitation });
 }
 
 export async function getOrganizations(options: OrganizationClientOptions & RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<OrganizationPage> {
@@ -416,9 +447,13 @@ function parseSessionResponse(payload: unknown): OrganizationSession {
   return Object.freeze({ version: payload.session.version, sessionId: String(payload.session.session_id).toLowerCase(), memberId: String(payload.session.member_id).toLowerCase(), organizationId: String(payload.session.organization_id).toLowerCase(), role: payload.session.role, createdAt: String(payload.session.created_at), expiresAt: String(payload.session.expires_at), recentAuthAt: payload.session.recent_auth_at === null ? null : String(payload.session.recent_auth_at), csrfToken: payload.csrf_token });
 }
 
-async function requestJson(fetchImpl: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, options: RequestOptions, controls: Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string; expectedStatus?: number }> = {}): Promise<unknown> {
-  const idempotencyKey = controls.idempotencyKey ?? (method === "GET" ? undefined : makeIdempotencyKey());
-  if (method !== "GET") assertIdempotencyKey(idempotencyKey);
+function assertSessionActive(session: OrganizationSession): void {
+  if (Date.parse(session.expiresAt) <= Date.now()) throw new OrganizationClientError("expired", "The organization session has expired");
+}
+
+async function requestJson(fetchImpl: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, options: RequestOptions, controls: Readonly<{ idempotencyKey?: string | null; expectedVersion?: number; recentAuth?: string; expectedStatus?: number }> = {}): Promise<unknown> {
+  const idempotencyKey = controls.idempotencyKey === null ? undefined : controls.idempotencyKey ?? (method === "GET" ? undefined : makeIdempotencyKey());
+  if (method !== "GET" && idempotencyKey !== undefined) assertIdempotencyKey(idempotencyKey);
   const headers = new Headers({ accept: "application/json", "cache-control": "no-store", pragma: "no-cache", [CSRF_HEADER]: context.csrfToken });
   if (body !== undefined) headers.set("content-type", "application/json");
   if (idempotencyKey !== undefined) headers.set("idempotency-key", idempotencyKey);

@@ -25,9 +25,7 @@ class QuarantineClient {
       this.events.push(text);
       return { rowCount: 0, rows: [] };
     }
-    if (text.startsWith("SELECT s.member_id FROM human_sessions")) return { rowCount: 1, rows: [{ member_id: ids.member }] };
-    if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rowCount: 1, rows: [{ locked: true }] };
-    if (text.startsWith("UPDATE webauthn_credentials")) return { rowCount: 1, rows: [{ id: credentialBytes, clone_detected_at: detectedAt }] };
+    if (text.startsWith("SELECT * FROM public.agentpass_human_quarantine_credential_clone")) return { rowCount: 1, rows: [{ id: credentialBytes, member_id: ids.member, clone_detected_at: detectedAt }] };
     throw new Error("unexpected SQL in clone quarantine test");
   }
 }
@@ -49,10 +47,9 @@ test("clone evidence is durably quarantined and propagates authority reduction i
   }), true);
 
   assert.deepEqual(client.events, ["BEGIN", "COMMIT"]);
-  const mutation = client.calls.find(({ text }) => text.startsWith("UPDATE webauthn_credentials"));
-  assert.match(mutation.text, /sign_count_state='clone-detected'/u);
-  assert.match(mutation.text, /clone_detected_at=clock_timestamp\(\)/u);
-  assert.match(mutation.text, /sign_count>=\$3/u);
+  const mutation = client.calls.find(({ text }) => text.startsWith("SELECT * FROM public.agentpass_human_quarantine_credential_clone"));
+  assert.match(mutation.text, /agentpass_human_quarantine_credential_clone/u);
+  assert.deepEqual(mutation.params.slice(3), [8, 8]);
   assert.equal(reductions.length, 1);
   assert.equal(reductions[0].tx !== undefined, true);
   assert.equal(reductions[0].reason, "webauthn_clone_detected");

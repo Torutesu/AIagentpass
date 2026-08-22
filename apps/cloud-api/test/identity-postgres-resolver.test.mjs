@@ -53,12 +53,8 @@ test("resolves the durable GitHub subject and active membership without trusting
   assert.equal(Object.hasOwn(assertion, "role"), false);
   assert.equal(Object.hasOwn(assertion, "subject"), false);
   assert.equal(Object.isFrozen(assertion), true);
-  assert.deepEqual(calls[0].params, ["github", ids.organization, subject]);
-  assert.match(calls[0].text, /ui\.provider\s*=\s*\$1/);
-  assert.match(calls[0].text, /ui\.subject\s*=\s*\$3/);
-  assert.match(calls[0].text, /ms\.organization_id\s*=\s*\$2::uuid/);
-  assert.match(calls[0].text, /ms\.status\s*=\s*'active'/);
-  assert.match(calls[0].text, /LIMIT 2/);
+  assert.deepEqual(calls[0].params, ["github", subject, ids.organization]);
+  assert.match(calls[0].text, /agentpass_human_identity_resolve/);
 
   assert.deepEqual(resolver.verifyAssertion(assertion, { now: NOW + 1_000 }), {
     provider: "github",
@@ -127,7 +123,7 @@ test("rejects malformed or ambiguous database identity rows and bounded input", 
   const badInputs = [
     { provider: "github", subject, organization_id: ids.organization, role: "owner" },
     { provider: "github", subject: "", organization_id: ids.organization },
-    { provider: "github", subject: "x".repeat(256), organization_id: ids.organization },
+    { provider: "github", subject: "x".repeat(513), organization_id: ids.organization },
     { provider: "github", subject, organization_id: "not-a-uuid" },
     { provider: "Google", subject, organization_id: ids.organization },
     { provider: "github", subject, organization_id: ids.organization, member_id: ids.member }
@@ -139,6 +135,17 @@ test("constructor enforces a bounded assertion lifetime and a database client", 
   assert.throws(() => createPostgresIdentityResolver(), /database client/);
   assert.throws(() => createPostgresIdentityResolver({ client: { query() {} }, assertionTtlMs: 999 }), /assertion TTL/);
   assert.throws(() => createPostgresIdentityResolver({ client: { query() {} }, assertionTtlMs: 60_001 }), /assertion TTL/);
+});
+
+test("uses the SQL provider grammar and UTF-8 subject byte bound", async () => {
+  const provider = "provider.with-dots-" + "x".repeat(45);
+  const wideSubject = "あ".repeat(170); // 510 UTF-8 bytes, below the 512-byte contract.
+  const resolver = createPostgresIdentityResolver({
+    client: { async query() { return { rowCount: 1, rows: [row({ provider, subject: wideSubject })] }; } },
+    now: () => NOW
+  });
+  const assertion = await resolver.resolveIdentity({ provider, subject: wideSubject, organization_id: ids.organization });
+  assert.equal(resolver.verifyAssertion(assertion, { now: NOW + 1 }).subject, wideSubject);
 });
 
 test("fails closed when the assertion expiry would exceed the safe integer range", async () => {

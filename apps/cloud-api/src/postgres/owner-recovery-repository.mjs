@@ -597,8 +597,10 @@ export function createPostgresOwnerRecoveryRepository({
       const validApprovals = await revalidateApprovals(tx, request, memberships, values.now);
       if (validApprovals.length < request.threshold) throw failure("ineligible");
       await lockCredentialSet(tx, request.subject_member_id);
-      const credential = await tx.query(`SELECT id FROM webauthn_credentials
-        WHERE id=$1 AND member_id=$2 AND revoked_at IS NULL FOR SHARE`, [values.credentialId, request.subject_member_id]);
+      const credential = await tx.query(
+        "SELECT * FROM public.agentpass_owner_recovery_credential_exists($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bytea,$6::timestamptz)",
+        [values.organizationId, values.requestId, session.recovery_session_id, request.subject_member_id, values.credentialId, values.enrolledAt]
+      );
       if (rowCount(credential) !== 1) throw failure("forbidden");
       const enrolled = await tx.query(`UPDATE owner_recovery_sessions
         SET stage='credential_enrolled',credential_id=$5,credential_enrolled_at=$6,last_seen_at=$6
@@ -646,8 +648,10 @@ export function createPostgresOwnerRecoveryRepository({
       const validApprovals = await revalidateApprovals(tx, request, memberships, values.now);
       if (validApprovals.length < request.threshold) throw failure("ineligible");
       await lockCredentialSet(tx, request.subject_member_id);
-      const credential = await tx.query(`SELECT id FROM webauthn_credentials
-        WHERE id=$1 AND member_id=$2 AND revoked_at IS NULL FOR SHARE`, [currentSession.credential_id, request.subject_member_id]);
+      const credential = await tx.query(
+        "SELECT * FROM public.agentpass_owner_recovery_credential_exists($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bytea,$6::timestamptz)",
+        [values.organizationId, values.requestId, currentSession.recovery_session_id, request.subject_member_id, currentSession.credential_id, values.now]
+      );
       if (rowCount(credential) !== 1) throw failure("forbidden");
       const authorization = await lockActivationAuthorization(tx, {
         organizationId: values.organizationId,
@@ -671,15 +675,6 @@ export function createPostgresOwnerRecoveryRepository({
         if (verified !== true && verified?.allowed !== true) throw failure("authorization_required");
       }
 
-      await tx.query("SET LOCAL agentpass.recovery_epoch_bump = 'on'", []);
-      const bumped = await tx.query(`UPDATE memberships
-        SET session_epoch=session_epoch+1,updated_at=clock_timestamp()
-        WHERE organization_id=$1 AND id=$2 AND member_id=$3 AND status='active'
-        RETURNING session_epoch`, [values.organizationId, subject.id, request.subject_member_id]);
-      if (rowCount(bumped) !== 1) throw failure("forbidden");
-      await tx.query(`UPDATE human_sessions
-        SET revoked_at=COALESCE(revoked_at,$3),revoke_reason=COALESCE(revoke_reason,'recovery_activated')
-        WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [values.organizationId, request.subject_member_id, values.now]);
       await tx.query(`UPDATE owner_recovery_sessions
         SET stage='revoked',revoked_at=$3,revoke_reason='recovery_activated'
         WHERE organization_id=$1 AND member_id=$2 AND recovery_session_id<>$4
@@ -700,6 +695,9 @@ export function createPostgresOwnerRecoveryRepository({
         activatedAt: values.activatedAt,
         approvedOwnerCount: validApprovals.length
       });
+      const bumped = await tx.query(`SELECT session_epoch FROM memberships
+        WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR SHARE`, [values.organizationId, request.subject_member_id]);
+      if (rowCount(bumped) !== 1) throw failure("forbidden");
       const auditEvent = await auditAppender({
         tx,
         organization_id: values.organizationId,
@@ -813,14 +811,10 @@ export function createPostgresOwnerRecoveryRepository({
       const validApprovals = await revalidateApprovals(tx, request, memberships, values.completedAt);
       if (validApprovals.length < request.threshold) throw failure("ineligible");
       await lockCredentialSet(tx, values.memberId);
-      const inserted = await tx.query(`INSERT INTO webauthn_credentials
-        (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (id) DO NOTHING
-        RETURNING id`, [
-        values.credentialId, values.memberId, values.publicKey, values.signCount, values.transports,
-        values.label, values.backupEligible, values.backupState
-      ]);
+      const inserted = await tx.query(
+        "SELECT * FROM public.agentpass_owner_recovery_register_credential($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::bytea,$7::bytea,$8::bigint,$9::text[],$10::text,$11::boolean,$12::boolean,$13::timestamptz)",
+        [values.organizationId, values.requestId, values.recoverySessionId, values.memberId, values.challengeId, values.credentialId, values.publicKey, values.signCount, values.transports, values.label, values.backupEligible, values.backupState, values.completedAt]
+      );
       if (rowCount(inserted) !== 1) throw failure("conflict");
       const enrolled = await tx.query(`UPDATE owner_recovery_sessions
         SET stage='credential_enrolled',credential_id=$5,credential_enrolled_at=$6,last_seen_at=$6
@@ -889,11 +883,17 @@ export function createPostgresOwnerRecoveryRepository({
       const validApprovals = await revalidateApprovals(tx, request, memberships, values.completedAt);
       if (validApprovals.length < request.threshold) throw failure("ineligible");
       await lockCredentialSet(tx, values.memberId);
-      const credential = await tx.query(`SELECT id FROM webauthn_credentials
-        WHERE id=$1 AND member_id=$2 AND revoked_at IS NULL FOR SHARE`, [values.credentialId, values.memberId]);
+      const credential = await tx.query(
+        "SELECT * FROM public.agentpass_owner_recovery_credential_exists($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bytea,$6::timestamptz)",
+        [values.organizationId, values.requestId, values.recoverySessionId, values.memberId, values.credentialId, values.completedAt]
+      );
       if (rowCount(credential) !== 1) throw failure("forbidden");
       const counter = await updateRecoveryCredentialCounterInTransaction({
         tx,
+        organization_id: values.organizationId,
+        request_id: values.requestId,
+        recovery_session_id: values.recoverySessionId,
+        challenge_id: values.authorizationId,
         member_id: values.memberId,
         credential_id: values.credentialId,
         expected_sign_count: values.expectedSignCount,
@@ -963,40 +963,34 @@ export function createPostgresOwnerRecoveryRepository({
   async function findRecoveryCredential(input = {}) {
     const values = normalizeCredentialLookupInput(input);
     const queryClient = values.tx ?? client;
-    let credentialId = values.credentialId;
-    if (!credentialId) {
-      if (!values.sessionDigest) throw failure("invalid_input");
-      const session = await queryClient.query(`SELECT credential_id FROM owner_recovery_sessions
-        WHERE organization_id=$1 AND recovery_session_id=$2 AND request_id=$3 AND member_id=$4
-          AND session_digest=$5 AND stage='credential_enrolled' AND credential_id IS NOT NULL
-          AND expires_at>$6 AND idle_expires_at>$6`, [values.organizationId, values.recoverySessionId, values.requestId, values.memberId, values.sessionDigest, values.now]);
-      if (rowCount(session) !== 1) return null;
-      credentialId = credentialBytes(session.rows[0].credential_id);
-    } else if (values.recoverySessionId) {
-      const binding = await queryClient.query(`SELECT 1 FROM owner_recovery_sessions
-        WHERE organization_id=$1 AND recovery_session_id=$2 AND request_id=$3 AND member_id=$4
-          AND credential_id=$5 AND stage IN ('credential_enrolled','activated')`, [values.organizationId, values.recoverySessionId, values.requestId, values.memberId, credentialId]);
-      if (rowCount(binding) !== 1) return null;
-    }
-    const result = await queryClient.query(`SELECT c.id,c.member_id,c.public_key,c.sign_count,c.transports,c.label,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at
-      FROM webauthn_credentials c WHERE c.id=$1 AND c.member_id=$2 AND c.revoked_at IS NULL`, [credentialId, values.memberId]);
+    if (!values.credentialId && !values.sessionDigest) throw failure("invalid_input");
+    const result = await queryClient.query(
+      "SELECT * FROM public.agentpass_owner_recovery_find_credential($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bytea,$6::bytea,$7::timestamptz)",
+      [values.organizationId, values.requestId, values.recoverySessionId ?? null, values.memberId, values.sessionDigest ?? null, values.credentialId ?? null, values.now]
+    );
     return result.rows?.[0] ? publicCredential(result.rows[0]) : null;
   }
 
   async function updateRecoveryCredentialCounterInTransaction(input = {}) {
     const values = normalizeCredentialCounterInput(input);
-    const assignments = values.hasBackupMetadata
-      ? "sign_count=$4,backup_eligible=$6,backup_state=$7,last_used_at=$5"
-      : "sign_count=$4,last_used_at=$5";
-    const predicates = values.hasBackupMetadata
-      ? " AND backup_eligible=$8 AND backup_state=$9"
-      : "";
-    const params = [values.credentialId, values.memberId, values.expectedSignCount, values.signCount, values.updatedAt];
-    if (values.hasBackupMetadata) params.push(values.backupEligible, values.backupState, values.expectedBackupEligible, values.expectedBackupState);
-    const result = await values.tx.query(`UPDATE webauthn_credentials
-      SET ${assignments}
-      WHERE id=$1 AND member_id=$2 AND sign_count=$3${predicates} AND revoked_at IS NULL
-      RETURNING id,sign_count,last_used_at`, params);
+    const result = await values.tx.query(
+      "SELECT * FROM public.agentpass_owner_recovery_update_credential_counter($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::bytea,$7::bigint,$8::bigint,$9::boolean,$10::boolean,$11::boolean,$12::boolean,$13::timestamptz)",
+      [
+        values.organizationId,
+        values.requestId,
+        values.recoverySessionId,
+        values.memberId,
+        values.challengeId,
+        values.credentialId,
+        values.signCount,
+        values.expectedSignCount,
+        values.hasBackupMetadata ? values.backupEligible : null,
+        values.hasBackupMetadata ? values.backupState : null,
+        values.hasBackupMetadata ? values.expectedBackupEligible : null,
+        values.hasBackupMetadata ? values.expectedBackupState : null,
+        values.updatedAt
+      ]
+    );
     if (rowCount(result) !== 1) throw failure("conflict");
     return Object.freeze({ committed: true, updated: true, credential_id: values.credentialId.toString("base64url"), sign_count: counterValue(result.rows[0].sign_count), last_used_at: timestamp(result.rows[0].last_used_at) });
   }
@@ -1045,13 +1039,6 @@ export function createPostgresOwnerRecoveryRepository({
 
   async function activateRecoveryStateInTransaction(tx, { request, session, organizationId, memberId, recoverySessionId, authorizationId, completedAt, validApprovals, counter }) {
     if (typeof auditAppender !== "function") throw failure("audit_unavailable");
-    await tx.query("SET LOCAL agentpass.recovery_epoch_bump = 'on'", []);
-    const bumped = await tx.query(`UPDATE memberships SET session_epoch=session_epoch+1,updated_at=clock_timestamp()
-      WHERE organization_id=$1 AND id=(SELECT id FROM memberships WHERE organization_id=$1 AND member_id=$2) AND member_id=$2 AND status='active'
-      RETURNING session_epoch`, [organizationId, memberId]);
-    if (rowCount(bumped) !== 1) throw failure("forbidden");
-    await tx.query(`UPDATE human_sessions SET revoked_at=COALESCE(revoked_at,$3),revoke_reason=COALESCE(revoke_reason,'recovery_activated')
-      WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, completedAt]);
     await tx.query(`UPDATE owner_recovery_sessions SET stage='revoked',revoked_at=$3,revoke_reason='recovery_activated'
       WHERE organization_id=$1 AND member_id=$2 AND recovery_session_id<>$4 AND stage IN ('session_issued','credential_enrolled') AND revoked_at IS NULL`, [organizationId, memberId, completedAt, recoverySessionId]);
     const activated = await tx.query(`UPDATE owner_recovery_sessions
@@ -1060,6 +1047,11 @@ export function createPostgresOwnerRecoveryRepository({
         AND stage='credential_enrolled' AND activation_authorization_id IS NULL RETURNING recovery_session_id`, [organizationId, recoverySessionId, request.request_id, memberId, authorizationId, completedAt]);
     if (rowCount(activated) !== 1) throw failure("conflict");
     const next = await transitionRequest(tx, { organizationId, requestId: request.request_id, expectedVersion: request.version, fromState: "credential_enrolled", toState: "activated", previousUpdatedAt: request.updated_at, activatedAt: completedAt, approvedOwnerCount: validApprovals.length });
+    const bumped = await tx.query(
+      "SELECT * FROM public.agentpass_owner_recovery_activate_authority($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::bytea)",
+      [organizationId, request.request_id, recoverySessionId, memberId, authorizationId, session.credential_id]
+    );
+    if (rowCount(bumped) !== 1) throw failure("forbidden");
     const auditEvent = await auditAppender({
       tx,
       organization_id: organizationId,
@@ -1650,7 +1642,7 @@ function normalizeCredentialCounterInput(input) {
   const expectedBackupState = optionalBoolean(input.expected_backup_state ?? input.expectedBackupState, "expected_backup_state");
   const hasBackupMetadata = [backupEligible, backupState, expectedBackupEligible, expectedBackupState].some((value) => value !== undefined);
   if (hasBackupMetadata && [backupEligible, backupState, expectedBackupEligible, expectedBackupState].some((value) => value === undefined)) throw failure("invalid_input");
-  return Object.freeze({ tx: input.tx, memberId: uuid(input.member_id ?? input.memberId, "member_id"), credentialId: credentialBytes(input.credential_id ?? input.credentialId), expectedSignCount: counterValue(input.expected_sign_count ?? input.expectedSignCount), signCount: counterValue(input.sign_count ?? input.signCount), backupEligible, backupState, expectedBackupEligible, expectedBackupState, hasBackupMetadata, updatedAt: date(input.updated_at ?? input.updatedAt ?? new Date(), "updated_at") });
+  return Object.freeze({ tx: input.tx, organizationId: uuid(input.organization_id ?? input.organizationId, "organization_id"), requestId: uuid(input.request_id ?? input.requestId, "request_id"), recoverySessionId: uuid(input.recovery_session_id ?? input.recoverySessionId, "recovery_session_id"), challengeId: uuid(input.challenge_id ?? input.challengeId, "challenge_id"), memberId: uuid(input.member_id ?? input.memberId, "member_id"), credentialId: credentialBytes(input.credential_id ?? input.credentialId), expectedSignCount: counterValue(input.expected_sign_count ?? input.expectedSignCount), signCount: counterValue(input.sign_count ?? input.signCount), backupEligible, backupState, expectedBackupEligible, expectedBackupState, hasBackupMetadata, updatedAt: date(input.updated_at ?? input.updatedAt ?? new Date(), "updated_at") });
 }
 
 function normalizeDigestExchangeInput(input) {

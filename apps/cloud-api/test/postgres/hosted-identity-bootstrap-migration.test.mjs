@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { migrationChecksum } from "../../src/postgres/migration-runner.mjs";
 
 const migrationUrl = new URL("../../../../contracts/postgres/0057_hosted_identity_bootstrap.sql", import.meta.url);
 const catalogUrl = new URL("../../../../contracts/catalog-v1.json", import.meta.url);
@@ -18,6 +19,7 @@ test("0057 is transactional, additive, and cataloged as the schema head", async 
     readFile(migrationUrl, "utf8"),
     readFile(catalogUrl, "utf8").then(JSON.parse)
   ]);
+  const sha256 = migrationChecksum(sql);
   assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/u);
   assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN|INDEX)|TRUNCATE\s+TABLE/iu);
   assert.doesNotMatch(sql, /ALTER TABLE public\.(?:members|organizations|memberships|human_sessions|webauthn_credentials|webauthn_challenges)/iu);
@@ -27,6 +29,7 @@ test("0057 is transactional, additive, and cataloged as the schema head", async 
     kind: "postgres-migration",
     source: "postgres/0057_hosted_identity_bootstrap.sql",
     version: 57,
+    sha256,
     profile: "migration-global",
     purpose: "migration.0057.hosted-identity-bootstrap",
     implementation_status: "implemented",

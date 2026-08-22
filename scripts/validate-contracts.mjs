@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -320,7 +321,7 @@ function validateContractCatalog() {
   for (const name of migrationNames) {
     const migration = migrations.find((item) => item.name === name);
     const version = Number(name.slice(0, 4));
-    expected.set(["postgres-migration", `postgres/${name}`, "", "", ""].join("|"), { kind: "postgres-migration", source: `postgres/${name}`, version, requiresTenant: /\borganization_id\b/.test(migration.sql) });
+    expected.set(["postgres-migration", `postgres/${name}`, "", "", ""].join("|"), { kind: "postgres-migration", source: `postgres/${name}`, version, sha256: crypto.createHash("sha256").update(migration.sql, "utf8").digest("hex"), requiresTenant: /\borganization_id\b/.test(migration.sql) });
   }
 
   const seenKeys = new Set();
@@ -331,7 +332,7 @@ function validateContractCatalog() {
       fail("catalog contains a non-object entry");
       continue;
     }
-    const allowedKeys = ["id", "kind", "source", "method", "path", "operation_id", "version", "profile", "purpose", "implementation_status", "authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry", "implementation_refs", "compatibility_fixtures"];
+    const allowedKeys = ["id", "kind", "source", "method", "path", "operation_id", "version", "sha256", "profile", "purpose", "implementation_status", "authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry", "implementation_refs", "compatibility_fixtures"];
     if (JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify([...allowedKeys].filter((key) => Object.hasOwn(entry, key)).sort())) fail(`catalog entry ${entry.id ?? "<unknown>"} has an unexpected field set`);
     if (typeof entry.id !== "string" || entry.id.length === 0) fail("catalog entry id is missing");
     else if (ids.has(entry.id)) fail(`catalog contains a duplicate id: ${entry.id}`);
@@ -344,6 +345,7 @@ function validateContractCatalog() {
       continue;
     }
     if (entry.version !== expectedEntry.version) fail(`${entry.id} has version ${entry.version}, expected ${expectedEntry.version}`);
+    if (entry.kind === "postgres-migration" && (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256) || entry.sha256 !== expectedEntry.sha256)) fail(`${entry.id} has a stale or invalid SQL checksum`);
     if (typeof entry.profile !== "string" || !catalog.profiles[entry.profile]) fail(`${entry.id} references an unknown profile`);
     if (typeof entry.purpose !== "string" || entry.purpose.length === 0) fail(`${entry.id} must declare a purpose`);
     if (entry.implementation_status !== undefined && !["implemented", "specified"].includes(entry.implementation_status)) fail(`${entry.id} has an invalid implementation status`);

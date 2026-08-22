@@ -64,23 +64,25 @@ async function queryIdentity(databaseUrl, expectedRole, connection) {
   if (!databaseUrl) fail(`database URL for ${connection} role assertion is required`);
   const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
   try {
-    const result = await pool.query("SELECT session_user, current_user");
+    const result = await pool.query("SELECT session_user, current_user, (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()) AS ssl");
     assert.equal(result.rowCount, 1);
     const identity = result.rows[0];
-    assert.deepEqual(identity, { session_user: expectedRole, current_user: expectedRole }, `${connection} PostgreSQL identity`);
+    assert.deepEqual(identity, { session_user: expectedRole, current_user: expectedRole, ssl: true }, `${connection} PostgreSQL identity and TLS`);
     return {
       connection,
       expected_role: expectedRole,
       session_user: identity.session_user,
       current_user: identity.current_user,
+      ssl: identity.ssl,
     };
   } finally {
     await pool.end();
   }
 }
 
-async function queryEvidence(databaseUrl, appDatabaseUrl) {
+async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl) {
   if (!databaseUrl) fail("AGENTPASS_TEST_POSTGRES_ADMIN_URL is required");
+  if (!maintenanceDatabaseUrl) fail("AGENTPASS_TEST_MAINTENANCE_DATABASE_URL is required");
   const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
   try {
     const result = await pool.query(`
@@ -104,7 +106,13 @@ async function queryEvidence(databaseUrl, appDatabaseUrl) {
                 WHERE n.nspname='public'
                   AND p.oid IN (to_regprocedure('public.agentpass_authorize_device_audit_tenant(uuid,uuid)'), to_regprocedure('public.agentpass_device_audit_current_organization_id()'))
                   AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog, public']) AS tenant_authority_functions,
-             has_table_privilege('agentpass_app', 'public.platform_device_audit_tenant_context', 'SELECT') AS app_can_select_tenant_authority`, [ROLE_NAMES]);
+             has_table_privilege('agentpass_app', 'public.platform_device_audit_tenant_context', 'SELECT') AS app_can_select_tenant_authority,
+             has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_enqueue(uuid,uuid,uuid,text,text,jsonb)', 'EXECUTE') AS app_can_enqueue_inbox,
+             has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE') AS app_can_claim_inbox,
+             has_function_privilege('agentpass_app', 'public.agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)', 'EXECUTE') AS app_can_settle_inbox,
+             has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_claim(bytea,integer,integer)', 'EXECUTE') AS maintenance_can_claim_inbox,
+             has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_settle(uuid,uuid,integer,bytea,text,text)', 'EXECUTE') AS maintenance_can_settle_inbox,
+             has_function_privilege('agentpass_maintenance', 'public.agentpass_device_audit_inbox_health()', 'EXECUTE') AS maintenance_can_health_inbox`, [ROLE_NAMES]);
     assert.equal(result.rowCount, 1);
     const row = result.rows[0];
     assert.equal(row.schema_head, POSTGRES_SCHEMA_HEAD.version);
@@ -116,11 +124,18 @@ async function queryEvidence(databaseUrl, appDatabaseUrl) {
     assert.equal(row.tenant_authority_relations, 1);
     assert.equal(row.tenant_authority_functions, 3);
     assert.equal(row.app_can_select_tenant_authority, false);
+    assert.equal(row.app_can_enqueue_inbox, true);
+    assert.equal(row.app_can_claim_inbox, false);
+    assert.equal(row.app_can_settle_inbox, false);
+    assert.equal(row.maintenance_can_claim_inbox, true);
+    assert.equal(row.maintenance_can_settle_inbox, true);
+    assert.equal(row.maintenance_can_health_inbox, true);
     assert.equal(row.ssl, true);
     const adminRole = process.env.AGENTPASS_QUALIFICATION_ADMIN_ROLE ?? "postgres";
     const roleAssertions = [
       await queryIdentity(databaseUrl, adminRole, "admin"),
       await queryIdentity(appDatabaseUrl, "agentpass_app", "app"),
+      await queryIdentity(maintenanceDatabaseUrl, "agentpass_maintenance", "maintenance"),
     ];
     return { ...row, roleAssertions };
   } finally {
@@ -138,6 +153,7 @@ async function writeEvidence(output, tapFile) {
   const server = await queryEvidence(
     process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL,
     process.env.AGENTPASS_TEST_APP_DATABASE_URL,
+    process.env.AGENTPASS_TEST_MAINTENANCE_DATABASE_URL,
   );
   const report = {
     schema_version: 1,
@@ -166,6 +182,14 @@ async function writeEvidence(output, tapFile) {
         relation: "platform_device_audit_tenant_context",
         security_definer_functions: server.tenant_authority_functions,
         app_can_select_relation: server.app_can_select_tenant_authority
+      },
+      device_audit_inbox_authority: {
+        app_can_enqueue: server.app_can_enqueue_inbox,
+        app_can_claim: server.app_can_claim_inbox,
+        app_can_settle: server.app_can_settle_inbox,
+        maintenance_can_claim: server.maintenance_can_claim_inbox,
+        maintenance_can_settle: server.maintenance_can_settle_inbox,
+        maintenance_can_health: server.maintenance_can_health_inbox
       }
     },
     suites: { tap: tapEvidence },
@@ -185,18 +209,30 @@ export function verifyEvidence(file, sourceCommit) {
   assert.equal(report.source_commit, sourceCommit);
   assert.equal(report.schema.head, POSTGRES_SCHEMA_HEAD.version);
   assert.equal(report.schema.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
+  assert.equal(report.schema.head_name, POSTGRES_SCHEMA_HEAD.name);
+  assert.equal(report.schema.head_checksum, POSTGRES_SCHEMA_HEAD.checksum);
+  assert.equal(report.schema.migrations_sha256, digest(JSON.stringify(POSTGRES_SCHEMA_HEAD.migrations)));
   assert.equal(report.service.ssl, true);
   assert.equal(report.service.roles.length, ROLE_NAMES.length);
   assert.deepEqual(report.service.role_assertions, [
-    { connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres" },
-    { connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app" },
+    { connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres", ssl: true },
+    { connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app", ssl: true },
+    { connection: "maintenance", expected_role: "agentpass_maintenance", session_user: "agentpass_maintenance", current_user: "agentpass_maintenance", ssl: true },
   ]);
   assert.equal(report.service.forced_rls_relations, 3);
   assert.equal(report.service.device_audit_triggers, 2);
   assert.deepEqual(report.service.tenant_authority, {
     relation: "platform_device_audit_tenant_context",
-        security_definer_functions: 3,
+    security_definer_functions: 3,
     app_can_select_relation: false
+  });
+  assert.deepEqual(report.service.device_audit_inbox_authority, {
+    app_can_enqueue: true,
+    app_can_claim: false,
+    app_can_settle: false,
+    maintenance_can_claim: true,
+    maintenance_can_settle: true,
+    maintenance_can_health: true
   });
   assert.equal(report.skipped_tests, 0);
   assert.equal(report.status, "passed");

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
-import { createCursorLaunchPlan, projectCursorAdapterError } from "../src/adapter.mjs";
+import { createCursorLaunchPlan, launchCursorLifecycle, projectCursorAdapterError } from "../src/adapter.mjs";
 import { scanCursorAdapterArtifacts } from "../src/secret-scan.mjs";
 
 function usage() {
-  process.stderr.write("agentpass-cursor: usage plan PROJECT_DIRECTORY | scan\n");
+  process.stderr.write("agentpass-cursor: usage plan PROJECT_DIRECTORY | launch PROJECT_DIRECTORY TTL_SECONDS | scan\n");
   process.exitCode = 2;
 }
 
@@ -23,6 +23,8 @@ try {
   const args = process.argv.slice(2);
   if (args.length === 2 && args[0] === "plan" && !args[1].startsWith("-")) {
     process.stdout.write(`${JSON.stringify(createCursorLaunchPlan({ projectDirectory: args[1] }))}\n`);
+  } else if (args.length === 3 && args[0] === "launch" && !args[1].startsWith("-") && !args[2].startsWith("-")) {
+    process.stdout.write(`${JSON.stringify(await launchCursorLifecycle({ projectDirectory: args[1], ttlSeconds: Number(args[2]) }, { platform: process.platform }))}\n`);
   } else if (args.length === 1 && args[0] === "scan") {
     const input = JSON.parse(await readStdin());
     process.stdout.write(`${JSON.stringify(scanCursorAdapterArtifacts(input))}\n`);

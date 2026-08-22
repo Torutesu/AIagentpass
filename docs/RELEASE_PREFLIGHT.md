@@ -2,7 +2,7 @@
 
 This is the release-blocking contract for the native audit delivery and the
 external qualification evidence that cannot be established by focused local
-tests. A release candidate is promotable only when all five checks below are
+tests. A release candidate is promotable only when all seven checks below are
 `passed` for the same source commit and package/container digest:
 
 | Check | Required live evidence |
@@ -10,8 +10,10 @@ tests. A release candidate is promotable only when all five checks below are
 | `native_audit_delivery` | The current independent native audit delivery, including the live Host/Child identity and lifecycle boundary, reviewed for this exact candidate. A focused test result alone is not sufficient. |
 | `cloud_production_deploy` | A real production deployment, immutable revision, ready health check, source commit, and SHA-256 artifact digest. An image push to GHCR or a staging result is not a production deployment. |
 | `real_postgresql` | Qualification against a real PostgreSQL instance covering the reviewed roles, migrations, privilege-negative checks, and relevant transaction/concurrency behavior. A skipped live-PostgreSQL test is not `passed`. |
-| `developer_id_notarization` | Developer ID application/installer signatures, Apple notarization ticket, stapling, and Gatekeeper verification for the exact package digest. Offline metadata alone is not `passed`. |
+| `developer_id_signing` | Developer ID application and installer signatures, exact Team ID, and independent verification for the package digest. Offline metadata alone is not `passed`. |
+| `apple_notarization` | Apple notarization submission, stapling, and Gatekeeper verification for the exact package digest. Offline metadata alone is not `passed`. |
 | `hardware_qualification` | Signed native candidate qualification on Apple silicon and Intel/T2 hardware, including the native host/device boundary scenarios, with both reports bound to the exact package digest. |
+| `external_qualification_provenance` | Canonical CI run plus distinct qualification run/attempt/job IDs, archive digest, and independent provenance verification. A self-reported job result is not `passed`. |
 
 The machine-readable input is supplied by the release system at the path given
 to `scripts/ops/verify-release-preflight.mjs`:
@@ -28,6 +30,12 @@ to `scripts/ops/verify-release-preflight.mjs`:
       "status": "passed|failed|unknown",
       "evidence_ref": "native-audit.json",
       "evidence_sha256": "<64 lowercase hex characters>",
+      "verification_ref": "native-audit.verification.json",
+      "verification_sha256": "<64 lowercase hex characters>",
+      "evidence_origin": "protected_external",
+      "execution_mode": "protected_external",
+      "verifier_kind": "independent_protected_verifier",
+      "verifier_status": "verified",
       "commit_sha": "<same candidate commit>",
       "artifact_digest": "<same candidate digest>"
     }
@@ -35,7 +43,8 @@ to `scripts/ops/verify-release-preflight.mjs`:
 }
 ```
 
-The five check objects are required. The example shows the common fields; each
+The seven check objects are required. Every passed check also requires a
+separate, digest-bound independent verification file. The example shows the common fields; each
 check must be present and must carry its own candidate binding when `status` is
 `passed`. Evidence references must be regular files beneath the release evidence
 file's directory, must not be symlinks, and must match `evidence_sha256`. They
@@ -44,7 +53,7 @@ secret material.
 
 判定は fail-closed です。
 
-- `passed` (exit `0`) は5項目すべてが `passed` で、同じ commit/digest に束縛されている場合だけです。
+- `passed` (exit `0`) は7項目すべてが `passed` で、同じ commit/digest に束縛され、各項目に独立検証証跡がある場合だけです。
 - `failed` (exit `1`) は否定的な qualification、schema/binding 不一致、または不正な証跡です。
 - `unknown` (exit `2`) は evidence file の欠落、live qualification の未取得、skip、または `unknown` の報告です。これは promotion を許可しません。
 

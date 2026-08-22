@@ -110,7 +110,8 @@ private struct NativeAgentDarwinBootIdentitySource: NativeAgentBootIdentitySourc
               bytes[length - 1] == 0 else {
             throw nativeAgentClockUnavailable
         }
-        let identity = String(cString: bytes).lowercased()
+        let identityBytes = bytes[..<(length - 1)].map { UInt8(bitPattern: $0) }
+        let identity = String(decoding: identityBytes, as: UTF8.self).lowercased()
         guard identity.utf8.count == 36, UUID(uuidString: identity)?.uuidString.lowercased() == identity else {
             throw nativeAgentClockUnavailable
         }

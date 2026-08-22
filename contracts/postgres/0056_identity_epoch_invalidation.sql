@@ -129,19 +129,15 @@ BEGIN
           MESSAGE = 'membership session epoch cannot advance beyond bigint';
       END IF;
 
-      -- 0025 had one compatibility caller that already advances the
-      -- membership epoch before the recovery request state transition.  It
-      -- remains accepted during this migration boundary; the primitive still
-      -- owns DB-clock session/recent-auth invalidation for that transition.
-      IF NOT (p_event = 'recovery_transition'
-              AND COALESCE(current_setting('agentpass.recovery_epoch_bump', true), '') = 'on') THEN
-        UPDATE memberships
-        SET session_epoch = session_epoch + 1,
-            updated_at = now_value
-        WHERE organization_id = p_organization_id
-          AND member_id = p_member_id;
-        membership_epoch := membership_epoch + 1;
-      END IF;
+      -- The SECURITY DEFINER owner is the only trusted writer of the epoch.
+      -- Do not use a caller-controlled GUC as an authorization signal: any
+      -- session can SET a custom parameter.
+      UPDATE memberships
+      SET session_epoch = session_epoch + 1,
+          updated_at = now_value
+      WHERE organization_id = p_organization_id
+        AND member_id = p_member_id;
+      membership_epoch := membership_epoch + 1;
     END IF;
   END IF;
 
@@ -391,10 +387,9 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NEW.session_epoch IS DISTINCT FROM OLD.session_epoch THEN
-    IF (current_user <> pg_get_userbyid(
-          (SELECT relowner FROM pg_class WHERE oid = TG_RELID)
-        )
-        AND COALESCE(current_setting('agentpass.recovery_epoch_bump', true), '') <> 'on')
+    IF current_user <> pg_get_userbyid(
+         (SELECT relowner FROM pg_class WHERE oid = TG_RELID)
+       )
        OR NEW.session_epoch <> OLD.session_epoch + 1 THEN
       RAISE EXCEPTION USING
         ERRCODE = 'check_violation',

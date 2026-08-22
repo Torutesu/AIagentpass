@@ -95,7 +95,7 @@ test("AgentPassConsole exposes the Organization administration view", async () =
   assert.match(source, /import \{ OrganizationPanel \} from "\.\/OrganizationPanel"/);
   assert.match(source, /\| "organizations"/);
   assert.match(source, /label: "Organizations"/);
-  assert.match(source, /activeView === "organizations" \? <OrganizationPanel key=\{selectedOrganizationId \?\? "session-organization"\} client=\{organizationClient\} initialOrganizationId=\{selectedOrganizationId \?\? undefined\} \/> : null/);
+  assert.match(source, /activeView === "organizations" \? <OrganizationPanel key=\{selectedOrganizationId \?\? "session-organization"\} client=\{organizationClient\} initialOrganizationId=\{selectedOrganizationId \?\? undefined\} onOrganizationSwitched=\{handleOrganizationSwitched\} \/> : null/);
   assert.match(source, /organization-content/);
   assert.match(source, /onOrganizationSwitched=\{handleOrganizationSwitched\}/);
 });

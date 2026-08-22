@@ -44,13 +44,16 @@ const laneSections = () => [
 
 const shellLines = (section) => section.split('\n').map((line) => line.trim()).filter(Boolean);
 
-const fixedInvocation = new RegExp(`^${escapeRegExp(FIXED_NODE)} ${escapeRegExp(FIXED_ENTRYPOINT)} (run|recover)$`, 'u');
+const fixedInvocation = new RegExp(`^(?:${escapeRegExp(FIXED_NODE)} ${escapeRegExp(FIXED_ENTRYPOINT)} (run|recover)|suite_output="\\$\\(${escapeRegExp(FIXED_NODE)} ${escapeRegExp(FIXED_ENTRYPOINT)} (run)\\)")$`, 'u');
 const materializerInvocation = new RegExp(`^${escapeRegExp(FIXED_NODE)} ${escapeRegExp(FIXED_INPUT_MATERIALIZER)} materialize$`, 'u');
 
 const missingFixedInvocationContracts = (name, section) => {
   const lines = shellLines(section);
-  const fixedLines = lines.filter((line) => line.startsWith(`${FIXED_NODE} ${FIXED_ENTRYPOINT} `));
-  const operations = fixedLines.map((line) => fixedInvocation.exec(line)?.[1] ?? null);
+  const fixedLines = lines.filter((line) => line.startsWith(`${FIXED_NODE} ${FIXED_ENTRYPOINT} `) || line.startsWith(`suite_output="\$(${FIXED_NODE} ${FIXED_ENTRYPOINT} `));
+  const operations = fixedLines.map((line) => {
+    const match = fixedInvocation.exec(line);
+    return match?.[1] ?? match?.[2] ?? null;
+  });
   const missing = [];
 
   if (operations.length !== 2 || operations.filter(Boolean).length !== 2 || operations.sort().join(',') !== 'recover,run') {
@@ -75,7 +78,7 @@ test('both hardware lanes materialize the fixed root input through the pinned in
     const lines = shellLines(section);
     const materializerLines = lines.filter((line) => line.startsWith(`${FIXED_NODE} ${FIXED_INPUT_MATERIALIZER} `));
     const materializerOperations = materializerLines.map((line) => materializerInvocation.exec(line)?.[0] ?? null);
-    const fixedRunIndex = lines.findIndex((line) => fixedInvocation.test(line) && line.endsWith(' run'));
+    const fixedRunIndex = lines.findIndex((line) => fixedInvocation.test(line) && (line.endsWith(' run') || line.endsWith(' run)"')));
     const materializerIndex = lines.findIndex((line) => materializerInvocation.test(line));
 
     if (!section.includes(`['${MATERIALIZER_INSTALLED}', '${MATERIALIZER_SOURCE}']`)) {
@@ -114,7 +117,7 @@ test('both hardware lanes explicitly orchestrate the unarmed control and the com
   for (const [name, section] of laneSections()) {
     const lines = shellLines(section);
     if (!section.includes(`['${SUITE_INSTALLED}', '${SUITE_SOURCE}']`)) missing.push(`${name}: preflight manifest must pin ${SUITE_INSTALLED} to ${SUITE_SOURCE}`);
-    const suiteLines = lines.filter((line) => line.startsWith(`${FIXED_NODE} ${FIXED_ENTRYPOINT} `));
+    const suiteLines = lines.filter((line) => line.startsWith(`${FIXED_NODE} ${FIXED_ENTRYPOINT} `) || line.startsWith(`suite_output="\$(${FIXED_NODE} ${FIXED_ENTRYPOINT} `));
     if (suiteLines.length !== 2) missing.push(`${name}: must execute the installed suite entrypoint for the unarmed+six suite with run and recover; observed ${JSON.stringify(suiteLines)}`);
     if (suiteLines.some((line) => !fixedInvocation.test(line))) missing.push(`${name}: suite entrypoint must receive only run or recover and no dynamic executable/path arguments`);
   }

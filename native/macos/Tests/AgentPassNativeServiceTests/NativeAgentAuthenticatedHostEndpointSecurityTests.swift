@@ -162,7 +162,8 @@ private final class HostEndpointHarness: @unchecked Sendable {
     func makeEndpoint(
         provideSignatureBudget: Bool = true,
         signerPolicy: NativeAgentAuthenticatedHostSignerPolicy = .dedicatedSignerRequired,
-        includeDedicatedSigner: Bool = false
+        includeDedicatedSigner: Bool = false,
+        controlRegistry: NativeAgentHostControlRegistry? = nil
     ) throws -> NativeAgentAuthenticatedHostEndpoint {
         let hostIdentity = NativeProcessIdentity(observation: hostObservation)
         let childIdentity = NativeProcessIdentity(observation: childObservation)
@@ -204,6 +205,23 @@ private final class HostEndpointHarness: @unchecked Sendable {
                 )
                 recorder.recordRegister()
             }
+        }
+        let sessionRegistrar: NativeAgentAuthenticatedHostEndpoint.SessionRegistrar?
+        let sessionUnregistrar: NativeAgentAuthenticatedHostEndpoint.SessionUnregistrar?
+        if let controlRegistry {
+            sessionRegistrar = { sessionID, endpoint, ownerIdentity in
+                try controlRegistry.register(
+                    sessionID: sessionID,
+                    endpoint: endpoint,
+                    ownerIdentity: ownerIdentity
+                )
+            }
+            sessionUnregistrar = { endpoint in
+                controlRegistry.unregister(endpoint: endpoint)
+            }
+        } else {
+            sessionRegistrar = nil
+            sessionUnregistrar = nil
         }
 
         return try NativeAgentAuthenticatedHostEndpoint(
@@ -249,7 +267,9 @@ private final class HostEndpointHarness: @unchecked Sendable {
                 registry.unregister(identityBindingHash: bindingHash)
                 recorder.recordUnregister(bindingHash)
             },
-            signatureBudgetProvider: signatureBudgetProvider
+            signatureBudgetProvider: signatureBudgetProvider,
+            sessionRegistrar: sessionRegistrar,
+            sessionUnregistrar: sessionUnregistrar
         )
     }
 
@@ -359,14 +379,14 @@ private final class HostEndpointHarness: @unchecked Sendable {
 
 private func prepare(_ endpoint: NativeAgentAuthenticatedHostEndpoint) throws -> AgentPassHostPrepareResponse {
     var result: AgentPassHostPrepareResponse?
-    var error: NSError?
+    var responseError: NSError?
     endpoint.prepareHostSession(
         try #require(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0x41, count: 16)))
-    ) { response, responseError in
+    ) { response, failure in
         result = response
-        error = responseError
+        responseError = failure
     }
-    #expect(error == nil)
+    #expect(responseError == nil)
     return try #require(result)
 }
 
@@ -400,6 +420,28 @@ private func childErrorCode(
     var error: NSError?
     endpoint.signChildGitCommit(request) { _, responseError in error = responseError }
     return error?.userInfo[NSLocalizedDescriptionKey] as? String
+}
+
+private func controlClose(
+    _ registry: NativeAgentHostControlRegistry,
+    controllerObservation: NativeProcessObservation,
+    request: AgentPassHostControlCloseRequest
+) -> (AgentPassHostControlCloseResponse?, NSError?) {
+    var response: AgentPassHostControlCloseResponse?
+    var error: NSError?
+    do {
+        response = try registry.close(
+            request: request,
+            controllerIdentity: NativeProcessIdentity(observation: controllerObservation)
+        )
+    } catch let failure {
+        error = NSError(
+            domain: "test.native-agent-host-control",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: failure.localizedDescription]
+        )
+    }
+    return (response, error)
 }
 
 @Test func hostEndpointRequiresDedicatedSignerByDefault() throws {
@@ -616,6 +658,297 @@ private func childErrorCode(
 
     #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
     #expect(harness.recorder.signCount == 0)
+
+    // Restoring the peer observation must not restore the revoked session.
+    // The close request was authenticated against the wrong peer, so the
+    // terminal revocation is connection-owned and monotonic.
+    harness.setPeerObservation(harness.hostObservation)
+    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x67])))
+    #expect(errorCode(endpoint, sign: signRequest) == 12)
+    #expect(harness.recorder.signCount == 0)
+}
+
+@Test func hostEndpointCloseResponseLossLeavesSigningClosedAndReplayCannotRestoreAuthority() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    let prepared = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    let request = try #require(AgentPassHostCloseRequest(reason: .clientShutdown))
+
+    // The service applies close before invoking the reply. Discarding the
+    // reply models a response lost after the close was already committed.
+    endpoint.closeHostSession(request) { _, _ in }
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+
+    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x68])))
+    #expect(errorCode(endpoint, sign: signRequest) == 10)
+    #expect(harness.recorder.signCount == 0)
+
+    // Close is intentionally idempotent: replaying the same harmless close
+    // request may return a receipt, but it must not re-register or revive the
+    // signing authority.
+    var replayResponse: AgentPassHostCloseResponse?
+    var replayError: NSError?
+    endpoint.closeHostSession(request) { response, error in
+        replayResponse = response
+        replayError = error
+    }
+    #expect(replayError == nil)
+    #expect(replayResponse?.sessionID == prepared.sessionID)
+    #expect(replayResponse?.status == AgentPassHostCloseResponse.closedStatus)
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(errorCode(endpoint, sign: signRequest) == 10)
+}
+
+@Test func hostEndpointDuplicateCloseDoesNotRepeatChildCleanupOrSignerAccess() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    let request = try #require(AgentPassHostCloseRequest(reason: .completed))
+    var firstResponse: AgentPassHostCloseResponse?
+    var firstError: NSError?
+    endpoint.closeHostSession(request) { response, error in
+        firstResponse = response
+        firstError = error
+    }
+    var secondResponse: AgentPassHostCloseResponse?
+    var secondError: NSError?
+    endpoint.closeHostSession(request) { response, error in
+        secondResponse = response
+        secondError = error
+    }
+
+    #expect(firstError == nil)
+    #expect(secondError == nil)
+    #expect(firstResponse?.sessionID == secondResponse?.sessionID)
+    #expect(firstResponse?.status == AgentPassHostCloseResponse.closedStatus)
+    #expect(secondResponse?.status == AgentPassHostCloseResponse.closedStatus)
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(harness.recorder.signCount == 0)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+}
+
+@Test func hostEndpointSessionOwnershipMismatchFailsClosedWithoutAffectingOwner() throws {
+    let harness = try HostEndpointHarness()
+    let owner = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    _ = try prepare(owner)
+    _ = try attach(owner, request: harness.attachRequest())
+
+    // A second endpoint models another accepted connection with the same
+    // observed executable identity. It has no session of its own and must not
+    // be able to close the owner's connection-owned session.
+    let otherConnection = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    var response: AgentPassHostCloseResponse?
+    var error: NSError?
+    otherConnection.closeHostSession(try #require(AgentPassHostCloseRequest(reason: .cancelled))) { value, responseError in
+        response = value
+        error = responseError
+    }
+
+    #expect(response == nil)
+    #expect(error?.code == 2)
+    #expect(harness.recorder.unregisterCount == 0)
+
+    let ownerSignRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x69])))
+    var ownerSignResponse: AgentPassHostSignResponse?
+    var ownerSignError: NSError?
+    owner.signHostPayload(ownerSignRequest) { value, responseError in
+        ownerSignResponse = value
+        ownerSignError = responseError
+    }
+    #expect(ownerSignError == nil)
+    #expect(ownerSignResponse?.signature.isEmpty == false)
+    #expect(harness.recorder.signCount == 1)
+}
+
+@Test func hostEndpointDisconnectCleanupIsIdempotentAndRevokesChildRegistration() throws {
+    let harness = try HostEndpointHarness()
+    let endpoint = try harness.makeEndpoint(signerPolicy: .developmentLegacySignerAllowed)
+    _ = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+
+    endpoint.invalidateConnection()
+    endpoint.invalidateConnection()
+
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x6A])))
+    #expect(errorCode(endpoint, sign: request) == 12)
+    #expect(harness.recorder.signCount == 0)
+}
+
+@Test func hostControlRegistryRejectsWrongPrincipalWithoutClosingTheTarget() throws {
+    let harness = try HostEndpointHarness()
+    let controlRegistry = NativeAgentHostControlRegistry()
+    let endpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let prepared = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+    let request = try #require(AgentPassHostControlCloseRequest(
+        sessionID: prepared.sessionID,
+        operationID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        reason: .completed
+    ))
+    let wrongObservation = try HostEndpointHarness.observation(
+        pid: 43,
+        pidVersion: 10,
+        codeDirectoryHash: String(repeating: "c", count: 64),
+        bundleIdentifier: "dev.agentpass.agent-host"
+    )
+    let wrongPrincipal = NativeProcessIdentity(observation: wrongObservation)
+
+    #expect(throws: NativeAgentHostControlRegistryError.controlPeerMismatch) {
+        _ = try controlRegistry.close(request: request, controllerIdentity: wrongPrincipal)
+    }
+
+    #expect(harness.recorder.unregisterCount == 0)
+    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x6B])))
+    var signResponse: AgentPassHostSignResponse?
+    var signError: NSError?
+    endpoint.signHostPayload(signRequest) { response, error in
+        signResponse = response
+        signError = error
+    }
+    #expect(signError == nil)
+    #expect(signResponse?.signature.isEmpty == false)
+    #expect(harness.recorder.signCount == 1)
+}
+
+@Test func hostControlRegistryRejectsOperationReplayWithDifferentFingerprint() throws {
+    let harness = try HostEndpointHarness()
+    let controlRegistry = NativeAgentHostControlRegistry()
+    let firstEndpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let secondEndpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let first = try prepare(firstEndpoint)
+    let second = try prepare(secondEndpoint)
+    let operationID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    let firstRequest = try #require(AgentPassHostControlCloseRequest(
+        sessionID: first.sessionID,
+        operationID: operationID,
+        reason: .completed
+    ))
+    let secondRequest = try #require(AgentPassHostControlCloseRequest(
+        sessionID: second.sessionID,
+        operationID: operationID,
+        reason: .completed
+    ))
+
+    let (firstResponse, firstError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: firstRequest)
+    let (secondResponse, secondError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: secondRequest)
+    #expect(firstError == nil)
+    #expect(firstResponse?.sessionID == first.sessionID)
+    #expect(secondResponse == nil)
+    #expect(secondError?.localizedDescription == NativeAgentHostControlRegistryError.controlReplay.rawValue)
+
+    var status: AgentPassHostStatusResponse?
+    var statusError: NSError?
+    secondEndpoint.hostSessionStatus(try #require(AgentPassHostStatusRequest())) { response, error in
+        status = response
+        statusError = error
+    }
+    #expect(statusError == nil)
+    #expect(status?.sessionID == second.sessionID)
+    #expect(status?.status == AgentPassHostXPCContract.SessionStatus.prepared.rawValue)
+}
+
+@Test func hostControlRegistryDuplicateCloseReturnsTheSameReceiptWithoutRepeatingCleanup() throws {
+    let harness = try HostEndpointHarness()
+    let controlRegistry = NativeAgentHostControlRegistry()
+    let endpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let prepared = try prepare(endpoint)
+    _ = try attach(endpoint, request: harness.attachRequest())
+    let request = try #require(AgentPassHostControlCloseRequest(
+        sessionID: prepared.sessionID,
+        operationID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        reason: .cancelled
+    ))
+
+    let (firstResponse, firstError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
+    let (secondResponse, secondError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
+
+    #expect(firstError == nil)
+    #expect(secondError == nil)
+    let first = try #require(firstResponse)
+    let second = try #require(secondResponse)
+    #expect(first.operationID == second.operationID)
+    #expect(first.sessionID == second.sessionID)
+    #expect(first.closedAtMilliseconds == second.closedAtMilliseconds)
+    #expect(harness.recorder.unregisterCount == 1)
+    #expect(harness.childAdmissionError() == NativeAgentAuthenticatedChildGitError.childNotRegistered.rawValue)
+}
+
+@Test func hostControlRegistryResponseLossConvergesOnExactOperationRetry() throws {
+    let harness = try HostEndpointHarness()
+    let controlRegistry = NativeAgentHostControlRegistry()
+    let endpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let prepared = try prepare(endpoint)
+    let request = try #require(AgentPassHostControlCloseRequest(
+        sessionID: prepared.sessionID,
+        operationID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        reason: .clientShutdown
+    ))
+
+    // Treat the first receipt as lost. The registry has already committed the
+    // close before returning, so an exact retry must converge to the same
+    // durable-in-memory receipt rather than invoke the endpoint again.
+    let (firstResponse, firstError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
+    let (retryResponse, retryError) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
+
+    #expect(firstError == nil)
+    #expect(firstResponse != nil)
+    #expect(retryError == nil)
+    let retry = try #require(retryResponse)
+    #expect(retry.operationID == request.operationID)
+    #expect(retry.sessionID == request.sessionID)
+    #expect(retry.status == AgentPassHostXPCContract.SessionStatus.closed.rawValue)
+    #expect(harness.recorder.unregisterCount == 0)
+    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x6C])))
+    #expect(errorCode(endpoint, sign: signRequest) == 10)
+}
+
+@Test func hostControlRegistryClosesOwnerSessionThroughASeparateAuthenticatedEndpoint() throws {
+    let harness = try HostEndpointHarness()
+    let controlRegistry = NativeAgentHostControlRegistry()
+    let ownerEndpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let controllerEndpoint = try harness.makeEndpoint(
+        signerPolicy: .developmentLegacySignerAllowed,
+        controlRegistry: controlRegistry
+    )
+    let prepared = try prepare(ownerEndpoint)
+    _ = try prepare(controllerEndpoint)
+    let request = try #require(AgentPassHostControlCloseRequest(
+        sessionID: prepared.sessionID,
+        operationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        reason: .completed
+    ))
+
+    let (response, error) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
+
+    #expect(error == nil)
+    #expect(response?.sessionID == prepared.sessionID)
+    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x6D])))
+    #expect(errorCode(ownerEndpoint, sign: signRequest) == 10)
 }
 
 @Test func hostEndpointRejectsPIDIdentityAndWorktreeMismatchDuringAttach() throws {

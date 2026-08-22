@@ -21,6 +21,7 @@ done
 [[ "$IDENTITY" == "Developer ID Installer:"* ]] || { echo "Installer identity must be a Developer ID Installer identity" >&2; exit 1; }
 TEAM_ID="${AGENTPASS_TEAM_ID:-}"
 [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "AGENTPASS_TEAM_ID must be a 10-character Team ID" >&2; exit 2; }
+[[ "$IDENTITY" =~ ^Developer\ ID\ Installer:\ .+\ \(${TEAM_ID}\)$ ]] || { echo "Installer identity must be a non-empty Developer ID Installer identity bound to AGENTPASS_TEAM_ID" >&2; exit 1; }
 [[ "$APP" == /* && "$OUTPUT" == /* ]] || { echo "App and output paths must be absolute" >&2; exit 2; }
 [[ -d "$APP" && ! -L "$APP" && "$(basename "$APP")" == "AgentPass.app" ]] || { echo "Input must be a real AgentPass.app directory" >&2; exit 1; }
 [[ ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || { echo "Installer output already exists or is a symlink" >&2; exit 1; }
@@ -55,7 +56,7 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT
   --sign "$IDENTITY" \
 "$OUTPUT"
 
-"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT"
+"$SCRIPT_DIR/verify-installer-package.sh" "$OUTPUT" "$TEAM_ID"
 INVENTORY_OUTPUT="${OUTPUT}.inventory.json"
 [[ ! -e "$INVENTORY_OUTPUT" && ! -L "$INVENTORY_OUTPUT" ]] || { echo "Installer inventory output already exists or is a symlink" >&2; exit 1; }
 node "$SCRIPT_DIR/generate-artifact-inventory.mjs" "$APP" "$OUTPUT" "$INVENTORY_OUTPUT" >/dev/null

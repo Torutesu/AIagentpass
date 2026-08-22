@@ -1,5 +1,15 @@
 # Host/Child XPC adversarial test lane
 
+## Review-status boundary
+
+This is a local adversarial test lane and not an independent third-party security
+review. Its focused results cannot make the product production-ready. Production
+approval additionally requires the signed, source/tree/image-bound review record
+defined in [`SECURITY_REVIEW_PRODUCTION_GATE.md`](SECURITY_REVIEW_PRODUCTION_GATE.md),
+with an externally provisioned reviewer identity, a separate reviewer key, an
+unexpired decision, and no open critical/high finding. Until that protected evidence
+exists, the disposition is `not_proven`.
+
 監査日: 2026-08-19
 対象: `native/macos/Tests/**` の Host/Child XPC 専用テストと test fixture
 制約: production source、既存の非XPCテスト、protected path、commit/pushは変更していない

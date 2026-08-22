@@ -1,6 +1,11 @@
 import path from "node:path";
 
 import {
+  createAgentLifecycleLaunchDescriptor,
+  launchAgentLifecycleWithHandoff
+} from "../../../lib/agent-lifecycle-cli.mjs";
+
+import {
   CURSOR_AGENT_RUNTIME_DESTINATION_PARENT,
   CURSOR_AGENT_RUNTIME_DIRECTORY_NAME,
   CURSOR_AGENT_RUNTIME_INDEX_NAME,
@@ -113,6 +118,31 @@ export function createCursorLaunchPlan({ projectDirectory } = {}) {
     arguments: Object.freeze([...CURSOR_RUNTIME_ARGUMENTS]),
     environment: Object.freeze({ ...CURSOR_RUNTIME_ENVIRONMENT })
   });
+}
+
+/** Build only the public process-bound launch descriptor; authority stays on FD3. */
+export function createCursorLifecycleDescriptor({ projectDirectory, ttlSeconds } = {}) {
+  const options = arguments[0] ?? {};
+  exactKeys(options, ["projectDirectory", "ttlSeconds"], "lifecycle options");
+  const project = normalizedAbsolutePath(projectDirectory, "project_directory");
+  if (!Number.isSafeInteger(ttlSeconds)) fail("invalid_arguments", "ttl_seconds is invalid");
+  try {
+    return createAgentLifecycleLaunchDescriptor({ agent: "cursor", project, ttl_seconds: ttlSeconds });
+  } catch {
+    fail("invalid_arguments", "lifecycle descriptor is invalid");
+  }
+}
+
+/** Relay the inherited one-time handoff to the fixed Native Host. */
+export async function launchCursorLifecycle(input, options = {}) {
+  const descriptor = createCursorLifecycleDescriptor(input);
+  const result = await launchAgentLifecycleWithHandoff(descriptor, options);
+  if (result.ok === true) return Object.freeze({ version: 1, ok: true, operation: "launch", status: result.status });
+  const error = result.error;
+  if (!error || typeof error.code !== "string") fail("adapter_failed");
+  if (error.code === "AGENT_LIFECYCLE_NOT_AVAILABLE" || error.code === "AGENT_LIFECYCLE_HANDOFF_NOT_AVAILABLE") fail("runtime_unavailable");
+  if (error.code === "AGENT_LIFECYCLE_NATIVE_HOST_REJECTED") fail("runtime_untrusted");
+  fail("adapter_failed");
 }
 
 /**

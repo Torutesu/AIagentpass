@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       run_id: ${{ steps.validate.outputs.run_id }}
+      run_attempt: ${{ steps.validate.outputs.run_attempt }}
       artifact_name: ${{ steps.validate.outputs.artifact_name }}
       candidate_head_sha: ${{ steps.validate.outputs.candidate_head_sha }}
     steps:
@@ -62,7 +63,9 @@ jobs:
           ' <<<"$run_json" >/dev/null
 
           candidate_head_sha="$(jq -er '.head_sha' <<<"$run_json")"
+          candidate_run_attempt="$(jq -er '.run_attempt' <<<"$run_json")"
           printf 'run_id=%s\n' "$RELEASE_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$candidate_run_attempt" >> "$GITHUB_OUTPUT"
           printf 'artifact_name=%s\n' "$RELEASE_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           printf 'candidate_head_sha=%s\n' "$candidate_head_sha" >> "$GITHUB_OUTPUT"
 
@@ -77,6 +80,7 @@ jobs:
       actions: read
     env:
       CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
+      CANDIDATE_RUN_ATTEMPT: ${{ needs.validate-candidate.outputs.run_attempt }}
       CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
@@ -88,13 +92,21 @@ jobs:
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
       QUALIFICATION_CONFIG_TOOL_ROOT: /opt/agentpass/p0c/qualification-tool
+      P0C_RELEASE_TOOL_ROOT: /opt/agentpass/release/qualification-tool
+      P0C_RELEASE_TOOL_MANIFEST_SHA256: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_SHA256 }}
+      P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT }}
       QUALIFICATION_DEVICE_CLIENT_CONFIG_B64: ${{ secrets.QUALIFICATION_DEVICE_CLIENT_CONFIG_B64 }}
       QUALIFICATION_RELAY_REQUEST_B64: ${{ secrets.QUALIFICATION_RELAY_REQUEST_B64 }}
       CONTROLLER_ARCHITECTURE: arm64
+      RUNNER_ATTESTATION: /opt/agentpass/p0c/runner-attestation.json
+      RUNNER_ATTESTATION_SIGNATURE: /opt/agentpass/p0c/runner-attestation.sig
+      RUNNER_ATTESTATION_PUBLIC_KEY: /opt/agentpass/p0c/runner-attestation.pem
+      RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_RUNNER_ATTESTATION_FINGERPRINT }}
+      EXPECTED_RUNNER_ID: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_RUNNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.validate-candidate.outputs.candidate_head_sha }}
           fetch-depth: 1
           persist-credentials: false
           clean: true
@@ -122,6 +134,17 @@ jobs:
           run-id: ${{ needs.validate-candidate.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ steps.paths.outputs.candidate_dir }}
+
+      - name: Verify protected report and qualification toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${P0C_RELEASE_TOOL_MANIFEST_SHA256:?protected report toolchain digest is required}"
+          : "${P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT:?protected report toolchain key fingerprint is required}"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/verify-installed-toolchain.mjs" "$P0C_RELEASE_TOOL_ROOT" "$P0C_RELEASE_TOOL_MANIFEST_SHA256" "$P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT" >/dev/null
+          expected='["generate-hardware-qualification-template.mjs","lib/release-candidate-identity.mjs","n3e/controller-identity-contract.mjs","n3e/qualification-suite-evidence.mjs","p0c/verify-runner-attestation.mjs","run-p0c-qualification.mjs","sign-hardware-qualification.mjs","validate-hardware-qualification.mjs","verify-hardware-qualification-set.mjs","verify-installed-toolchain.mjs"]'
+          actual="$(sudo -n /usr/bin/cat "$P0C_RELEASE_TOOL_ROOT/manifest.json" | /usr/bin/jq -c '[.files[].path] | sort')"
+          [[ "$actual" == "$expected" ]] || { echo 'protected report toolchain inventory is not exact' >&2; exit 1; }
 
       - id: candidate
         name: Catalog exact candidate files without executing candidate content
@@ -244,7 +267,9 @@ jobs:
           const root = '/opt/agentpass/p0c/qualification-tool';
           if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
           const expected = [
+            ['p0c/verify-runner-attestation.mjs', 'scripts/release/p0c/verify-runner-attestation.mjs'],
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['release-candidate-identity.mjs', 'lib/release-candidate-identity.mjs'],
             ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
             ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
@@ -270,7 +295,9 @@ jobs:
             const stat = fs.lstatSync(file);
             if (stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) throw new Error('qualification tool installation is unsafe');
           };
-          safe(root, true); safe(path.join(root, 'n3e'), true);
+          safe(root, true); safe(path.join(root, 'n3e'), true); safe(path.join(root, 'p0c'), true);
+          const p0cEntries = fs.readdirSync(path.join(root, 'p0c'), { withFileTypes: true });
+          if (p0cEntries.length !== 2 || p0cEntries.some((entry) => (entry.name !== 'lib' && entry.name !== 'verify-runner-attestation.mjs') || (entry.name === 'lib' ? !entry.isDirectory() : !entry.isFile()))) throw new Error('protected p0c qualification tool inventory is not exact');
           const manifestPath = path.join(root, 'manifest.json'); safe(manifestPath);
           const manifestBytes = fs.readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes);
           if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(['files', 'schema_version']) || manifest.schema_version !== 1 || !Array.isArray(manifest.files) || manifest.files.length !== expected.length) throw new Error('qualification tool manifest is invalid');
@@ -327,23 +354,19 @@ jobs:
           write(process.env.PUBLIC_KEY_PATH, process.env.OPERATOR_PUBLIC_KEY_B64, 0o644);
           NODE
 
-      - name: Run fixed root-owned P0-C gate drivers
+      - name: Verify fixed runner attestation
         env:
-          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
-          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
-          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
-          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          OUTPUT_DIR: ${{ steps.paths.outputs.output_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
-          node scripts/release/run-p0c-qualification.mjs \
-            --template "$TEMPLATE" \
-            --output "$REPORT" \
-            --artifact "$PRODUCT_PKG" \
-            --gate-drivers "$GATE_DRIVER_DIR" \
-            --evidence-dir "$EVIDENCE_DIR" \
-            --operator "$OPERATOR_ID"
+          sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/p0c/verify-runner-attestation.mjs \
+            "$RUNNER_ATTESTATION" "$RUNNER_ATTESTATION_SIGNATURE" "$RUNNER_ATTESTATION_PUBLIC_KEY" \
+            "$RUNNER_ATTESTATION_FINGERPRINT" "$CONTROLLER_ARCHITECTURE" "apple_silicon" "$EXPECTED_RUNNER_ID" \
+            > "$OUTPUT_DIR/runner-attestation.json"
+          /bin/cp -p "$RUNNER_ATTESTATION" "$OUTPUT_DIR/runner-attestation.payload.json"
+          /bin/cp -p "$RUNNER_ATTESTATION_SIGNATURE" "$OUTPUT_DIR/runner-attestation.sig"
+          /bin/cp -p "$RUNNER_ATTESTATION_PUBLIC_KEY" "$OUTPUT_DIR/runner-attestation.pem"
 
       - name: Run protected N3-E unarmed and six-scenario suite
         env:
@@ -351,6 +374,7 @@ jobs:
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          SUITE_EVIDENCE: ${{ steps.paths.outputs.output_dir }}/n3e-suite-evidence.json
         shell: bash
         run: |
           set -euo pipefail
@@ -398,9 +422,33 @@ jobs:
           sudo -n /usr/bin/test -f /private/var/db/agentpass-qualification/input.inbox.json
           sudo -n /usr/bin/test ! -e /private/var/db/agentpass-qualification/input.json
           sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-input-materializer.mjs materialize
-          sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-suite-orchestrator.mjs run
+          suite_output="$(sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-suite-orchestrator.mjs run)"
+          printf '%s\n' "$suite_output" > "$SUITE_EVIDENCE"
+          test -s "$SUITE_EVIDENCE"
           recover_n3e
           trap - EXIT
+
+      - name: Run fixed root-owned P0-C gate drivers after N3-E
+        env:
+          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          SUITE_EVIDENCE: ${{ steps.paths.outputs.output_dir }}/n3e-suite-evidence.json
+          GATE_MANIFEST: /opt/agentpass/p0c/gate-manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/run-p0c-qualification.mjs" \
+            --template "$TEMPLATE" \
+            --output "$REPORT" \
+            --artifact "$PRODUCT_PKG" \
+            --gate-drivers "$GATE_DRIVER_DIR" \
+            --gate-manifest "$GATE_MANIFEST" \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --operator "$OPERATOR_ID" \
+            --n3e-suite-evidence "$SUITE_EVIDENCE"
 
       - name: Sign and independently verify lane report
         env:
@@ -416,10 +464,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/release/sign-hardware-qualification.mjs \
+          /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/sign-hardware-qualification.mjs" \
             --report "$REPORT" --private-key "$PRIVATE_KEY" --signature "$SIGNATURE" \
             --public-key "$PUBLIC_KEY" --expected-fingerprint "$OPERATOR_FINGERPRINT"
-          node scripts/release/validate-hardware-qualification.mjs \
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/validate-hardware-qualification.mjs" \
             "$REPORT" "$PRODUCT_PKG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" \
             "$RELEASE_MANIFEST_FINGERPRINT" "$SIGNATURE" "$PUBLIC_KEY" "$OPERATOR_FINGERPRINT" "$EVIDENCE_DIR"
 
@@ -430,6 +478,10 @@ jobs:
             ${{ steps.paths.outputs.output_dir }}/report.json
             ${{ steps.paths.outputs.output_dir }}/report.sig
             ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.json
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.payload.json
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.sig
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.pem
             ${{ steps.paths.outputs.output_dir }}/evidence/**
           if-no-files-found: error
           retention-days: 14
@@ -445,6 +497,19 @@ jobs:
           chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
           rm -f -- "$PRIVATE_KEY_PATH"
 
+      - name: Remove lane qualification temporary data
+        if: ${{ always() }}
+        env:
+          CANDIDATE_DIR: ${{ steps.paths.outputs.candidate_dir }}
+          OUTPUT_DIR: ${{ steps.paths.outputs.output_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_DIR" == "$RUNNER_TEMP"/agentpass-p0c-candidate-* ]] || { echo 'candidate cleanup path is not lane-scoped' >&2; exit 1; }
+          [[ "$OUTPUT_DIR" == "$RUNNER_TEMP"/agentpass-p0c-output-* ]] || { echo 'output cleanup path is not lane-scoped' >&2; exit 1; }
+          rm -rf -- "$CANDIDATE_DIR" "$OUTPUT_DIR"
+          [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo 'lane qualification temporary data remains' >&2; exit 1; }
+
   intel-t2-qualification:
     if: ${{ needs.validate-candidate.result == 'success' && github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
     needs: validate-candidate
@@ -456,6 +521,7 @@ jobs:
       actions: read
     env:
       CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
+      CANDIDATE_RUN_ATTEMPT: ${{ needs.validate-candidate.outputs.run_attempt }}
       CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
@@ -467,16 +533,35 @@ jobs:
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
       QUALIFICATION_CONFIG_TOOL_ROOT: /opt/agentpass/p0c/qualification-tool
+      P0C_RELEASE_TOOL_ROOT: /opt/agentpass/release/qualification-tool
+      P0C_RELEASE_TOOL_MANIFEST_SHA256: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_SHA256 }}
+      P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT }}
       QUALIFICATION_DEVICE_CLIENT_CONFIG_B64: ${{ secrets.QUALIFICATION_DEVICE_CLIENT_CONFIG_B64 }}
       QUALIFICATION_RELAY_REQUEST_B64: ${{ secrets.QUALIFICATION_RELAY_REQUEST_B64 }}
       CONTROLLER_ARCHITECTURE: x86_64
+      RUNNER_ATTESTATION: /opt/agentpass/p0c/runner-attestation.json
+      RUNNER_ATTESTATION_SIGNATURE: /opt/agentpass/p0c/runner-attestation.sig
+      RUNNER_ATTESTATION_PUBLIC_KEY: /opt/agentpass/p0c/runner-attestation.pem
+      RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_RUNNER_ATTESTATION_FINGERPRINT }}
+      EXPECTED_RUNNER_ID: ${{ vars.AGENTPASS_P0C_INTEL_T2_RUNNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.validate-candidate.outputs.candidate_head_sha }}
           fetch-depth: 1
           persist-credentials: false
           clean: true
+
+      - name: Verify protected report and qualification toolchain (Intel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${P0C_RELEASE_TOOL_MANIFEST_SHA256:?protected report toolchain digest is required}"
+          : "${P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT:?protected report toolchain key fingerprint is required}"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/verify-installed-toolchain.mjs" "$P0C_RELEASE_TOOL_ROOT" "$P0C_RELEASE_TOOL_MANIFEST_SHA256" "$P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT" >/dev/null
+          expected='["generate-hardware-qualification-template.mjs","lib/release-candidate-identity.mjs","n3e/controller-identity-contract.mjs","n3e/qualification-suite-evidence.mjs","p0c/verify-runner-attestation.mjs","run-p0c-qualification.mjs","sign-hardware-qualification.mjs","validate-hardware-qualification.mjs","verify-hardware-qualification-set.mjs","verify-installed-toolchain.mjs"]'
+          actual="$(sudo -n /usr/bin/cat "$P0C_RELEASE_TOOL_ROOT/manifest.json" | /usr/bin/jq -c '[.files[].path] | sort')"
+          [[ "$actual" == "$expected" ]] || { echo 'protected report toolchain inventory is not exact' >&2; exit 1; }
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -493,6 +578,20 @@ jobs:
           /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$OUTPUT_DIR"
           printf 'candidate_dir=%s\noutput_dir=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
           printf 'CANDIDATE_DIR=%s\nOUTPUT_DIR=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify fixed runner attestation (Intel)
+        env:
+          OUTPUT_DIR: ${{ steps.paths.outputs.output_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/p0c/verify-runner-attestation.mjs \
+            "$RUNNER_ATTESTATION" "$RUNNER_ATTESTATION_SIGNATURE" "$RUNNER_ATTESTATION_PUBLIC_KEY" \
+            "$RUNNER_ATTESTATION_FINGERPRINT" "$CONTROLLER_ARCHITECTURE" "intel_t2" "$EXPECTED_RUNNER_ID" \
+            > "$OUTPUT_DIR/runner-attestation.json"
+          /bin/cp -p "$RUNNER_ATTESTATION" "$OUTPUT_DIR/runner-attestation.payload.json"
+          /bin/cp -p "$RUNNER_ATTESTATION_SIGNATURE" "$OUTPUT_DIR/runner-attestation.sig"
+          /bin/cp -p "$RUNNER_ATTESTATION_PUBLIC_KEY" "$OUTPUT_DIR/runner-attestation.pem"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -616,7 +715,9 @@ jobs:
           const root = '/opt/agentpass/p0c/qualification-tool';
           if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
           const expected = [
+            ['p0c/verify-runner-attestation.mjs', 'scripts/release/p0c/verify-runner-attestation.mjs'],
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['release-candidate-identity.mjs', 'lib/release-candidate-identity.mjs'],
             ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
             ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
@@ -642,7 +743,9 @@ jobs:
             const stat = fs.lstatSync(file);
             if (stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) throw new Error('qualification tool installation is unsafe');
           };
-          safe(root, true); safe(path.join(root, 'n3e'), true);
+          safe(root, true); safe(path.join(root, 'n3e'), true); safe(path.join(root, 'p0c'), true);
+          const p0cEntries = fs.readdirSync(path.join(root, 'p0c'), { withFileTypes: true });
+          if (p0cEntries.length !== 2 || p0cEntries.some((entry) => (entry.name !== 'lib' && entry.name !== 'verify-runner-attestation.mjs') || (entry.name === 'lib' ? !entry.isDirectory() : !entry.isFile()))) throw new Error('protected p0c qualification tool inventory is not exact');
           const manifestPath = path.join(root, 'manifest.json'); safe(manifestPath);
           const manifestBytes = fs.readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes);
           if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(['files', 'schema_version']) || manifest.schema_version !== 1 || !Array.isArray(manifest.files) || manifest.files.length !== expected.length) throw new Error('qualification tool manifest is invalid');
@@ -699,24 +802,13 @@ jobs:
           write(process.env.PUBLIC_KEY_PATH, process.env.OPERATOR_PUBLIC_KEY_B64, 0o644);
           NODE
 
-      - name: Run fixed root-owned P0-C gate drivers
-        env:
-          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
-          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
-          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
-          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
-          node scripts/release/run-p0c-qualification.mjs --template "$TEMPLATE" --output "$REPORT" --artifact "$PRODUCT_PKG" --gate-drivers "$GATE_DRIVER_DIR" --evidence-dir "$EVIDENCE_DIR" --operator "$OPERATOR_ID"
-
       - name: Run protected N3-E unarmed and six-scenario suite
         env:
           MANIFEST: ${{ steps.candidate.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          SUITE_EVIDENCE: ${{ steps.paths.outputs.output_dir }}/n3e-suite-evidence.json
         shell: bash
         run: |
           set -euo pipefail
@@ -764,9 +856,25 @@ jobs:
           sudo -n /usr/bin/test -f /private/var/db/agentpass-qualification/input.inbox.json
           sudo -n /usr/bin/test ! -e /private/var/db/agentpass-qualification/input.json
           sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-input-materializer.mjs materialize
-          sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-suite-orchestrator.mjs run
+          suite_output="$(sudo -n /usr/bin/node /opt/agentpass/p0c/qualification-tool/n3e/qualification-suite-orchestrator.mjs run)"
+          printf '%s\n' "$suite_output" > "$SUITE_EVIDENCE"
+          test -s "$SUITE_EVIDENCE"
           recover_n3e
           trap - EXIT
+
+      - name: Run fixed root-owned P0-C gate drivers after N3-E
+        env:
+          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          SUITE_EVIDENCE: ${{ steps.paths.outputs.output_dir }}/n3e-suite-evidence.json
+          GATE_MANIFEST: /opt/agentpass/p0c/gate-manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/run-p0c-qualification.mjs" --template "$TEMPLATE" --output "$REPORT" --artifact "$PRODUCT_PKG" --gate-drivers "$GATE_DRIVER_DIR" --gate-manifest "$GATE_MANIFEST" --evidence-dir "$EVIDENCE_DIR" --operator "$OPERATOR_ID" --n3e-suite-evidence "$SUITE_EVIDENCE"
 
       - name: Sign and independently verify lane report
         env:
@@ -782,8 +890,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/release/sign-hardware-qualification.mjs --report "$REPORT" --private-key "$PRIVATE_KEY" --signature "$SIGNATURE" --public-key "$PUBLIC_KEY" --expected-fingerprint "$OPERATOR_FINGERPRINT"
-          node scripts/release/validate-hardware-qualification.mjs "$REPORT" "$PRODUCT_PKG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$SIGNATURE" "$PUBLIC_KEY" "$OPERATOR_FINGERPRINT" "$EVIDENCE_DIR"
+          /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/sign-hardware-qualification.mjs" --report "$REPORT" --private-key "$PRIVATE_KEY" --signature "$SIGNATURE" --public-key "$PUBLIC_KEY" --expected-fingerprint "$OPERATOR_FINGERPRINT"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/validate-hardware-qualification.mjs" "$REPORT" "$PRODUCT_PKG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$SIGNATURE" "$PUBLIC_KEY" "$OPERATOR_FINGERPRINT" "$EVIDENCE_DIR"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -792,6 +900,10 @@ jobs:
             ${{ steps.paths.outputs.output_dir }}/report.json
             ${{ steps.paths.outputs.output_dir }}/report.sig
             ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.json
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.payload.json
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.sig
+            ${{ steps.paths.outputs.output_dir }}/runner-attestation.pem
             ${{ steps.paths.outputs.output_dir }}/evidence/**
           if-no-files-found: error
           retention-days: 14
@@ -807,10 +919,24 @@ jobs:
           chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
           rm -f -- "$PRIVATE_KEY_PATH"
 
+      - name: Remove lane qualification temporary data
+        if: ${{ always() }}
+        env:
+          CANDIDATE_DIR: ${{ steps.paths.outputs.candidate_dir }}
+          OUTPUT_DIR: ${{ steps.paths.outputs.output_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_DIR" == "$RUNNER_TEMP"/agentpass-p0c-candidate-* ]] || { echo 'candidate cleanup path is not lane-scoped' >&2; exit 1; }
+          [[ "$OUTPUT_DIR" == "$RUNNER_TEMP"/agentpass-p0c-output-* ]] || { echo 'output cleanup path is not lane-scoped' >&2; exit 1; }
+          rm -rf -- "$CANDIDATE_DIR" "$OUTPUT_DIR"
+          [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo 'lane qualification temporary data remains' >&2; exit 1; }
+
   aggregate-qualification:
     if: ${{ needs.validate-candidate.result == 'success' && needs.apple-silicon-qualification.result == 'success' && needs.intel-t2-qualification.result == 'success' && github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
     needs: [validate-candidate, apple-silicon-qualification, intel-t2-qualification]
     runs-on: ubuntu-latest
+    environment: p0c-aggregate
     timeout-minutes: 30
     permissions:
       contents: read
@@ -822,10 +948,17 @@ jobs:
       APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
       INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
       APPROVED_OPERATOR_POLICY_JSON: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON }}
+      APPROVED_OPERATOR_POLICY_SHA256: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_SHA256 }}
+      APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64 }}
+      APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64 }}
+      APPROVED_OPERATOR_POLICY_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_FINGERPRINT }}
+      P0C_RELEASE_TOOL_ROOT: /opt/agentpass/release/qualification-tool
+      P0C_RELEASE_TOOL_MANIFEST_SHA256: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_SHA256 }}
+      P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.validate-candidate.outputs.candidate_head_sha }}
           fetch-depth: 1
           persist-credentials: false
           clean: true
@@ -865,6 +998,18 @@ jobs:
         with:
           name: p0c-hardware-intel-t2
           path: ${{ steps.paths.outputs.intel_dir }}
+
+      - name: Verify protected aggregate release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${P0C_RELEASE_TOOL_MANIFEST_SHA256:?protected aggregate toolchain digest is required}"
+          : "${P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT:?protected aggregate toolchain key fingerprint is required}"
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/verify-installed-toolchain.mjs" \
+            "$P0C_RELEASE_TOOL_ROOT" "$P0C_RELEASE_TOOL_MANIFEST_SHA256" "$P0C_RELEASE_TOOL_MANIFEST_FINGERPRINT" >/dev/null
+          expected='["generate-hardware-qualification-template.mjs","lib/release-candidate-identity.mjs","n3e/controller-identity-contract.mjs","n3e/qualification-suite-evidence.mjs","p0c/verify-runner-attestation.mjs","run-p0c-qualification.mjs","sign-hardware-qualification.mjs","validate-hardware-qualification.mjs","verify-hardware-qualification-set.mjs","verify-installed-toolchain.mjs"]'
+          actual="$(sudo -n /usr/bin/cat "$P0C_RELEASE_TOOL_ROOT/manifest.json" | /usr/bin/jq -c '[.files[].path] | sort')"
+          [[ "$actual" == "$expected" ]] || { echo 'protected aggregate toolchain inventory is not exact' >&2; exit 1; }
 
       - id: candidate
         name: Re-catalog candidate before aggregate verification
@@ -912,16 +1057,27 @@ jobs:
       - name: Write externally supplied approved operator policy
         env:
           POLICY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.json
+          POLICY_SIGNATURE_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.sig
+          POLICY_PUBLIC_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.pub
         shell: bash
         run: |
           set -euo pipefail
           : "${APPROVED_OPERATOR_POLICY_JSON:?approved operator policy must be supplied as a protected repository variable}"
+          : "${APPROVED_OPERATOR_POLICY_SHA256:?approved operator policy digest must be supplied by the protected environment}"
+          : "${APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64:?approved operator policy signature must be supplied by the protected environment}"
+          : "${APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64:?approved operator policy public key must be supplied by the protected environment}"
+          : "${APPROVED_OPERATOR_POLICY_FINGERPRINT:?approved operator policy fingerprint must be supplied by the protected environment}"
           node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
           import fs from 'node:fs';
           const path = process.env.POLICY_PATH;
           const bytes = Buffer.from(process.env.APPROVED_OPERATOR_POLICY_JSON, 'utf8');
-          const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-          try { fs.writeSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          if (!/^[0-9a-f]{64}$/.test(process.env.APPROVED_OPERATOR_POLICY_SHA256) || crypto.createHash('sha256').update(bytes).digest('hex') !== process.env.APPROVED_OPERATOR_POLICY_SHA256) throw new Error('approved operator policy digest does not match the protected environment binding');
+          const write = (target, value) => { const fd = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600); try { fs.writeSync(fd, value); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } };
+          if (!/^[A-Za-z0-9+/]+={0,2}$/.test(process.env.APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64) || !/^[A-Za-z0-9+/]+={0,2}$/.test(process.env.APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64)) throw new Error('approved operator policy signature inputs are not strict base64');
+          write(path, bytes);
+          write(process.env.POLICY_SIGNATURE_PATH, Buffer.from(`${process.env.APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64}\n`, 'utf8'));
+          write(process.env.POLICY_PUBLIC_KEY_PATH, Buffer.from(process.env.APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64, 'base64'));
           NODE
 
       - id: aggregate
@@ -932,27 +1088,44 @@ jobs:
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
           POLICY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.json
+          POLICY_SIGNATURE_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.sig
+          POLICY_PUBLIC_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.pub
           APPLE_DIR: ${{ steps.paths.outputs.apple_dir }}
           INTEL_DIR: ${{ steps.paths.outputs.intel_dir }}
+          APPLE_RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_RUNNER_ATTESTATION_FINGERPRINT }}
+          INTEL_RUNNER_ATTESTATION_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_RUNNER_ATTESTATION_FINGERPRINT }}
+          APPLE_EXPECTED_RUNNER_ID: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_RUNNER_ID }}
+          INTEL_EXPECTED_RUNNER_ID: ${{ vars.AGENTPASS_P0C_INTEL_T2_RUNNER_ID }}
           SUMMARY_PATH: ${{ steps.paths.outputs.output_dir }}/qualification-summary.json
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/release/verify-hardware-qualification-set.mjs \
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/p0c/verify-runner-attestation.mjs" \
+            "$APPLE_DIR/runner-attestation.payload.json" "$APPLE_DIR/runner-attestation.sig" "$APPLE_DIR/runner-attestation.pem" \
+            "$APPLE_RUNNER_ATTESTATION_FINGERPRINT" arm64 apple_silicon "$APPLE_EXPECTED_RUNNER_ID" artifact > /dev/null
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/p0c/verify-runner-attestation.mjs" \
+            "$INTEL_DIR/runner-attestation.payload.json" "$INTEL_DIR/runner-attestation.sig" "$INTEL_DIR/runner-attestation.pem" \
+            "$INTEL_RUNNER_ATTESTATION_FINGERPRINT" x86_64 intel_t2 "$INTEL_EXPECTED_RUNNER_ID" artifact > /dev/null
+          sudo -n /usr/bin/node "$P0C_RELEASE_TOOL_ROOT/verify-hardware-qualification-set.mjs" \
             "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$PRODUCT_PKG" \
             "$APPLE_DIR/report.json" "$APPLE_DIR/report.sig" "$APPLE_DIR/operator-public.pem" "$APPLE_OPERATOR_FINGERPRINT" "$APPLE_DIR/evidence" \
+            "$APPLE_DIR/runner-attestation.payload.json" "$APPLE_DIR/runner-attestation.sig" "$APPLE_DIR/runner-attestation.pem" "$APPLE_RUNNER_ATTESTATION_FINGERPRINT" "$APPLE_EXPECTED_RUNNER_ID" \
             "$INTEL_DIR/report.json" "$INTEL_DIR/report.sig" "$INTEL_DIR/operator-public.pem" "$INTEL_OPERATOR_FINGERPRINT" "$INTEL_DIR/evidence" \
-            "$POLICY_PATH" > "$SUMMARY_PATH"
+            "$INTEL_DIR/runner-attestation.payload.json" "$INTEL_DIR/runner-attestation.sig" "$INTEL_DIR/runner-attestation.pem" "$INTEL_RUNNER_ATTESTATION_FINGERPRINT" "$INTEL_EXPECTED_RUNNER_ID" \
+            "$POLICY_PATH" "$POLICY_SIGNATURE_PATH" "$POLICY_PUBLIC_KEY_PATH" "$APPROVED_OPERATOR_POLICY_FINGERPRINT" \
+            "$CANDIDATE_RUN_ID" "$CANDIDATE_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$SUMMARY_PATH"
           node --input-type=module - "$SUMMARY_PATH" "$OUTPUT_DIR/qualification-dispatch-binding.json" <<'NODE'
           import crypto from 'node:crypto';
           import fs from 'node:fs';
           const [summaryPath, outputPath] = process.argv.slice(2);
-          if (!/^[1-9][0-9]{0,18}$/.test(process.env.CANDIDATE_RUN_ID || '') || !/^[1-9][0-9]{0,18}$/.test(process.env.GITHUB_RUN_ID || '')) throw new Error('workflow run identity is invalid');
+          if (!/^[1-9][0-9]{0,18}$/.test(process.env.CANDIDATE_RUN_ID || '') || !/^[1-9][0-9]{0,18}$/.test(process.env.CANDIDATE_RUN_ATTEMPT || '') || !/^[1-9][0-9]{0,18}$/.test(process.env.GITHUB_RUN_ID || '') || !/^[1-9][0-9]{0,18}$/.test(process.env.GITHUB_RUN_ATTEMPT || '')) throw new Error('workflow run identity is invalid');
           const summary = fs.readFileSync(summaryPath);
           const binding = {
             schema_version: 1,
             release_run_id: process.env.CANDIDATE_RUN_ID,
+            release_run_attempt: process.env.CANDIDATE_RUN_ATTEMPT,
             qualification_run_id: process.env.GITHUB_RUN_ID,
+            qualification_run_attempt: process.env.GITHUB_RUN_ATTEMPT,
             candidate_artifact_name: process.env.CANDIDATE_ARTIFACT_NAME,
             qualification_summary_sha256: crypto.createHash('sha256').update(summary).digest('hex')
           };

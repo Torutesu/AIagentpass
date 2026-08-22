@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { createDeviceEnrollmentSetupHandler, createLegacyDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { canonicalJson } from "../lib/identity.mjs";
 import { DeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
 import { bundleAcknowledgementSigningData, normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
@@ -307,12 +307,114 @@ async function runFreshControlCase(buildRestart) {
       return new Response(canonicalJson(completedResponse(control, refreshHint)), { status: 201, headers: { "content-type": "application/json" } });
     }
   });
-  return createDeviceEnrollmentSetupHandler({
+  return createLegacyDeviceEnrollmentSetupHandler({
     ...base,
     restartService: async () => buildRestart(device),
     loadConfig: () => ({ control_v2: { statement_hash: controlStatementHash, authority_generation: 1, sequence: 1 } })
   })(context());
 }
+
+test("requires a durable resume store for D2 and isolates legacy compatibility", () => {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  const common = commonOptions({ device, receiptSigner, credential, fetchImpl: async () => new Response("", { status: 401 }) });
+  assert.throws(
+    () => createDeviceEnrollmentSetupHandler(common),
+    (error) => error.code === "INVALID_RESUME_STORE"
+  );
+  const resume = resumeStore();
+  assert.throws(
+    () => createLegacyDeviceEnrollmentSetupHandler({ ...common, resumeStore: resume.store }),
+    (error) => error.code === "INVALID_RESUME_STORE"
+  );
+  assert.equal(typeof createLegacyDeviceEnrollmentSetupHandler(common), "function");
+});
+
+test("rejects an expired persisted candidate binding before network or mutation", async () => {
+  for (const expires_at of ["2020-01-02T03:04:05.000Z"]) {
+    const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const receiptSigner = crypto.generateKeyPairSync("ed25519");
+    const credential = crypto.randomBytes(32).toString("base64url");
+    const resume = resumeStore();
+    const binding = { ...candidateBinding(device), expires_at };
+    const descriptor = {
+      enrollment_id: enrollmentId,
+      label: "Build Mac",
+      platform: "macos",
+      api_base_url: "https://api.example.test/v1",
+      candidate_binding: binding,
+      challenge_digest: crypto.createHash("sha256").update(nonce).digest("hex"),
+      request_digest: "c".repeat(64),
+      verification_key_id: "receipt-key-v1",
+      verification_algorithm: "ed25519",
+      verification_public_key: receiptSigner.publicKey.export({ type: "spki", format: "pem" }).toString()
+    };
+    resume.store.create_invitation_issued({
+      release_id: binding.candidate_id,
+      organization_id: binding.organization_id,
+      device_id: binding.device_id,
+      resume_id: "resume-expired",
+      recovery_descriptor: descriptor,
+      invitation_id: enrollmentId,
+      invitation_hash: "e".repeat(64)
+    });
+    let networkCalls = 0;
+    const handler = createDeviceEnrollmentSetupHandler({
+      ...commonOptions({
+        device,
+        receiptSigner,
+        credential,
+        fetchImpl: async () => {
+          networkCalls += 1;
+          throw new Error("expired descriptor must be rejected before network");
+        }
+      }),
+      invitation: undefined,
+      resumeStore: resume.store,
+      provisionControl: async () => { throw new Error("expired descriptor must not provision trust"); },
+      restartService: async () => { throw new Error("expired descriptor must not restart service"); }
+    });
+    await assert.rejects(
+      () => handler(context()),
+      (error) => error.code === "RESUME_BINDING_MISMATCH" && /expired|invalid/iu.test(error.message)
+    );
+    assert.equal(networkCalls, 0);
+    assert.equal(resume.store.read().state, "invitation_issued");
+  }
+});
+
+test("rejects an unparsable candidate expiry before persisting resume state", () => {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const resume = resumeStore();
+  const binding = { ...candidateBinding(device), expires_at: "not-a-date" };
+  const descriptor = {
+    enrollment_id: enrollmentId,
+    label: "Build Mac",
+    platform: "macos",
+    api_base_url: "https://api.example.test/v1",
+    candidate_binding: binding,
+    challenge_digest: crypto.createHash("sha256").update(nonce).digest("hex"),
+    request_digest: "c".repeat(64),
+    verification_key_id: "receipt-key-v1",
+    verification_algorithm: "ed25519",
+    verification_public_key: receiptSigner.publicKey.export({ type: "spki", format: "pem" }).toString()
+  };
+  assert.throws(
+    () => resume.store.create_invitation_issued({
+      release_id: binding.candidate_id,
+      organization_id: binding.organization_id,
+      device_id: binding.device_id,
+      resume_id: "resume-invalid-expiry",
+      recovery_descriptor: descriptor,
+      invitation_id: enrollmentId,
+      invitation_hash: "e".repeat(64)
+    }),
+    (error) => error.code === "INVALID_TIME"
+  );
+  assert.throws(() => resume.store.read(), { code: "NOT_INITIALIZED" });
+});
 
 test("uses the v2 invitation, verifies the receipt, and persists only non-secret control trust", async () => {
   const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -325,7 +427,7 @@ test("uses the v2 invitation, verifies the receipt, and persists only non-secret
   let saved;
   let provisioned;
   let receiptReads = 0;
-  const handler = createDeviceEnrollmentSetupHandler({
+  const handler = createLegacyDeviceEnrollmentSetupHandler({
     ...commonOptions({
       device,
       receiptSigner,
@@ -380,17 +482,17 @@ test("rejects legacy invitations and unsafe enrollment bases before mutation", a
   const credential = crypto.randomBytes(32).toString("base64url");
   const common = commonOptions({ device, receiptSigner, credential, fetchImpl: async () => new Response("", { status: 401 }) });
   const legacy = { enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label: "Build Mac", credential };
-  assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: legacy }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  assert.throws(() => createLegacyDeviceEnrollmentSetupHandler({ ...common, invitation: legacy }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
   const canonical = invitation(device, credential, receiptSigner);
   const { version: _missingVersion, ...missingVersion } = canonical;
-  assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: missingVersion }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
-  assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: { ...canonical, version: 1 } }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
-  assert.throws(() => createDeviceEnrollmentSetupHandler({
+  assert.throws(() => createLegacyDeviceEnrollmentSetupHandler({ ...common, invitation: missingVersion }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  assert.throws(() => createLegacyDeviceEnrollmentSetupHandler({ ...common, invitation: { ...canonical, version: 1 } }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  assert.throws(() => createLegacyDeviceEnrollmentSetupHandler({
     ...common,
     invitation: { ...canonical, endpoint: "/v1/enrollments/00000000-0000-4000-8000-000000000000" }
   }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
   const expiredAt = "2020-01-02T03:04:05.000Z";
-  assert.throws(() => createDeviceEnrollmentSetupHandler({
+  assert.throws(() => createLegacyDeviceEnrollmentSetupHandler({
     ...common,
     invitation: {
       ...canonical,
@@ -399,9 +501,9 @@ test("rejects legacy invitations and unsafe enrollment bases before mutation", a
       challenge: { ...canonical.challenge, expires_at: expiredAt }
     }
   }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
-  const credentialed = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://user:pass@api.example.test/v1" });
+  const credentialed = createLegacyDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://user:pass@api.example.test/v1" });
   await assert.rejects(() => credentialed(context()), (error) => error.code === "INVALID_ENROLLMENT_INVITATION" || error.code === "ERR_DEVICE_ENROLLMENT_URL");
-  const wrongPath = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://api.example.test/api" });
+  const wrongPath = createLegacyDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://api.example.test/api" });
   await assert.rejects(() => wrongPath(context()), (error) => error.code === "ERR_DEVICE_ENROLLMENT_URL" || error.code === "INVALID_ENROLLMENT_INVITATION");
 });
 
@@ -410,7 +512,7 @@ test("fails before mutation when dispatched outside the enrollment state", async
   const receiptSigner = crypto.generateKeyPairSync("ed25519");
   const credential = crypto.randomBytes(32).toString("base64url");
   let saved = false;
-  const handler = createDeviceEnrollmentSetupHandler({
+  const handler = createLegacyDeviceEnrollmentSetupHandler({
     ...commonOptions({ device, receiptSigner, credential, fetchImpl: async () => new Response("", { status: 401 }) }),
     saveConfig: () => { saved = true; }
   });
@@ -483,7 +585,7 @@ test("durably records every pre-POST boundary and completes the resumed state ma
   assert.notEqual(expectedAckEvidenceHash, crypto.createHash("sha256").update(canonicalJson(signatureMutation), "utf8").digest("hex"));
   assert.notEqual(expectedAckEvidenceHash, crypto.createHash("sha256").update(canonicalJson(nonceMutation), "utf8").digest("hex"));
   const journal = JSON.parse(fs.readFileSync(`${resume.store.filePath}.journal`, "utf8"));
-  assert.deepEqual(journal.entries.map((entry) => entry.state), ["prepared", "invitation_issued", "delivered", "enrollment_uncertain", "receipt_verified", "trust_installed", "control_acknowledged"]);
+  assert.deepEqual(journal.entries.map((entry) => entry.state), ["invitation_issued", "delivered", "enrollment_uncertain", "receipt_verified", "trust_installed", "control_acknowledged"]);
   const durable = JSON.stringify(resume.store.read());
   assert.equal(resume.store.read().recovery_descriptor.request_digest.length, 64);
   assert.equal(resume.store.read().recovery_descriptor.challenge_digest, crypto.createHash("sha256").update(nonce).digest("hex"));
@@ -616,6 +718,7 @@ test("fails closed when a durable descriptor is incomplete or bound to another d
   const methods = {
     read: () => ({ state: "enrollment_uncertain", release_id: binding.candidate_id, organization_id: organizationId, device_id: deviceId, recovery_descriptor: { ...descriptor, request_digest: undefined } }),
     create_prepared: () => { throw new Error("unexpected mutation"); },
+    create_invitation_issued: () => { throw new Error("unexpected mutation"); },
     issue_invitation: () => { throw new Error("unexpected mutation"); },
     record_delivery: () => { throw new Error("unexpected mutation"); },
     mark_enrollment_uncertain: () => { throw new Error("unexpected mutation"); },

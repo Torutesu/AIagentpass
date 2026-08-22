@@ -36,11 +36,16 @@ export const PLATFORM_AUTH_SCENARIO_CHECKS = Object.freeze({
 });
 
 const REPORT_KEYS = ["completed_at", "deployment_digests", "instances", "job_id", "kind", "qualified", "reason", "run_id", "schema_version", "source_commit", "source_tree", "started_at", "status"];
+const REPORT_KEYS_WITH_QUALIFICATION_BINDING = [...REPORT_KEYS, "ci_run_attempt", "ci_run_id", "qualification_job_id", "qualification_run_attempt", "qualification_run_id"];
+const REPORT_KEYS_WITH_EXECUTION = [...REPORT_KEYS, "execution"];
+const REPORT_KEYS_WITH_QUALIFICATION_BINDING_AND_EXECUTION = [...REPORT_KEYS_WITH_QUALIFICATION_BINDING, "execution"];
 const SHA = /^[0-9a-f]{40}$/u;
 const RUN_ID = /^[1-9][0-9]{0,19}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const DISALLOWED_IDENTITY = /(^|[._:/ -])(local|static|unit|mock|fixture|fake|simulator|emulator|test|macos-latest|unknown|unidentified|unspecified|placeholder|redacted|n\/a|none|null)($|[._:/ -])/iu;
+const EXTERNAL_EXECUTION_KEYS = ["completed_at", "environment", "job_id", "kind", "real_execution", "run_attempt", "run_id", "runner_id", "source_commit", "source_tree", "started_at", "ci_run_attempt", "ci_run_id", "qualification_job_id", "qualification_run_attempt", "qualification_run_id"];
 const SAFE_REASON = new Set([
   "provider_not_configured",
   "qualification_dependencies_missing",
@@ -129,7 +134,11 @@ export async function runPlatformAuthQualification({
 
 export function normalizePlatformAuthQualificationEvidence(value) {
   try {
-    exactObject(value, REPORT_KEYS);
+    const hasQualificationBinding = Object.prototype.hasOwnProperty.call(value, "ci_run_id");
+    const hasExecution = Object.prototype.hasOwnProperty.call(value, "execution");
+    exactObject(value, hasQualificationBinding
+      ? (hasExecution ? REPORT_KEYS_WITH_QUALIFICATION_BINDING_AND_EXECUTION : REPORT_KEYS_WITH_QUALIFICATION_BINDING)
+      : (hasExecution ? REPORT_KEYS_WITH_EXECUTION : REPORT_KEYS));
     if (value.schema_version !== PLATFORM_AUTH_QUALIFICATION_SCHEMA_VERSION
       || value.kind !== PLATFORM_AUTH_QUALIFICATION_KIND
       || !["passed", "failed"].includes(value.status)
@@ -139,6 +148,8 @@ export function normalizePlatformAuthQualificationEvidence(value) {
       || typeof value.source_tree !== "string" || !SHA.test(value.source_tree)
       || typeof value.run_id !== "string" || !RUN_ID.test(value.run_id)
       || typeof value.job_id !== "string" || !RUN_ID.test(value.job_id)) fail();
+    if (hasQualificationBinding && ["ci_run_id", "ci_run_attempt", "qualification_run_id", "qualification_run_attempt", "qualification_job_id"].some((key) => typeof value[key] !== "string" || !RUN_ID.test(value[key]))) fail();
+    if (hasExecution) normalizeExternalExecution(value.execution, value);
     if (!validDeploymentDigests(value.deployment_digests)) fail();
     timestamp(value.started_at);
     timestamp(value.completed_at);
@@ -181,7 +192,7 @@ export function normalizePlatformAuthNotRunEvidence(value) {
   }
 }
 
-export function verifyPlatformAuthQualificationEvidence(input, { expectedSourceCommit, expectedSourceTree, expectedDeploymentDigests, expectedRunId, expectedJobId } = {}) {
+export function verifyPlatformAuthQualificationEvidence(input, { expectedSourceCommit, expectedSourceTree, expectedDeploymentDigests, expectedRunId, expectedJobId, expectedRunAttempt, expectedCiRunId, expectedCiRunAttempt, requireExternalExecution = false } = {}) {
   let value;
   let bytes;
   try {
@@ -192,6 +203,7 @@ export function verifyPlatformAuthQualificationEvidence(input, { expectedSourceC
   } catch { fail(); }
   const normalized = value?.status === "not_run" ? normalizePlatformAuthNotRunEvidence(value) : normalizePlatformAuthQualificationEvidence(value);
   if (normalized.status !== "not_run") {
+    if (requireExternalExecution && !Object.prototype.hasOwnProperty.call(normalized, "execution")) fail();
     if (expectedSourceCommit !== undefined && normalized.source_commit !== expectedSourceCommit) fail();
     if (expectedSourceTree !== undefined && normalized.source_tree !== expectedSourceTree) fail();
     if (expectedDeploymentDigests !== undefined) {
@@ -204,6 +216,9 @@ export function verifyPlatformAuthQualificationEvidence(input, { expectedSourceC
     }
     if (expectedRunId !== undefined && normalized.run_id !== String(expectedRunId)) fail();
     if (expectedJobId !== undefined && normalized.job_id !== String(expectedJobId)) fail();
+    if (expectedRunAttempt !== undefined && normalized.execution?.run_attempt !== String(expectedRunAttempt)) fail();
+    if (expectedCiRunId !== undefined && normalized.execution?.ci_run_id !== String(expectedCiRunId)) fail();
+    if (expectedCiRunAttempt !== undefined && normalized.execution?.ci_run_attempt !== String(expectedCiRunAttempt)) fail();
   }
   if (bytes !== undefined && canonicalPlatformAuthQualificationEvidence(normalized) !== bytes) fail();
   return Object.freeze({
@@ -220,6 +235,34 @@ export function verifyPlatformAuthQualificationEvidence(input, { expectedSourceC
         job_id: normalized.job_id
       })
   });
+}
+
+function normalizeExternalExecution(value, report) {
+  exactObject(value, EXTERNAL_EXECUTION_KEYS);
+  if (value.kind !== "external_runner" || value.real_execution !== true
+    || typeof value.runner_id !== "string" || !IDENTIFIER.test(value.runner_id) || DISALLOWED_IDENTITY.test(value.runner_id)
+    || typeof value.run_id !== "string" || value.run_id !== report.run_id
+    || typeof value.job_id !== "string" || value.job_id !== report.job_id
+    || typeof value.run_attempt !== "string" || !RUN_ID.test(value.run_attempt)
+    || typeof value.source_commit !== "string" || value.source_commit !== report.source_commit
+    || typeof value.source_tree !== "string" || value.source_tree !== report.source_tree
+    || typeof value.started_at !== "string" || value.started_at !== report.started_at
+    || typeof value.completed_at !== "string" || value.completed_at !== report.completed_at
+    || !value.environment || typeof value.environment !== "object" || Array.isArray(value.environment)) fail();
+  exactObject(value.environment, ["identity", "kind"]);
+  if (value.environment.kind !== "platform_auth"
+    || typeof value.environment.identity !== "string"
+    || !IDENTIFIER.test(value.environment.identity)
+    || DISALLOWED_IDENTITY.test(value.environment.identity)) fail();
+  if (Date.parse(value.completed_at) < Date.parse(value.started_at)) fail();
+  const hasQualificationBinding = Object.prototype.hasOwnProperty.call(report, "ci_run_id");
+  if (!hasQualificationBinding
+    || typeof value.ci_run_id !== "string" || value.ci_run_id !== report.ci_run_id
+    || typeof value.ci_run_attempt !== "string" || value.ci_run_attempt !== report.ci_run_attempt
+    || typeof value.qualification_run_id !== "string" || value.qualification_run_id !== report.qualification_run_id
+    || typeof value.qualification_run_attempt !== "string" || !RUN_ID.test(value.qualification_run_attempt) || value.qualification_run_attempt !== report.qualification_run_attempt
+    || typeof value.qualification_job_id !== "string" || value.qualification_job_id !== report.qualification_job_id) fail();
+  return Object.freeze({ ...value, environment: Object.freeze({ ...value.environment }) });
 }
 
 export function canonicalPlatformAuthQualificationEvidence(value) {

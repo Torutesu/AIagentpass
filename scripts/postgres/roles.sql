@@ -135,14 +135,22 @@ BEGIN
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND c.relname NOT IN (
         'schema_migrations', 'schema_migration_attempts', 'release_candidates',
+        'organizations', 'memberships', 'organization_invitations',
+        'human_sessions', 'webauthn_credentials', 'webauthn_challenges',
+        'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges',
+        'owner_recovery_sessions', 'owner_recovery_webauthn_challenges',
+        'owner_recovery_idempotency_records', 'owner_recovery_outbox',
+        'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads',
+        'owner_recovery_outbox_transition_ledger',
         'capabilities', 'agent_session_signing_capability_reservations',
         'agent_session_signing_capability_expiry_audit_events',
         'agent_session_signing_capability_expiry_audit_heads',
         'agent_capability_sequence_heads',
         'agent_session_launch_authority_handoffs',
         'agent_session_grants', 'agent_sessions',
-        'device_audit_events', 'device_audit_heads', 'device_audit_gaps',
-        'human_identity_assertion_replays'
+        'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets',
+        'device_audit_events', 'device_audit_heads', 'device_audit_gaps', 'device_audit_inbox',
+        'human_identity_assertion_replays', 'upstream_identities'
       )
       AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
       AND left(c.relname, length('platform_')) <> 'platform_'
@@ -156,6 +164,10 @@ BEGIN
 END
 $$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
+-- Organization and membership rows are readable by the online application,
+-- but every mutation must cross a reviewed authority function.  This keeps
+-- existing read paths working while removing the direct-DML escalation path.
+GRANT SELECT ON TABLE public.organizations, public.memberships TO agentpass_app;
 
 -- signer: all managed-signer state is function-only after migration 0051.
 -- The signer identity receives no table or sequence privileges. Every state
@@ -188,9 +200,9 @@ BEGIN
     'platform_promotion_deployments', 'platform_promotion_issuances',
     'platform_principals', 'platform_operator_assignments',
     'platform_operator_assignment_approvals',
-    'managed_signer_key_lifecycles', 'managed_signer_keys',
-    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
-    'managed_signer_provider_operations'
+        'managed_signer_key_lifecycles', 'managed_signer_keys',
+        'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
+    'managed_signer_provider_operations', 'device_audit_inbox'
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
@@ -224,7 +236,8 @@ BEGIN
         OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
           'agent_session_signing_capability_expiry_audit_events',
           'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads',
-          'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions')
+          'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions',
+          'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets')
       )
   LOOP
     EXECUTE format(
@@ -275,6 +288,48 @@ BEGIN
     ,'agentpass_agent_session_consume(uuid,uuid,uuid,uuid,text,uuid,text,text,text,jsonb,integer,timestamptz,timestamptz,bigint,bigint,text,text,text,text,text,text,text,uuid,boolean)'
     ,'agentpass_agent_session_lifecycle_expire_due(uuid,integer,timestamptz)'
     ,'agentpass_agent_session_lifecycle_revoke(uuid,uuid,uuid,uuid,uuid,boolean,timestamptz)'
+    ,'agentpass_human_session_find_by_token(bytea)'
+    ,'agentpass_human_session_touch(uuid,timestamptz,timestamptz)'
+    ,'agentpass_human_session_logout(uuid,uuid,uuid,bytea,timestamptz,text)'
+    ,'agentpass_human_session_revoke(uuid,timestamptz,text)'
+    ,'agentpass_human_session_create(uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz)'
+    ,'agentpass_human_session_reduce_to_ceiling(uuid,timestamptz,integer,text)'
+    ,'agentpass_human_session_create_with_ceiling(uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,integer,text,timestamptz)'
+    ,'agentpass_human_session_bind_recent_auth(uuid,uuid,uuid,text,uuid,bytea,timestamptz)'
+    ,'agentpass_human_session_consume_recent_auth(uuid,uuid,uuid,text,uuid,bytea,timestamptz)'
+    ,'agentpass_human_session_list(uuid)'
+    ,'agentpass_human_session_list_safe(uuid,uuid,timestamptz,uuid,integer)'
+    ,'agentpass_human_list_credentials_for_session(uuid,uuid)'
+    ,'agentpass_human_find_credential_for_session(uuid,uuid,bytea)'
+    ,'agentpass_human_update_credential_counter(uuid,uuid,bytea,bigint,bigint,boolean,boolean,boolean,boolean)'
+    ,'agentpass_human_quarantine_credential_clone(uuid,uuid,bytea,bigint,bigint)'
+    ,'agentpass_human_register_credential(uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean)'
+    ,'agentpass_human_list_credential_metadata_for_session(uuid,uuid,uuid,timestamptz,uuid,integer)'
+    ,'agentpass_human_update_credential_label(uuid,uuid,uuid,bytea,text,bigint)'
+    ,'agentpass_human_revoke_credential(uuid,uuid,uuid,bytea,bigint,timestamptz,text)'
+    ,'agentpass_human_get_registration_user(uuid,uuid,uuid)'
+    ,'agentpass_human_session_rotate(uuid,bytea,uuid,uuid,uuid,uuid,text,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz,text)'
+    ,'agentpass_human_session_switch(uuid,bytea,uuid,uuid,uuid,uuid,bytea,bytea,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz,text)'
+    ,'agentpass_human_session_revoke_managed(uuid,uuid,uuid,uuid,bigint,timestamptz,text)'
+    ,'agentpass_human_session_revoke_others(uuid,uuid,uuid,timestamptz,text)'
+    ,'agentpass_human_member_session_revoke(uuid,uuid,timestamptz,text)'
+    ,'agentpass_organization_create_with_owner(uuid,uuid,uuid,text,text,text,text,timestamptz)'
+    ,'agentpass_organization_rename(uuid,uuid,text,bigint)'
+    ,'agentpass_human_membership_role_update(uuid,uuid,uuid,text,bigint,timestamptz)'
+    ,'agentpass_human_membership_remove(uuid,uuid,uuid,bigint,timestamptz)'
+    ,'agentpass_organization_invitation_create(uuid,uuid,bytea,text,uuid,timestamptz,timestamptz)'
+    ,'agentpass_organization_invitation_revoke(uuid,uuid,bigint,timestamptz,uuid,text)'
+    ,'agentpass_organization_invitation_reissue(uuid,uuid,bytea,timestamptz,timestamptz,bigint,uuid)'
+    ,'agentpass_organization_invitation_accept(uuid,uuid,bytea,uuid,timestamptz)'
+    ,'agentpass_organization_invitation_list(uuid,uuid,timestamptz,uuid,integer)'
+    ,'agentpass_human_identity_resolve(text,text,uuid)'
+    ,'agentpass_human_identity_find(text,text)'
+    ,'agentpass_human_identity_list_memberships(text,text,uuid)'
+    ,'agentpass_human_credential_registration_status(uuid,uuid,uuid,bytea)'
+    ,'agentpass_owner_recovery_register_credential(uuid,uuid,uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean,timestamptz)'
+    ,'agentpass_owner_recovery_find_credential(uuid,uuid,uuid,uuid,bytea,bytea,timestamptz)'
+    ,'agentpass_owner_recovery_update_credential_counter(uuid,uuid,uuid,uuid,uuid,bytea,bigint,bigint,boolean,boolean,boolean,boolean,timestamptz)'
+    ,'agentpass_owner_recovery_credential_exists(uuid,uuid,uuid,uuid,bytea,timestamptz)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
@@ -291,7 +346,8 @@ DECLARE
   routine_signature text;
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
-    'agentpass_agent_signing_capability_recover_expired(integer)'
+    'agentpass_agent_signing_capability_recover_expired(integer)',
+    'agentpass_human_identity_bind(text,text,uuid,uuid)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_maintenance', routine_signature);

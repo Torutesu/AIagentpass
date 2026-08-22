@@ -190,10 +190,11 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
     private let childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar?
     private let signatureBudgetProvider: SignatureBudgetProvider?
     private let nowMilliseconds: NativeAgentAuthenticatedHostEndpoint.MillisecondClock
+    private let controlRegistry: NativeAgentHostControlRegistry
     private let endpointLock = NSLock()
     private var endpoints: [ObjectIdentifier: NativeAgentAuthenticatedHostEndpoint] = [:]
 
-    public init(
+    init(
         allowedClientUID: UInt32,
         codeSigningRequirement: String,
         peerPolicyFactory: @escaping @Sendable (NativeProcessObservation) throws -> NativeProcessIdentityPolicy,
@@ -206,6 +207,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         dedicatedChildRegistrar: NativeAgentAuthenticatedHostEndpoint.DedicatedChildRegistrar? = nil,
         childUnregistrar: NativeAgentAuthenticatedHostEndpoint.ChildUnregistrar? = nil,
         signatureBudgetProvider: SignatureBudgetProvider? = nil,
+        controlRegistry: NativeAgentHostControlRegistry = NativeAgentHostControlRegistry(),
         nowMilliseconds: @escaping NativeAgentAuthenticatedHostEndpoint.MillisecondClock = {
             Int64(Date().timeIntervalSince1970 * 1_000)
         }
@@ -222,6 +224,7 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
         self.dedicatedChildRegistrar = dedicatedChildRegistrar
         self.childUnregistrar = childUnregistrar
         self.signatureBudgetProvider = signatureBudgetProvider
+        self.controlRegistry = controlRegistry
         self.nowMilliseconds = nowMilliseconds
         super.init()
     }
@@ -301,7 +304,17 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 childRegistrar: childRegistrar,
                 dedicatedChildRegistrar: dedicatedChildRegistrar,
                 childUnregistrar: childUnregistrar,
-                signatureBudgetProvider: signatureBudgetProvider
+                signatureBudgetProvider: signatureBudgetProvider,
+                sessionRegistrar: { [controlRegistry] sessionID, endpoint, ownerIdentity in
+                    try controlRegistry.register(
+                        sessionID: sessionID,
+                        endpoint: endpoint,
+                        ownerIdentity: ownerIdentity
+                    )
+                },
+                sessionUnregistrar: { [controlRegistry] endpoint in
+                    controlRegistry.unregister(endpoint: endpoint)
+                }
             )
             connection.exportedInterface = AgentPassHostXPCInterface.make()
             connection.exportedObject = endpoint
@@ -315,6 +328,196 @@ public final class NativeAgentAuthenticatedHostListenerDelegate: NSObject, NSXPC
                 self.endpointLock.lock()
                 self.endpoints.removeValue(forKey: ObjectIdentifier(connection))
                 self.endpointLock.unlock()
+            }
+            connection.resume()
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+/// A control-only endpoint for a process that is separate from the Host that
+/// owns the session. It has no Host signing methods and revalidates its own
+/// complete peer identity before every registry operation.
+public final class NativeAgentAuthenticatedHostControlEndpoint: NSObject, AgentPassHostControlXPCProtocol {
+    public typealias ContextObserver = @Sendable () throws -> NativeConnectionContext
+    public typealias ProcessObserver = @Sendable () throws -> NativeProcessObservation
+
+    private static let errorDomain = "com.agentpass.native-authenticated-host-control"
+    private let peerBinding: NativeAgentAuthenticatedGitBridgePeerBinding
+    private let peerContextObserver: ContextObserver
+    private let peerProcessObserver: ProcessObserver
+    private let registry: NativeAgentHostControlRegistry
+    private let stateLock = NSLock()
+    private var invalidated = false
+
+    init(
+        connectionContext: NativeConnectionContext,
+        initialPeerObservation: NativeProcessObservation,
+        peerProcessPolicy: NativeProcessIdentityPolicy,
+        observeConnectionContext: @escaping ContextObserver,
+        observePeerProcess: @escaping ProcessObserver,
+        registry: NativeAgentHostControlRegistry
+    ) throws {
+        self.peerBinding = try NativeAgentAuthenticatedGitBridgePeerBinding(
+            connectionContext: connectionContext,
+            observation: initialPeerObservation,
+            processPolicy: peerProcessPolicy
+        )
+        self.peerContextObserver = observeConnectionContext
+        self.peerProcessObserver = observePeerProcess
+        self.registry = registry
+        super.init()
+    }
+
+    public func closeHostSessionFromControl(
+        _ request: AgentPassHostControlCloseRequest,
+        withReply reply: @escaping (AgentPassHostControlCloseResponse?, NSError?) -> Void
+    ) {
+        do {
+            let controllerIdentity = try revalidatePeer()
+            reply(try registry.close(request: request, controllerIdentity: controllerIdentity), nil)
+        } catch {
+            reply(nil, makeError(error))
+        }
+    }
+
+    public func invalidateConnection() {
+        stateLock.withLock { invalidated = true }
+    }
+
+    private func revalidatePeer() throws -> NativeProcessIdentity {
+        stateLock.lock()
+        guard !invalidated else {
+            stateLock.unlock()
+            throw NativeAgentHostControlRegistryError.controlUnavailable
+        }
+        do {
+            let context = try peerContextObserver()
+            let observation = try peerProcessObserver()
+            try peerBinding.revalidate(connectionContext: context, observation: observation)
+            stateLock.unlock()
+            return peerBinding.processIdentity
+        } catch NativeAgentAuthenticatedGitBridgeError.peerIdentityMismatch {
+            invalidated = true
+            stateLock.unlock()
+            throw NativeAgentHostControlRegistryError.controlPeerMismatch
+        } catch NativeAgentAuthenticatedGitBridgeError.codeIdentityDenied {
+            invalidated = true
+            stateLock.unlock()
+            throw NativeAgentHostControlRegistryError.controlPeerMismatch
+        } catch NativeAgentAuthenticatedGitBridgeError.processIdentityChanged {
+            invalidated = true
+            stateLock.unlock()
+            throw NativeAgentHostControlRegistryError.controlPeerMismatch
+        } catch {
+            invalidated = true
+            stateLock.unlock()
+            throw NativeAgentHostControlRegistryError.controlUnavailable
+        }
+    }
+
+    private func makeError(_ error: Error) -> NSError {
+        let stable: NativeAgentHostControlRegistryError
+        if let error = error as? NativeAgentHostControlRegistryError {
+            stable = error
+        } else {
+            stable = .controlUnavailable
+        }
+        let code: Int
+        switch stable {
+        case .controlUnavailable: code = 1
+        case .controlPeerMismatch: code = 2
+        case .controlReplay: code = 3
+        case .controlInProgress: code = 4
+        case .controlSessionMissing: code = 5
+        }
+        return NSError(
+            domain: Self.errorDomain,
+            code: code,
+            userInfo: [NSLocalizedDescriptionKey: stable.rawValue]
+        )
+    }
+}
+
+/// Listener delegate for the dedicated Host control Mach service. The code
+/// signing requirement is supplied independently of the normal Host listener
+/// instance, and the complete audit token is captured again for this peer.
+public final class NativeAgentAuthenticatedHostControlListenerDelegate: NSObject, NSXPCListenerDelegate {
+    private let allowedClientUID: UInt32
+    private let codeSigningRequirement: String
+    private let peerPolicyFactory: @Sendable (NativeProcessObservation) throws -> NativeProcessIdentityPolicy
+    private let auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource
+    private let registry: NativeAgentHostControlRegistry
+    private let endpointLock = NSLock()
+    private var endpoints: [ObjectIdentifier: NativeAgentAuthenticatedHostControlEndpoint] = [:]
+
+    init(
+        allowedClientUID: UInt32,
+        codeSigningRequirement: String,
+        peerPolicyFactory: @escaping @Sendable (NativeProcessObservation) throws -> NativeProcessIdentityPolicy,
+        auditTokenSource: any NativeAgentAuthenticatedHostAuditTokenSource,
+        registry: NativeAgentHostControlRegistry
+    ) {
+        self.allowedClientUID = allowedClientUID
+        self.codeSigningRequirement = codeSigningRequirement
+        self.peerPolicyFactory = peerPolicyFactory
+        self.auditTokenSource = auditTokenSource
+        self.registry = registry
+        super.init()
+    }
+
+    public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        let tokenSource = auditTokenSource
+        let token: NativeAgentAuthenticatedHostCompleteAuditToken
+        do {
+            token = try auditTokenSource.completeAuditToken(for: connection)
+        } catch {
+            return false
+        }
+        guard token.effectiveUserID == allowedClientUID else { return false }
+        connection.setCodeSigningRequirement(codeSigningRequirement)
+
+        let observer = NativeDarwinProcessObservationSource()
+        do {
+            let peerPID = token.pid
+            let peerUID = token.effectiveUserID
+            let connectionBox = NativeAgentAuthenticatedHostConnectionBox(connection)
+            let initialObservation = try observer.observe(pid: peerPID, expectedUserID: peerUID)
+            let context = try token.context(matching: initialObservation)
+            let peerPolicy = try peerPolicyFactory(initialObservation)
+            let endpoint = try NativeAgentAuthenticatedHostControlEndpoint(
+                connectionContext: context,
+                initialPeerObservation: initialObservation,
+                peerProcessPolicy: peerPolicy,
+                observeConnectionContext: {
+                    let currentToken = try tokenSource.completeAuditToken(for: connectionBox.connection)
+                    guard currentToken.pid == peerPID,
+                          currentToken.effectiveUserID == peerUID else {
+                        throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+                    }
+                    let current = try observer.observe(pid: currentToken.pid, expectedUserID: currentToken.effectiveUserID)
+                    return try currentToken.context(matching: current)
+                },
+                observePeerProcess: {
+                    let currentToken = try tokenSource.completeAuditToken(for: connectionBox.connection)
+                    guard currentToken.pid == peerPID,
+                          currentToken.effectiveUserID == peerUID else {
+                        throw NativeAgentAuthenticatedHostAuditTokenError.invalidAuditToken
+                    }
+                    return try observer.observe(pid: currentToken.pid, expectedUserID: currentToken.effectiveUserID)
+                },
+                registry: registry
+            )
+            connection.exportedInterface = AgentPassHostControlXPCInterface.make()
+            connection.exportedObject = endpoint
+            let key = ObjectIdentifier(connection)
+            endpointLock.withLock { endpoints[key] = endpoint }
+            connection.invalidationHandler = { [weak self, weak endpoint, weak connection] in
+                endpoint?.invalidateConnection()
+                guard let self, let connection else { return }
+                _ = self.endpointLock.withLock { self.endpoints.removeValue(forKey: ObjectIdentifier(connection)) }
             }
             connection.resume()
             return true

@@ -22,10 +22,10 @@ function pool() {
   return { options: { max: 4 }, totalCount: 1, idleCount: 1, waitingCount: 0 };
 }
 
-function catalogWithSyntheticMigration(catalog, version, name) {
+function catalogWithSyntheticMigration(catalog, version, name, checksum) {
   return {
     ...catalog,
-    entries: [...catalog.entries, { kind: "postgres-migration", source: `postgres/${name}`, version }]
+    entries: [...catalog.entries, { kind: "postgres-migration", source: `postgres/${name}`, version, sha256: checksum }]
   };
 }
 
@@ -64,7 +64,7 @@ test("a coordinated synthetic 0056 automatically becomes the head", async () => 
   const migrations = [...POSTGRES_SCHEMA_HEAD.migrations, migration];
   const manifest = { schema_version: 1, migrations: migrations.map(({ name, bytes, checksum }) => ({ name, bytes, sha256: checksum })) };
   const head = derivePostgresSchemaHead({
-    catalog: catalogWithSyntheticMigration(catalog, migration.version, migration.name),
+    catalog: catalogWithSyntheticMigration(catalog, migration.version, migration.name, migration.checksum),
     migrations,
     migrationManifest: manifest
   });
@@ -84,13 +84,15 @@ test("a file, catalog, manifest, or checksum update without the other sources fa
     bytes: Buffer.byteLength(sql),
     checksum: digest(sql)
   };
-  const futureCatalog = catalogWithSyntheticMigration(catalog, migration.version, migration.name);
+  const futureCatalog = catalogWithSyntheticMigration(catalog, migration.version, migration.name, migration.checksum);
   const futureMigrations = [...POSTGRES_SCHEMA_HEAD.migrations, migration];
   const futureManifest = { migrations: futureMigrations.map(({ name, bytes, checksum }) => ({ name, bytes, sha256: checksum })) };
   assert.throws(() => derivePostgresSchemaHead({ catalog, migrations: futureMigrations }), { code: "ERR_SCHEMA_HEAD_MISMATCH" });
   assert.throws(() => derivePostgresSchemaHead({ catalog: futureCatalog, migrations: POSTGRES_SCHEMA_HEAD.migrations }), { code: "ERR_SCHEMA_HEAD_MISMATCH" });
   assert.throws(() => derivePostgresSchemaHead({ catalog, migrations: POSTGRES_SCHEMA_HEAD.migrations, migrationManifest: futureManifest }), { code: "ERR_SCHEMA_HEAD_MISMATCH" });
   assert.throws(() => derivePostgresSchemaHead({ catalog: futureCatalog, migrations: futureMigrations, migrationManifest: { migrations: futureManifest.migrations.map((entry, index) => index === futureManifest.migrations.length - 1 ? { ...entry, sha256: "0".repeat(64) } : entry) } }), { code: "ERR_SCHEMA_HEAD_MISMATCH" });
+  const staleCatalog = { ...catalog, entries: catalog.entries.map((entry) => entry.id === "migration.0084_device_audit_inbox_worker_authority" ? { ...entry, sha256: "0".repeat(64) } : entry) };
+  assert.throws(() => derivePostgresSchemaHead({ catalog: staleCatalog, migrations: POSTGRES_SCHEMA_HEAD.migrations }), { code: "ERR_SCHEMA_HEAD_MISMATCH" });
 });
 
 test("readiness consumes the same derived head and rejects a stale database", async () => {

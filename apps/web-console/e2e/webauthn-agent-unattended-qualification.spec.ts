@@ -8,6 +8,7 @@ import {
   CHALLENGE,
   CHALLENGE_ID,
   CREDENTIAL_ID,
+  CREDENTIAL_ID_BYTES,
   CSRF_TOKEN,
   ORGANIZATION_ID,
   browserStorageSnapshot,
@@ -135,7 +136,9 @@ function inspectAssertion(credential: unknown, expectedChallenge: string, expect
   return Object.freeze({
     credentialShape: value.type === "public-key"
       && typeof value.id === "string"
+      && value.id === CREDENTIAL_ID
       && typeof value.rawId === "string"
+      && decodeBase64Url(value.rawId).equals(CREDENTIAL_ID_BYTES)
       && typeof responseValue.clientDataJSON === "string"
       && typeof responseValue.authenticatorData === "string"
       && typeof responseValue.signature === "string"

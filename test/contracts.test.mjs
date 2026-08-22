@@ -10,7 +10,28 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, new RegExp(`validated 59 schemas, 2 OpenAPI documents, 24 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
+  assert.match(result.stdout, new RegExp(`validated 64 schemas, 3 OpenAPI documents, 28 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
+});
+
+test("production-readiness gate schema is closed and fixes the eleven-row production inventory", () => {
+  const schema = contractSchema("production-readiness-gate-v1.schema.json");
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ["candidate", "evidence", "kind", "reviewer", "schema_version"]);
+  assert.equal(schema.properties.kind.const, "agentpass.production-readiness-gate");
+  assert.equal(schema.properties.schema_version.const, 1);
+  assert.equal(schema.properties.evidence.minItems, 11);
+  assert.equal(schema.properties.evidence.maxItems, 11);
+  assert.equal(schema.properties.evidence.prefixItems.length, 11);
+  assert.equal(schema.properties.evidence.items, false);
+  assert.deepEqual(schema.$defs.evidenceRow.required, ["artifact_sha256", "candidate_id", "expires_at", "kind", "name", "produced_at", "provenance", "qualified", "run", "sha256", "slot", "source_commit", "source_tree", "status"]);
+  assert.equal(schema.$defs.evidenceRow.properties.status.const, "passed");
+  assert.equal(schema.$defs.evidenceRow.properties.qualified.const, true);
+  assert.deepEqual(schema.$defs.provenance.required, ["environment", "execution_class", "runner_class", "source"]);
+  assert.equal(schema.$defs.provenance.properties.environment.const, "production");
+  assert.equal(schema.$defs.provenance.properties.execution_class.const, "protected_external");
+  assert.equal(schema.$defs.provenance.properties.source.const, "external");
+  assert.equal(schema.$defs.reviewer.properties.independent.const, true);
+  assert.equal(schema.$defs.reviewer.additionalProperties, false);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));

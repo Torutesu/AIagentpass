@@ -1,6 +1,11 @@
-# Independent security review — 2026-08-19
+# Security-review gate record — 2026-08-19 (not a third-party review)
 
-This review records the remaining production gates after the current native
+Status: `not_proven`. This document is a repository-side review record and a list
+of required production gates. It does not claim that an independent third party
+performed or completed a review. A real third-party engagement, reviewer identity,
+signed source-bound record, expiry, and retest evidence remain outstanding.
+
+This repository-side review records the remaining production gates after the current native
 Host, Console, PostgreSQL repository, and release-preflight changes. A local
 test result is not treated as proof of a production control.
 
@@ -72,4 +77,6 @@ Secure Enclave/T2 evidence remain external gates.
 The protected release job must reject a dirty checkout and record the exact
 source commit, tree digest, candidate digest, and evidence bundle digest. A
 focused local test, an offline release-preflight result, or a skipped live
-PostgreSQL/Apple test must remain `not_proven`.
+PostgreSQL/Apple test must remain `not_proven`. The security-review verifier also
+requires an unexpired, separately keyed reviewer record before any production-ready
+result can be returned; this contract does not supply that real-world record.

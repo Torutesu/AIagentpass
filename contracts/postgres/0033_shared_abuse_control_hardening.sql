@@ -5,7 +5,7 @@ BEGIN;
 -- taken only after the existing row has been locked.  Otherwise a request
 -- that waited on a contended bucket could refill from a timestamp captured
 -- before the wait.
-CREATE OR REPLACE FUNCTION agentpass_acquire_rate_limit(
+CREATE OR REPLACE FUNCTION public.agentpass_acquire_rate_limit(
   request_organization_id uuid,
   request_principal_type text,
   request_principal_id uuid,
@@ -23,9 +23,11 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
-  bucket rate_limit_buckets%ROWTYPE;
+  bucket public.rate_limit_buckets%ROWTYPE;
   now_value timestamptz;
   elapsed_seconds numeric;
   new_tokens numeric;
@@ -47,7 +49,7 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'invalid rate-limit parameters';
   END IF;
 
-  INSERT INTO rate_limit_buckets
+  INSERT INTO public.rate_limit_buckets
     (organization_id, principal_type, principal_id, capacity, refill_per_second, tokens, updated_at, expires_at)
   VALUES
     (request_organization_id, request_principal_type, request_principal_id,
@@ -56,7 +58,7 @@ BEGIN
   ON CONFLICT (organization_id, principal_type, principal_id) DO NOTHING;
 
   SELECT * INTO bucket
-  FROM rate_limit_buckets
+  FROM public.rate_limit_buckets
   WHERE organization_id = request_organization_id
     AND principal_type = request_principal_type
     AND principal_id = request_principal_id
@@ -76,7 +78,7 @@ BEGIN
     next_reset := now_value + (((request_cost - new_tokens) / request_refill_per_second) * interval '1 second');
   END IF;
 
-  UPDATE rate_limit_buckets
+  UPDATE public.rate_limit_buckets
   SET capacity = request_capacity,
       refill_per_second = request_refill_per_second,
       tokens = new_tokens,
@@ -90,7 +92,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION agentpass_acquire_anonymous_rate_limit(
+CREATE OR REPLACE FUNCTION public.agentpass_acquire_anonymous_rate_limit(
   request_operation text,
   request_principal_id uuid,
   request_capacity integer,
@@ -107,9 +109,11 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
-  bucket anonymous_rate_limit_buckets%ROWTYPE;
+  bucket public.anonymous_rate_limit_buckets%ROWTYPE;
   now_value timestamptz;
   elapsed_seconds numeric;
   new_tokens numeric;
@@ -128,7 +132,7 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'invalid anonymous rate-limit parameters';
   END IF;
 
-  INSERT INTO anonymous_rate_limit_buckets
+  INSERT INTO public.anonymous_rate_limit_buckets
     (operation, principal_id, capacity, refill_per_second, tokens, updated_at, expires_at)
   VALUES
     (request_operation, request_principal_id, request_capacity,
@@ -137,7 +141,7 @@ BEGIN
   ON CONFLICT (operation, principal_id) DO NOTHING;
 
   SELECT * INTO bucket
-  FROM anonymous_rate_limit_buckets
+  FROM public.anonymous_rate_limit_buckets
   WHERE operation = request_operation AND principal_id = request_principal_id
   FOR UPDATE;
 
@@ -153,7 +157,7 @@ BEGIN
     next_reset := now_value + (((request_cost - new_tokens) / request_refill_per_second) * interval '1 second');
   END IF;
 
-  UPDATE anonymous_rate_limit_buckets
+  UPDATE public.anonymous_rate_limit_buckets
   SET capacity = request_capacity,
       refill_per_second = request_refill_per_second,
       tokens = new_tokens,
@@ -168,10 +172,12 @@ $$;
 -- Every candidate query locks its bounded batch before deletion.  This makes
 -- concurrent maintenance workers cooperate instead of selecting the same
 -- expired rows and waiting on a delete lock after the bound was chosen.
-CREATE OR REPLACE FUNCTION agentpass_prune_shared_control_expired(prune_limit integer)
+CREATE OR REPLACE FUNCTION public.agentpass_prune_shared_control_expired(prune_limit integer)
 RETURNS TABLE (removed bigint)
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   remaining integer := prune_limit;
@@ -182,9 +188,9 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'invalid prune limit';
   END IF;
 
-  DELETE FROM idempotency_records
+    DELETE FROM public.idempotency_records
   WHERE ctid IN (
-    SELECT ctid FROM idempotency_records
+    SELECT ctid FROM public.idempotency_records
     WHERE expires_at <= clock_timestamp()
     ORDER BY expires_at, organization_id, principal_id, idempotency_key
     FOR UPDATE SKIP LOCKED
@@ -195,9 +201,9 @@ BEGIN
   remaining := remaining - deleted_count::integer;
 
   IF remaining > 0 THEN
-    DELETE FROM device_request_nonces
+    DELETE FROM public.device_request_nonces
     WHERE ctid IN (
-      SELECT ctid FROM device_request_nonces
+      SELECT ctid FROM public.device_request_nonces
       WHERE expires_at <= clock_timestamp()
       ORDER BY expires_at, organization_id, device_id, nonce_digest
       FOR UPDATE SKIP LOCKED
@@ -209,9 +215,9 @@ BEGIN
   END IF;
 
   IF remaining > 0 THEN
-    DELETE FROM rate_limit_buckets
+    DELETE FROM public.rate_limit_buckets
     WHERE ctid IN (
-      SELECT ctid FROM rate_limit_buckets
+      SELECT ctid FROM public.rate_limit_buckets
       WHERE expires_at <= clock_timestamp()
       ORDER BY expires_at, organization_id, principal_type, principal_id
       FOR UPDATE SKIP LOCKED
@@ -223,9 +229,9 @@ BEGIN
   END IF;
 
   IF remaining > 0 THEN
-    DELETE FROM human_identity_assertion_replays
+    DELETE FROM public.human_identity_assertion_replays
     WHERE ctid IN (
-      SELECT ctid FROM human_identity_assertion_replays
+      SELECT ctid FROM public.human_identity_assertion_replays
       WHERE expires_at <= clock_timestamp()
       ORDER BY expires_at, jti_digest
       FOR UPDATE SKIP LOCKED
@@ -239,10 +245,12 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION agentpass_prune_anonymous_rate_limits(prune_limit integer)
+CREATE OR REPLACE FUNCTION public.agentpass_prune_anonymous_rate_limits(prune_limit integer)
 RETURNS TABLE (removed bigint)
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   deleted_count bigint;
@@ -251,9 +259,9 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'invalid anonymous rate-limit prune limit';
   END IF;
 
-  DELETE FROM anonymous_rate_limit_buckets
+  DELETE FROM public.anonymous_rate_limit_buckets
   WHERE ctid IN (
-    SELECT ctid FROM anonymous_rate_limit_buckets
+    SELECT ctid FROM public.anonymous_rate_limit_buckets
     WHERE expires_at <= clock_timestamp()
     ORDER BY expires_at, operation, principal_id
     FOR UPDATE SKIP LOCKED
@@ -264,10 +272,12 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION agentpass_prune_human_identity_assertion_replays(prune_limit integer)
+CREATE OR REPLACE FUNCTION public.agentpass_prune_human_identity_assertion_replays(prune_limit integer)
 RETURNS TABLE (removed bigint)
 LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   deleted_count bigint;
@@ -276,9 +286,9 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'invalid human identity assertion replay prune limit';
   END IF;
 
-  DELETE FROM human_identity_assertion_replays
+  DELETE FROM public.human_identity_assertion_replays
   WHERE ctid IN (
-    SELECT ctid FROM human_identity_assertion_replays
+    SELECT ctid FROM public.human_identity_assertion_replays
     WHERE expires_at <= clock_timestamp()
     ORDER BY expires_at, jti_digest
     FOR UPDATE SKIP LOCKED

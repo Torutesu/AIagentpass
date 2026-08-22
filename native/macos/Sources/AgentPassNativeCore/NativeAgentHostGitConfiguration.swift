@@ -9,8 +9,12 @@ import Foundation
 /// signed/notarized distribution exists, a missing helper fails Git closed.
 public enum NativeAgentHostGitConfiguration {
     public static let helperExecutablePath = "/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-sign"
+    public static let versionedSessionHelperExecutablePath = "/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-session-sign"
     public static let authenticatedXPCHelperExecutablePath = "/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-sign-xpc"
     public static let signerReference = NativeAgentGitSigningInvocation.fixedSignerReference
+    public static let sessionProtocolEnvironmentKey = "AGENTPASS_GIT_SESSION_PROTOCOL"
+    public static let sessionEntrypointEnvironmentKey = "AGENTPASS_GIT_SESSION_ENTRYPOINT"
+    public static let versionedSessionProtocol = NativeAgentHostPrivateGitSessionProtocol.versionedSessionV1.rawValue
 
     /// The exact environment entries consumed by Git's supported command-line
     /// config mechanism. The caller cannot override any key because the
@@ -34,6 +38,19 @@ public enum NativeAgentHostGitConfiguration {
     public static var authenticatedXPCEnvironment: [String: String] {
         var values = environment
         values["GIT_CONFIG_VALUE_1"] = authenticatedXPCHelperExecutablePath
+        return values
+    }
+
+    /// Explicit Agent-facing session configuration. Git's
+    /// `gpg.ssh.program` remains the ordinary one-payload helper even in this
+    /// mode: Git invokes that program once per signing operation and cannot
+    /// drive the two-payload session contract. The session helper is exposed
+    /// as a separate, explicit Agent entrypoint instead of being installed as
+    /// a hidden Git fallback.
+    public static var versionedSessionEnvironment: [String: String] {
+        var values = environment
+        values[sessionProtocolEnvironmentKey] = versionedSessionProtocol
+        values[sessionEntrypointEnvironmentKey] = versionedSessionHelperExecutablePath
         return values
     }
 }

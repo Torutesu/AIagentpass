@@ -39,7 +39,7 @@ test("all Console reads and mutations wait for one shared session bootstrap", as
 
 test("resumes the same-origin session before SIWC and falls back only for Cloud human_session_session_required", async () => {
   const source = await componentSource();
-  const bootstrap = functionBody(source, "bootstrapConsoleSession", "allocateEnrollmentStoreId");
+  const bootstrap = functionBody(source, "bootstrapConsoleSession", "supportsWebAuthn");
   const request = functionBody(source, "requestConsoleSession", "isSessionResumeRequired");
 
   assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
@@ -68,6 +68,15 @@ test("every Console mutation carries the exact in-memory CSRF token and same-ori
   assert.match(source, /fetchConsole\(`\/api\/console\?operation=\$\{encodeURIComponent\(operation\)\}`, \{[\s\S]*?method: "POST"/);
 });
 
+test("emergency stop exposes a retryable visible failure state without weakening the mutation guard", async () => {
+  const source = await componentSource();
+  assert.match(source, /const \[stopError, setStopError\] = useState<string \| null>\(null\)/);
+  assert.match(source, /setStopError\("停止を確認できませんでした。接続と認証状態を確認し、もう一度お試しください。"\)/);
+  assert.match(source, /stopError \? <p className="form-error" role="alert" aria-live="assertive">\{stopError\}<\/p>/);
+  assert.match(source, /if \(stopPending\) return;/);
+  assert.match(source, /authenticateRecentAuth\(\{ operation: EMERGENCY_STOP_RECENT_AUTH_OPERATION/);
+});
+
 test("session material stays out of React state, browser storage, and logs", async () => {
   const source = await componentSource();
   const authority = await readFile(authorityPath, "utf8");
@@ -75,10 +84,9 @@ test("session material stays out of React state, browser storage, and logs", asy
   assert.doesNotMatch(source, /useState\([^\n]*(?:csrf|csrf_token|organizationId|authorization|challenge|assertion)/i);
   assert.match(authority, /let value: T \| undefined/);
   assert.match(authority, /let pending: Promise<T> \| undefined/);
-  assert.match(authority, /return Object\.freeze\(\{ get, clear \}\)/);
-  assert.match(source, /const \[preflight, setPreflight\] = useState<PublicEnrollmentPreflight \| null>\(null\)/);
+  assert.match(authority, /return Object\.freeze\(\{ get, replace, clear \}\)/);
+  assert.doesNotMatch(source, /enrollmentJson|secret-output|enrollmentVisible|setEnrollmentVisible/);
   assert.doesNotMatch(source, /enrollmentStores|writeEnrollmentStore|readEnrollmentStore|allocateEnrollmentStoreId/);
-  assert.doesNotMatch(source, /navigator\.clipboard|ClipboardItem|secret-output|enrollmentJson|enrollmentVisible|setEnrollmentVisible/);
   assert.doesNotMatch(source, /<pre[^>]*>\s*\{[^}]*invitation/);
   assert.doesNotMatch(source, /useState<Record<string, string> \| null>/);
   assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
@@ -88,11 +96,11 @@ test("session material stays out of React state, browser storage, and logs", asy
 test("enrollment credentials use only the validated live handoff and are discarded on failure", async () => {
   const source = await componentSource();
   const setup = functionBody(source, "SetupSurface", "AgentsSurface");
-  const handoffPost = setup.indexOf("await postBrowserCliHandoff");
+  const handoffPost = setup.indexOf("await liveHandoff.delivery.deliver");
   const handoffClear = setup.indexOf("liveHandoffRef.current = null;");
 
-  assert.ok(handoffClear >= 0 && handoffClear < handoffPost, "the one-shot handoff reference must be consumed before POST");
-  assert.match(setup, /await postBrowserCliHandoff\(\{[\s\S]*?invitation,[\s\S]*?\}\);\s*onLiveHandoffStatus\("delivered"\)/);
+  assert.ok(handoffClear >= 0 && handoffClear < handoffPost, "the one-shot handoff reference must be consumed before delivery");
+  assert.match(setup, /await liveHandoff\.delivery\.deliver\(invitation\)/);
   assert.match(setup, /credentialは表示せず破棄しました/);
   assert.doesNotMatch(setup, /set[A-Za-z]*(?:Credential|Invitation|EnrollmentVisible)/);
   assert.doesNotMatch(setup, /navigator\.clipboard|ClipboardItem|localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
@@ -169,14 +177,27 @@ test("session role is strictly parsed and authority-changing controls are least-
   assert.doesNotMatch(source, /useState\("\/work\/repo"\)/);
 });
 
+test("Agent launch guide exposes only bounded Claude Code and Cursor commands", async () => {
+  const source = await componentSource();
+  const guide = functionBody(source, "AgentLaunchGuide", "PoliciesSurface");
+
+  assert.match(source, /<AgentLaunchGuide \/>/);
+  assert.ok(guide.includes('claude: "agentpass launch --agent claude-code --project \\"$PWD\\" --ttl 600"'));
+  assert.ok(guide.includes('cursor: "agentpass launch --agent cursor --project \\"$PWD\\" --ttl 600"'));
+  assert.match(guide, /navigator\.clipboard\.writeText\(commands\[kind\]\)/);
+  assert.match(guide, /短期の権限/);
+  assert.match(guide, /秘密鍵や認証情報はコマンドに含まれません/);
+  assert.doesNotMatch(guide, /csrf|authorization|private[_-]?key|secret|token/i);
+});
+
 test("help modal exposes an accessible dialog and a keyboard focus trap", async () => {
   const source = await componentSource();
 
-  assert.match(source, /aria-controls="help-modal"/);
+  assert.match(source, /aria-controls="help-dialog"/);
   assert.match(source, /helpModalRef/);
   assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy"/);
   assert.match(source, /event\.key === "Escape"/);
-  assert.match(source, /event\.key !== "Tab"/);
-  assert.match(source, /previousModalFocusRef/);
-  assert.match(source, /previous\?\.focus\(\)/);
+  assert.match(source, /event\.key === "Tab"/);
+  assert.match(source, /previousFocusRef/);
+  assert.match(source, /if \(target\?\.isConnected\) target\.focus\(\)/);
 });

@@ -49,7 +49,7 @@ function dependencies(failingPurpose, canaryFailingPurpose) {
       unavailableCode: `${purpose.replaceAll(/[^a-z0-9]+/giu, "_")}_unavailable`,
       signer: implementation,
       canary: implementation.canary,
-      lifecycle: { version: 1, purpose, algorithm: "ed25519", keys: [{ key_id: `${purpose}-key`, key_version: 1, public_key_fingerprint: implementation.fingerprint, state: "active", state_version: 1 }] }
+      lifecycle: { version: 1, purpose, algorithm: "ed25519", keys: [{ key_id: `${purpose}-key`, key_version: 1, purpose, algorithm: "ed25519", public_key_fingerprint: implementation.fingerprint, state: "active", state_version: 1 }] }
     };
   });
 }
@@ -67,6 +67,15 @@ test("hosted readiness covers all eight purposes and normalizes metadata-only si
     assert.equal(check.algorithm, "ed25519");
     assert.match(check.public_key_fingerprint, /^[0-9a-f]{64}$/u);
   }
+});
+
+test("hosted readiness rejects registry purpose substitution before serving", () => {
+  const substituted = dependencies();
+  substituted[0] = { ...substituted[0], purpose: "agentpass.attacker-purpose" };
+  assert.throws(
+    () => createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), substituted),
+    /Hosted readiness signer registry is unavailable/u,
+  );
 });
 
 test("managed signer canary failure makes readiness fail closed", async () => {
@@ -116,12 +125,40 @@ test("authoritative lifecycle key mismatch makes readiness fail closed", async (
   assert.equal(report.checks.managed_signers.signers.agent_session_grant.key_id, null);
 });
 
+test("retiring lifecycle keys must be present in the signer verification ring", async () => {
+  const current = dependencies();
+  current[0].lifecycle.keys.push({
+    key_id: "retiring-key-not-published",
+    key_version: 2,
+    purpose: current[0].purpose,
+    algorithm: "ed25519",
+    public_key_fingerprint: "1".repeat(64),
+    state: "retiring",
+    state_version: 1,
+  });
+  const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current);
+  const report = await readiness();
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "agentpass_agent_session_grant_unavailable");
+});
+
+test("hosted readiness rejects duplicate or missing signer registry names", () => {
+  const current = dependencies();
+  current[1].registryName = current[0].registryName;
+  assert.throws(
+    () => createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current),
+    /signer registry is unavailable/u
+  );
+});
+
 test("concurrent readiness calls share one canary per active key", async () => {
   const current = dependencies();
+  const originalCanary = current[0].canary;
   let calls = 0;
   current[0].canary = async () => {
     calls += 1;
     await new Promise((resolve) => setTimeout(resolve, 5));
+    return originalCanary();
   };
   const readiness = createHostedReadiness(async () => ({ ready: true, status: "ok", code: "ready", checks: {} }), current);
   await Promise.all([readiness(), readiness(), readiness()]);

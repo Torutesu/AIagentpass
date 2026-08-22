@@ -9,15 +9,13 @@ import {
 } from './n3e/controller-identity-contract.mjs';
 import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 
-const args = process.argv.slice(2);
-const [input, artifactInput, manifestInput, manifestSignatureInput, manifestPublicKeyInput,
-  manifestFingerprint, operatorSignatureInput, operatorPublicKeyInput, operatorFingerprint,
-  evidenceDirectoryInput] = args;
 const V2_ARGUMENTS = 10;
-if (!input || ![1, V2_ARGUMENTS].includes(args.length)) {
-  throw new Error('Usage: validate-hardware-qualification.mjs RESULT.json [ARTIFACT RELEASE-MANIFEST RELEASE-SIGNATURE RELEASE-PUBLIC-KEY RELEASE-FINGERPRINT OPERATOR-SIGNATURE OPERATOR-PUBLIC-KEY OPERATOR-FINGERPRINT EVIDENCE-DIR]');
-}
 if (!Number.isInteger(fs.constants.O_NOFOLLOW)) throw new Error('O_NOFOLLOW is unavailable on this platform');
+
+// This path is part of the production trust boundary. It is deliberately not
+// a CLI argument: a caller must not be able to select a different driver
+// manifest while validating a qualification report.
+const P0C_GATE_MANIFEST_PATH = '/opt/agentpass/p0c/gate-manifest.json';
 
 const statIdentity = (stat) => [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
 const validDigest = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -307,8 +305,25 @@ const requiredCodeIdentities = new Map([
   ['AgentPass.app/Contents/MacOS/agentpass-native-manager', 'dev.agentpass.native-manager'],
   ['AgentPass.app/Contents/MacOS/agentpass-onboarding', 'dev.agentpass']
 ]);
-const validateEvidenceList = (items, label, evidenceDirectory, seenEvidence) => {
+const readFixedGateManifest = (manifestPath = P0C_GATE_MANIFEST_PATH) => {
+  const snapshot = snapshotFile(manifestPath, { maximum: 1024 * 1024, capture: true, label: 'fixed P0-C gate manifest' });
+  const manifest = readJSON(snapshot, 'fixed P0-C gate manifest');
+  if (!snapshot.content.equals(canonicalJSON(manifest))) throw new Error('fixed P0-C gate manifest is not canonical JSON');
+  exactKeys(manifest, ['schema_version', 'gates'], 'fixed P0-C gate manifest');
+  if (manifest.schema_version !== 1 || !Array.isArray(manifest.gates) || manifest.gates.length !== requiredGates.length) throw new Error('fixed P0-C gate manifest identity is invalid');
+  const manifestGateOrder = [...requiredGates].sort(lexicalCompare);
+  const digests = new Map();
+  manifest.gates.forEach((entry, index) => {
+    exactKeys(entry, ['gate', 'sha256'], 'fixed P0-C gate manifest entry');
+    if (entry.gate !== manifestGateOrder[index] || digests.has(entry.gate) || !validDigest(entry.sha256) || entry.sha256 === '0'.repeat(64)) throw new Error('fixed P0-C gate manifest entries are invalid or reordered');
+    digests.set(entry.gate, entry.sha256);
+  });
+  return Object.freeze({ path: snapshot.path, sha256: snapshot.sha256, digests });
+};
+
+const validateEvidenceList = (items, label, evidenceDirectory, seenEvidence, requireGateDriverDigest = false, expectedGateDriverDigests = null) => {
   if (!Array.isArray(items) || items.length === 0 || items.length > 256) throw new Error(`invalid ${label} count`);
+  if (requireGateDriverDigest && !(expectedGateDriverDigests instanceof Map)) throw new Error('fixed P0-C gate manifest is required');
   const names = new Set();
   for (const item of items) {
     exactKeys(item, ['name', 'status', 'evidence', ...(item?.status === 'passed' ? [] : ['reason'])], label);
@@ -323,33 +338,48 @@ const validateEvidenceList = (items, label, evidenceDirectory, seenEvidence) => 
       exactKeys(evidence, ['name', 'bytes', 'sha256'], `${label} evidence item`);
       if (!safeName(evidence.name) || evidenceNames.has(evidence.name) || seenEvidence.has(evidence.name) || !Number.isSafeInteger(evidence.bytes) || evidence.bytes <= 0 || !validDigest(evidence.sha256)) throw new Error(`invalid, duplicate, or unbound ${label} evidence`);
       if (!evidenceDirectory) throw new Error('qualified hardware report requires an evidence directory');
-      snapshotFile(resolve(evidenceDirectory, evidence.name), { maximum: 16 * 1024 * 1024, expectedBytes: evidence.bytes, expectedSHA256: evidence.sha256, label: `${label} evidence` });
+      const evidenceSnapshot = snapshotFile(resolve(evidenceDirectory, evidence.name), { maximum: 16 * 1024 * 1024, capture: requireGateDriverDigest, expectedBytes: evidence.bytes, expectedSHA256: evidence.sha256, label: `${label} evidence` });
+      if (requireGateDriverDigest) {
+        const projection = readJSON(evidenceSnapshot, `${label} evidence`);
+        if (!evidenceSnapshot.content.equals(canonicalJSON(projection)) || projection.kind !== 'p0c-gate-result' || projection.name !== item.name || typeof projection.driver_sha256 !== 'string' || !validDigest(projection.driver_sha256) || projection.driver_sha256 === '0'.repeat(64)) throw new Error(`${label} evidence is missing a valid driver digest`);
+        if (projection.driver_sha256 !== expectedGateDriverDigests.get(item.name)) throw new Error(`${label} evidence driver digest does not match the fixed gate manifest for ${item.name}`);
+      }
       evidenceNames.add(evidence.name); seenEvidence.add(evidence.name);
     }
   }
   return new Set(names);
 };
 
-const validateV1 = (value) => {
+const validateV1 = (value, write = (line) => console.log(line)) => {
   exactKeys(value, ['schema_version', 'artifact_sha256', 'architecture', 'hardware_class', 'model_identifier', 'macos_version', 'macos_build', 'secure_enclave', 'started_at', 'completed_at', 'operator', 'qualified', 'tests'], 'hardware qualification report');
   if (value.schema_version !== 1 || value.qualified !== false) throw new Error('v1 hardware qualification is accepted only as unqualified/non-production');
-  console.log(JSON.stringify({ ok: true, schema_version: 1, qualified: false, production: false, backwards_compatible: true }));
+  write(JSON.stringify({ ok: true, schema_version: 1, qualified: false, production: false, backwards_compatible: true }));
 };
 
+const main = ({ argv = process.argv.slice(2), gateManifestPath = P0C_GATE_MANIFEST_PATH, write = (line) => console.log(line) } = {}) => {
+const rawArgs = argv;
+const requireQualified = rawArgs.includes('--require-qualified');
+const args = rawArgs.filter((value) => value !== '--require-qualified');
+const [input, artifactInput, manifestInput, manifestSignatureInput, manifestPublicKeyInput,
+  manifestFingerprint, operatorSignatureInput, operatorPublicKeyInput, operatorFingerprint,
+  evidenceDirectoryInput] = args;
+if (!input || ![1, V2_ARGUMENTS].includes(args.length)) {
+  throw new Error('Usage: validate-hardware-qualification.mjs RESULT.json [--require-qualified] [ARTIFACT RELEASE-MANIFEST RELEASE-SIGNATURE RELEASE-PUBLIC-KEY RELEASE-FINGERPRINT OPERATOR-SIGNATURE OPERATOR-PUBLIC-KEY OPERATOR-FINGERPRINT EVIDENCE-DIR]');
+}
 const reportSnapshot = snapshotFile(input, { maximum: 4 * 1024 * 1024, capture: true, label: 'hardware qualification report' });
 const reportValue = readJSON(reportSnapshot, 'hardware qualification report');
-if (reportValue.schema_version === 1) { validateV1(reportValue); process.exit(0); }
+if (reportValue.schema_version === 1) { validateV1(reportValue, write); return; }
 if (reportValue.schema_version !== 2) throw new Error('unsupported hardware qualification schema version');
 if (!reportSnapshot.content.equals(canonicalJSON(reportValue))) throw new Error('hardware qualification report is not canonical JSON');
 const reportKeys = [
-  'schema_version', 'source_commit', 'dependency_lock_sha256', 'release_manifest_sha256', 'artifact_name', 'artifact_sha256',
+  'schema_version', 'source_commit', 'source_tree', 'dependency_lock_sha256', 'release_manifest_sha256', 'artifact_name', 'artifact_sha256',
   'architecture', 'hardware_class', 'model_identifier', 'macos_version', 'macos_build', 'secure_enclave', 'team_id',
   'nested_code_identities', 'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256', 'signer_key_versions',
   'browser_versions', 'started_at', 'completed_at', 'operator', 'operator_key_fingerprint', 'qualified', 'tests', 'gates'
 ];
 if (Object.hasOwn(reportValue, 'n3e_qualification_suite_evidence')) reportKeys.push('n3e_qualification_suite_evidence');
 exactKeys(reportValue, reportKeys, 'hardware qualification report');
-for (const field of ['source_commit']) if (typeof reportValue[field] !== 'string' || !/^[0-9a-f]{40}$/.test(reportValue[field])) throw new Error(`invalid ${field}`);
+for (const field of ['source_commit', 'source_tree']) if (typeof reportValue[field] !== 'string' || !/^[0-9a-f]{40}$/.test(reportValue[field])) throw new Error(`invalid ${field}`);
 for (const field of ['dependency_lock_sha256', 'release_manifest_sha256', 'artifact_sha256', 'database_migration_manifest_sha256']) if (!validDigest(reportValue[field])) throw new Error(`invalid ${field}`);
 if (!safeName(reportValue.artifact_name) || !['arm64', 'x86_64'].includes(reportValue.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(reportValue.hardware_class)) throw new Error('invalid artifact or hardware identity');
 if ((reportValue.hardware_class === 'apple_silicon') !== (reportValue.architecture === 'arm64') || (reportValue.hardware_class === 'intel_without_t2' && reportValue.secure_enclave === true)) throw new Error('hardware class and architecture disagree');
@@ -395,14 +425,16 @@ if (Object.hasOwn(reportValue, 'n3e_qualification_suite_evidence') && reportValu
 const suppliedGate = args.length === V2_ARGUMENTS;
 if (reportValue.qualified && !suppliedGate) throw new Error('qualified result requires signed release manifest, exact artifact, and detached operator signature inputs');
 if (!suppliedGate) {
+  if (requireQualified) throw new Error('production validation requires qualified:true and a complete signed qualification gate');
   if (reportValue.qualified) throw new Error('qualified result cannot be self-asserted');
   validateEvidenceList(reportValue.tests, 'hardware test', null, new Set());
   validateEvidenceList(reportValue.gates, 'hardware gate', null, new Set());
-  console.log(JSON.stringify({ ok: true, schema_version: 2, qualified: false, production: false, operator_signature_verified: false }));
+  write(JSON.stringify({ ok: true, schema_version: 2, qualified: false, production: false, operator_signature_verified: false }));
 } else {
   const evidenceDirectory = resolve(evidenceDirectoryInput);
   const release = validateManifest(snapshotFile(manifestInput, { maximum: 16 * 1024 * 1024, capture: true, label: 'release manifest' }), manifestSignatureInput, manifestPublicKeyInput, manifestFingerprint, reportValue.team_id);
   if (release.manifest.source.commit !== reportValue.source_commit) throw new Error('source commit mismatch between report and signed release manifest');
+  if (release.manifest.source.tree !== reportValue.source_tree) throw new Error('source tree mismatch between report and signed release manifest');
   if (createHash('sha256').update(release.manifestBytes).digest('hex') !== reportValue.release_manifest_sha256) throw new Error('release manifest digest mismatch');
   const product = release.artifacts.find((item) => item.role === 'product');
   const artifact = snapshotFile(artifactInput, { maximum: 16 * 1024 * 1024 * 1024, label: 'release artifact' });
@@ -418,10 +450,17 @@ if (!suppliedGate) {
   if (reportValue.qualified && (reportValue.secure_enclave !== true || reportValue.hardware_class === 'intel_without_t2' || reportValue.notarization.status !== 'accepted_stapled')) throw new Error('hardware cannot qualify for production guarantees');
   const seenEvidence = new Set();
   const testNames = validateEvidenceList(reportValue.tests, 'hardware test', evidenceDirectory, seenEvidence);
-  const gateNames = validateEvidenceList(reportValue.gates, 'hardware gate', evidenceDirectory, seenEvidence);
+  const gateManifest = readFixedGateManifest(gateManifestPath);
+  const gateNames = validateEvidenceList(reportValue.gates, 'hardware gate', evidenceDirectory, seenEvidence, true, gateManifest.digests);
   if (reportValue.qualified && (reportValue.tests.some((item) => item.status !== 'passed') || reportValue.gates.some((item) => item.status !== 'passed') || requiredTests.some((name) => !testNames.has(name)) || requiredGates.some((name) => !gateNames.has(name)))) throw new Error('qualified result is missing required passing tests or gates');
   const operator = verifyDetached(reportSnapshot.content, operatorSignatureInput, operatorPublicKeyInput, operatorFingerprint, 'operator');
   if (operator.fingerprint !== reportValue.operator_key_fingerprint) throw new Error('report operator key fingerprint does not match detached operator signature');
   if (reportValue.qualified && seenEvidence.size === 0) throw new Error('qualified result requires real evidence files');
-  console.log(JSON.stringify({ ok: true, schema_version: 2, qualified: reportValue.qualified, production: reportValue.qualified, tests: testNames.size, gates: gateNames.size, artifact_name: reportValue.artifact_name, artifact_sha256: reportValue.artifact_sha256, source_commit: reportValue.source_commit, release_manifest_sha256: reportValue.release_manifest_sha256, operator_key_fingerprint: operator.fingerprint, operator_signature_verified: true, release_manifest_signature_verified: true, ...(n3eSuiteEvidenceSHA256 ? { n3e_suite_evidence_sha256: n3eSuiteEvidenceSHA256 } : {}) }));
+  write(JSON.stringify({ ok: true, schema_version: 2, qualified: reportValue.qualified, production: reportValue.qualified, tests: testNames.size, gates: gateNames.size, artifact_name: reportValue.artifact_name, artifact_sha256: reportValue.artifact_sha256, source_commit: reportValue.source_commit, source_tree: reportValue.source_tree, release_manifest_sha256: reportValue.release_manifest_sha256, operator_key_fingerprint: operator.fingerprint, operator_signature_verified: true, release_manifest_signature_verified: true, ...(n3eSuiteEvidenceSHA256 ? { n3e_suite_evidence_sha256: n3eSuiteEvidenceSHA256 } : {}) }));
 }
+
+};
+
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) main();
+
+export { main as validateHardwareQualification };

@@ -64,6 +64,10 @@ the promoted candidate or restore a revoked private key.
 - [ ] Affected authority is disabled/revoked at the authoritative boundary.
 - [ ] New operations are denied and cached/offline paths meet the measured
   revocation bound.
+- [ ] Emergency-stop evidence records both `propagation_bound_ms` and the
+  observed `propagation_observed_ms`; the observed value is no greater than
+  the bound. A boolean propagation assertion without these measurements is
+  not qualified evidence.
 - [ ] No `reserved`/`uncertain` operation is silently retried or deleted.
 - [ ] Audit, deployment state, ledger, and incident evidence are durable and
   verifiable.

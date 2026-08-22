@@ -6,6 +6,7 @@ import { loadPostgresAppConfig } from "./postgres/runtime.mjs";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/;
 const SUBJECT = /^[^\u0000-\u001f\u007f]{1,512}$/u;
+const DATABASE_URL_ENV = "AGENTPASS_IDENTITY_BIND_DATABASE_URL";
 const REQUIRED_OPTIONS = ["provider", "subject", "member-id", "organization-id"];
 const OPTION_NAMES = new Set(REQUIRED_OPTIONS.map((name) => `--${name}`));
 
@@ -26,7 +27,7 @@ export class IdentityBindError extends Error {
  */
 export async function runIdentityBind({ argv = process.argv.slice(2), env = process.env, PoolClass = Pool } = {}) {
   const options = parseArguments(argv);
-  if (options.help) return Object.freeze({ ok: true, command: "identity-bind", required: REQUIRED_OPTIONS.map((name) => `--${name} VALUE`), database: "AGENTPASS_DATABASE_URL" });
+  if (options.help) return Object.freeze({ ok: true, command: "identity-bind", required: REQUIRED_OPTIONS.map((name) => `--${name} VALUE`), database: DATABASE_URL_ENV });
 
   const config = loadDatabaseConfig(env);
   const pool = createPool({ PoolClass, config });
@@ -37,7 +38,6 @@ export async function runIdentityBind({ argv = process.argv.slice(2), env = proc
     await configureConnection(client, config);
     await client.query("BEGIN");
     try {
-      await lockActiveMembership(client, options);
       const result = await bindIdentity(client, options);
       await client.query("COMMIT");
       completed = true;
@@ -92,10 +92,13 @@ function parseArguments(argv) {
 }
 
 function loadDatabaseConfig(env) {
-  if (!env || typeof env.AGENTPASS_DATABASE_URL !== "string" || env.AGENTPASS_DATABASE_URL.length === 0) throw new IdentityBindError("database_config_invalid");
+  if (!env || typeof env[DATABASE_URL_ENV] !== "string" || env[DATABASE_URL_ENV].length === 0) throw new IdentityBindError("database_config_invalid");
   try {
-    return loadPostgresAppConfig(env);
+    const parsed = new URL(env[DATABASE_URL_ENV]);
+    if (parsed.username !== "agentpass_maintenance") throw new IdentityBindError("database_config_invalid");
+    return loadPostgresAppConfig({ ...env, AGENTPASS_DATABASE_URL: env[DATABASE_URL_ENV] });
   } catch (error) {
+    if (error instanceof IdentityBindError) throw error;
     throw new IdentityBindError("database_config_invalid", error);
   }
 }
@@ -123,33 +126,20 @@ async function configureConnection(client, config) {
   await client.query("SELECT set_config('lock_timeout', $1, false)", [`${config.lockTimeoutMs}ms`]);
 }
 
-async function lockActiveMembership(client, options) {
-  const result = await client.query(
-    "SELECT organization_id, member_id, role FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR UPDATE",
-    [options.organizationId, options.memberId]
-  );
-  if (result.rowCount !== 1) throw new IdentityBindError("membership_not_active");
-}
-
 async function bindIdentity(client, options) {
-  const inserted = await client.query(
-    "INSERT INTO upstream_identities (provider, subject, member_id) VALUES ($1, $2, $3) ON CONFLICT (provider, subject) DO NOTHING RETURNING provider, subject, member_id",
-    [options.provider, options.subject, options.memberId]
+  const result = await client.query(
+    "SELECT public.agentpass_human_identity_bind($1::text,$2::text,$3::uuid,$4::uuid) AS result",
+    [options.provider, options.subject, options.memberId, options.organizationId]
   );
-  if (inserted.rowCount === 1) return "created";
-
-  const existing = await client.query(
-    "SELECT member_id FROM upstream_identities WHERE provider=$1 AND subject=$2",
-    [options.provider, options.subject]
-  );
-  if (existing.rowCount !== 1) throw new IdentityBindError("database_operation_failed");
-  const existingMemberId = String(existing.rows[0]?.member_id ?? "").toLowerCase();
-  if (existingMemberId !== options.memberId) throw new IdentityBindError("identity_rebind_forbidden");
-  return "already_exists";
+  const value = result.rows?.[0]?.result;
+  if (result.rowCount !== 1 || !["created", "already_exists"].includes(value)) throw new IdentityBindError("database_operation_failed");
+  return value;
 }
 
 function toIdentityBindError(error) {
   if (error instanceof IdentityBindError) return error;
+  if (error?.code === "23503") return new IdentityBindError("membership_not_active", error);
+  if (error?.code === "42501") return new IdentityBindError("identity_rebind_forbidden", error);
   return new IdentityBindError("database_operation_failed", error);
 }
 
@@ -159,7 +149,7 @@ function assertProvider(value) {
 }
 
 function assertSubject(value) {
-  if (typeof value !== "string" || !SUBJECT.test(value) || value.trim() !== value) throw new IdentityBindError("invalid_arguments");
+  if (typeof value !== "string" || !SUBJECT.test(value) || Buffer.byteLength(value, "utf8") > 512 || value.trim() !== value) throw new IdentityBindError("invalid_arguments");
   return value;
 }
 

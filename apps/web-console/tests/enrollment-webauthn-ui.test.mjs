@@ -34,17 +34,14 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   assert.doesNotMatch(source, /autoComplete="off" value=\{recentAuth\}/);
 });
 
-test("guided enrollment imports one strict public preflight and keeps the advanced fallback explicit", async () => {
+test("guided enrollment uses one strict public preflight and the live handoff", async () => {
   const source = await readFile(componentPath, "utf8");
 
-  assert.match(source, /parsePublicEnrollmentPreflight\(preflightText\)/);
-  assert.match(source, /version: 1,[\s\S]*platform: "macos"/);
   assert.match(source, /publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight/);
   assert.match(source, /liveHandoffRef/);
-  assert.match(source, /PUBLIC ONLY/);
-  assert.match(source, /上級者向け：preflight JSONを使えない場合の手入力/);
-  assert.match(source, /candidate_binding\.candidate_id !== expectedPreflight\.candidate_id/);
-  assert.match(source, /candidate_binding\.device_key_fingerprint !== expectedPreflight\.device_key_fingerprint/);
+  assert.match(source, /candidate_id !== activePreflight\.candidate_id/);
+  assert.match(source, /device_key_fingerprint !== activePreflight\.device_key_fingerprint/);
+  assert.match(source, /発行済みcredentialは表示せず破棄しました/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|window\.location\.search|console\.(?:log|info|warn|error)/);
   assert.doesNotMatch(source, /enrollmentStores|allocateEnrollmentStoreId/);
   assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);

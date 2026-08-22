@@ -11,6 +11,7 @@ import {
   refreshHintSigningData
 } from "../../../packages/protocol/src/index.mjs";
 import { controlBundleStatementHash, issueControlBundle } from "../../../lib/control-bundle-v2.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 // G4.1 runtime dependency contract. These methods are deliberately named here
 // so the server implementation cannot hide persistence, ordering, or replay
@@ -189,7 +190,7 @@ async function startServer(t, options = {}) {
     now: () => NOW,
     ...options.cloudApi
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   t.after(async () => new Promise((resolve) => server.close(resolve)));
   return { ...dependencies, base: `http://127.0.0.1:${server.address().port}` };
 }

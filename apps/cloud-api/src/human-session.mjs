@@ -67,7 +67,9 @@ export class HumanSessionError extends Error {
  * transaction (and lock the member's active-session set when issuing or
  * rotating) so the concurrent-session limit also holds across instances.
  * PostgreSQL exposes this stronger optional seam as createSessionWithLimit;
- * reference stores retain the process-local fallback below.
+ * reference stores retain the process-local fallback below.  PostgreSQL also
+ * exposes logoutSession: it serializes the cookie's final revoke with
+ * rotation and follows only exact rotation successors.
  */
 export function assertHumanSessionRepository(repository) {
   if (!repository || typeof repository !== "object") fail(HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID);
@@ -396,7 +398,22 @@ export function createHumanSessionService(options = {}) {
     const active = await ensureActive(record, now);
     assertCsrf(active, input.csrfToken ?? input.csrf_token ?? headerValue(input.headers, CSRF_HEADER));
     const revokedAt = new Date(now).toISOString();
-    await repository.revokeSession({ sessionId: record.session_id, session_id: record.session_id, revokedAt, revoked_at: revokedAt, reason: "logout", revoke_reason: "logout" });
+    const logoutInput = {
+      sessionId: record.session_id,
+      session_id: record.session_id,
+      memberId: record.member_id,
+      member_id: record.member_id,
+      organizationId: record.organization_id,
+      organization_id: record.organization_id,
+      tokenHash: record.token_hash,
+      token_hash: record.token_hash,
+      revokedAt,
+      revoked_at: revokedAt,
+      reason: "logout",
+      revoke_reason: "logout"
+    };
+    if (typeof repository.logoutSession === "function") await repository.logoutSession(logoutInput);
+    else await repository.revokeSession(logoutInput);
     return { session: publicSession({ ...record, revoked_at: revokedAt, revoke_reason: "logout" }), clearCookie: serializeClearedSessionCookie(), setCookie: serializeClearedSessionCookie() };
   }
 

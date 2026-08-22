@@ -41,6 +41,14 @@ The runner is fail-closed:
   and typed resilience conditions proving restart recovery, failover recovery,
   response-loss reconciliation, one logical commit, durable uncertain state,
   and zero blind retries.
+- Provider identity is not accepted from an adapter's plain metadata alone.
+  Each provider must return a signed `agentpass.kms-provider-identity-attestation`
+  over the exact run binding, provider account/project, workload identity,
+  region, and complete expected resource ID set. The protected
+  `AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST` map pins the
+  provider attestor public key, fingerprint, and key ID. Nonce replay,
+  resource substitution, attestor-key substitution, expired proof, and
+  cross-run proof are rejected before IAM or scenario qualification.
 
 Probe return values are exact, small typed records. The scenario envelope is
 `kind: "agentpass-cloud-signer-kms-provider-evidence"` and is validated before
@@ -80,7 +88,9 @@ It requires external execution mode, a non-local runner identity, all
 source/tree/deployment/artifact/run/job bindings, an adapter module supplied
 by the protected environment, its SHA-256
 (`AGENTPASS_KMS_PROVIDER_ADAPTER_SHA256`), and an exclusive evidence output
-path. It
+path. It also requires the protected
+`AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS` resource allowlist and
+`AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST` attestor map. It
 rejects `not_run` and failed reports and verifies the canonical report before
 writing it. The adapter owns SDK, workload identity, IAM, and KMS calls; raw
 credentials and provider responses never enter the report.
@@ -91,12 +101,64 @@ until an independently controlled environment supplies the injected probes and
 retains the corresponding redacted evidence.
 
 The focused local tests intentionally use dependency injection and synthetic
-public metadata. They do not verify that a real AWS KMS or GCP Cloud KMS key
+public metadata plus generated attestation keys. They do not verify that a real AWS KMS or GCP Cloud KMS key
 exists, that workload identity/IAM policy is deployed as expected, that HSM
 export is impossible, that rotation/disable was executed in the provider
 account, that an ambiguous provider request was reconciled in production, or
 that the two PostgreSQL instances are real and independently operated. Those
 external gates remain required and are never inferred from a green local test.
+
+## Cloud production qualification workflow contract
+
+`.github/workflows/cloud-production-qualification.yml` consumes two distinct
+KMS evidence layers and must not treat either one as a substitute for the
+other:
+
+1. The signed hosted-KMS report is verified by
+   `verify-cloud-promotion.mjs` with the independently pinned production KMS
+   public key. Its source commit and image digest must match the signed
+   deployment evidence.
+2. The canonical Cloud signer v2 report is verified with
+   `ci-preflight.mjs kms-qualification`. The workflow supplies the exact
+   source tree, deployment digest, artifact SHA-256, external qualification
+   run ID, and `kms` job ID. `not_run`, failed, unqualified, non-canonical, or
+   substituted reports terminate the job.
+
+Before accepting the v2 report, the workflow queries GitHub for the exact
+external run and job. It requires the canonical repository, the
+`External qualification runners` workflow path, a successful completed
+`workflow_dispatch` on `main`, the requested source commit and run attempt,
+and one successful `kms` job with the requested job ID. This prevents a URL
+or a report field from being used as the only run provenance.
+
+The workflow also derives the exact external artifact name from the source
+commit, run ID, and run attempt. It requires one live artifact from that run,
+validates the canonical GitHub archive URL, recomputes the archive digest,
+extracts exactly one regular `kms-qualification.json` entry, and compares its
+bytes with the HTTPS evidence URL. A successful run/job with a different
+artifact or a different URL therefore cannot satisfy this gate.
+
+The workflow also re-verifies every provider identity attestation using the
+protected `AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST` map. It
+recomputes the nonce and binding digest, checks provider/account/region and
+the complete resource set, verifies the Ed25519 signature and validity
+window, and checks the attestor response digest against the identity record.
+The protected canonical `AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS` map
+is an additional authority: every purpose, provider resource, key ID/version,
+public-key fingerprint, account/project, workload identity, identity
+fingerprint, and region must match it. The evidence cannot define its own
+qualification target.
+The deployment-attestation key, hosted-KMS qualification key, and provider
+identity-attestor keys must be distinct. Public-key material is never
+accepted solely because it was embedded in downloaded evidence.
+
+The uploaded qualification artifact retains the canonical v2 report, both
+verification results, and a closed `qualification-binding.json` containing
+source, tree, image, deployment, evidence-archive, artifact, run, attempt,
+and job identities.
+The complete artifact is secret-scanned before upload. Absence of protected
+trust, run/job evidence, or any required binding is an error; it is never
+represented as a successful `not_proven` or `not_run` qualification.
 # Protected release binding
 
 Release signing requires all of the following protected environment variables in addition to the canonical JSON evidence:

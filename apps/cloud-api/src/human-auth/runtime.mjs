@@ -47,12 +47,14 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
-export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, securitySecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, qualificationManifestSigner = undefined, now = () => Date.now() } = {}) {
+export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, securitySecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, qualificationManifestSigner = undefined, requireStrongSessionConcurrency = false, now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
   const sharedControlRepository = postgresRuntime?.sharedControlRepository;
   if (!repository || !organizationRepository || !pool || !sharedControlRepository || typeof sharedControlRepository.acquireRateLimit !== "function" || typeof sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new TypeError("postgresRuntime with pool, humanRepository, organizationRepository, and sharedControlRepository is required");
+  if (typeof requireStrongSessionConcurrency !== "boolean") throw new TypeError("requireStrongSessionConcurrency must be boolean");
+  if (requireStrongSessionConcurrency && typeof repository.createSessionWithLimit !== "function") throw new TypeError("PostgreSQL human session concurrency authority is unavailable");
   const cursorCodec = createHumanCursorCodec({ secret: requireCursorSecret(cursorSecret) });
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });

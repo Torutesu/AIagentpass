@@ -91,6 +91,17 @@ private final class HostForbiddenKeyCoder: NSCoder {
     #expect(protocolSelectors(AgentPassHostXPCProtocol.self).intersection(protocolSelectors(AgentPassNativeServiceProtocol.self)).isEmpty)
 }
 
+@Test func hostControlProtocolIsDedicatedAndOnlyCloses() {
+    #expect(protocolSelectors(AgentPassHostControlXPCProtocol.self) == [
+        "closeHostSessionFromControl:withReply:"
+    ])
+    #expect(protocolSelectors(AgentPassHostControlXPCProtocol.self).intersection(protocolSelectors(AgentPassHostXPCProtocol.self)).isEmpty)
+    let interface = AgentPassHostControlXPCInterface.make()
+    let selector = #selector(AgentPassHostControlXPCProtocol.closeHostSessionFromControl(_:withReply:))
+    #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: false)) == ["AgentPassHostControlCloseRequest"])
+    #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: true)) == ["AgentPassHostControlCloseResponse"])
+}
+
 @Test func hostInterfaceRegistersOnlyFrozenRequestAndReplyClasses() {
     let interface = AgentPassHostXPCInterface.make()
     let expected: [(Selector, Set<String>, Set<String>)] = [
@@ -175,6 +186,16 @@ private final class HostForbiddenKeyCoder: NSCoder {
     ))
     let closeRequest = try #require(AgentPassHostCloseRequest(reason: .completed))
     let closeResponse = try #require(AgentPassHostCloseResponse(sessionID: hostSessionID, closedAtMilliseconds: 4_000_000_000_000))
+    let controlRequest = try #require(AgentPassHostControlCloseRequest(
+        sessionID: hostSessionID,
+        operationID: hostRequestID,
+        reason: .clientShutdown
+    ))
+    let controlResponse = try #require(AgentPassHostControlCloseResponse(
+        operationID: hostRequestID,
+        sessionID: hostSessionID,
+        closedAtMilliseconds: 4_000_000_000_000
+    ))
 
     #expect((try unarchive(AgentPassHostPrepareRequest.self, from: archive(prepare))).launchNonce == hostNonce)
     #expect((try unarchive(AgentPassHostPrepareResponse.self, from: archive(prepareResponse))).sessionID == hostSessionID)
@@ -192,11 +213,39 @@ private final class HostForbiddenKeyCoder: NSCoder {
     #expect((try unarchive(AgentPassHostStatusResponse.self, from: archive(statusResponse))).childAttached)
     #expect((try unarchive(AgentPassHostCloseRequest.self, from: archive(closeRequest))).reason == "completed")
     #expect((try unarchive(AgentPassHostCloseResponse.self, from: archive(closeResponse))).status == "closed")
+    let decodedControlRequest = try unarchive(AgentPassHostControlCloseRequest.self, from: archive(controlRequest))
+    #expect(decodedControlRequest.sessionID == hostSessionID)
+    #expect(decodedControlRequest.operationID == hostRequestID)
+    let decodedControlResponse = try unarchive(AgentPassHostControlCloseResponse.self, from: archive(controlResponse))
+    #expect(decodedControlResponse.operationID == hostRequestID)
+    #expect(decodedControlResponse.status == "closed")
 
     let signLabels = Set(Mirror(reflecting: sign).children.compactMap(\.label))
     #expect(signLabels == ["requestSequence", "commitPayload", "requestID", "createdAtMilliseconds"])
     for forbidden in ["capability", "privateKey", "algorithm", "operation", "repositoryPath", "sessionID", "token"] {
         #expect(signLabels.contains(forbidden) == false)
+    }
+}
+
+@Test func hostControlDTORejectsMalformedOrAuthorityBearingValues() throws {
+    #expect(AgentPassHostControlCloseRequest(
+        sessionID: hostSessionID,
+        operationID: "not-a-uuid",
+        reason: .completed
+    ) == nil)
+    #expect(AgentPassHostControlCloseRequest(
+        sessionID: "not-a-uuid",
+        operationID: hostRequestID,
+        reason: .completed
+    ) == nil)
+    let labels = Set(Mirror(reflecting: try #require(AgentPassHostControlCloseRequest(
+        sessionID: hostSessionID,
+        operationID: hostRequestID,
+        reason: .completed
+    ))).children.compactMap(\.label))
+    #expect(labels == ["protocolVersion", "sessionID", "operationID", "reason"])
+    for forbidden in ["token", "capability", "privateKey", "pid", "filePath", "environment"] {
+        #expect(labels.contains(forbidden) == false)
     }
 }
 

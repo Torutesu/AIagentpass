@@ -37,7 +37,7 @@ export function defaultPostgresMigrationDirectory() {
 export function derivePostgresSchemaHead({ catalog, migrations, migrationManifest, catalogBytes, manifestBytes } = {}) {
   const catalogMigrations = normalizeCatalogMigrations(catalog);
   const fileMigrations = normalizeMigrations(migrations);
-  assertSameMigrationSet(catalogMigrations, fileMigrations, "catalog and migration files disagree");
+  assertSameMigrationSet(catalogMigrations, fileMigrations, "catalog and migration files disagree", true);
 
   const manifestMigrations = migrationManifest === undefined ? undefined : normalizeManifestMigrations(migrationManifest);
   if (manifestMigrations !== undefined) assertSameMigrationSet(fileMigrations, manifestMigrations, "migration manifest and migration files disagree", true);
@@ -98,8 +98,10 @@ function normalizeCatalogMigrations(catalog) {
     const source = typeof entry.source === "string" ? entry.source : "";
     const match = /^postgres\/(\d{4})_([a-z0-9_]+)\.sql$/u.exec(source);
     const version = Number(entry.version);
+    const checksum = entry.sha256;
     if (!match || !Number.isSafeInteger(version) || version < 1 || Number(match[1]) !== version) throw schemaError("catalog", "migration catalog entry has an invalid source or version");
-    return { version, name: `${match[1]}_${match[2]}.sql` };
+    if (typeof checksum !== "string" || !SHA256.test(checksum)) throw schemaError("catalog", "migration catalog entry has an invalid checksum");
+    return { version, name: `${match[1]}_${match[2]}.sql`, checksum };
   }).sort((left, right) => left.version - right.version || left.name.localeCompare(right.name));
   assertContiguous(migrations, "migration catalog");
   return migrations;

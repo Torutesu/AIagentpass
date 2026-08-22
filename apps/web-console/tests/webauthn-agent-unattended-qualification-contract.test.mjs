@@ -15,6 +15,8 @@ test("WebAuthn unattended qualification is a real-browser-only typed evidence co
   }
   assert.match(source, /navigator\.credentials\?\.get/);
   assert.match(source, /installVirtualAuthenticator/);
+  assert.match(source, /value\.id === CREDENTIAL_ID/);
+  assert.match(source, /decodeBase64Url\(value\.rawId\)\.equals\(CREDENTIAL_ID_BYTES\)/);
   assert.match(source, /testInfo\.attach\("webauthn-agent-unattended-qualification\.json"/);
   assert.match(source, /real_execution:\s*true/);
   assert.match(source, /Object\.values\(values\)\.some\(\(value\) => value === undefined\)/);

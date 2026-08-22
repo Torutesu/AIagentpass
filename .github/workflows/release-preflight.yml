@@ -19,9 +19,15 @@ on:
         required: false
         default: ".release/evidence.json"
         type: string
+      candidate_run_id:
+        description: "Exact successful Release candidate workflow run ID; tag pushes resolve exactly one matching run"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   release-preflight:
@@ -40,6 +46,7 @@ jobs:
           CANDIDATE_COMMIT_SHA: ${{ inputs.source_sha || github.sha }}
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
           EVIDENCE_PATH: ${{ inputs.evidence_path || '.release/evidence.json' }}
+          RESULT_PATH: ${{ runner.temp }}/verify-release-preflight.json
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "candidate source SHA must be a full lowercase SHA-1" >&2; exit 1; }
@@ -57,11 +64,173 @@ jobs:
           [[ "$(git cat-file -t "$RELEASE_TAG")" == "tag" ]] || { echo "release tag must be annotated" >&2; exit 1; }
           [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" == "$CANDIDATE_COMMIT_SHA" ]] || { echo "release tag is not bound to the candidate source SHA" >&2; exit 1; }
           node scripts/ops/verify-release-preflight.mjs "$EVIDENCE_PATH" \
-            --candidate-commit-sha "$CANDIDATE_COMMIT_SHA"
+            --candidate-commit-sha "$CANDIDATE_COMMIT_SHA" \
+            --candidate-tree-sha "$(git rev-parse HEAD^{tree})" \
+            > "$RESULT_PATH"
+          node --input-type=module - "$RESULT_PATH" <<'NODE'
+          import fs from 'node:fs';
+          const result = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          if (result.status !== 'passed' || result.result?.status !== undefined) throw new Error('release preflight verifier result is not the canonical seven-gate result');
+          NODE
+      - id: candidate
+        name: Resolve and download the exact successful Release candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID_INPUT: ${{ inputs.candidate_run_id }}
+          CANDIDATE_COMMIT_SHA: ${{ inputs.source_sha || github.sha }}
+          CANDIDATE_ROOT: ${{ runner.temp }}/release-preflight-candidate
+          INTEGRITY_ROOT: ${{ runner.temp }}/release-preflight-integrity
+          RUN_METADATA: ${{ runner.temp }}/release-preflight-candidate-run.json
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "candidate source SHA must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ ! -e "$CANDIDATE_ROOT" && ! -e "$INTEGRITY_ROOT" && ! -e "$RUN_METADATA" ]] || { echo "release preflight candidate paths already exist" >&2; exit 1; }
+          mkdir -m 0700 "$CANDIDATE_ROOT" "$INTEGRITY_ROOT"
+          if [[ -n "$CANDIDATE_RUN_ID_INPUT" ]]; then
+            [[ "$CANDIDATE_RUN_ID_INPUT" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "candidate_run_id must be a decimal run ID" >&2; exit 1; }
+            candidate_run_id="$CANDIDATE_RUN_ID_INPUT"
+          else
+            runs_json="$RUNNER_TEMP/release-preflight-candidate-runs.json"
+            gh api --method GET -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs?head_sha=$CANDIDATE_COMMIT_SHA&event=workflow_dispatch&status=success&per_page=100" > "$runs_json"
+            candidate_run_id="$(node --input-type=module - "$runs_json" "$CANDIDATE_COMMIT_SHA" <<'NODE'
+          import fs from 'node:fs';
+          const [file, expectedSha] = process.argv.slice(2);
+          const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+          const runs = (value.workflow_runs ?? []).filter((run) => run?.path === '.github/workflows/release-candidate.yml'
+            && run.event === 'workflow_dispatch' && run.status === 'completed' && run.conclusion === 'success'
+            && run.head_sha === expectedSha && run.head_branch === 'main' && Number.isSafeInteger(run.id));
+          if (runs.length !== 1) throw new Error('exactly one successful source-bound Release candidate run is required');
+          process.stdout.write(String(runs[0].id));
+          NODE
+            )"
+          fi
+          run_json="$RUNNER_TEMP/release-preflight-candidate-run-api.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id" > "$run_json"
+          node --input-type=module - "$run_json" "$CANDIDATE_COMMIT_SHA" "$GITHUB_REPOSITORY" "$candidate_run_id" <<'NODE'
+          import fs from 'node:fs';
+          const [file, expectedSha, expectedRepository, expectedId] = process.argv.slice(2);
+          const run = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (String(run.id) !== expectedId || run.path !== '.github/workflows/release-candidate.yml' || run.event !== 'workflow_dispatch'
+            || run.status !== 'completed' || run.conclusion !== 'success' || run.head_sha !== expectedSha || run.head_branch !== 'main'
+            || run.repository?.full_name !== expectedRepository || !/^[1-9][0-9]{0,19}$/u.test(String(run.run_attempt))) throw new Error('candidate run is not an exact successful source-bound workflow run');
+          NODE
+          artifacts_json="$RUNNER_TEMP/release-preflight-candidate-artifacts.json"
+          gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100" > "$artifacts_json"
+          node --input-type=module - "$artifacts_json" "$candidate_run_id" <<'NODE'
+          import fs from 'node:fs';
+          const [file, expectedRunId] = process.argv.slice(2);
+          const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+          for (const name of ['notarized-release-candidate', 'release-integrity-evidence']) {
+            const matches = (value.artifacts ?? []).filter((item) => item?.name === name && item.expired === false
+              && String(item.workflow_run?.id) === expectedRunId && Number.isSafeInteger(item.id) && Number.isSafeInteger(item.size_in_bytes) && item.size_in_bytes > 0);
+            if (matches.length !== 1) throw new Error(`candidate run must expose exactly one live ${name} artifact`);
+          }
+          NODE
+          gh run download "$candidate_run_id" --repo "$GITHUB_REPOSITORY" --name notarized-release-candidate --dir "$CANDIDATE_ROOT"
+          gh run download "$candidate_run_id" --repo "$GITHUB_REPOSITORY" --name release-integrity-evidence --dir "$INTEGRITY_ROOT"
+          node --input-type=module - "$run_json" "$RUN_METADATA" "$candidate_run_id" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [input, output, expectedId] = process.argv.slice(2);
+          const run = JSON.parse(fs.readFileSync(input, 'utf8'));
+          const value = { id: String(run.id), run_attempt: String(run.run_attempt), head_sha: run.head_sha, path: run.path, event: run.event, status: run.status, conclusion: run.conclusion, repository: run.repository?.full_name };
+          if (value.id !== expectedId) throw new Error('candidate run metadata changed while materializing');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, canonicalJson(value), 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          printf 'run_id=%s\n' "$candidate_run_id" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$(jq -er '.run_attempt | tostring' "$run_json")" >> "$GITHUB_OUTPUT"
+      - name: Verify externally reviewed release evidence index for the exact candidate
+        env:
+          RELEASE_EVIDENCE_INDEX_JSON: ${{ vars.AGENTPASS_RELEASE_EVIDENCE_INDEX_JSON }}
+          CANDIDATE_ROOT: ${{ runner.temp }}/release-preflight-candidate
+          INTEGRITY_ROOT: ${{ runner.temp }}/release-preflight-integrity
+          INDEX_ROOT: ${{ runner.temp }}/release-preflight-evidence-index
+          EXPECTED_COMMIT: ${{ inputs.source_sha || github.sha }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.candidate.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_EVIDENCE_INDEX_JSON:?AGENTPASS_RELEASE_EVIDENCE_INDEX_JSON is required in the protected production environment}"
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "expected source commit must be a full lowercase SHA-1" >&2; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || { echo "release tag is not canonical" >&2; exit 1; }
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "candidate workflow run binding is invalid" >&2; exit 1; }
+          [[ ! -e "$INDEX_ROOT" ]] || { echo "release evidence index output path already exists" >&2; exit 1; }
+          mkdir -m 0700 "$INDEX_ROOT"
+          node --input-type=module - "$RELEASE_EVIDENCE_INDEX_JSON" "$INDEX_ROOT/release-evidence-index.json" <<'NODE'
+          import fs from 'node:fs';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [raw, output] = process.argv.slice(2);
+          let value;
+          try { value = JSON.parse(raw); } catch { throw new Error('release evidence index is not JSON'); }
+          if (raw !== canonicalJson(value)) throw new Error('release evidence index must be canonical JSON without a trailing newline');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, raw, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          node --input-type=module - "$CANDIDATE_ROOT" "$INTEGRITY_ROOT" "$INDEX_ROOT/release-evidence-expected-candidate.json" "$EXPECTED_COMMIT" "$RELEASE_TAG" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+          import { basename, join } from 'node:path';
+          import { canonicalJson } from './packages/protocol/src/index.mjs';
+          const [candidateRoot, integrityRoot, output, expectedCommit, expectedTag] = process.argv.slice(2);
+          const regular = (root, predicate, label) => {
+            const matches = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => predicate(entry.name))
+              .map((entry) => join(root, entry.name)).filter((file) => { const stat = fs.lstatSync(file); return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (stat.mode & 0o022) === 0; });
+            if (matches.length !== 1) throw new Error(`exactly one ${label} is required`);
+            return matches[0];
+          };
+          const manifestPath = regular(candidateRoot, (name) => name.endsWith('.release-manifest.json'), 'release manifest');
+          const packagePath = regular(candidateRoot, (name) => name.endsWith('.pkg'), 'product PKG');
+          const expectedArtifactPath = regular(integrityRoot, (name) => name === 'release-evidence-expected-candidate.json', 'candidate binding');
+          const manifestBytes = fs.readFileSync(manifestPath);
+          const manifest = JSON.parse(manifestBytes);
+          const product = manifest.artifacts?.filter((item) => item?.role === 'product');
+          if (product?.length !== 1 || product[0].name !== basename(packagePath) || !/^[0-9A-Za-z][0-9A-Za-z._-]*$/u.test(product[0].name)) throw new Error('signed release manifest product name is not bound to the exact PKG');
+          if (manifest.source?.commit !== expectedCommit || manifest.source?.tag !== expectedTag || !/^[0-9a-f]{40}$/u.test(manifest.source?.tree ?? '')) throw new Error('signed release manifest source or tag binding is invalid');
+          const artifactSha256 = createHash('sha256').update(fs.readFileSync(packagePath)).digest('hex');
+          const manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex');
+          if (product[0].sha256 !== artifactSha256 || !/^[0-9a-f]{64}$/u.test(artifactSha256)) throw new Error('signed release manifest product digest differs from the exact PKG');
+          const expected = { artifact_name: product[0].name, artifact_sha256: artifactSha256, candidate_id: manifest.candidate_id, release_manifest_sha256: manifestSha256, source_commit: expectedCommit, source_tree: manifest.source.tree };
+          if (expected.candidate_id !== `release-pkg-sha256-v1-${artifactSha256}`) throw new Error('release candidate identity is not product-bound');
+          const supplied = fs.readFileSync(expectedArtifactPath, 'utf8');
+          if (supplied !== canonicalJson(expected)) throw new Error('candidate binding artifact differs from the independently derived candidate');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, canonicalJson(expected), 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          process.stdout.write(JSON.stringify({ candidate: expected, package_path: basename(packagePath), manifest_path: basename(manifestPath) }));
+          NODE
+          EXPECTED_TREE="$(node --input-type=module - "$CANDIDATE_ROOT" <<'NODE'
+          import fs from 'node:fs';
+          const root = process.argv[2];
+          const file = fs.readdirSync(root).find((name) => name.endsWith('.release-manifest.json'));
+          const value = JSON.parse(fs.readFileSync(`${root}/${file}`, 'utf8'));
+          process.stdout.write(value.source.tree);
+          NODE
+          )"
+          node --input-type=module - "$INDEX_ROOT/release-evidence-index.json" "$INDEX_ROOT/release-evidence-expected-candidate.json" "$EXPECTED_COMMIT" "$EXPECTED_TREE" "$CANDIDATE_RUN_ID" "$CANDIDATE_RUN_ATTEMPT" <<'NODE' > "$INDEX_ROOT/release-evidence-index-verification.json"
+          import fs from 'node:fs';
+          const [indexPath, expectedPath, expectedCommit, expectedTree, candidateRunId, candidateRunAttempt] = process.argv.slice(2);
+          const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+          const expected = JSON.parse(fs.readFileSync(expectedPath, 'utf8'));
+          if (index.candidate?.source_commit !== expectedCommit || index.candidate?.source_tree !== expectedTree || index.candidate?.artifact_sha256 !== expected.artifact_sha256 || index.candidate?.candidate_id !== expected.candidate_id) throw new Error('release evidence index candidate binding is not exact');
+          const candidateEvidence = index.evidence?.find((item) => item?.kind === 'release' && item?.slot === 'candidate');
+          if (!candidateEvidence || String(candidateEvidence.run?.run_id) !== candidateRunId || String(candidateEvidence.run?.run_attempt) !== candidateRunAttempt) throw new Error('release evidence index candidate slot is not bound to the exact Release candidate run');
+          NODE
+          node scripts/release/release-evidence-index.mjs verify \
+            "$INDEX_ROOT/release-evidence-index.json" \
+            "$INDEX_ROOT/release-evidence-expected-candidate.json" \
+            > "$INDEX_ROOT/release-evidence-index-verification.json"
       - name: Retain verified candidate-bound preflight evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-preflight-evidence-${{ inputs.source_sha || github.sha }}
-          path: ${{ github.workspace }}/${{ inputs.evidence_path || '.release/evidence.json' }}
+          name: release-preflight-result-${{ inputs.source_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/${{ inputs.evidence_path || '.release/evidence.json' }}
+            ${{ runner.temp }}/verify-release-preflight.json
+            ${{ runner.temp }}/release-preflight-candidate-run.json
+            ${{ runner.temp }}/release-preflight-evidence-index/release-evidence-index.json
+            ${{ runner.temp }}/release-preflight-evidence-index/release-evidence-index-verification.json
+            ${{ runner.temp }}/release-preflight-evidence-index/release-evidence-expected-candidate.json
           if-no-files-found: error
           retention-days: 14

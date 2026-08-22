@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
+import { createPlatformPromotionHttpApi } from "../src/platform-promotion-http-api.mjs";
+import { PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH, PLATFORM_PROMOTION_ISSUE_PATH } from "../src/platform-promotion-http-contract.mjs";
+import { PLATFORM_SESSION_COOKIE_NAME, PLATFORM_SESSION_CSRF_HEADER } from "../src/platform-session-transport.mjs";
 import { createCloudApi } from "../src/server.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
-const SESSION_COOKIE = `__Host-agentpass_session=${"A".repeat(43)}`;
+const SESSION_COOKIE = `${PLATFORM_SESSION_COOKIE_NAME}=${"A".repeat(43)}`;
 const CSRF = "B".repeat(43);
-const RECENT_AUTH = "55555555-5555-4555-8555-555555555555";
+const PROOF_ID = "55555555-5555-4555-8555-555555555555";
+const JTI = "77777777-7777-4777-8777-777777777777";
 const ORGANIZATION_ID = "99999999-9999-4999-8999-999999999999";
 const INPUT = {
   promotion_id: "11111111-1111-4111-8111-111111111111",
@@ -23,37 +28,22 @@ function publicPromotion(replayed = false) {
 }
 
 async function start(t, options = {}) {
-  const calls = { auth: [], recent: [], operator: [], service: [] };
+  const calls = { service: [] };
   const service = options.service ?? {
     async issuePlatformPromotion(input) { calls.service.push(["issue", input]); return publicPromotion(false); },
-    async replayPlatformPromotion(input) { calls.service.push(["replay", input]); return publicPromotion(true); }
   };
+  const platformPromotionHttpApi = createPlatformPromotionHttpApi({
+    promotionService: service,
+    rateLimiter: { acquire: () => ({ ...LIMIT }) },
+    origin: ORIGIN,
+    randomUUID: () => "88888888-8888-4888-8888-888888888888"
+  });
   const server = createCloudApi({
     store: {},
     now: () => 1_800_000_000_000,
-    humanAuthOrigin: ORIGIN,
-    humanSession: {
-      async authenticateRequest(input) {
-        calls.auth.push(input);
-        if (input.headers.cookie !== SESSION_COOKIE) Object.assign(new Error("invalid"), { code: "invalid_session_cookie" });
-        return { session: { session_id: "22222222-2222-4222-8222-222222222222", member_id: "33333333-3333-4333-8333-333333333333", organization_id: ORGANIZATION_ID, role: options.sessionRole ?? "viewer" } };
-      }
-    },
-    recentAuthService: {
-      async authorize(input) {
-        calls.recent.push(input);
-        return { verified: true, consumed: true, challenge_id: input.proof, member_id: input.principal.member_id, organization_id: input.organization_id, operation: input.operation, authenticated_at: 1_800_000_000_000, context_hash: input.context_hash };
-      }
-    },
-    platformPromotionIssuanceService: service,
-    platformOperatorAuthorizer: async (input) => {
-      calls.operator.push(input);
-      return options.operatorDecision ?? { allowed: true, role: "platform_operator", capability: input.capability };
-    },
-    rateLimiter: { acquire: () => ({ ...LIMIT }) },
-    admissionRateLimiter: { acquire: () => ({ ...LIMIT }) }
+    platformPromotionHttpApi
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  startInMemoryHttpServer(server);
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => new Promise((resolve) => server.close(resolve)));
   return { base, calls };
@@ -63,50 +53,40 @@ function headers() {
   return {
     origin: ORIGIN,
     cookie: SESSION_COOKIE,
-    "agentpass-csrf": CSRF,
-    "agentpass-recent-auth": RECENT_AUTH,
+    [PLATFORM_SESSION_CSRF_HEADER]: CSRF,
+    "agentpass-platform-proof-id": PROOF_ID,
+    "agentpass-platform-jti": JTI,
     "idempotency-key": "platform-promotion-0001",
     "content-type": "application/json"
   };
 }
 
-test("issues and replays through the bounded platform-operator API", async (t) => {
+test("issues through the authorized Platform promotion route and never the legacy route", async (t) => {
   const fixture = await start(t);
-  const issue = await fetch(`${fixture.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
+  const issue = await fetch(`${fixture.base}${PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH}`, { method: "POST", headers: headers(), body: JSON.stringify({ operation: "platform.promotion.issue", organization_id: ORGANIZATION_ID, ...INPUT }) });
   assert.equal(issue.status, 201);
   const issued = await issue.json();
   assert.equal(issued.promotion.promotion_id, INPUT.promotion_id);
   assert.equal(issued.promotion.replayed, false);
   assert.equal(Object.hasOwn(issued, "claim_token"), false);
   assert.equal(Object.hasOwn(issued.promotion, "provider_diagnostics"), false);
-  assert.equal(fixture.calls.auth[0].method, "POST");
-  assert.equal(fixture.calls.auth[0].csrfToken, CSRF);
-  assert.equal(fixture.calls.operator[0].capability, "platform.promotion.issue");
-  assert.equal(fixture.calls.recent[0].operation, "platform.promotion.issue");
   assert.equal(fixture.calls.service[0][1].idempotency_key, "platform-promotion-0001");
+  assert.equal(fixture.calls.service[0][1].organization_id, ORGANIZATION_ID);
 
-  const replay = await fetch(`${fixture.base}/v1/platform/promotions/replay`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
-  assert.equal(replay.status, 200);
-  assert.equal((await replay.json()).promotion.replayed, true);
-  assert.equal(fixture.calls.operator[1].capability, "platform.promotion.replay");
-  assert.equal(fixture.calls.recent[1].operation, "platform.promotion.replay");
+  const legacy = await fetch(`${fixture.base}${PLATFORM_PROMOTION_ISSUE_PATH}`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
+  assert.equal(legacy.status, 404);
 });
 
-test("fails closed for organization roles and malformed or private responses", async (t) => {
-  const denied = await start(t, { operatorDecision: { allowed: false, role: "platform_operator", capability: "platform.promotion.issue" } });
-  const deniedResponse = await fetch(`${denied.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
-  assert.equal(deniedResponse.status, 403);
-  assert.equal((await deniedResponse.json()).error.code, "platform_operator_denied");
-
+test("fails closed for malformed requests and private service responses", async (t) => {
   const malformed = await start(t, { service: { async issuePlatformPromotion() { return { ...publicPromotion(false), provider_diagnostics: { message: "secret" } }; }, async replayPlatformPromotion() { return null; } } });
-  const malformedResponse = await fetch(`${malformed.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify({ ...INPUT, unexpected: true }) });
+  const malformedResponse = await fetch(`${malformed.base}${PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH}`, { method: "POST", headers: headers(), body: JSON.stringify({ operation: "platform.promotion.issue", organization_id: ORGANIZATION_ID, ...INPUT, unexpected: true }) });
   assert.equal(malformedResponse.status, 400);
-  assert.equal((await malformedResponse.json()).error.code, "err_platform_promotion_http_request");
-  const privateResponse = await fetch(`${malformed.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
+  assert.equal((await malformedResponse.json()).error.code, "platform_promotion_http_invalid_request");
+  const privateResponse = await fetch(`${malformed.base}${PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH}`, { method: "POST", headers: headers(), body: JSON.stringify({ operation: "platform.promotion.issue", organization_id: ORGANIZATION_ID, ...INPUT }) });
   assert.equal(privateResponse.status, 503);
-  assert.equal((await privateResponse.json()).error.code, "platform_promotion_unavailable");
+  assert.equal((await privateResponse.json()).error.code, "platform_promotion_http_unavailable");
 });
 
-test("does not expose the route without an explicit platform operator authorizer", () => {
-  assert.throws(() => createCloudApi({ store: {}, platformPromotionIssuanceService: { issuePlatformPromotion() {}, replayPlatformPromotion() {} } }), /platformOperatorAuthorizer is required/);
+test("does not expose the authorized route without the exact injected boundary", () => {
+  assert.throws(() => createCloudApi({ store: {}, platformPromotionHttpApi: { handle() {}, paths: { issue: "/v1/platform/promotions" } } }), /platformPromotionHttpApi must expose handle\(\) and paths\.issue/);
 });

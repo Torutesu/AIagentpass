@@ -1,5 +1,10 @@
 import path from "node:path";
 
+import {
+  createAgentLifecycleLaunchDescriptor,
+  launchAgentLifecycleWithHandoff
+} from "../../../lib/agent-lifecycle-cli.mjs";
+
 export const CLAUDE_CODE_ADAPTER_SCHEMA_VERSION = 1;
 export const CLAUDE_CODE_CLIENT = "claude-code";
 
@@ -152,6 +157,31 @@ export function validateClaudeCodeLaunchPlan(plan) {
   }
   if (plan.native_host !== CLAUDE_NATIVE_HOST_STATUS) fail("invalid_arguments", "native Host status is invalid");
   return true;
+}
+
+/** Build only the public process-bound launch descriptor; authority stays on FD3. */
+export function createClaudeCodeLifecycleDescriptor({ projectDirectory, ttlSeconds } = {}) {
+  const options = arguments[0] ?? {};
+  exactKeys(options, ["projectDirectory", "ttlSeconds"], "lifecycle options");
+  const project = normalizedAbsolutePath(projectDirectory, "project_directory");
+  if (!Number.isSafeInteger(ttlSeconds)) fail("invalid_arguments", "ttl_seconds is invalid");
+  try {
+    return createAgentLifecycleLaunchDescriptor({ agent: "claude-code", project, ttl_seconds: ttlSeconds });
+  } catch {
+    fail("invalid_arguments", "lifecycle descriptor is invalid");
+  }
+}
+
+/** Relay the inherited one-time handoff to the fixed Native Host. */
+export async function launchClaudeCodeLifecycle(input, options = {}) {
+  const descriptor = createClaudeCodeLifecycleDescriptor(input);
+  const result = await launchAgentLifecycleWithHandoff(descriptor, options);
+  if (result.ok === true) return Object.freeze({ version: 1, ok: true, operation: "launch", status: result.status });
+  const error = result.error;
+  if (!error || typeof error.code !== "string") fail("adapter_failed");
+  if (error.code === "AGENT_LIFECYCLE_NOT_AVAILABLE" || error.code === "AGENT_LIFECYCLE_HANDOFF_NOT_AVAILABLE") fail("native_host_unavailable");
+  if (error.code === "AGENT_LIFECYCLE_NATIVE_HOST_REJECTED") fail("native_host_untrusted");
+  fail("adapter_failed");
 }
 
 export function projectClaudeCodeState(raw) {

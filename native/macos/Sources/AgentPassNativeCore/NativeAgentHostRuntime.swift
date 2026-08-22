@@ -20,12 +20,14 @@ public final class NativeAgentHostRuntime: @unchecked Sendable {
     private let connection: NativeAgentHostConnectionBinding
     private let supervisor: NativeAgentHostChildSupervisor
     private let adapter: any NativeAgentHostLifecycleAdapter
+    private let gitTransport: NativeAgentHostGitTransport
 
     public init(
         plan: NativeAgentHostLaunchPlan,
         connection: NativeAgentHostConnectionBinding,
         supervisor: NativeAgentHostChildSupervisor,
-        adapter: any NativeAgentHostLifecycleAdapter
+        adapter: any NativeAgentHostLifecycleAdapter,
+        gitTransport: NativeAgentHostGitTransport = .authenticatedXPC
     ) throws {
         guard connection.agentID == plan.authorityHandoff.agentID else {
             throw NativeAgentHostLifecycleError.invalidHandoff
@@ -34,6 +36,7 @@ public final class NativeAgentHostRuntime: @unchecked Sendable {
         self.connection = connection
         self.supervisor = supervisor
         self.adapter = adapter
+        self.gitTransport = gitTransport
     }
 
     public func makeCoordinator() throws -> NativeAgentHostLifecycleCoordinator {
@@ -42,8 +45,18 @@ public final class NativeAgentHostRuntime: @unchecked Sendable {
             handoff: plan.authorityHandoff,
             supervisor: supervisor,
             hooks: try adapter.hooks(for: plan),
-            gitTransport: .authenticatedXPC
+            gitTransport: gitTransport
         )
+    }
+
+    /// Constructs the only Agent-facing command allowed to use the
+    /// versioned two-payload session. Process execution remains owned by the
+    /// supervised Host/Agent boundary; this method only returns the frozen
+    /// executable and argv projection.
+    public func makeVersionedSessionCommand(
+        payloadPaths: [String]
+    ) throws -> NativeAgentHostVersionedSessionCommand {
+        try NativeAgentHostVersionedSessionCommand(payloadPaths: payloadPaths)
     }
 
     public func start() throws -> NativeAgentHostLifecycleCoordinator {

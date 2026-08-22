@@ -168,6 +168,9 @@ test("the normal AgentPass app does not bundle the separately built qualificatio
   assert.deepEqual([...machServices.matchAll(/<key>([^<]+)<\/key><true\s*\/>/gu)].map(([, name]) => name), [
     "dev.agentpass.native-service",
     "dev.agentpass.agent-session",
+    "dev.agentpass.agent-host",
+    "dev.agentpass.agent-host-control",
+    "dev.agentpass.child-git",
     "dev.agentpass.n3e-qualification",
   ]);
 

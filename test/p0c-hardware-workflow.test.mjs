@@ -85,12 +85,30 @@ test('hardware lanes are distinct protected self-hosted environments and expose 
   assert.doesNotMatch(workflow, /continue-on-error:\s*true/);
 });
 
+test('aggregate qualification uses a protected environment and pinned operator policy inputs', () => {
+  const aggregate = job('aggregate-qualification');
+  assert.match(aggregate, /environment: p0c-aggregate/u);
+  assert.match(aggregate, /APPROVED_OPERATOR_POLICY_SHA256/u);
+  assert.match(aggregate, /APPROVED_OPERATOR_POLICY_SIGNATURE_BASE64/u);
+  assert.match(aggregate, /APPROVED_OPERATOR_POLICY_PUBLIC_KEY_BASE64/u);
+  assert.match(aggregate, /APPROVED_OPERATOR_POLICY_FINGERPRINT/u);
+  assert.match(aggregate, /approved-operator-policy\.sig/u);
+  assert.match(aggregate, /approved-operator-policy\.pub/u);
+  assert.match(aggregate, /policy digest does not match the protected environment binding/u);
+  assert.match(aggregate, /approved operator policy signature must be supplied/u);
+  assert.match(aggregate, /approved operator policy signature inputs are not strict base64/u);
+  assert.match(aggregate, /APPROVED_OPERATOR_POLICY_FINGERPRINT" \\\n+            "\$CANDIDATE_RUN_ID" "\$CANDIDATE_RUN_ATTEMPT" "\$GITHUB_RUN_ID" "\$GITHUB_RUN_ATTEMPT" > "\$SUMMARY_PATH"/u);
+});
+
 test('each lane verifies the installed profile-bound qualification helper bundle before qualification', () => {
   for (const laneName of ['apple-silicon-qualification', 'intel-t2-qualification']) {
     const section = job(laneName);
     assert.match(section, /QUALIFICATION_CLIENT_SOURCE: \$\{\{ steps\.candidate\.outputs\.qualification_client \}\}/u);
     assert.match(section, /\/Applications\/AgentPass\.app\/Contents\/Library\/HelperTools\/agentpass-qualification-grant-client/u);
     assert.match(section, /verify-installed-qualification-client\.sh/);
+    assert.match(section, /p0c\/verify-runner-attestation\.mjs/);
+    assert.match(section, /release-candidate-identity\.mjs/);
+    assert.match(section, /protected p0c qualification tool inventory is not exact/);
     assert.match(section, /qualification-device-relay\.mjs claim/);
     assert.match(section, /qualification-device-relay\.mjs recover/);
     assert.match(section, /device-client-config\.json/);
@@ -104,7 +122,7 @@ test('each lane verifies the installed profile-bound qualification helper bundle
 test('each lane checks out only the trusted workflow commit, verifies the candidate before fixed qualification, and uploads all evidence', () => {
   for (const [name, hardwareClass] of [['apple-silicon-qualification', 'apple-silicon'], ['intel-t2-qualification', 'intel-t2']]) {
     const section = job(name);
-    assert.match(section, /ref: \$\{\{ github\.sha \}\}/);
+    assert.match(section, /ref: \$\{\{ needs\.validate-candidate\.outputs\.candidate_head_sha \}\}/);
     assert.match(section, /persist-credentials: false/);
     assert.match(section, /clean: true/);
     assert.match(section, /run-id: \$\{\{ needs\.validate-candidate\.outputs\.run_id \}\}/);
@@ -117,17 +135,32 @@ test('each lane checks out only the trusted workflow commit, verifies the candid
     assert.match(section, /generate-hardware-qualification-template\.mjs/);
     assert.match(section, /run-p0c-qualification\.mjs/);
     assert.match(section, /--gate-drivers "\$GATE_DRIVER_DIR"/);
+    assert.match(section, /GATE_MANIFEST: \/opt\/agentpass\/p0c\/gate-manifest\.json/);
+    assert.match(section, /--gate-manifest "\$GATE_MANIFEST"/);
+    assert.match(section, /verify-runner-attestation\.mjs/);
+    assert.match(section, /RUNNER_ATTESTATION: \/opt\/agentpass\/p0c\/runner-attestation\.json/);
+    assert.match(section, /RUNNER_ATTESTATION_SIGNATURE: \/opt\/agentpass\/p0c\/runner-attestation\.sig/);
+    assert.match(section, /RUNNER_ATTESTATION_PUBLIC_KEY: \/opt\/agentpass\/p0c\/runner-attestation\.pem/);
+    assert.match(section, /RUNNER_ATTESTATION_FINGERPRINT/);
+    assert.match(section, /runner-attestation\.payload\.json/);
+    assert.match(section, /suite_output="\$\(sudo -n \/usr\/bin\/node \/opt\/agentpass\/p0c\/qualification-tool\/n3e\/qualification-suite-orchestrator\.mjs run\)"/);
+    assert.match(section, /--n3e-suite-evidence "\$SUITE_EVIDENCE"/);
     assert.match(section, /sign-hardware-qualification\.mjs/);
     assert.match(section, /validate-hardware-qualification\.mjs/);
     assert.match(section, new RegExp(`name: p0c-hardware-${hardwareClass}`));
-    for (const required of ['report.json', 'report.sig', 'operator-public.pem', 'evidence/']) assert.match(section, new RegExp(required.replace(/[./]/g, '\\$&')));
+    for (const required of ['report.json', 'report.sig', 'operator-public.pem', 'runner-attestation.json', 'runner-attestation.payload.json', 'runner-attestation.sig', 'runner-attestation.pem', 'evidence/']) assert.match(section, new RegExp(required.replace(/[./]/g, '\\$&')));
     const verificationEnd = section.indexOf('verify-macos-release.sh');
-    const templateStart = section.indexOf('generate-hardware-qualification-template.mjs');
-    const qualificationStart = section.indexOf('run-p0c-qualification.mjs');
-    const signingStart = section.indexOf('sign-hardware-qualification.mjs');
+    const templateStart = section.lastIndexOf('generate-hardware-qualification-template.mjs');
+    const suiteStart = section.lastIndexOf('qualification-suite-orchestrator.mjs run');
+    const qualificationStart = section.lastIndexOf('run-p0c-qualification.mjs');
+    const signingStart = section.lastIndexOf('sign-hardware-qualification.mjs');
     assert.ok(verificationEnd > 0 && templateStart > verificationEnd && qualificationStart > templateStart, `${name} runs qualification before signed template generation`);
-    assert.ok(signingStart > qualificationStart, `${name} signs before qualification`);
+    assert.ok(suiteStart > templateStart && qualificationStart > suiteStart, `${name} binds N3-E before generating the P0-C report`);
+    assert.ok(signingStart > qualificationStart, `${name} signs after qualification`);
     assert.match(section, /if: \$\{\{ always\(\) \}\}/);
+    assert.match(section, /Remove lane qualification temporary data/);
+    assert.match(section, /rm -rf -- "\$CANDIDATE_DIR" "\$OUTPUT_DIR"/);
+    assert.match(section, /lane qualification temporary data remains/);
   }
 });
 
@@ -196,7 +229,7 @@ test('aggregate is secret-free, depends fail-closed on both successful lanes, an
   assert.match(section, /qualification-dispatch-binding\.json/);
   assert.match(section, /release_run_id: process\.env\.CANDIDATE_RUN_ID/);
   assert.match(section, /qualification_run_id: process\.env\.GITHUB_RUN_ID/);
-  assert.doesNotMatch(section, /environment:/);
+  assert.match(section, /environment: p0c-aggregate/u);
   assert.doesNotMatch(section, /if: \$\{\{ always\(\) \}\}/);
 });
 

@@ -64,34 +64,74 @@ export async function runExternalPlatformAuthQualification({ env = process.env }
     source_tree: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_TREE", SHA),
     primary_deployment_digest: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST", DIGEST),
     secondary_deployment_digest: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST", DIGEST),
-    run_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID", RUN_ID),
-    job_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID", RUN_ID),
+    ci_run_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_CI_RUN_ID", RUN_ID),
+    ci_run_attempt: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_CI_RUN_ATTEMPT", RUN_ID),
+    qualification_run_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID", RUN_ID),
+    qualification_run_attempt: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ATTEMPT", RUN_ID),
+    qualification_job_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID", RUN_ID),
+    environment_id: required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_ENVIRONMENT_ID", IDENTIFIER),
   };
+  if (binding.ci_run_id === binding.qualification_run_id) throw new PlatformAuthQualificationRunnerError("canonical CI and qualification runs must be distinct");
   const output = path.resolve(required(env, "AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_PATH", /^[^\0]+$/u));
   if (fs.existsSync(output)) throw new PlatformAuthQualificationRunnerError("Platform Auth qualification evidence target already exists");
   const loadedAdapter = await loadAdapter(env);
   const report = await runPlatformAuthQualification({
     env: {
       ...env,
-      AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID: binding.run_id,
-      AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID: binding.job_id,
+      AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID: binding.qualification_run_id,
+      AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID: binding.qualification_job_id,
       AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EXECUTION: "external",
       AGENTPASS_PLATFORM_AUTH_QUALIFICATION_REAL_EXECUTION: "true"
     },
     sourceCommit: binding.source_commit,
     sourceTree: binding.source_tree,
     expectedDeploymentDigests: { primary: binding.primary_deployment_digest, secondary: binding.secondary_deployment_digest },
-    runId: binding.run_id,
-    jobId: binding.job_id,
+    runId: binding.qualification_run_id,
+    jobId: binding.qualification_job_id,
     providerAdapter: loadedAdapter.adapter,
   });
-  const text = canonicalJson(report);
   if (report.status !== "passed" || report.qualified !== true) throw new PlatformAuthQualificationRunnerError("Platform Auth qualification did not pass");
-  verifyPlatformAuthQualificationEvidence(text, { expectedSourceCommit: binding.source_commit, expectedSourceTree: binding.source_tree, expectedDeploymentDigests: { primary: binding.primary_deployment_digest, secondary: binding.secondary_deployment_digest }, expectedRunId: binding.run_id, expectedJobId: binding.job_id });
+  const outputReport = {
+    ...report,
+    ci_run_id: binding.ci_run_id,
+    ci_run_attempt: binding.ci_run_attempt,
+    qualification_run_id: binding.qualification_run_id,
+    qualification_run_attempt: binding.qualification_run_attempt,
+    qualification_job_id: binding.qualification_job_id,
+    execution: {
+      kind: "external_runner",
+      real_execution: true,
+      runner_id: runner,
+      run_id: binding.qualification_run_id,
+      job_id: binding.qualification_job_id,
+      run_attempt: binding.qualification_run_attempt,
+      source_commit: binding.source_commit,
+      source_tree: binding.source_tree,
+      ci_run_id: binding.ci_run_id,
+      ci_run_attempt: binding.ci_run_attempt,
+      qualification_run_id: binding.qualification_run_id,
+      qualification_run_attempt: binding.qualification_run_attempt,
+      qualification_job_id: binding.qualification_job_id,
+      started_at: report.started_at,
+      completed_at: report.completed_at,
+      environment: { kind: "platform_auth", identity: binding.environment_id }
+    }
+  };
+  verifyPlatformAuthQualificationEvidence(canonicalJson(outputReport), {
+    expectedSourceCommit: binding.source_commit,
+    expectedSourceTree: binding.source_tree,
+    expectedDeploymentDigests: { primary: binding.primary_deployment_digest, secondary: binding.secondary_deployment_digest },
+    expectedRunId: binding.qualification_run_id,
+    expectedJobId: binding.qualification_job_id,
+    expectedRunAttempt: binding.qualification_run_attempt,
+    expectedCiRunId: binding.ci_run_id,
+    expectedCiRunAttempt: binding.ci_run_attempt,
+    requireExternalExecution: true
+  });
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
   const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-  try { fs.writeFileSync(fd, text, "utf8"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  return Object.freeze({ status: "passed", qualified: true, evidence_path: output, adapter_sha256: loadedAdapter.sha256, source_commit: binding.source_commit, run_id: binding.run_id, job_id: binding.job_id });
+  try { fs.writeFileSync(fd, `${canonicalJson(outputReport)}\n`, "utf8"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  return Object.freeze({ status: "passed", qualified: true, evidence_path: output, adapter_sha256: loadedAdapter.sha256, source_commit: binding.source_commit, ci_run_id: binding.ci_run_id, ci_run_attempt: binding.ci_run_attempt, qualification_run_id: binding.qualification_run_id, qualification_run_attempt: binding.qualification_run_attempt, qualification_job_id: binding.qualification_job_id });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {

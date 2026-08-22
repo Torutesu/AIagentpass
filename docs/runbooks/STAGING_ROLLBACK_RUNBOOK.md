@@ -1,5 +1,10 @@
 # Staging rollback contract
 
+The shared schema, fixed scenario IDs, observer independence rules, and
+SLO/RPO/RTO requirements are defined in
+[STAGING_DRILL_EVIDENCE_CONTRACT.md](STAGING_DRILL_EVIDENCE_CONTRACT.md).
+This runbook is the rollback projection of that contract.
+
 Rollback is an executed safety test for the exact staging deployment. It is
 not a rebuild, a down-migration, or an instruction to change Cloud API or
 Console authentication. The operator reuses an immutable retained target and
@@ -18,6 +23,14 @@ plus a rollback record containing:
 - `traffic_restored: true` after the target receives traffic; and
 - start/completion timestamps inside a current evidence window of at most 24
   hours, with no future-dated completion.
+
+The rollback record must also bind its unique execution ID and independent
+observer evidence digest to the exact current candidate/source/tree,
+artifact/image/schema/catalog/database-schema digests and the immutable
+rollback target. It must include measured rollback RTO (and any applicable
+service SLO/RPO values). An observer assertion copied from the rollback
+operator, a status-only provider response, or a self-reported `target_ready`
+value is `not_proven`, not a pass.
 
 The target deployment must remain in staging and use the same deployment ID
 and service as the current deployment. A same-revision target, missing target,
@@ -53,6 +66,12 @@ rollback record.
 The focused contract tests prove parsing and fail-closed behavior only. They do
 not prove real provider execution, database compatibility, alert delivery,
 Cloud API/Console auth, or production rollback authority.
+
+Rollback is one of seven required staging scenarios. A rollback record cannot
+close the staging gate while `canary`, `drain`, `failover`, `pitr`,
+`signer_outage`, or `recovery` is missing, `not_run`, `not_proven`, stale, or
+self-reported. Preserve every failed or uncertain execution and allocate a
+new execution ID for a rerun; never edit a failed record into a pass.
 
 ## Promotion handoff
 

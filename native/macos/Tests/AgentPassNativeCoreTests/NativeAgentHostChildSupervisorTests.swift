@@ -559,6 +559,39 @@ private func makeHookedProjectDirectory(
     }
 }
 
+@Test func claudeCodeLaunchUsesOnlyTheClosedAdapterAndIgnoresExecutableAuthorityInputs() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let request = try makeRequest(
+            projectDirectory: project,
+            environment: [
+                "PATH": "/tmp/attacker-bin",
+                "CLAUDE_CODE_PATH": "/tmp/attacker-claude",
+                "AGENTPASS_EXECUTABLE": "/tmp/attacker-agent",
+                "AGENTPASS_LAUNCH_AUTHORITY": "attacker-authority",
+                "SHELL": "/tmp/attacker-shell"
+            ]
+        )
+
+        let session = try supervisor.start(request)
+        let spec = try #require(fixture.snapshot().spec)
+
+        #expect(spec.executablePath == "/opt/homebrew/bin/claude"
+            || spec.executablePath == "/usr/local/bin/claude")
+        #expect(spec.arguments.isEmpty)
+        #expect(spec.environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
+        #expect(spec.environment["CLAUDE_CODE_PATH"] == nil)
+        #expect(spec.environment["AGENTPASS_EXECUTABLE"] == nil)
+        #expect(spec.environment["AGENTPASS_LAUNCH_AUTHORITY"] == nil)
+        #expect(spec.environment["SHELL"] == nil)
+
+        // A second lease commit would fail closed, so a successful start
+        // proves that the one-use bridge is resolved exactly once.
+        #expect(try session.wait() == .success)
+    }
+}
+
 @Test func cursorAdapterUsesOnlyTheManagedRuntimeNodeAndIndex() throws {
     let expectedPaths = NativeCursorAgentRuntimeSpec.requiredPaths
     try withTemporaryProjectDirectory { project in
@@ -766,6 +799,52 @@ private func makeAuthenticatedXPCSupervisor(
         childObserverFactory: { xpc },
         launchNonceFactory: { Data(repeating: 0x5a, count: 16) }
     )
+}
+
+@Test func versionedSessionUsesDedicatedHelperAndExplicitFD3Handoff() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let request = try makeRequest(
+            projectDirectory: project,
+            gitTransport: .versionedSessionV1,
+            environment: [
+                "HOME": "/Users/tester",
+                "GIT_CONFIG_COUNT": "99",
+                "GIT_CONFIG_VALUE_1": "/tmp/attacker-git-helper"
+            ]
+        )
+
+        let session = try supervisor.start(request)
+        let spec = try #require(fixture.snapshot().spec)
+        #expect(spec.gitTransport == .versionedSessionV1)
+        #expect(spec.hasPrivateGitBridgeHandoff)
+        #expect(session.privateGitBridgeHostEndpoint != nil)
+        // Git still invokes its normal one-payload helper for ordinary Git
+        // signing. The two-payload session helper is a separate explicit
+        // Agent entrypoint and must not be hidden behind Git's argv contract.
+        #expect(spec.environment["GIT_CONFIG_VALUE_1"]
+            == NativeAgentHostGitConfiguration.helperExecutablePath)
+        #expect(spec.environment[NativeAgentHostGitConfiguration.sessionEntrypointEnvironmentKey]
+            == NativeAgentHostGitConfiguration.versionedSessionHelperExecutablePath)
+
+        _ = try session.wait()
+    }
+}
+
+@Test func versionedSessionKeepsGitOnePayloadHelperSeparateFromItsExplicitEntrypoint() {
+    let environment = NativeAgentHostGitConfiguration.versionedSessionEnvironment
+
+    // Git invokes gpg.ssh.program once per payload with its normal SSH
+    // signing argv. The two-payload session helper is never installed there.
+    #expect(environment["GIT_CONFIG_VALUE_1"]
+        == NativeAgentHostGitConfiguration.helperExecutablePath)
+    #expect(environment["GIT_CONFIG_VALUE_1"]
+        != NativeAgentHostGitConfiguration.versionedSessionHelperExecutablePath)
+    #expect(environment[NativeAgentHostGitConfiguration.sessionEntrypointEnvironmentKey]
+        == NativeAgentHostGitConfiguration.versionedSessionHelperExecutablePath)
+    #expect(environment[NativeAgentHostGitConfiguration.sessionProtocolEnvironmentKey]
+        == NativeAgentHostGitConfiguration.versionedSessionProtocol)
 }
 
 @Test func authenticatedHostLaunchPreparationAdapterUsesTheExistingClientAndKeepsItOwned() throws {

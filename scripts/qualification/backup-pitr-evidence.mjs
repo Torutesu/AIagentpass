@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 
 export const BACKUP_PITR_EVIDENCE_SCHEMA_VERSION = 1;
@@ -44,18 +45,35 @@ const COMMANDS = Object.freeze({
   restore: "pg_restore",
   probe: "psql"
 });
+const EXPECTED_BACKUP_ROLE = "agentpass_backup";
+const INSTANCE_PURPOSES = Object.freeze(["source", "restore", "pitr"]);
+const SCHEMA_HEAD = Object.freeze({
+  version: POSTGRES_SCHEMA_HEAD.version,
+  name: POSTGRES_SCHEMA_HEAD.name,
+  checksum: POSTGRES_SCHEMA_HEAD.checksum,
+  migration_count: POSTGRES_SCHEMA_HEAD.migration_count
+});
 
 const INPUT_KEYS = Object.freeze([
   "artifact_sha256", "backup_restore", "ci_job_id", "ci_run_attempt", "ci_run_id", "completed_at",
-  "execution", "kind", "pitr_recovery", "schema_version", "source_commit", "source_tree", "started_at"
+  "execution", "kind", "pitr_recovery", "schema_version", "source_commit", "source_tree", "started_at", "verification"
 ]);
 const EXECUTION_KEYS = Object.freeze(["environment", "real_execution", "runner_id"]);
+const EXECUTION_KEYS_WITH_QUALIFICATION_BINDING = Object.freeze([
+  ...EXECUTION_KEYS, "qualification_job_id", "qualification_job_name", "qualification_run_attempt", "qualification_run_id"
+]);
 const CHECK_INPUT_KEYS = Object.freeze(["expected", "observed", "status"]);
 const EVIDENCE_KEYS = Object.freeze([
   "artifact_sha256", "backup_restore", "ci_job_id", "ci_run_attempt", "ci_run_id",
   "pitr_recovery", "redacted", "schema_version", "source_commit", "source_tree"
 ]);
+const EVIDENCE_KEYS_WITH_QUALIFICATION_BINDING = Object.freeze([
+  ...EVIDENCE_KEYS, "qualification_job_id", "qualification_job_name", "qualification_run_attempt", "qualification_run_id"
+]);
 const CHECK_KEYS = Object.freeze(["evidence_sha256", "expected", "id", "observed", "status"]);
+const VERIFICATION_KEYS = Object.freeze(["instances", "wal_replay"]);
+const VERIFICATION_INSTANCE_KEYS = Object.freeze(["dml_denied", "identity_sha256", "purpose", "read_only", "role", "role_evidence_sha256", "schema_head", "tls"]);
+const WAL_REPLAY_KEYS = Object.freeze(["recovery_state", "replay_lsn_sha256", "status"]);
 
 export class BackupPitrEvidenceError extends TypeError {
   constructor(code) {
@@ -122,11 +140,18 @@ function assertExpectedBinding(actual, expected = {}) {
 }
 
 function normalizeExecution(value) {
-  exactObject(value, EXECUTION_KEYS);
+  const hasQualificationBinding = value && typeof value === "object" && value.qualification_run_id !== undefined;
+  exactObject(value, hasQualificationBinding ? EXECUTION_KEYS_WITH_QUALIFICATION_BINDING : EXECUTION_KEYS);
   if (value.real_execution !== true || typeof value.environment !== "string"
     || value.environment !== "postgresql" || typeof value.runner_id !== "string"
     || !SAFE_ID.test(value.runner_id) || DISALLOWED_RUNNER.test(value.runner_id)) {
     fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.NOT_EXTERNAL);
+  }
+  if (hasQualificationBinding) {
+    string(value.qualification_run_id, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_run_attempt, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_job_id, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_job_name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/u, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
   }
   return Object.freeze({ ...value });
 }
@@ -173,6 +198,62 @@ function normalizeEvidenceCheck(value, id) {
   return Object.freeze(value);
 }
 
+function roleEvidenceDigest(instance) {
+  return crypto.createHash("sha256").update(canonicalJson({
+    dml_denied: instance.dml_denied,
+    purpose: instance.purpose,
+    read_only: instance.read_only,
+    role: instance.role,
+    schema_head: instance.schema_head,
+    tls: instance.tls
+  }), "utf8").digest("hex");
+}
+
+function normalizeSchemaHead(value) {
+  exactObject(value, ["checksum", "name", "version"], BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  if (value.version !== SCHEMA_HEAD.version || value.name !== SCHEMA_HEAD.name
+    || value.checksum !== SCHEMA_HEAD.checksum) fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  return Object.freeze({ ...value });
+}
+
+function normalizeVerification(value) {
+  exactObject(value, VERIFICATION_KEYS, BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  if (!Array.isArray(value.instances) || value.instances.length !== INSTANCE_PURPOSES.length) {
+    fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  }
+  const instances = value.instances.map((instance, index) => {
+    exactObject(instance, VERIFICATION_INSTANCE_KEYS, BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+    if (instance.purpose !== INSTANCE_PURPOSES[index]
+      || typeof instance.role !== "string" || instance.role !== EXPECTED_BACKUP_ROLE
+      || instance.dml_denied !== true || instance.read_only !== true || instance.tls !== true
+      || !SHA256.test(instance.identity_sha256)
+      || !SHA256.test(instance.role_evidence_sha256)) {
+      fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+    }
+    const schemaHead = normalizeSchemaHead(instance.schema_head);
+    const normalized = { ...instance, schema_head: schemaHead };
+    if (instance.role_evidence_sha256 !== roleEvidenceDigest(normalized)) {
+      fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+    }
+    return Object.freeze(normalized);
+  });
+  const identities = new Set(instances.map((instance) => instance.identity_sha256));
+  if (identities.size !== instances.length
+    || instances[1].identity_sha256 === instances[2].identity_sha256) {
+    fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.RUNNER_CONFIG);
+  }
+  exactObject(value.wal_replay, WAL_REPLAY_KEYS, BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  if (value.wal_replay.status !== "passed"
+    || !["recovery", "promoted"].includes(value.wal_replay.recovery_state)
+    || !SHA256.test(value.wal_replay.replay_lsn_sha256)) {
+    fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.CHECK_FAILED);
+  }
+  return Object.freeze({
+    instances: Object.freeze(instances),
+    walReplay: Object.freeze({ ...value.wal_replay })
+  });
+}
+
 export function normalizeBackupPitrExecutionResult(value, expectedBinding = {}) {
   exactObject(value, INPUT_KEYS);
   if (value.schema_version !== BACKUP_PITR_EVIDENCE_SCHEMA_VERSION || value.kind !== BACKUP_PITR_EXECUTION_RESULT_KIND) {
@@ -184,9 +265,10 @@ export function normalizeBackupPitrExecutionResult(value, expectedBinding = {}) 
   timestamp(value.completed_at);
   if (Date.parse(value.completed_at) < Date.parse(value.started_at)) fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
   normalizeExecution(value.execution);
+  const verification = normalizeVerification(value.verification);
   const backupRestore = normalizeInputCheck(value.backup_restore, "backup_restore");
   const pitrRecovery = normalizeInputCheck(value.pitr_recovery, "pitr_recovery");
-  return Object.freeze({ ...value, binding, backupRestore, pitrRecovery });
+  return Object.freeze({ ...value, binding, verification, backupRestore, pitrRecovery });
 }
 
 export function createBackupPitrEvidence(value, expectedBinding = {}) {
@@ -203,16 +285,29 @@ export function createBackupPitrEvidence(value, expectedBinding = {}) {
     backup_restore: toEvidenceCheck(input.backupRestore),
     pitr_recovery: toEvidenceCheck(input.pitrRecovery)
   };
+  if (input.execution.qualification_run_id !== undefined) {
+    evidence.qualification_run_id = input.execution.qualification_run_id;
+    evidence.qualification_run_attempt = input.execution.qualification_run_attempt;
+    evidence.qualification_job_id = input.execution.qualification_job_id;
+    evidence.qualification_job_name = input.execution.qualification_job_name;
+  }
   return normalizeBackupPitrEvidence(evidence, expectedBinding);
 }
 
 export function normalizeBackupPitrEvidence(value, expectedBinding = {}) {
-  exactObject(value, EVIDENCE_KEYS, BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
+  const hasQualificationBinding = value && typeof value === "object" && value.qualification_run_id !== undefined;
+  exactObject(value, hasQualificationBinding ? EVIDENCE_KEYS_WITH_QUALIFICATION_BINDING : EVIDENCE_KEYS, BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
   if (value.schema_version !== BACKUP_PITR_EVIDENCE_SCHEMA_VERSION || value.redacted !== true) fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
   const binding = bindingFrom(value);
   assertExpectedBinding(binding, expectedBinding);
   normalizeEvidenceCheck(value.backup_restore, "backup_restore");
   normalizeEvidenceCheck(value.pitr_recovery, "pitr_recovery");
+  if (hasQualificationBinding) {
+    string(value.qualification_run_id, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_run_attempt, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_job_id, POSITIVE_ID, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+    string(value.qualification_job_name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/u, BACKUP_PITR_EVIDENCE_ERROR_CODES.RUN_BINDING);
+  }
   const serialized = canonicalJson(value);
   if (serialized.includes("postgresql://") || /password|secret|private[\s_-]*key|credential|authorization|cookie|api[\s_-]*key|connection[\s_-]*(?:string|url)|token/iu.test(serialized)) {
     fail(BACKUP_PITR_EVIDENCE_ERROR_CODES.INPUT);
@@ -366,6 +461,109 @@ async function runDatabaseCommand(command, args, connection, env, options = {}) 
   return result;
 }
 
+const ROLE_SCHEMA_QUERY = `SELECT json_build_object(
+  'current_user', current_user,
+  'session_user', session_user,
+  'ssl', COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false),
+  'schema_version', (SELECT version FROM public.schema_migrations ORDER BY version DESC LIMIT 1),
+  'schema_checksum', (SELECT checksum FROM public.schema_migrations ORDER BY version DESC LIMIT 1),
+  'schema_count', (SELECT count(*) FROM public.schema_migrations),
+  'read_only', (
+    has_schema_privilege(current_user, 'public', 'USAGE')
+    AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
+    AND has_database_privilege(current_user, current_database(), 'CONNECT')
+    AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
+  ),
+  'dml_denied', NOT EXISTS (
+    SELECT 1
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND (
+        has_table_privilege(current_user, relation.oid, 'INSERT')
+        OR has_table_privilege(current_user, relation.oid, 'UPDATE')
+        OR has_table_privilege(current_user, relation.oid, 'DELETE')
+      )
+  )
+)::text`;
+
+const WAL_REPLAY_QUERY = `SELECT json_build_object(
+  'replay_lsn', pg_last_wal_replay_lsn()::text,
+  'recovery_state', CASE WHEN pg_is_in_recovery() THEN 'recovery' ELSE 'promoted' END
+)::text`;
+
+function metadataResultDigest(value) {
+  return crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+function parseProtectedMetadata(text, connection, purpose) {
+  let value;
+  try { value = JSON.parse(text); } catch { failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED); }
+  exactObject(value, ["current_user", "dml_denied", "read_only", "schema_checksum", "schema_count", "schema_version", "session_user", "ssl"], BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
+  if (value.current_user !== EXPECTED_BACKUP_ROLE || value.session_user !== EXPECTED_BACKUP_ROLE
+    || value.current_user !== connection.user || value.session_user !== connection.user
+    || value.ssl !== true || value.read_only !== true || value.dml_denied !== true
+    || value.schema_version !== SCHEMA_HEAD.version || value.schema_checksum !== SCHEMA_HEAD.checksum
+    || value.schema_count !== SCHEMA_HEAD.migration_count) {
+    failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
+  }
+  const schemaHead = { version: SCHEMA_HEAD.version, name: SCHEMA_HEAD.name, checksum: SCHEMA_HEAD.checksum };
+  const roleEvidence = {
+    dml_denied: value.dml_denied,
+    purpose,
+    read_only: value.read_only,
+    role: value.current_user,
+    schema_head: schemaHead,
+    tls: value.ssl
+  };
+  return Object.freeze({
+    identitySha256: metadataResultDigest({
+      host: connection.host,
+      port: connection.port,
+      database: connection.database,
+      purpose
+    }),
+    roleEvidenceSha256: metadataResultDigest(roleEvidence),
+    schemaHead,
+    role: value.current_user,
+    readOnly: value.read_only,
+    dmlDenied: value.dml_denied,
+    tls: value.ssl
+  });
+}
+
+async function probeProtectedMetadata(connection, env, spawnProcess, directory, purpose) {
+  const outputPath = path.join(directory, `${purpose}-metadata.txt`);
+  await runDatabaseCommand(COMMANDS.probe, [
+    "--no-psqlrc", "--quiet", "--no-password", "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1",
+    "--command", ROLE_SCHEMA_QUERY, "--output", outputPath
+  ], connection, env, { spawnProcess, outputPath });
+  const metadata = parseProtectedMetadata(await readCommandResult(outputPath), connection, purpose);
+  return metadata;
+}
+
+async function probeWalReplay(connection, env, spawnProcess, directory) {
+  const outputPath = path.join(directory, "pitr-wal-replay.txt");
+  await runDatabaseCommand(COMMANDS.probe, [
+    "--no-psqlrc", "--quiet", "--no-password", "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1",
+    "--command", WAL_REPLAY_QUERY, "--output", outputPath
+  ], connection, env, { spawnProcess, outputPath });
+  let value;
+  try { value = JSON.parse(await readCommandResult(outputPath)); } catch { failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED); }
+  exactObject(value, ["recovery_state", "replay_lsn"], BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
+  if (typeof value.replay_lsn !== "string" || value.replay_lsn.length < 1 || value.replay_lsn.length > 64
+    || !/^[0-9A-Fa-f/]+$/u.test(value.replay_lsn)
+    || !["recovery", "promoted"].includes(value.recovery_state)) {
+    failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
+  }
+  return Object.freeze({
+    status: "passed",
+    recoveryState: value.recovery_state,
+    replayLsnSha256: crypto.createHash("sha256").update(value.replay_lsn, "utf8").digest("hex")
+  });
+}
+
 async function runBackupPitrCommands({ env = process.env, spawnProcess = nodeSpawn, tempDirectory }) {
   const caFile = await protectedReadableFile(env.AGENTPASS_BACKUP_PITR_CA_CERT_FILE);
   const source = parseDatabaseUrl(env.AGENTPASS_DATABASE_URL, caFile);
@@ -379,8 +577,6 @@ async function runBackupPitrCommands({ env = process.env, spawnProcess = nodeSpa
 
   const directory = tempDirectory ?? await mkdtemp(path.join(os.tmpdir(), "agentpass-backup-pitr-"));
   const dumpPath = path.join(directory, "base.dump");
-  const restoreProbePath = path.join(directory, "restore-probe.txt");
-  const pitrProbePath = path.join(directory, "pitr-probe.txt");
   try {
     await chmod(directory, 0o700).catch(() => failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.OUTPUT_FILE));
     await runDatabaseCommand(COMMANDS.dump, [
@@ -391,26 +587,34 @@ async function runBackupPitrCommands({ env = process.env, spawnProcess = nodeSpa
       || (dumpMetadata.mode & 0o077) !== 0 || dumpMetadata.size < 1 || dumpMetadata.size > MAX_BACKUP_BYTES) {
       failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
     }
+    const sourceMetadata = await probeProtectedMetadata(source, env, spawnProcess, directory, "source");
     await runDatabaseCommand(COMMANDS.restore, [
       "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--no-password", "--dbname", restore.database, dumpPath
     ], restore, env, { spawnProcess });
-    await runDatabaseCommand(COMMANDS.probe, [
-      "--no-psqlrc", "--quiet", "--no-password", "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1",
-      "--command", "SELECT 'restore-ok'", "--output", restoreProbePath
-    ], restore, env, { spawnProcess, outputPath: restoreProbePath });
-    if ((await readCommandResult(restoreProbePath)) !== "restore-ok") {
-      failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
-    }
-    await runDatabaseCommand(COMMANDS.probe, [
-      "--no-psqlrc", "--quiet", "--no-password", "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1",
-      "--command", "SELECT CASE WHEN pg_last_wal_replay_lsn() IS NULL THEN 'not-replayed' ELSE 'replayed' END || ':' || CASE WHEN pg_is_in_recovery() THEN 'recovery' ELSE 'ready' END",
-      "--output", pitrProbePath
-    ], pitr, env, { spawnProcess, outputPath: pitrProbePath });
-    const pitrResult = await readCommandResult(pitrProbePath);
-    if (!/^replayed:(?:recovery|ready)$/u.test(pitrResult)) {
-      failRunner(BACKUP_PITR_EVIDENCE_ERROR_CODES.COMMAND_FAILED);
-    }
-    return Object.freeze({ backupRestore: "passed", pitrRecovery: "passed" });
+    const restoreMetadata = await probeProtectedMetadata(restore, env, spawnProcess, directory, "restore");
+    const pitrMetadata = await probeProtectedMetadata(pitr, env, spawnProcess, directory, "pitr");
+    const walReplay = await probeWalReplay(pitr, env, spawnProcess, directory);
+    return Object.freeze({
+      backupRestore: "passed",
+      pitrRecovery: "passed",
+      verification: {
+        instances: [sourceMetadata, restoreMetadata, pitrMetadata].map((metadata, index) => ({
+          dml_denied: metadata.dmlDenied,
+          identity_sha256: metadata.identitySha256,
+          purpose: INSTANCE_PURPOSES[index],
+          read_only: metadata.readOnly,
+          role: metadata.role,
+          role_evidence_sha256: metadata.roleEvidenceSha256,
+          schema_head: metadata.schemaHead,
+          tls: metadata.tls
+        })),
+        wal_replay: {
+          recovery_state: walReplay.recoveryState,
+          replay_lsn_sha256: walReplay.replayLsnSha256,
+          status: walReplay.status
+        }
+      }
+    });
   } finally {
     await rm(directory, { recursive: true, force: true }).catch(() => {});
   }
@@ -450,7 +654,20 @@ export async function runBackupPitrQualification({
     artifact_sha256: binding.artifactSha256,
     started_at: startedAt,
     completed_at: completedAt,
-    execution: { environment: "postgresql", real_execution: true, runner_id: runnerId },
+    execution: {
+      environment: "postgresql",
+      real_execution: true,
+      runner_id: runnerId,
+      ...(env.GITHUB_RUN_ID && env.GITHUB_RUN_ATTEMPT && env.AGENTPASS_BACKUP_PITR_CI_JOB_ID && env.GITHUB_JOB
+        ? {
+            qualification_run_id: String(env.GITHUB_RUN_ID),
+            qualification_run_attempt: String(env.GITHUB_RUN_ATTEMPT),
+            qualification_job_id: String(env.AGENTPASS_BACKUP_PITR_CI_JOB_ID),
+            qualification_job_name: String(env.GITHUB_JOB)
+          }
+        : {})
+    },
+    verification: checks.verification,
     backup_restore: { expected: "passed", observed: checks.backupRestore, status: checks.backupRestore },
     pitr_recovery: { expected: "passed", observed: checks.pitrRecovery, status: checks.pitrRecovery }
   };

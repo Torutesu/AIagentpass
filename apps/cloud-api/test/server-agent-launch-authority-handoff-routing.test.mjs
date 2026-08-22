@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createCloudApi } from "../src/server.mjs";
 import { AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS } from "../src/agent-launch-authority-handoff-api.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const IDS = Object.freeze({
   organization: "11111111-1111-4111-8111-111111111111",
@@ -20,13 +21,7 @@ async function startServer(t, options = {}) {
     rateLimiter: { acquire: async () => DECISION },
     agentLaunchAuthorityHandoffApi: options.api
   });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return `http://127.0.0.1:${server.address().port}`;
 }

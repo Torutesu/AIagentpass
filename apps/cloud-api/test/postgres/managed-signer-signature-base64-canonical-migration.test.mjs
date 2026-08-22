@@ -24,6 +24,7 @@ test("0065 emits canonical unwrapped base64 without widening execution authority
     readFile(rolesUrl, "utf8")
   ]);
   const catalog = JSON.parse(catalogText);
+  const migrationChecksum = (await import("../../src/postgres/migration-runner.mjs")).migrationChecksum(migration);
 
   assert.match(migration, /^BEGIN;/u);
   assert.match(migration, /CREATE OR REPLACE FUNCTION public\.agentpass_managed_signer_signing_record_json\(/u);
@@ -55,7 +56,7 @@ test("0065 emits canonical unwrapped base64 without widening execution authority
   assert.match(migration, /CASE WHEN p_signature IS NULL THEN NULL/u);
 
   assert.equal(POSTGRES_SCHEMA_HEAD.version, POSTGRES_SCHEMA_HEAD.migration_count);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0076_refresh_outbox_wall_clock_expiry.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0109_invitation_authority.sql");
   const previousCatalogEntry = catalog.entries.find((entry) => entry.version === 64 && entry.kind === "postgres-migration");
   const currentCatalogEntries = catalog.entries.filter((entry) => entry.version === 65 && entry.kind === "postgres-migration");
   assert.equal(previousCatalogEntry?.version, 64);
@@ -65,6 +66,7 @@ test("0065 emits canonical unwrapped base64 without widening execution authority
     kind: "postgres-migration",
     source: "postgres/0065_managed_signer_signature_base64_canonical.sql",
     version: 65,
+    sha256: migrationChecksum,
     profile: "migration-global",
     purpose: "migration.0065.managed-signer-signature-base64-canonical",
     implementation_status: "implemented",

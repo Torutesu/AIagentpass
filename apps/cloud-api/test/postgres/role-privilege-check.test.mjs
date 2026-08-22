@@ -44,11 +44,12 @@ test("authority diagnostics enforce function-only app reads for Hosted, Platform
 
 test("CI service-role login qualification follows the shared PostgreSQL schema head", async () => {
   const workflow = await read(".github/workflows/ci.yml");
+  const authorityAction = await read(".github/actions/postgres-authority-qualification/action.yml");
   const inlineModules = workflow.split("node --input-type=module <<'NODE'").slice(1).map((value) => value.split("\n          NODE", 1)[0]);
   for (const moduleSource of inlineModules) {
     const imports = moduleSource.match(/import \{ POSTGRES_SCHEMA_HEAD \} from "\.\/apps\/cloud-api\/src\/postgres\/schema-head\.mjs";/gu) ?? [];
     assert.ok(imports.length <= 1, "an inline CI module must not redeclare the schema-head import");
   }
-  assert.match(workflow, /Verify actual service-role login boundaries[\s\S]*import \{ POSTGRES_SCHEMA_HEAD \}[\s\S]*assert\.equal\(head\.rows\[0\]\.version, POSTGRES_SCHEMA_HEAD\.version\)/u);
+  assert.match(authorityAction, /Verify actual service-role login boundaries[\s\S]*import \{ POSTGRES_SCHEMA_HEAD \}[\s\S]*assert\.equal\(head\.rows\[0\]\.version, POSTGRES_SCHEMA_HEAD\.version\)/u);
   assert.doesNotMatch(workflow, /assert\.equal\(head\.rows\[0\]\.version, 55\)/u);
 });

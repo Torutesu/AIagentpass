@@ -5,6 +5,7 @@ import test from "node:test";
 import { createApiTokenRecord, signDeviceRequest } from "../src/auth.mjs";
 import { createCloudApi } from "../src/server.mjs";
 import { canonicalControlBundle, controlBundleStatementHash, verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -107,10 +108,9 @@ function createFixture(t, bundleSigner, { enrollmentCredentialSecret = Buffer.al
     now: () => NOW,
     verifyRecentWebAuthn: async ({ proof, organization_id, principal, operation }) => ({ verified: true, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: NOW })
   });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
-    t.after(async () => new Promise((done) => server.close(done)));
-    resolve({ server, store, state, deviceKeys, refreshKeys, base: `http://127.0.0.1:${server.address().port}` });
-  }));
+  startInMemoryHttpServer(server);
+  t.after(async () => new Promise((done) => server.close(done)));
+  return { server, store, state, deviceKeys, refreshKeys, base: `http://127.0.0.1:${server.address().port}` };
 }
 
 function deviceHeaders(path, privateKey, nonce = "managed-control-bundle-nonce-0000000001") {

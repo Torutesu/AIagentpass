@@ -153,6 +153,9 @@ public final class NativeDeviceAuditOutbox: @unchecked Sendable {
     /// transport and device binding. Head metadata is committed before event
     /// removal so a crash leaves an exact replay rather than a chain gap.
     public func acknowledge(_ response: NativeDeviceAuditIngestionResponse) throws {
+        // A durable Inbox acknowledgement is not a committed audit result.
+        // Keep the exact batch on disk until a committed response is returned.
+        guard response.deliveryState == "committed" else { return }
         let accepted = response.acceptedEventIDs.map { $0.lowercased() }
         let duplicates = response.duplicateEventIDs.map { $0.lowercased() }
         let acknowledged = accepted + duplicates
@@ -167,7 +170,7 @@ public final class NativeDeviceAuditOutbox: @unchecked Sendable {
             throw AgentPassNativeError.invalidSignature("Device audit ingestion response reports an audit gap")
         }
         let incoming = NativeDeviceAuditHead(
-            lastHash: response.headHash,
+            lastHash: response.headHash ?? "",
             lastEventID: response.headEventID?.lowercased()
         )
         try Self.validateHead(incoming)

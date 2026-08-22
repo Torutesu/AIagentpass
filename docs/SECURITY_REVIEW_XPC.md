@@ -1,5 +1,10 @@
 # Security review: dedicated Host/Child XPC identity boundary
 
+判定: `not_proven`。これは checkout の静的読み取りによる repository-side review
+record であり、実際の第三者レビューを実施・完了したという主張ではない。実機・
+protected runner・署名付き reviewer identity の証跡が揃うまで、focused finding
+やテスト結果を production approval に昇格させない。
+
 監査日: 2026-08-19  
 対象: `/Users/torutano/Documents/ChatGPT/AIagentpass/work/agentpass-c3`  
 範囲: 専用 `dev.agentpass.agent-host` / `dev.agentpass.child-git` listener の実配線、audit-token provenance、connection/launch nonce binding、Child code-signing requirement。  

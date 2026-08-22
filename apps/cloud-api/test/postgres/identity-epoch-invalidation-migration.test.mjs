@@ -57,7 +57,8 @@ test("0056 is cataloged at the PostgreSQL schema head and remains transactional"
     ],
     compatibility_fixtures: [
       "apps/cloud-api/test/postgres/identity-epoch-invalidation-migration.test.mjs"
-    ]
+    ],
+    sha256: "f72dea9c6b3c1aa7311909cbe4d946eb0b4e29b702d1e4ab9b5321bb3d6035b5"
   });
   assert.match(manifest, /POSTGRES_SCHEMA_HEAD/u);
   assert.match(manifest, /REQUIRED_MIGRATION_VERSION = String\(POSTGRES_SCHEMA_HEAD\.version\)/u);
@@ -108,7 +109,7 @@ test("0056 fixes the lock order and makes the invalidation atomic with sessions"
   assert.match(primitive, /SET revoked_at = CASE[\s\S]*version = version \+ 1/u);
   assert.match(primitive, /GET DIAGNOSTICS invalidated_human_sessions = ROW_COUNT/u);
   assert.match(primitive, /GET DIAGNOSTICS invalidated_platform_sessions = ROW_COUNT/u);
-  assert.match(sql, /agentpass\.recovery_epoch_bump/u, "0025 compatibility must be explicit and scoped");
+  assert.doesNotMatch(primitive, /agentpass\.recovery_epoch_bump/u, "epoch authority must not trust a caller-controlled GUC");
 });
 
 test("0056 covers every reviewed mutation path through wrappers and triggers", async () => {
@@ -163,5 +164,5 @@ test("0056 epoch guards authorize the relation owner rather than a fixed deploym
     assert.match(guard, /pg_get_userbyid\([\s\S]*SELECT relowner FROM pg_class WHERE oid = TG_RELID/u);
     assert.doesNotMatch(guard, /current_user\s*<>\s*'agentpass_migrator'/u);
   }
-  assert.match(membershipGuard, /agentpass\.recovery_epoch_bump/u);
+  assert.doesNotMatch(membershipGuard, /agentpass\.recovery_epoch_bump/u, "direct epoch DML must not be authorized by a caller-controlled GUC");
 });

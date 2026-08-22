@@ -85,12 +85,29 @@ test("start/status/close response DTOs have only the frozen opaque shape", () =>
       fields: [
         ["sessionID", "String"],
         ["leaseID", "String"],
+        ["deviceID", "String"],
         ["processBindingDigest", "Data"],
+        ["ancestryBindingDigest", "Data"],
         ["worktreeBindingDigest", "Data"],
+        ["controlSequence", "Int64"],
+        ["authorityGeneration", "Int64"],
+        ["keyGeneration", "Int64"],
         ["expiresAtMilliseconds", "Int64"],
         ["maxSignatures", "Int"]
       ],
-      keys: ["session_id", "lease_id", "process_binding_digest", "worktree_binding_digest", "expires_at_ms", "max_signatures"]
+      keys: [
+        "session_id",
+        "lease_id",
+        "device_id",
+        "process_binding_digest",
+        "ancestry_binding_digest",
+        "worktree_binding_digest",
+        "control_sequence",
+        "authority_generation",
+        "key_generation",
+        "expires_at_ms",
+        "max_signatures"
+      ]
     },
     {
       label: "status response",
@@ -259,18 +276,26 @@ test("signGitCommit uses a durable sign-once transaction and returns only bounde
   const signBody = signMethod.slice(signMethod.indexOf("{") + 1);
   assert.match(signMethod, /runtime\.signingTransactions\.lookup\(request: transactionRequest\)/u);
   assert.match(signMethod, /bindingObserver\.consumeSigningCapability/u);
-  assert.match(signMethod, /runtime\.signingTransactions\.markProviderStarted/u);
   assert.match(signMethod, /runtime\.gitCommitSigner\.signGitCommitPayload/u);
   assert.match(signMethod, /runtime\.gitCommitSigner\.verifyGitCommitSignature/u);
-  assert.match(signMethod, /runtime\.signingTransactions\.recordVerified/u);
-  assert.match(signMethod, /runtime\.signingTransactions\.complete/u);
+  assert.match(signMethod, /coordinator\.makeSigningHandoff/u);
+  assert.match(signMethod, /NativeAgentSessionCoordinatorSigningAdapter/u);
+  assert.match(signMethod, /adapter\.execute/u);
+  const freshSigningPath = signMethod.slice(signMethod.indexOf("let handoff"));
+  assert.doesNotMatch(freshSigningPath, /runtime\.signingTransactions\.(?:admit|markIntent|markProviderStarted|recordVerified|complete)/u);
   assert.match(signMethod, /Self\.denial\(for: error\)\.nsError/u);
   assert.doesNotMatch(signBody, /error as NSError|localizedDescription|error\.userInfo|privateKey|keySelector/u);
   assert.match(protocol, /func signGitCommit\([\s\S]*AgentPassAgentSignResponse\?/u);
   assert.match(signMethod, /case \.providerStarted:[\s\S]*NativeSigningTransactionError\.uncertain/u);
   assert.match(signMethod, /case \.uncertain:[\s\S]*NativeSigningTransactionError\.uncertain/u);
-  assert.ok(signMethod.indexOf("consumeSigningCapability") < signMethod.indexOf("markProviderStarted"));
   assert.ok(signMethod.indexOf("consumeSigningCapability") < signMethod.indexOf("signGitCommitPayload"));
+  const adapterSource = read("native/macos/Sources/AgentPassNativeCore/NativeAgentSessionCoordinatorSigningAdapter.swift");
+  const executeMethod = between(adapterSource, "public func execute(", "@discardableResult\n    private func markProviderStartedLocked");
+  assert.match(executeMethod, /_ = try reserveLocked\(\)/u);
+  assert.match(executeMethod, /_ = try beginLocked\(\)/u);
+  assert.match(executeMethod, /_ = try markProviderStartedLocked\(\)/u);
+  assert.ok(executeMethod.indexOf("markProviderStartedLocked") < executeMethod.indexOf("provider(handoff.signingRequest.commitPayload)"));
+  assert.match(executeMethod, /terminalizeProviderFailure\(\)/u);
   assert.match(signingTransaction, /"capability_sha256": capabilityHash/u);
   assert.doesNotMatch(signingTransaction, /"capability": request\.capability/u);
 });

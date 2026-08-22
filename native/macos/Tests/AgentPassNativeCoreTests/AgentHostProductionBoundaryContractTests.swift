@@ -49,8 +49,8 @@ func agentHostUsesOnlyTheFixedXPCBoundary() throws {
         encoding: .utf8
     )
 
-    #expect(source.contains("static let machServiceName = \"dev.agentpass.agent-session\""))
-    #expect(source.contains("NSXPCConnection(machServiceName: AgentHostContract.machServiceName"))
+    #expect(source.contains("static let activationMachServiceName = \"dev.agentpass.agent-session\""))
+    #expect(source.contains("NSXPCConnection(machServiceName: AgentHostContract.activationMachServiceName"))
     #expect(source.contains("proxy.bootstrapAgent(bootstrapRequest, withReply: reply)"))
     #expect(source.contains("proxy.startAgentSession(sessionRequest, withReply: reply)"))
     #expect(source.contains("proxy.signGitCommit") == false)

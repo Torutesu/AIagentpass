@@ -27,6 +27,14 @@ test('native service example separates the Agent session endpoint and client req
   assert.notEqual(example.agent_client_code_signing_requirement, example.client_code_signing_requirement);
   assert.match(launchd, /<key>dev\.agentpass\.native-service<\/key><true\/>/u);
   assert.match(launchd, /<key>dev\.agentpass\.agent-session<\/key><true\/>/u);
+  assert.match(launchd, /<key>dev\.agentpass\.agent-host-control<\/key><true\/>/u);
+});
+
+test('Host control closes are admitted as Native Client operations, never as Host operations', () => {
+  assert.match(service, /let hostControlRegistry = NativeAgentHostControlRegistry\(\s*authorizedControlBundleIdentifier: NativeClientCodeRequirement\.clientBundleID,\s*requireOwnerPrincipalMatch: false\s*\)/u);
+  const controlSection = service.slice(service.indexOf('let hostControlDelegate'), service.indexOf('let childDelegate'));
+  assert.match(controlSection, /codeSigningRequirement: configuration\.clientCodeSigningRequirement/u);
+  assert.doesNotMatch(controlSection, /codeSigningRequirement: configuration\.agentClientCodeSigningRequirement/u);
 });
 
 test('Agent runtime authority configuration is complete, bounded, and device-enrollment dependent', () => {
@@ -55,11 +63,11 @@ test('production listeners export separate management and connection-scoped Agen
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.machServiceName\)/u);
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.agentMachServiceName\)/u);
   assert.match(service, /connection\.exportedInterface = AgentPassAgentXPCInterface\.make\(\)/u);
-  assert.match(service, /let endpoint = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime,\s*auditAppender: auditAppender,\s*qualificationFaultConsumer: qualificationFaultConsumer,\s*transportReplyFaultConsumer: transportReplyFaultConsumer\s*\)/u);
+  assert.match(service, /let endpoint = AgentConnectionEndpoint\(\s*connection: connection,\s*connectionGuard: guardValue,\s*observer: observer,\s*auditTokenSource: auditTokenSource,\s*runtime: runtime,\s*auditAppender: auditAppender,\s*qualificationFaultConsumer: qualificationFaultConsumer,\s*transportReplyFaultConsumer: transportReplyFaultConsumer,\s*sessionAssociationRegistry: sessionAssociationRegistry\s*\)/u);
   assert.match(service, /connection\.invalidationHandler[\s\S]*endpoint\?\.invalidateConnection\(\)/u);
-  assert.match(service, /observer\.observe\(pid: peerPID, expectedUserID: peerUID\)/u);
-  assert.match(service, /connection\.processIdentifier/u);
-  assert.match(service, /connection\.auditSessionIdentifier/u);
+  assert.match(service, /auditTokenSource\.completeAuditToken\(for: connection\)/u);
+  assert.match(service, /observer\.observe\(pid: initialToken\.pid, expectedUserID: initialToken\.effectiveUserID\)/u);
+  assert.match(service, /initialToken\.context\(matching: observation\)/u);
   const agentEndpoint = service.slice(service.indexOf('private final class AgentConnectionEndpoint'), service.indexOf('private final class AgentListenerDelegate'));
   assert.doesNotMatch(agentEndpoint, /ServiceEndpoint|AgentPassNativeServiceProtocol|rotateAudit|stageKey|applyControlBundle/u);
 });
@@ -83,11 +91,20 @@ test('Agent bootstrap, sessions, and durable signing remain connection-bound and
   assert.match(agentEndpoint, /coordinator\.close\(sessionID: sessionID, reason: reason\)/u);
   assert.match(agentEndpoint, /coordinator\?\.invalidateConnection\(\)/u);
   assert.match(agentEndpoint, /func signGitCommit[\s\S]*authorizeConnection\(\)/u);
-  assert.match(agentEndpoint, /func signGitCommit[\s\S]*coordinator\.reserveSigningRequest\(request\)/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*coordinator\.makeSigningHandoff/u);
   assert.match(agentEndpoint, /func signGitCommit[\s\S]*bindingObserver\.observeSigningAuthority/u);
-  assert.match(agentEndpoint, /func signGitCommit[\s\S]*signingTransactions\.markProviderStarted/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*NativeAgentSessionCoordinatorSigningAdapter/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*adapter\.execute/u);
   assert.match(agentEndpoint, /func signGitCommit[\s\S]*gitCommitSigner\.signGitCommitPayload/u);
   assert.match(agentEndpoint, /func signGitCommit[\s\S]*Self\.denial\(for: error\)\.nsError/u);
+  const signMethod = agentEndpoint.slice(agentEndpoint.indexOf('func signGitCommit'), agentEndpoint.indexOf('func closeAgentSession'));
+  const freshSigningPath = signMethod.slice(signMethod.indexOf('let handoff'));
+  assert.doesNotMatch(freshSigningPath, /runtime\.signingTransactions\.(?:admit|markIntent|markProviderStarted|recordVerified|complete)/u);
+  assert.match(agentEndpoint, /private let terminationState = NativeAgentConnectionTerminationState\(\)/u);
+  assert.match(agentEndpoint, /terminationState\.install\(activation\.binding\)/u);
+  assert.match(agentEndpoint, /private func cleanupConnectionState\(\)[\s\S]*terminationState\.beginCleanup\(\)/u);
+  assert.match(agentEndpoint, /func invalidateConnection\(\)\s*\{\s*_ = cleanupConnectionState\(\)\s*\}/u);
+  assert.match(agentEndpoint, /private func terminallyClose\(\)[\s\S]*guard cleanupConnectionState\(\) else \{ return \}[\s\S]*connection\.invalidate\(\)/u);
   assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|error as NSError/u);
 });
 

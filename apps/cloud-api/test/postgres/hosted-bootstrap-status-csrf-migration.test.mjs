@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
+import { migrationChecksum } from "../../src/postgres/migration-runner.mjs";
 
 const migrationUrl = new URL("../../../../contracts/postgres/0064_hosted_bootstrap_status_csrf.sql", import.meta.url);
 const rolesUrl = new URL("../../../../scripts/postgres/roles.sql", import.meta.url);
@@ -62,13 +63,15 @@ test("0064 exposes only database-clock status and exact CSRF verification author
 });
 
 test("0064 is cataloged, activated, and granted without app table reads", async () => {
-  const [roles, checker, catalog, contract, validator] = await Promise.all([
+  const [roles, checker, catalog, contract, validator, migration] = await Promise.all([
     readFile(rolesUrl, "utf8"),
     readFile(roleCheckerUrl, "utf8"),
     readFile(catalogUrl, "utf8").then(JSON.parse),
     readFile(contractUrl, "utf8").then(JSON.parse),
-    readFile(validatorUrl, "utf8")
+    readFile(validatorUrl, "utf8"),
+    readFile(migrationUrl, "utf8")
   ]);
+  const sha256 = migrationChecksum(migration);
   const statusSignature = "agentpass_hosted_identity_bootstrap_status_v2(bytea,bytea)";
   const verifySignature = "agentpass_hosted_identity_bootstrap_csrf_verify_v2(bytea,bytea)";
   for (const signature of [statusSignature, verifySignature]) {
@@ -84,6 +87,7 @@ test("0064 is cataloged, activated, and granted without app table reads", async 
     kind: "postgres-migration",
     source: "postgres/0064_hosted_bootstrap_status_csrf.sql",
     version: 64,
+    sha256,
     profile: "migration-global",
     purpose: "migration.0064.hosted-bootstrap-status-csrf",
     implementation_status: "implemented",

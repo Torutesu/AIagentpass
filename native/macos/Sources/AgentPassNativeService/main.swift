@@ -355,6 +355,20 @@ internal func deriveDedicatedChildCodeSigningRequirement(
     return requirement
 }
 
+/// The Host listener's child policy must be pinned to the exact signed Child
+/// helper that the product shipped.  A missing hash is not a development
+/// mode: it leaves process binding incomplete and must reject configuration
+/// loading before any Mach service is resumed.
+internal func requireHostChildCodeDirectoryHash(_ configuredHash: String?) throws -> String {
+    guard let configuredHash,
+          configuredHash.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
+        throw AgentPassNativeError.invalidConfiguration(
+            "Native service configuration must pin the Host Child code-directory hash"
+        )
+    }
+    return configuredHash.lowercased()
+}
+
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let agentMachServiceName: String
@@ -543,11 +557,7 @@ private struct ServiceConfiguration: Decodable {
               value.clientCodeSigningRequirement != value.agentClientCodeSigningRequirement else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
         }
-        if let childHash = value.hostChildCodeDirectoryHash {
-            guard childHash.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
-                throw AgentPassNativeError.invalidConfiguration("Host child code-directory hash is invalid")
-            }
-        }
+        _ = try requireHostChildCodeDirectoryHash(value.hostChildCodeDirectoryHash)
         guard let serviceAccessGroup = value.keychainAccessGroup,
               value.clientCodeSigningRequirement == (try? NativeClientCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
             throw AgentPassNativeError.invalidConfiguration("Native client code-signing requirement must bind the fixed Team ID, Developer ID identity, and approval-key entitlement")
@@ -4165,9 +4175,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let coordinator: NativeAgentSessionCoordinator?
     private let signingBindingObserver: AgentConnectionSessionBindingObserver?
     private let sessionAssociationRegistry: NativeAgentCoordinatorSessionAssociationRegistry?
-    private let terminalCloseLock = NSLock()
-    private var hasTerminallyClosed = false
-    private var activeSessionBinding: NativeAgentSessionBinding?
+    private let terminationState = NativeAgentConnectionTerminationState()
 
     init(
         connection: NSXPCConnection,
@@ -4268,22 +4276,23 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     private func terminallyClose() {
-        let shouldClose = terminalCloseLock.withLock {
-            guard !hasTerminallyClosed else { return false }
-            hasTerminallyClosed = true
-            return true
-        }
-        guard shouldClose else { return }
-        let binding = terminalCloseLock.withLock {
-            defer { activeSessionBinding = nil }
-            return activeSessionBinding
-        }
-        if let binding {
+        guard cleanupConnectionState() else { return }
+        connection.invalidate()
+    }
+
+    /// Shared by authorization failure and the NSXPC invalidation callback.
+    /// This deliberately does not invalidate the transport itself; callers
+    /// already inside the invalidation callback must not recurse.
+    @discardableResult
+    private func cleanupConnectionState() -> Bool {
+        let plan = terminationState.beginCleanup()
+        guard plan.shouldCleanup else { return false }
+        if let binding = plan.binding {
             sessionAssociationRegistry?.invalidate(binding: binding)
         }
         coordinator?.invalidateConnection()
         bootstrapStore.invalidate()
-        connection.invalidate()
+        return true
     }
 
     private func unavailableAfterAuthorization() -> NSError {
@@ -4371,8 +4380,10 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                         binding: activation.binding,
                         coordinator: coordinator,
                         dedicatedSigningAssociation: dedicatedAssociation)
-                    self.terminalCloseLock.withLock {
-                        self.activeSessionBinding = activation.binding
+                    guard self.terminationState.install(activation.binding) else {
+                        registry.invalidate(binding: activation.binding)
+                        coordinator.abortActivation(sessionID: activation.status.sessionID)
+                        throw NativeAgentSessionCoordinatorError.invalidated
                     }
                 }
                 guard let response = AgentPassAgentSessionResponse(
@@ -4388,9 +4399,8 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     expiresAtMilliseconds: activation.status.expiresAtMilliseconds,
                     maxSignatures: activation.status.maxSignatures
                 ) else {
-                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                    if let binding = self.terminationState.takeInstalledBinding() {
                         self.sessionAssociationRegistry?.invalidate(binding: binding)
-                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
                     }
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
@@ -4404,9 +4414,8 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     // therefore a local fault and must not strand reply-less
                     // authority.
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
-                    if let binding = self.terminalCloseLock.withLock({ self.activeSessionBinding }) {
+                    if let binding = self.terminationState.takeInstalledBinding() {
                         self.sessionAssociationRegistry?.invalidate(binding: binding)
-                        self.terminalCloseLock.withLock { self.activeSessionBinding = nil }
                     }
                     throw error
                 }
@@ -4590,7 +4599,9 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
             }
             do {
                 try self.authorizeConnection()
+                let binding = try coordinator.binding(sessionID: sessionID)
                 let status = try coordinator.close(sessionID: sessionID, reason: reason)
+                self.sessionAssociationRegistry?.remove(binding: binding)
                 let closedAt = try self.clocks.wallClock.sample().millisecondsSinceUnixEpoch
                 guard let response = AgentPassAgentCloseSessionResponse(
                     sessionID: status.sessionID,
@@ -4607,8 +4618,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     func invalidateConnection() {
-        coordinator?.invalidateConnection()
-        bootstrapStore.invalidate()
+        _ = cleanupConnectionState()
     }
 
     private static func denial(for error: Error) -> NativeAgentSessionDenialReason {
@@ -5517,6 +5527,7 @@ do {
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
     let hostListener = NSXPCListener(machServiceName: configuration.hostMachServiceName)
+    let hostControlListener = NSXPCListener(machServiceName: AgentPassHostControlXPCContract.machServiceName)
     let childListener = NSXPCListener(machServiceName: configuration.childMachServiceName)
     let controlRefreshEvidenceStore = try configuration.controlV2RefreshStatePath.map {
         try NativeControlRefreshEvidencePOSIXStore(path: "\($0).control-ack")
@@ -5612,6 +5623,10 @@ do {
     }
     let auditTokenSource = NativeMacOSAuditTokenSource()
     let sessionAssociationRegistry = NativeAgentCoordinatorSessionAssociationRegistry()
+    let hostControlRegistry = NativeAgentHostControlRegistry(
+        authorizedControlBundleIdentifier: NativeClientCodeRequirement.clientBundleID,
+        requireOwnerPrincipalMatch: false
+    )
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
     let agentDelegate = AgentListenerDelegate(
         configuration: configuration,
@@ -5814,7 +5829,33 @@ do {
         },
         childUnregistrar: { bindingHash in
             childRegistry.unregister(identityBindingHash: bindingHash)
-        }
+        },
+        controlRegistry: hostControlRegistry
+    )
+    let hostControlDelegate = NativeAgentAuthenticatedHostControlListenerDelegate(
+        allowedClientUID: configuration.allowedClientUID,
+        // The control caller is the signed Native Client (`agentpass close`),
+        // not the separately signed Agent Host that owns the session.  Keep
+        // this admission boundary distinct from the Host listener so a Host
+        // identity cannot be confused with the control principal.
+        codeSigningRequirement: configuration.clientCodeSigningRequirement,
+        peerPolicyFactory: { observation in
+            try NativeProcessIdentityPolicy(
+                expectedUID: observation.process.uid,
+                expectedBootIdentity: observation.process.bootIdentity,
+                expectedExecutableFileIdentity: observation.process.executableFileIdentity,
+                expectedCodeDirectoryHash: observation.process.codeDirectoryHash,
+                expectedBundleIdentifier: observation.process.bundleIdentifier,
+                expectedTeamIdentifier: observation.process.teamIdentifier,
+                expectedSignatureKind: observation.process.signatureKind,
+                requiredEntitlements: observation.process.entitlements,
+                expectedAncestry: observation.ancestry,
+                rejectAdHocSignature: true,
+                rejectUnknownAncestors: true
+            )
+        },
+        auditTokenSource: auditTokenSource,
+        registry: hostControlRegistry
     )
     let childDelegate = NativeAgentAuthenticatedChildGitListenerDelegate(
         allowedClientUID: configuration.allowedClientUID,
@@ -5829,10 +5870,12 @@ do {
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
     hostListener.delegate = hostDelegate
+    hostControlListener.delegate = hostControlDelegate
     childListener.delegate = childDelegate
     managementListener.resume()
     agentListener.resume()
     hostListener.resume()
+    hostControlListener.resume()
     childListener.resume()
     qualificationRuntime?.resume()
     RunLoop.current.run()

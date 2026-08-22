@@ -17,6 +17,15 @@ const PLATFORM_AUTHORITY_RELATIONS = Object.freeze([
   'platform_promotion_deployments',
   'platform_promotion_issuances',
 ]);
+const HUMAN_AUTHORITY_RELATIONS = Object.freeze([
+  "organizations", "memberships",
+  "human_sessions", "webauthn_credentials", "webauthn_challenges",
+  "owner_recovery_requests", "owner_recovery_approvals", "owner_recovery_exchanges",
+  "owner_recovery_sessions", "owner_recovery_webauthn_challenges",
+  "owner_recovery_idempotency_records", "owner_recovery_outbox",
+  "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox_transition_heads",
+  "owner_recovery_outbox_transition_ledger"
+]);
 
 const PLATFORM_APP_FUNCTIONS = Object.freeze([
   'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)',
@@ -134,10 +143,15 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
 
   assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_app/u);
   assert.match(rolesSql, /c\.relname NOT IN \([\s\S]*'capabilities'[\s\S]*'agent_session_signing_capability_reservations'/u);
+  assert.match(rolesSql, /c\.relname NOT IN \([\s\S]*'device_audit_inbox'/u);
+  assert.match(rolesSql, /'managed_signer_provider_operations', 'device_audit_inbox'/u);
   assert.match(rolesSql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
   assert.ok(rolesSql.indexOf("c.relname NOT IN (") < rolesSql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO agentpass_app'));
+  for (const relation of HUMAN_AUTHORITY_RELATIONS) {
+    assert.match(rolesSql, new RegExp(`'${escapedRegExp(relation)}'`, 'u'), `human authority relation is missing from app DML exclusion: ${relation}`);
+  }
 
   assert.match(authorization, /CREATE FUNCTION public\.agentpass_consume_platform_authorization_and_reserve\([\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = pg_catalog, public/u);
   assert.match(authorization, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_platform_promotion_issuance_reserve\([^;]+\) FROM agentpass_app/u);
@@ -210,16 +224,14 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /process\.argv\.length !== 2/);
   assert.match(checker, /current_user/);
   assert.match(checker, /current_user = 'agentpass_migrator'/);
-  assert.match(checker, /platform_promotion_approvals/);
-  assert.match(checker, /platform_promotion_issuances/);
-  assert.match(checker, /platform_deployment_state/);
+  assert.match(checker, /left\(t\.relname, length\('platform_'\)\)/u);
   for (const privilegeFunction of ['has_schema_privilege', 'has_table_privilege', 'has_sequence_privilege', 'has_function_privilege']) assert.match(checker, new RegExp(privilegeFunction));
   assert.match(checker, /agentpass_signer/);
   assert.match(checker, /managed_signer_provider_operations/);
   assert.match(checker, /migration_head_ok/u);
   assert.match(checker, /POSTGRES_SCHEMA_HEAD/u);
   assert.match(checker, /const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD\.version/u);
-  assert.match(checker, /count\(\*\) = \$\{EXPECTED_MIGRATION_VERSION\} AND min\(version\) = 1 AND max\(version\) = \$\{EXPECTED_MIGRATION_VERSION\}/u);
+  assert.match(checker, /count\(\*\) = \$\{EXPECTED_MIGRATION_VERSION\}[\s\S]*?min\(version\) = 1[\s\S]*?max\(version\) = \$\{EXPECTED_MIGRATION_VERSION\}/u);
   assert.match(checker, /signer_function_allowlist/u);
   assert.match(checker, /app_function_allowlist/u);
   assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
@@ -252,6 +264,24 @@ test('real role qualification removes database URLs before spawning psql', async
   assert.match(integration, /DATABASE_URL:\s*_genericDatabaseUrl/);
   assert.match(integration, /spawnSync\(\s*"psql"/);
   assert.doesNotMatch(integration, /env:\s*process\.env/);
+});
+
+test('real role qualification uses independent TLS-authenticated connections', async () => {
+  const integration = await read('apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs');
+
+  for (const variable of [
+    'AGENTPASS_TEST_POSTGRES_ADMIN_URL',
+    'AGENTPASS_TEST_APP_DATABASE_URL',
+    'AGENTPASS_TEST_SIGNER_DATABASE_URL',
+    'AGENTPASS_TEST_MIGRATION_DATABASE_URL',
+    'AGENTPASS_TEST_BACKUP_DATABASE_URL',
+  ]) assert.match(integration, new RegExp(variable, 'u'));
+  assert.match(integration, /async function withRoleConnection/u);
+  assert.match(integration, /SELECT session_user, current_user,[\s\S]*pg_stat_ssl/u);
+  assert.match(integration, /assert\.equal\(principal\.rows\[0\]\.ssl, true/u);
+  assert.doesNotMatch(integration, /SET SESSION AUTHORIZATION/u);
+  assert.doesNotMatch(integration, /SET LOCAL ROLE/u);
+  assert.match(integration, /cleanup left rows or objects behind/u);
 });
 
 test('existing operational docs contain the role boundary', async () => {

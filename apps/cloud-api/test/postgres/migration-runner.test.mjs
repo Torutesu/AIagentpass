@@ -152,13 +152,13 @@ test("migration 0008 indexes unexpired revoked capabilities for bounded ControlB
 test("migration 0009 stores only namespaced jti replay state and provides atomic one-time consume", async () => {
   const sql = await readFile(new URL("../../../../contracts/postgres/0009_human_identity_assertion_replays.sql", import.meta.url), "utf8");
   assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/);
-  assert.match(sql, /CREATE TABLE human_identity_assertion_replays \(/);
+  assert.match(sql, /CREATE TABLE public\.human_identity_assertion_replays \(/);
   assert.match(sql, /jti_digest bytea PRIMARY KEY CHECK \(octet_length\(jti_digest\) = 32\)/);
   assert.match(sql, /expires_at timestamptz NOT NULL/);
   assert.doesNotMatch(sql, /consumed_at|created_at/);
   assert.doesNotMatch(sql, /subject|member_id|membership_id|role|assertion_payload|raw_jti/i);
   assert.match(sql, /CREATE INDEX human_identity_assertion_replays_expiry/);
-  assert.match(sql, /CREATE FUNCTION agentpass_consume_human_identity_assertion\(/);
+  assert.match(sql, /CREATE FUNCTION public\.agentpass_consume_human_identity_assertion\(/);
   assert.match(sql, /ON CONFLICT \(jti_digest\) DO NOTHING/);
   assert.match(sql, /RETURN FOUND/);
   assert.match(sql, /assertion_expires_at <= clock_timestamp\(\)/);
@@ -187,7 +187,7 @@ test("migration 0011 closes the hosted control-plane schema gaps transactionally
   assert.match(sql, /CREATE TABLE device_request_nonces \([\s\S]*nonce_digest bytea NOT NULL CHECK \(octet_length\(nonce_digest\) = 32\)/);
   assert.match(sql, /CREATE TABLE rate_limit_buckets \(/);
   assert.match(sql, /CREATE INDEX (?:idempotency_records_expiry|device_request_nonces_expiry|rate_limit_buckets_expiry)/);
-  assert.match(sql, /CREATE FUNCTION agentpass_consume_device_request_nonce\(/);
+  assert.match(sql, /CREATE FUNCTION public\.agentpass_consume_device_request_nonce\(/);
   assert.match(sql, /CREATE FUNCTION agentpass_acquire_rate_limit\(/);
   assert.match(sql, /CREATE FUNCTION agentpass_prune_shared_control_expired\(/);
   assert.match(sql, /ON CONFLICT \(organization_id, device_id, nonce_digest\) DO NOTHING/);

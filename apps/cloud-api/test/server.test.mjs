@@ -12,6 +12,7 @@ import { verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, verifyCapability } from "../../../packages/capability/src/index.mjs";
 import { createRateLimiter } from "../src/rate-limit.mjs";
 import { deterministicDeviceAuditBatchId } from "../src/device-audit-ingestion.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const deviceId = "22222222-2222-4222-8222-222222222222";
@@ -46,8 +47,7 @@ async function fixture(t, apiOptions = {}) {
   const { storeDecorator, ...cloudApiOptions } = apiOptions;
   const apiStore = typeof storeDecorator === "function" ? storeDecorator(store) : store;
   const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, refreshHintService: { publicKeyMetadata: async () => ({ key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHintKeys.publicKey.export({ type: "spki", format: "pem" }).toString() }), poll: async () => null }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === recentProof, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const base = startInMemoryHttpServer(server);
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
   return { store, token, deviceKeys, bundleKeys, refreshHintKeys, base, scope };
 }
@@ -96,8 +96,7 @@ async function v2Fixture(t, apiOptions = {}) {
     verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: proof, member_id: principal.member_id, organization_id, operation, authenticated_at: now }),
     ...apiOptions
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const base = startInMemoryHttpServer(server);
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); });
   return { base, token, candidate, completionKeys, device, state, receiptKeys };
 }
@@ -425,6 +424,29 @@ test("device audit ingestion is authenticated and rejects body substitution", as
   assert.equal(accepted.status, 202, JSON.stringify(await accepted.clone().json()));
   const tampered = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "AgentPass-Nonce": "nonce-audit-zyxwvutsrqponmlkjihgfedcba-54321", "content-type": "application/json" }, body: JSON.stringify({ batch_id: "other", events: [event] }) });
   assert.equal(tampered.status, 401);
+});
+
+test("device audit inbox database outage maps to a retryable 503 without leaking storage details", async (t) => {
+  const f = await fixture(t, {
+    deviceAuditInbox: {
+      async enqueue() {
+        const error = new Error("postgres connection refused: secret-host.internal");
+        error.code = "ERR_DEVICE_AUDIT_INBOX_UNAVAILABLE";
+        throw error;
+      }
+    }
+  });
+  const endpoint = `/v1/organizations/${org}/audit/events`;
+  const event = auditListEvent("66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777", "0".repeat(64), new Date(now).toISOString());
+  const body = JSON.stringify({ batch_id: deterministicDeviceAuditBatchId(org, deviceId, [event]), events: [event] });
+  const headers = signDeviceRequest({ method: "POST", path: endpoint, body, device_id: deviceId, timestamp: now, nonce: "nonce-audit-db-outage-abcdefghijklmnopqrstuvwxyz-1" }, f.deviceKeys.privateKey);
+  const response = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "1");
+  const payload = await response.json();
+  assert.equal(payload.error.code, "device_audit_inbox_unavailable");
+  assert.equal(payload.error.message, "Device audit ingestion is temporarily unavailable");
+  assert.doesNotMatch(JSON.stringify(payload), /postgres|secret-host|connection refused/iu);
 });
 
 test("device audit ingestion rejects nondeterministic batches and unordered chains before mutation", async (t) => {

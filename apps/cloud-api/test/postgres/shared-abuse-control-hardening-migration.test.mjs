@@ -5,7 +5,7 @@ import test from "node:test";
 const migrationUrl = new URL("../../../../contracts/postgres/0033_shared_abuse_control_hardening.sql", import.meta.url);
 
 const functionSource = (sql, name) => {
-  const start = sql.indexOf(`CREATE OR REPLACE FUNCTION ${name}(`);
+  const start = sql.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
   assert.notEqual(start, -1, `${name} must be replaced in 0033`);
   const end = sql.indexOf("\nCREATE ", start + 1);
   return sql.slice(start, end === -1 ? sql.length : end);
@@ -17,8 +17,8 @@ test("0033 is a forward-only transactional migration with no destructive DDL", a
   const sql = await readMigration();
   assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/u);
   assert.doesNotMatch(sql, /\b(?:DROP|TRUNCATE|ALTER\s+TABLE|CREATE\s+TABLE)\b/iu);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION agentpass_acquire_rate_limit\(/u);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION agentpass_acquire_anonymous_rate_limit\(/u);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION public\.agentpass_acquire_rate_limit\(/u);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION public\.agentpass_acquire_anonymous_rate_limit\(/u);
 });
 
 test("0033 preserves both rate-limit function signatures and token decision semantics", async () => {
@@ -65,6 +65,6 @@ test("0033 makes every abuse-control prune bounded and cooperative", async () =>
   }
   const shared = functionSource(sql, "agentpass_prune_shared_control_expired");
   assert.equal((shared.match(/FOR UPDATE SKIP LOCKED/g) ?? []).length, 4);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION agentpass_prune_human_identity_assertion_replays\(/u);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION public\.agentpass_prune_human_identity_assertion_replays\(/u);
   assert.doesNotMatch(sql, /DELETE FROM human_identity_assertion_replays\s+WHERE\s+expires_at/iu);
 });

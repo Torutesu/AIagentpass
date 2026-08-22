@@ -31,7 +31,17 @@ native/macos/scripts/build-app.sh --universal --output-dir "$PWD/dist" \
   --identity 'Developer ID Application: …' --team-id APPLETEAM1 \
   --app-identifier-prefix APPLETEAM1 \
   --service-profile /protected/service.provisionprofile \
-  --client-profile /protected/client.provisionprofile
+  --client-profile /protected/client.provisionprofile \
+  --agent-profile /protected/agent.provisionprofile \
+  --qualification-client-profile /protected/qualification-client.provisionprofile
+```
+
+`--universal` is a closed cross-hardware build: every executable, including
+`agentpass-git-sign`, `agentpass-git-session-sign`, and `agentpass-git-sign-xpc`,
+must contain exactly the `arm64` and `x86_64` slices. The app assembly fails
+closed if any slice is missing or duplicated.
+
+```sh
 export AGENTPASS_TEAM_ID=APPLETEAM1
 native/macos/scripts/build-installer.sh \
   --app "$PWD/dist/AgentPass.app" \

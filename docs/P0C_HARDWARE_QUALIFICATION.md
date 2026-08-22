@@ -157,11 +157,11 @@ The config generator snapshots the SHA-256 of the exact native client, native ma
 
 No operator private key, Developer ID credential, candidate artifact, or Cloud secret is written into the provisioned tree. Scenario executables must also remain secret-free and obtain only the non-secret candidate bindings passed by the driver runtime.
 
-stdout and stderr are bounded to 256 KiB per stream. The runner records only byte counts, SHA-256 digests, truncation, exit code/signal, timeout/output-limit state, and duration. Raw child output is never written to the report, evidence directory, or error output. A timeout sends `SIGTERM`, then `SIGKILL` after the bounded grace period. An output limit does the same.
+stdout and stderr are bounded to 256 KiB per stream. The runner records only byte counts, SHA-256 digests, truncation, exit code/signal, timeout/output-limit state, duration, and the exact `driver_sha256` selected from the fixed manifest for each gate evidence file. Raw child output is never written to the report, evidence directory, or error output. A timeout sends `SIGTERM`, then `SIGKILL` after the bounded grace period. An output limit does the same.
 
 ## Evidence and qualification rule
 
-Every gate and test receives a separate JSON evidence file. Evidence files are created with `O_NOFOLLOW|O_EXCL`, mode `0600`, and must remain regular single-link files. Each report entry binds the evidence basename, exact byte count, and SHA-256. The evidence payload contains metadata and output hashes only.
+Every gate and test receives a separate JSON evidence file. Evidence files are created with `O_NOFOLLOW|O_EXCL`, mode `0600`, and must remain regular single-link files. Each report entry binds the evidence basename, exact byte count, and SHA-256. Gate evidence additionally carries the driver byte digest, allowing the retained result to be compared with the root-owned `/opt/agentpass/p0c/gate-manifest.json`; the evidence payload contains metadata and output hashes only, never raw output.
 
 `qualified` is true only when all of the following hold:
 

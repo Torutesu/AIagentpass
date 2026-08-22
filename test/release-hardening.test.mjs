@@ -638,6 +638,7 @@ test('release candidate verifies signed source before the secret-bearing job and
   const candidateRemoval = workflow.indexOf('rm -f "$RUNNER_TEMP/candidate/ci-preflight.json"', preflightCopy);
   const productScan = workflow.indexOf('node scripts/release/ci-preflight.mjs artifact-scan', candidateRemoval);
   assert.ok(candidateScanStart >= 0 && preflightScan > candidateScanStart && preflightCopy > preflightScan && candidateRemoval > preflightCopy && productScan > candidateRemoval, "preflight must be scanned separately before the candidate scan");
+  assert.match(workflow, /Archive-scan the final raw evidence upload inventory[\s\S]*?archive-secret-scan\.mjs "\$RUNNER_TEMP\/integrity-evidence"/);
   assert.match(workflow, /Require source-bound external qualification evidence inputs[\s\S]*?AGENTPASS_KMS_QUALIFICATION_EVIDENCE_JSON/);
   assert.match(workflow, /AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_JSON[\s\S]*?canonical JSON[\s\S]*?kms-qualification/);
   assert.match(workflow, /ci-preflight\.mjs kms-qualification[\s\S]*?ci-preflight\.mjs platform-auth-qualification/);

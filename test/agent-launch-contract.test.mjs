@@ -49,7 +49,11 @@ test("accepts arguments after launch and applies the native default TTL", () => 
 
 test("requires the exact Claude agent and rejects positional arguments", () => {
   assert.equal(errorFor([]).code, AGENT_LAUNCH_ERROR_CODES.MISSING_AGENT);
-  assert.equal(errorFor(["--agent", "cursor"]).code, AGENT_LAUNCH_ERROR_CODES.UNSUPPORTED_AGENT);
+  assert.deepEqual(parseAgentLaunchArgs(["--agent", "cursor"]), {
+    agent: "cursor",
+    project: null,
+    ttl_seconds: AGENT_LAUNCH_DEFAULT_TTL_SECONDS
+  });
   assert.equal(errorFor(["--agent", "claude-code", "command"]).code, AGENT_LAUNCH_ERROR_CODES.POSITIONAL_ARGUMENT);
 });
 

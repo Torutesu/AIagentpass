@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import http from "node:http";
-import test from "node:test";
+import nodeTest from "node:test";
 
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 import { AUDIT_ANCHOR_ZERO_DIGEST } from "../src/audit-anchor-statement.mjs";
 import { createCloudApi } from "../src/server.mjs";
 import { foldAuditExportRoot } from "../src/postgres/audit-export-snapshot-reader.mjs";
+import { createLoopbackAwareTest } from "./support/loopback-test.mjs";
+
+const test = createLoopbackAwareTest(nodeTest);
 
 const ORIGIN = "https://console.agentpass.test";
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";

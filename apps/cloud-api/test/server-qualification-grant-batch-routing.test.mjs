@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createCloudApi } from "../src/server.mjs";
+import { startInMemoryHttpServer } from "../../../test/support/http-test-transport.mjs";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -10,7 +11,7 @@ const PATH = `/v1/organizations/${ORGANIZATION_ID}/devices/${DEVICE_ID}/qualific
 
 async function startServer(t, options = {}) {
   const server = createCloudApi({ store: options.store ?? {}, ...options });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
+  startInMemoryHttpServer(server);
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return `http://127.0.0.1:${server.address().port}`;
 }

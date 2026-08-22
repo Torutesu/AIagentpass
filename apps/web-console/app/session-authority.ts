@@ -7,6 +7,7 @@ export class SessionAuthorityInvalidatedError extends Error {
 
 export type SessionAuthority<T extends object> = Readonly<{
   get(signal?: AbortSignal): Promise<T>;
+  replace(value: T): void;
   clear(expected?: T): void;
 }>;
 
@@ -52,7 +53,14 @@ export function createSessionAuthority<T extends object>(loader: () => Promise<T
     pending = undefined;
   };
 
-  return Object.freeze({ get, clear });
+  const replace = (next: T): void => {
+    if (!next || typeof next !== "object") throw new TypeError("session value is required");
+    generation += 1;
+    value = Object.freeze(next);
+    pending = undefined;
+  };
+
+  return Object.freeze({ get, replace, clear });
 }
 
 function abortError(): DOMException {

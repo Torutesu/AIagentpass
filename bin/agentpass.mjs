@@ -65,7 +65,8 @@ Commands:
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
   launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
-  close             reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  close --session-id UUID [--operation-id UUID] [--reason completed|cancelled|client_shutdown]
+                    close a running Host session through the signed native control service
   status            show legacy local policy and revocation status
   check             evaluate the current repository
   doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
@@ -1342,6 +1343,34 @@ async function launchAgent() {
   process.exitCode = result.ok ? 0 : 1;
 }
 
+async function closeAgent() {
+  const sessionID = requiredFlag("--session-id");
+  const operationID = args.includes("--operation-id") ? requiredFlag("--operation-id") : crypto.randomUUID();
+  const reason = args.includes("--reason") ? requiredFlag("--reason") : "client_shutdown";
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  if (!uuid.test(sessionID) || !uuid.test(operationID) || !["completed", "cancelled", "client_shutdown"].includes(reason)) {
+    throw new Error("close requires canonical UUIDs and a supported close reason");
+  }
+  const config = loadConfig();
+  if (config.native_broker?.enabled !== true) throw new Error("Native broker is not configured");
+  let result;
+  try {
+    result = await brokerRequest({ operation: "native.host.close", session_id: sessionID, operation_id: operationID, reason }, { native: config.native_broker, timeoutMs: 30_000 });
+  } catch (error) {
+    // The service ledger can converge a response-loss retry only when the
+    // caller reuses the exact operation ID.  Surface that non-secret UUID so
+    // a human or supervising agent can retry without accidentally creating a
+    // second close operation.
+    if (/timed out/u.test(error?.message ?? "")) {
+      throw new Error(`Native control close timed out; retry with --operation-id ${operationID}`);
+    }
+    throw error;
+  }
+  const decoded = JSON.parse(Buffer.from(result.stdout_base64 ?? "", "base64").toString("utf8"));
+  if (!decoded || decoded.status !== "closed" || decoded.operation_id !== operationID || decoded.session_id !== sessionID) throw new Error("Native control service returned an invalid close receipt");
+  console.log(JSON.stringify(decoded, null, 2));
+}
+
 function launchContractFailure(error) {
   if (!(error instanceof AgentLaunchContractError)) return false;
   // Keep the public unavailable response stable while refusing the invalid
@@ -1387,10 +1416,7 @@ export function normalizeNativeControlRefreshResponse(value) {
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
   if (command === undefined || command === "--help" || command === "-h") usage();
   else if (command === "launch") await launchAgent();
-  else if (command === "close") {
-    console.log(JSON.stringify(unavailableAgentLifecycle(command)));
-    process.exitCode = 1;
-  }
+  else if (command === "close") await closeAgent();
   else if (command === "install") installProduction();
   else if (command === "setup") await setupNativeBridge();
   else if (command === "uninstall") await uninstallProduction();

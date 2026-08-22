@@ -18,6 +18,7 @@ import {
   redactP0BDiagnostic,
   requireTrustedHttpsLoopback,
   requireVerifiedPostgresUrl,
+  listenP0BTestServer,
   startP0BHarness
 } from "./harness.mjs";
 
@@ -94,7 +95,12 @@ test("generated certificate is accepted for localhost and rejected for a differe
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const certificates = await createTestCertificates(directory);
   const server = https.createServer({ cert: await fs.readFile(certificates.cert), key: await fs.readFile(certificates.key) }, (_request, response) => response.end("ok"));
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  try {
+    await listenP0BTestServer(server);
+  } catch (error) {
+    if (error instanceof P0BSkip) return t.skip(error.message);
+    throw error;
+  }
   t.after(() => new Promise((resolve) => server.close(() => resolve())));
   const port = server.address().port;
   const ca = await fs.readFile(certificates.caCert, "utf8");

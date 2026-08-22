@@ -285,6 +285,8 @@ process.stdin.on("end", () => {
   assert.equal(controlStatus.command, "control-status");
   const validateControl = await brokerRequest({ operation: "native.control.validate", agent_id: "agent" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(validateControl.command, "control-validate");
+  const hostClose = await brokerRequest({ operation: "native.host.close", session_id: "11111111-1111-4111-8111-111111111111", operation_id: "22222222-2222-4222-8222-222222222222", reason: "client_shutdown" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(hostClose.command, "host-control-close");
   fs.chmodSync(client, 0o777);
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
 });
