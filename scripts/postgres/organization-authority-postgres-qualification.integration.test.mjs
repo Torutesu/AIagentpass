@@ -50,7 +50,7 @@ async function expectPermissionDenied(operation) {
 }
 
 function savepointName(label) {
-  return `organization_authority_${label}_${id(label).replaceAll("-", "")}`;
+  return `organization_authority_${label.replace(/[^A-Za-z0-9_]/gu, "_")}_${id(label).replaceAll("-", "")}`;
 }
 
 async function inSavepoint(client, operation, label = "probe") {

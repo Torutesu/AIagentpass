@@ -65,6 +65,8 @@ async function cleanupFixture(adminPool, { organizationIds, memberIds }) {
   const memberArray = memberIds.filter(Boolean);
   try {
     await client.query("BEGIN");
+    await client.query("ALTER TABLE device_audit_export_entries DISABLE TRIGGER device_audit_export_entries_append_only");
+    await client.query("ALTER TABLE device_audit_export_heads DISABLE TRIGGER device_audit_export_heads_forward_only");
     // Export entries are trigger-created dependants of audit events and must
     // be removed before the event rows. Keep this list explicit: a broad
     // TRUNCATE ... CASCADE could erase another qualification lane's fixture.
@@ -84,6 +86,8 @@ async function cleanupFixture(adminPool, { organizationIds, memberIds }) {
       ["DELETE FROM organizations WHERE id = ANY($1::uuid[])", [organizationArray]],
       ["DELETE FROM members WHERE id = ANY($1::uuid[])", [memberArray]],
     ]) await client.query(sql, parameters);
+    await client.query("ALTER TABLE device_audit_export_entries ENABLE TRIGGER device_audit_export_entries_append_only");
+    await client.query("ALTER TABLE device_audit_export_heads ENABLE TRIGGER device_audit_export_heads_forward_only");
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
