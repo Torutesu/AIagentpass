@@ -618,14 +618,14 @@ device_audit_boundary_observations AS (
       CASE WHEN (SELECT count(*) FROM pg_policy p WHERE p.polrelid = t.oid) <> 6 THEN 'policy:unexpected_count' END,
       CASE WHEN NOT EXISTS (
         SELECT 1 FROM (VALUES
-          ('device_audit_events_tenant_select'::name, 'r'::"char", 0::oid),
-          ('device_audit_events_tenant_insert'::name, 'a'::"char", 0::oid),
-          ('device_audit_events_tenant_update'::name, 'w'::"char", 0::oid),
-          ('device_audit_events_tenant_delete'::name, 'd'::"char", 0::oid),
-          ('device_audit_events_migrator_authority'::name, '*'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')),
-          ('device_audit_events_backup_select'::name, 'r'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_backup'))
-        ) expected(policy_name, command, role_oid)
-        LEFT JOIN pg_policy p ON p.polrelid = t.oid AND p.polname = expected.policy_name
+          ('tenant_select'::name, 'r'::"char", 0::oid),
+          ('tenant_insert'::name, 'a'::"char", 0::oid),
+          ('tenant_update'::name, 'w'::"char", 0::oid),
+          ('tenant_delete'::name, 'd'::"char", 0::oid),
+          ('migrator_authority'::name, '*'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')),
+          ('backup_select'::name, 'r'::"char", (SELECT oid FROM role_ids WHERE rolname = 'agentpass_backup'))
+        ) expected(policy_suffix, command, role_oid)
+        LEFT JOIN pg_policy p ON p.polrelid = t.oid AND p.polname = t.relname || '_' || expected.policy_suffix
         WHERE p.oid IS NULL OR p.polcmd IS DISTINCT FROM expected.command
           OR p.polpermissive IS DISTINCT FROM true
           OR (expected.role_oid = 0 AND p.polroles IS DISTINCT FROM ARRAY[0::oid])
@@ -634,7 +634,7 @@ device_audit_boundary_observations AS (
       CASE WHEN EXISTS (
         SELECT 1 FROM pg_policy p
         WHERE p.polrelid = t.oid
-          AND p.polname LIKE 'device_audit%_tenant_%'
+          AND p.polname LIKE t.relname || '_tenant_%'
           AND (
             replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), 'public.', '')
               IS DISTINCT FROM CASE WHEN p.polcmd IN ('r', 'w', 'd') THEN '(organization_id=agentpass_device_audit_current_organization_id())' END
