@@ -33,7 +33,7 @@ const EXPECTED_SCHEMA_HEAD = POSTGRES_SCHEMA_HEAD.version;
 const CHECK_KEYS = Object.freeze(["check_id", "status", "expected", "observed", "evidence_sha256"]);
 
 export class PostgresExternalQualificationRunnerError extends Error {
-  constructor(message) { super(message); this.name = "PostgresExternalQualificationRunnerError"; }
+  constructor(message, code = "qualification_error") { super(message); this.name = "PostgresExternalQualificationRunnerError"; this.code = code; }
 }
 
 export function classifyQualificationDependencyError(error) {
@@ -48,7 +48,7 @@ async function loadC3Qualification() {
     return await import("./postgres-c3-migration-0047.mjs");
   } catch (error) {
     const classified = classifyQualificationDependencyError(error);
-    if (classified) throw new PostgresExternalQualificationRunnerError(classified);
+    if (classified) throw new PostgresExternalQualificationRunnerError(classified, "dependency_unavailable");
     throw error;
   }
 }
@@ -290,6 +290,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(im
     process.stdout.write(`${canonicalJson(result)}\n`);
     process.exitCode = externalQualificationExitCode(result);
   }).catch((error) => {
+    if (error?.code === "dependency_unavailable") {
+      process.stdout.write(`${canonicalJson({ status: "not_proven", reason: "dependency_unavailable" })}\n`);
+      process.exitCode = 2;
+      return;
+    }
     process.stderr.write(`external PostgreSQL qualification failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });
