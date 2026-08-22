@@ -87,8 +87,12 @@ function schemaQueryFailureClass(error) {
   const code = typeof error?.code === "string" ? error.code : "";
   if (code === "42P01") return "relation_missing";
   if (code === "42703") return "column_missing";
+  if (code === "42883") return "function_missing";
+  if (code === "42804") return "type_mismatch";
   if (code === "42501") return "permission_denied";
   if (code === "42601") return "syntax_invalid";
+  if (code === "0A000") return "feature_unsupported";
+  if (code === "22023") return "parameter_invalid";
   if (/^08/u.test(code) || ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND"].includes(code)) return "connection_failed";
   return "query_failed";
 }

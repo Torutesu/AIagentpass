@@ -577,8 +577,11 @@ export function classifyP0BStartupError(error) {
   const schemaFailure = message.match(/P0-B deployment schema identity ([a-z_]+) failed/u)?.[1];
   if (schemaFailure === "relation_missing") return "database_schema_relation_failed";
   if (schemaFailure === "column_missing") return "database_schema_column_failed";
+  if (schemaFailure === "function_missing") return "database_schema_function_failed";
+  if (schemaFailure === "type_mismatch") return "database_schema_type_failed";
   if (schemaFailure === "permission_denied") return "database_schema_permission_failed";
   if (schemaFailure === "syntax_invalid") return "database_schema_syntax_failed";
+  if (schemaFailure === "feature_unsupported") return "database_schema_feature_failed";
   if (schemaFailure === "connection_failed") return "database_schema_connection_failed";
   if (schemaFailure === "query_failed") return "database_schema_query_failed";
   if (/P0-B deployment schema identity failed/u.test(message)) return "database_prepare_failed";
