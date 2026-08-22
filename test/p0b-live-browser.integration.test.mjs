@@ -419,6 +419,12 @@ async function scenario(parent, name, callback) {
             if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
             if (summaryStatus >= 500) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_HTTP_5XX_FAILED");
             if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
+          } else if (effectiveSafeOpenPrefix === "P0B_SAFE_AUDITOR_OPEN") {
+            await summaryBodyPromise;
+            if (summaryStatus === null) assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_NO_RESPONSE_FAILED");
+            if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
+            if (summaryStatus >= 400) assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_HTTP_FAILED");
+            if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
           }
           failSafeOpen(effectiveSafeOpenPrefix, "READINESS");
         }
