@@ -180,13 +180,15 @@ jobs:
                      (SELECT max(version)::int FROM schema_migrations) AS schema_version,
                      to_regclass('public.qualification_grant_batches') AS batches,
                      to_regclass('public.qualification_grant_batch_steps') AS steps
-            `);
-            const row = result.rows[0];
-            if (row.schema_version !== POSTGRES_SCHEMA_HEAD.version
-              || row.batches !== "qualification_grant_batches"
-              || row.steps !== "qualification_grant_batch_steps") {
-              throw new Error("qualification database schema binding failed");
-            }
+          `);
+          const row = result.rows[0];
+          const relationName = (value) => typeof value === "string" ? value.replace(/^public\./u, "") : value;
+          if (Number(row.schema_version) !== POSTGRES_SCHEMA_HEAD.version
+            || relationName(row.batches) !== "qualification_grant_batches"
+            || relationName(row.steps) !== "qualification_grant_batch_steps") {
+            console.error(JSON.stringify({ schema_version: row.schema_version, batches: row.batches, steps: row.steps, expected_head: POSTGRES_SCHEMA_HEAD.version }));
+            throw new Error("qualification database schema binding failed");
+          }
             const evidence = {
               schema_version: 1,
               candidate_id: process.env.AGENTPASS_QUALIFICATION_CANDIDATE_ID,
