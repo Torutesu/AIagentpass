@@ -97,6 +97,12 @@ SELECT jsonb_build_object(
 
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 
+function resolvedSearchPath(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !/^\{(?:[A-Za-z_][A-Za-z0-9_]*)(?:,(?:[A-Za-z_][A-Za-z0-9_]*))*\}$/u.test(value)) return null;
+  return value.slice(1, -1).split(",");
+}
+
 export function postgresSchemaIdentityDigest(snapshot) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new TypeError("schema snapshot is invalid");
   const bytes = Buffer.from(canonicalJson(snapshot), "utf8");
@@ -104,28 +110,23 @@ export function postgresSchemaIdentityDigest(snapshot) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
-export async function measurePostgresSchemaIdentity({ client, expectedDigest, onFailure } = {}) {
+export async function measurePostgresSchemaIdentity({ client, expectedDigest } = {}) {
   if (!client || typeof client.query !== "function" || typeof expectedDigest !== "string" || !/^[0-9a-f]{64}$/u.test(expectedDigest)) return Object.freeze({ ok: false, code: "schema_identity_unconfigured", digest: null });
   let began = false;
-  let stage = "begin";
   let result;
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     began = true;
-    stage = "search_path";
     const searchPath = await client.query("SELECT pg_catalog.current_setting('search_path', false) AS raw_search_path, pg_catalog.current_schemas(false) AS resolved_search_path");
-    const resolved = searchPath?.rows?.[0]?.resolved_search_path;
+    const resolved = resolvedSearchPath(searchPath?.rows?.[0]?.resolved_search_path);
     if (!Array.isArray(resolved) || resolved.some((schema) => !["pg_catalog", "public"].includes(schema))) throw new Error("unsafe search_path");
     await client.query("SET LOCAL search_path TO pg_catalog, public");
-    stage = "snapshot_query";
     const queryResult = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
     const snapshot = queryResult?.rows?.[0]?.snapshot;
     const parsed = typeof snapshot === "string" ? JSON.parse(snapshot) : snapshot;
-    stage = "digest";
     const digest = postgresSchemaIdentityDigest(parsed);
     result = { ok: digest === expectedDigest, code: digest === expectedDigest ? "verified" : "schema_identity_mismatch", digest, destroy: false };
   } catch {
-    try { onFailure?.(`schema_identity_${stage}`); } catch { /* diagnostics must never affect the fail-closed result */ }
     result = { ok: false, code: "schema_identity_unavailable", digest: null, destroy: false };
   } finally {
     if (began) {
