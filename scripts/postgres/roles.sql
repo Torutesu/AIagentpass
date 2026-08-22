@@ -4,6 +4,12 @@
 -- Authentication is supplied by the deployment (IAM, mTLS, or a secret
 -- manager). This file intentionally contains no passwords or credentials.
 
+-- Extensions are provisioned by the database administrator before the
+-- migrator login is constrained. This keeps the migration identity from
+-- needing database-wide CREATE while allowing migration 0080 to remain an
+-- idempotent compatibility check.
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
 BEGIN;
 
 DO $$

@@ -87,6 +87,7 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   const platformSql = migrations.join('\n');
 
   assert.match(sql, /CREATE ROLE %I LOGIN/);
+  assert.match(sql, /CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public/);
   for (const role of ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup', 'agentpass_maintenance']) assert.match(sql, new RegExp(`\\b${role}\\b`));
   assert.doesNotMatch(sql, /PASSWORD\s+['"]/i);
   assert.doesNotMatch(sql, /postgres(?:ql)?:\/\/[^\s]*:[^\s@]+@/i);
