@@ -180,6 +180,9 @@ BEGIN
      AND to_regclass('public.memberships') IS NOT NULL THEN
     EXECUTE 'GRANT SELECT ON TABLE public.organizations, public.memberships TO agentpass_app';
   END IF;
+  IF to_regclass('public.organization_invitations') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT ON TABLE public.organization_invitations TO agentpass_app';
+  END IF;
 END
 $$;
 
