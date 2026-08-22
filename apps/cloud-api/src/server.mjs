@@ -1982,7 +1982,8 @@ function publicReadinessChecks(value, expectedReady = undefined) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks:shape");
   const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
   const allowedCheckNames = new Set(["database", "schema", "pool", "drain", "platform_session", "platform_promotion", "owner_recovery_outbox", "managed_signer_provider_operations", "device_audit_inbox", "managed_signers", ...hostedSignerCheckNames]);
-  if (Object.keys(value).some((key) => !allowedCheckNames.has(key))) throw new Error("invalid readiness checks:unknown_key");
+  const unknownCheck = Object.keys(value).find((key) => !allowedCheckNames.has(key));
+  if (unknownCheck !== undefined) throw new Error(`invalid readiness checks:unknown_key_${unknownCheck}`);
   const suppliedSignerCheckNames = Object.keys(value).filter((key) => key.endsWith("_signer")).sort();
   if (suppliedSignerCheckNames.length > 0 && suppliedSignerCheckNames.join(",") !== hostedSignerCheckNames.slice().sort().join(",")) throw new Error("invalid readiness checks:signer_set");
   const { database, schema, pool, drain, platform_session: platformSession, platform_promotion: platformPromotion, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, device_audit_inbox: deviceAuditInbox, managed_signers: managedSigners, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner, refresh_hint_signer: refreshHintSigner, capability_signer: capabilitySigner, control_bundle_signer: controlBundleSigner, audit_anchor_signer: auditAnchorSigner, promotion_evidence_signer: promotionEvidenceSigner } = value;

@@ -844,7 +844,15 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
   }
   const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
   const readinessDiagnostic = /^status_\d+_[a-z][a-z0-9_]{0,63}$/u.test(detail) ? detail : "transport_or_timeout";
-  const readinessMarker = readinessDiagnostic === "status_503_health_database"
+  const readinessMarker = readinessDiagnostic === "status_503_health_unknown_key_metrics"
+    ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_METRICS_FAILED"
+    : readinessDiagnostic === "status_503_health_unknown_key_outbox"
+      ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_OUTBOX_FAILED"
+      : readinessDiagnostic === "status_503_health_unknown_key_providerOperations"
+        ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_PROVIDER_OPERATIONS_FAILED"
+        : readinessDiagnostic === "status_503_health_unknown_key_deviceAuditInbox"
+          ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_DEVICE_AUDIT_FAILED"
+          : readinessDiagnostic === "status_503_health_database"
     ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_DATABASE_FAILED"
     : readinessDiagnostic === "status_503_health_schema"
       ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_SCHEMA_FAILED"
