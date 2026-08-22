@@ -460,7 +460,7 @@ RETURNS TABLE (
   version bigint
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
