@@ -616,7 +616,7 @@ device_audit_boundary_observations AS (
       CASE WHEN t.relrowsecurity IS DISTINCT FROM true THEN 'rls:not_enabled' END,
       CASE WHEN t.relforcerowsecurity IS DISTINCT FROM true THEN 'rls:not_forced' END,
       CASE WHEN (SELECT count(*) FROM pg_policy p WHERE p.polrelid = t.oid) <> 6 THEN 'policy:unexpected_count' END,
-      CASE WHEN NOT EXISTS (
+      CASE WHEN EXISTS (
         SELECT 1 FROM (VALUES
           ('tenant_select'::name, 'r'::"char", 0::oid),
           ('tenant_insert'::name, 'a'::"char", 0::oid),
