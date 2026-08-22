@@ -326,10 +326,20 @@ async function scenario(parent, name, callback) {
           );
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         let summaryStatus = null;
+        let summaryErrorCode = null;
+        let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
             const url = new URL(response.url());
-            if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") summaryStatus = response.status();
+            if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
+              summaryStatus = response.status();
+              if (summaryStatus >= 500) {
+                summaryBodyPromise = response.json().then((body) => {
+                  const code = body?.error?.code;
+                  if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)) summaryErrorCode = code;
+                }).catch(() => {});
+              }
+            }
           } catch {}
         };
         page.on("response", summaryResponseListener);
@@ -386,10 +396,13 @@ async function scenario(parent, name, callback) {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
             const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
             if (summaryReady === 0) {
+              await summaryBodyPromise;
               if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
               if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
               if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
-              if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_5XX_FAILED");
+              if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
+              if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
+              if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED");
               if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
