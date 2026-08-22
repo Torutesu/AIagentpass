@@ -375,7 +375,7 @@ test("P2 PostgreSQL device-audit qualification uses the application role for sec
       const forgedEventId = id("forged-event");
       await inSavepoint(appClient, () => assert.rejects(
         () => appClient.query(`INSERT INTO public.device_audit_events
-        (organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at)
+        (organization_id,device_id,event_id,previous_hash,event_hash,redacted_json)
         VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [
           organizationId, deviceId, forgedEventId, "0".repeat(64), "0".repeat(64),
           { agent_id: agentId, event_id: forgedEventId, previous_hash: "0".repeat(64), event_hash: "0".repeat(64) }

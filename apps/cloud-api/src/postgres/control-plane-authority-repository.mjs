@@ -235,6 +235,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       // Capability revocations are durable authority state too.  Read them
       // inside this transaction so the returned snapshot never omits a
       // capability that was already revoked at the snapshot boundary.
+      await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [values.organizationId]);
       const capabilityResult = await tx.query(`SELECT public.agentpass_capability_authority_list_revoked(
         $1,$2::timestamptz,$3
       ) AS result`, [values.organizationId, values.issuedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);

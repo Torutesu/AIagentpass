@@ -21,9 +21,13 @@ test("PostgreSQL activity keyset traverses more than 500 rows without duplicates
   }
 
   const organizationId = crypto.randomUUID();
+  const principalId = crypto.randomUUID();
+  const membershipId = crypto.randomUUID();
   const deviceId = crypto.randomUUID();
   const otherDeviceId = crypto.randomUUID();
   await pool.query("INSERT INTO organizations (id,name) VALUES ($1,$2)", [organizationId, "Activity pagination integration"]);
+  await pool.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,$3)", [principalId, `activity-${principalId}`, "Activity principal"]);
+  await pool.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'auditor','active')", [organizationId, membershipId, principalId]);
   await pool.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status)
     VALUES ($1,$2,'Activity device','ed25519',$3,'active'),($1,$4,'Other device','ed25519',$5,'active')`, [
     organizationId,
@@ -59,19 +63,20 @@ test("PostgreSQL activity keyset traverses more than 500 rows without duplicates
   }
 
   const repository = createPostgresAuditRepository({ client: pool, cursorSecret: Buffer.alloc(32, 0x46) });
-  const first = await repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: deviceId, limit: 101 });
+  const list = (input) => repository.listDeviceAuditEvents({ principal_id: principalId, ...input });
+  const first = await list({ organization_id: organizationId, device_id: deviceId, limit: 101 });
   assert.equal(first.events.length, 101);
   assert.ok(first.next_cursor);
 
   const newer = eventRecord(deviceId, new Date(base + 2_000_000).toISOString());
-  const continuationPromise = repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: deviceId, limit: 101, cursor: first.next_cursor });
+  const continuationPromise = list({ organization_id: organizationId, device_id: deviceId, limit: 101, cursor: first.next_cursor });
   const insertPromise = insertEvent(pool, organizationId, deviceId, newer, new Date(base + 2_000_001));
   const [, second] = await Promise.all([insertPromise, continuationPromise]);
 
   const seen = [...first.events, ...second.events];
   let cursor = second.next_cursor;
   while (cursor !== null) {
-    const page = await repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: deviceId, limit: 101, cursor });
+    const page = await list({ organization_id: organizationId, device_id: deviceId, limit: 101, cursor });
     seen.push(...page.events);
     cursor = page.next_cursor;
   }
@@ -82,10 +87,10 @@ test("PostgreSQL activity keyset traverses more than 500 rows without duplicates
   assert.equal(seen.some((record) => record.event_id === newer.event_id), false, "a newer concurrent insert is outside the already-open traversal");
   assert.ok(seen.every((record) => Object.keys(record).sort().join(",") === "device_id,event,event_id,organization_id,received_at"));
 
-  const fresh = await repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: deviceId, limit: 1 });
+  const fresh = await list({ organization_id: organizationId, device_id: deviceId, limit: 1 });
   assert.equal(fresh.events[0].event_id, newer.event_id);
-  await assert.rejects(() => repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: otherDeviceId, cursor: first.next_cursor }), /invalid/);
-  const otherDevicePage = await repository.listDeviceAuditEvents({ organization_id: organizationId, device_id: otherDeviceId, limit: 10 });
+  await assert.rejects(() => list({ organization_id: organizationId, device_id: otherDeviceId, cursor: first.next_cursor }), /invalid/);
+  const otherDevicePage = await list({ organization_id: organizationId, device_id: otherDeviceId, limit: 10 });
   assert.equal(otherDevicePage.next_cursor, null);
   assert.deepEqual(new Set(otherDevicePage.events.map((record) => record.event_id)), new Set(otherDeviceEvents));
   assert.ok(otherDevicePage.events.every((record) => record.device_id === otherDeviceId));
