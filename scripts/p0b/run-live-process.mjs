@@ -12,6 +12,7 @@ import { runQualificationCommand } from "./qualification/command.mjs";
 import {
   buildP0BQualificationReport,
   digestArtifactTree,
+  resolveSourceTree,
   resolveSourceState,
   writeP0BQualificationReport
 } from "./qualification/report.mjs";
@@ -471,11 +472,13 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   let sourceBefore;
+  let sourceTreeBefore;
   let reportOutput;
   try {
     reportOutput = resolveQualificationOutput(options.reportOutput, process.env.P0B_QUALIFICATION_OUTPUT);
     await prepareQualificationOutput(reportOutput);
     sourceBefore = resolveSourceState(REPOSITORY_ROOT);
+    sourceTreeBefore = resolveSourceTree(REPOSITORY_ROOT);
   } catch (error) {
     emitFailure("source", error);
     return 1;
@@ -574,7 +577,12 @@ export async function main(argv = process.argv.slice(2)) {
         const childArgs = ["--test", "--test-reporter", "tap", path.relative(REPOSITORY_ROOT, LIVE_BROWSER_TEST)];
         const result = await runQualificationCommand(process.execPath, childArgs, {
           cwd: REPOSITORY_ROOT,
-          env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
+          env: {
+            ...buildTestEnvironment(process.env, fixtureEnvironment),
+            P0B_LIVE_BROWSER: "1",
+            P0B_SOURCE_COMMIT: sourceBefore.commit,
+            P0B_SOURCE_TREE: sourceTreeBefore
+          },
           timeoutMs: BROWSER_TIMEOUT_MS,
           safeFailureMarkers: LIVE_BROWSER_SAFE_FAILURE_MARKERS,
           terminateOnSafeFailure: true,

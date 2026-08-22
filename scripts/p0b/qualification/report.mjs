@@ -549,6 +549,19 @@ export function resolveSourceCommit(repositoryRoot) {
   return resolveHeadCommit(repositoryRoot);
 }
 
+export function resolveSourceTree(repositoryRoot) {
+  if (typeof repositoryRoot !== "string" || !path.isAbsolute(repositoryRoot)) invalid("invalid_repository_path", "repository path must be absolute");
+  let result;
+  try {
+    result = spawnSync("git", ["-C", repositoryRoot, "rev-parse", "--verify", "HEAD^{tree}"], { encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    invalid("source_tree_unavailable", "source tree could not be resolved");
+  }
+  const tree = result.status === 0 ? result.stdout.trim() : "";
+  if (!/^[0-9a-f]{40,64}$/u.test(tree)) invalid("source_tree_unavailable", "source tree could not be resolved");
+  return tree;
+}
+
 /**
  * Resolve the source identity used by qualification and fail closed when the
  * checkout is not a clean, commit-addressable repository. Git's porcelain

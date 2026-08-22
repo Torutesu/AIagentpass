@@ -10,7 +10,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { Pool } from "pg";
-import { createMigrationRunner } from "../../../apps/cloud-api/src/postgres/migration-runner.mjs";
+import { createMigrationRunner, loadSqlMigrations } from "../../../apps/cloud-api/src/postgres/migration-runner.mjs";
+import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
+import { POSTGRES_SCHEMA_IDENTITY_QUERY, postgresSchemaIdentityDigest } from "../../../apps/cloud-api/src/postgres/schema-identity.mjs";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LOOPBACK = "127.0.0.1";
@@ -48,6 +50,35 @@ export class P0BSkip extends Error {
 }
 
 export function p0bRepositoryRoot() { return REPOSITORY_ROOT; }
+
+async function p0BDeploymentDigests({ repoRoot, database, sourceCommit, sourceTree }) {
+  if (!/^[0-9a-f]{40}$/u.test(sourceCommit ?? "") || !/^[0-9a-f]{40}$/u.test(sourceTree ?? "")) {
+    throw new Error("P0-B source identity is unavailable");
+  }
+  const migrations = await loadSqlMigrations();
+  const manifest = {
+    schema_version: 1,
+    source_commit: sourceCommit,
+    source_tree: sourceTree,
+    migrations: migrations.map((migration) => ({ name: migration.name, bytes: Buffer.byteLength(migration.sql, "utf8"), sha256: migration.checksum }))
+  };
+  const schemaDigest = crypto.createHash("sha256").update(`${canonicalJson(manifest)}\n`, "utf8").digest("hex");
+  const catalogBytes = await fsp.readFile(path.resolve(repoRoot, "contracts/catalog-v1.json"));
+  const catalogDigest = crypto.createHash("sha256").update(catalogBytes).digest("hex");
+  const client = await database.pool.connect();
+  let began = false;
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    began = true;
+    await client.query("SET LOCAL search_path TO pg_catalog, public");
+    const result = await client.query(POSTGRES_SCHEMA_IDENTITY_QUERY);
+    const snapshot = typeof result?.rows?.[0]?.snapshot === "string" ? JSON.parse(result.rows[0].snapshot) : result?.rows?.[0]?.snapshot;
+    return Object.freeze({ schemaDigest, catalogDigest, databaseSchemaDigest: postgresSchemaIdentityDigest(snapshot) });
+  } finally {
+    if (began) await client.query("ROLLBACK").catch(() => {});
+    client.release();
+  }
+}
 
 export function requireTrustedHttpsLoopback(value) {
   let url;
@@ -274,6 +305,12 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       refreshNonceKeyId: files.refreshNonceKeyId,
       refreshNonceKey: Buffer.from(files.refreshNonceKey)
     }));
+    const deploymentDigests = await p0BDeploymentDigests({
+      repoRoot,
+      database,
+      sourceCommit: env.P0B_SOURCE_COMMIT,
+      sourceTree: env.P0B_SOURCE_TREE
+    });
     const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
     const cloudPort = await reservePort();
     const cloudTlsPort = await reservePort();
@@ -335,14 +372,14 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       // Hosted runtime startup requires a complete deployment identity even
       // for this disposable qualification tenant. Keep these values fixed and
       // secret-free; release provenance is bound by the outer report.
-      AGENTPASS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
-      AGENTPASS_CLOUD_SOURCE_TREE: "b".repeat(40),
+      AGENTPASS_CLOUD_SOURCE_COMMIT: env.P0B_SOURCE_COMMIT,
+      AGENTPASS_CLOUD_SOURCE_TREE: env.P0B_SOURCE_TREE,
       AGENTPASS_CLOUD_IMAGE_DIGEST: `sha256:${"c".repeat(64)}`,
       AGENTPASS_CLOUD_DEPLOYMENT_ID: "p0b-cloud",
       AGENTPASS_CLOUD_DEPLOYMENT_REVISION: "p0b",
-      AGENTPASS_CLOUD_SCHEMA_DIGEST: "d".repeat(64),
-      AGENTPASS_CLOUD_CATALOG_DIGEST: "e".repeat(64),
-      AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: "f".repeat(64),
+      AGENTPASS_CLOUD_SCHEMA_DIGEST: deploymentDigests.schemaDigest,
+      AGENTPASS_CLOUD_CATALOG_DIGEST: deploymentDigests.catalogDigest,
+      AGENTPASS_CLOUD_DATABASE_SCHEMA_DIGEST: deploymentDigests.databaseSchemaDigest,
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
