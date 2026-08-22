@@ -141,8 +141,8 @@ BEGIN
   -- This is intentionally the same authority projection used by the Session
   -- binder. FOR SHARE locks every mutable authority row participating in the
   -- decision before the one-use marker is attempted.
-  SELECT s, gr
-    INTO session_row, grant_row
+  SELECT s.*
+    INTO session_row
   FROM public.agent_sessions AS s
   JOIN public.devices AS d
     ON d.organization_id = s.organization_id AND d.id = s.device_id
@@ -190,6 +190,27 @@ BEGIN
     RAISE EXCEPTION USING
       ERRCODE = 'check_violation',
       MESSAGE = 'agent session launch authority is unavailable';
+  END IF;
+
+  -- PostgreSQL does not allow an anonymous RECORD target as one item in a
+  -- multi-target INTO list. Fetch the already-locked grant separately so the
+  -- typed row variables remain compatible with every supported PostgreSQL
+  -- version while preserving the same transaction-bound authority snapshot.
+  SELECT gr.*
+    INTO grant_row
+  FROM public.agent_session_grants AS gr
+  WHERE gr.organization_id = p_organization_id
+    AND gr.grant_id = p_grant_id
+    AND gr.device_id = p_device_id
+    AND gr.agent_id = p_agent_id
+    AND gr.status = 'consumed'
+    AND gr.consumed_session_id = p_session_id
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'check_violation',
+      MESSAGE = 'agent session launch authority grant is unavailable';
   END IF;
 
   IF session_row.agent_kind IS DISTINCT FROM p_agent_kind

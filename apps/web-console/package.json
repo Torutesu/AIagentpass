@@ -18,7 +18,6 @@
     "e2e:install": "playwright install chromium"
   },
   "dependencies": {
-    "@cloudflare/workerd-darwin-arm64": "^1.20260804.1",
     "@simplewebauthn/browser": "13.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
