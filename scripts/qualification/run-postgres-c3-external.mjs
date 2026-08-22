@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
@@ -285,7 +286,7 @@ export async function runExternalPostgresC3Qualification({ env = process.env } =
   return Object.freeze({ status: report.status, qualified: report.qualified, evidence_path: output, artifact_sha256: binding.artifact_sha256, migration_artifact_sha256: report.migration_artifact_sha256 });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runExternalPostgresC3Qualification().then((result) => {
     process.stdout.write(`${canonicalJson(result)}\n`);
     process.exitCode = externalQualificationExitCode(result);
