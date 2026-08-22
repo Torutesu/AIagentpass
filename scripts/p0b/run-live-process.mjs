@@ -272,12 +272,6 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_SCENARIO_11_FAILED", "browser_scenario_11", false],
   [null, "P0B_SAFE_SCENARIO_12_FAILED", "browser_scenario_12", false],
   [null, "P0B_SAFE_SCENARIO_13_FAILED", "browser_scenario_13", false],
-  [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial", false],
-  [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial", false],
-  [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial", false],
-  [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial", false],
-  [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke", false],
-  [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke", false]
 ].map(([index, name, code, terminate = true]) => Object.freeze({
   marker: index === null ? name : `not ok ${index} - ${name}`,
   code,
