@@ -122,7 +122,7 @@ async function queryEvidence(databaseUrl, appDatabaseUrl, maintenanceDatabaseUrl
     assert.equal(row.migration_count, POSTGRES_SCHEMA_HEAD.migration_count);
     assert.deepEqual(row.migration_versions, Array.from({ length: POSTGRES_SCHEMA_HEAD.migration_count }, (_, index) => index + 1));
     assert.equal(row.roles?.length, ROLE_NAMES.length);
-    assert.equal(row.forced_rls_relations, 3, `device audit RLS state: ${JSON.stringify(row.device_audit_rls)}`);
+    if (row.forced_rls_relations !== 3) throw new Error(`device audit RLS state: ${JSON.stringify(row.device_audit_rls)}`);
     assert.equal(row.device_audit_triggers, 2);
     assert.equal(row.tenant_authority_relations, 1);
     assert.equal(row.tenant_authority_functions, 3);

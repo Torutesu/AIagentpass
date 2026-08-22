@@ -258,6 +258,10 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     if (createdAtValue !== undefined) timestamp(createdAtValue, "created_at");
     const evaluatedAt = timestamp(createdAtValue ?? now(), "evaluated_at");
     return mutate(organizationId, input, "invitation.create", { organization_id: organizationId, actor_id: actorId, role, expires_at: expiresAt }, async (tx) => {
+      const tenant = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+      if ((tenant.rowCount ?? tenant.rows?.length ?? 0) !== 1 || tenant.rows?.[0]?.organization_id !== organizationId) {
+        throw new OrganizationRepositoryError("ERR_DATABASE", "invitation tenant context is unavailable");
+      }
       const result = await tx.query(`SELECT * FROM public.agentpass_organization_invitation_create(
         $1::uuid,$2::uuid,$3::bytea,$4::text,$5::uuid,$6::timestamptz,$7::timestamptz
       )`, [organizationId, invitationId, tokenHash, role, actorId, createdAtValue ?? null, expiresAt]);
