@@ -30,3 +30,8 @@ test("schema identity fails closed for a hostile resolved search_path", async ()
   const result = await measurePostgresSchemaIdentity({ client: { async query(sql) { if (sql.startsWith("SELECT pg_catalog.current_setting")) return { rows: [{ resolved_search_path: ["attacker", "public"] }] }; return { rows: [] }; } }, expectedDigest: "a".repeat(64) });
   assert.deepEqual(result, { ok: false, code: "schema_identity_unavailable", digest: null, destroy: false });
 });
+
+test("schema identity accepts the node-postgres text-array representation", async () => {
+  const result = await measurePostgresSchemaIdentity({ client: { async query(sql) { if (sql.startsWith("SELECT pg_catalog.current_setting")) return { rows: [{ resolved_search_path: "{public}" }] }; if (sql === POSTGRES_SCHEMA_IDENTITY_QUERY) return { rows: [{ snapshot }] }; return { rows: [] }; } }, expectedDigest: postgresSchemaIdentityDigest(snapshot) });
+  assert.equal(result.code, "verified");
+});
