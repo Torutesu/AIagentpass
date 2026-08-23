@@ -408,6 +408,7 @@ async function scenario(parent, name, callback) {
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
+          emitLiveStage("OPEN_UI_READY");
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
             const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
