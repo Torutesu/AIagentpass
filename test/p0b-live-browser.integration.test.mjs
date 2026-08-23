@@ -471,7 +471,6 @@ async function scenario(parent, name, callback) {
         emitLiveStage("OPEN_RELOAD");
         try { await fixture.reloadAndAdoptSession(page); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
-        emitLiveStage("OPEN_READY");
         // UI assertions own their own bounded waits. Returning immediately
         // avoids coupling fixture readiness to Chromium locator protocols,
         // which can become non-responsive while the network boundary remains
