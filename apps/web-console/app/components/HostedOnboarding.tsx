@@ -44,7 +44,7 @@ const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
 // period so a slow first read is not aborted and replayed.
-const INITIAL_STATUS_GUARD_MS = 10_000;
+const INITIAL_STATUS_GUARD_MS = 120_000;
 
 const STEPS = [
   { id: "github", label: "GitHubで本人確認", detail: "GitHub identity" },
