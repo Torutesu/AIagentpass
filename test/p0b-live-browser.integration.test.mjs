@@ -473,8 +473,10 @@ async function scenario(parent, name, callback) {
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         emitLiveStage("OPEN_READY");
         try {
-          await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor({ timeout: 30_000 });
-          await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor({ timeout: 30_000 });
+          await runP0BLifecycle(async () => {
+            await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor({ timeout: 30_000 });
+            await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor({ timeout: 30_000 });
+          }, { timeoutMs: 30_000, timeoutCode: "ui_readiness_timeout", timeoutMessage: "P0-B Console UI readiness timed out" });
           emitLiveStage("OPEN_UI_READY");
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
