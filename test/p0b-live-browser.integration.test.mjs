@@ -473,10 +473,13 @@ async function scenario(parent, name, callback) {
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         emitLiveStage("OPEN_READY");
         try {
-          await runP0BLifecycle(async () => {
-            await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor({ timeout: 30_000 });
-            await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor({ timeout: 30_000 });
-          }, { timeoutMs: 30_000, timeoutCode: "ui_readiness_timeout", timeoutMessage: "P0-B Console UI readiness timed out" });
+          // The response listener is the bounded readiness boundary. Waiting
+          // on a browser locator here can hang when Chromium's protocol is
+          // unhealthy, masking the Cloud/BFF result we need to classify.
+          await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 30_000))]);
+          if (summaryStatus === null) throw new Error("summary_response_missing");
+          if (summaryStatus >= 400) throw new Error("summary_response_failed");
+          if (summaryBodyCode !== "body_shape_ok") throw new Error("summary_response_contract");
           emitLiveStage("OPEN_UI_READY");
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
