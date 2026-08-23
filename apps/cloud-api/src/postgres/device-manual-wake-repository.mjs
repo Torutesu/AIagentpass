@@ -41,7 +41,27 @@ export function createPostgresDeviceManualWakeRepository({
 
   async function requestDeviceManualWake(input = {}) {
     const values = normalizeInput(input, now);
-    if (input?.tx !== undefined) return requestDeviceManualWakeInTransaction({ ...input, ...values });
+    if (input?.tx !== undefined) {
+      try {
+        return await requestDeviceManualWakeInTransaction({ ...input, ...values });
+      } catch (error) {
+        if (error?.code === "ERR_DATABASE" && error?.cause?.code === "42501") {
+          try {
+            const probe = await client.query(`SELECT current_user, session_user,
+                has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
+                has_column_privilege(current_user, 'public.memberships', 'organization_id', 'SELECT') AS organization_select,
+                has_column_privilege(current_user, 'public.memberships', 'member_id', 'SELECT') AS member_select,
+                has_column_privilege(current_user, 'public.memberships', 'role', 'SELECT') AS role_select,
+                has_column_privilege(current_user, 'public.memberships', 'status', 'SELECT') AS status_select`);
+            const row = probe.rows?.[0];
+            const identity = [row?.current_user, row?.session_user, row?.table_select, row?.organization_select,
+              row?.member_select, row?.role_select, row?.status_select].map((value) => String(value)).join("_");
+            Object.defineProperty(error, "storageIdentity", { value: identity, enumerable: false });
+          } catch {}
+        }
+        throw mapError(error);
+      }
+    }
     try {
       return await inTransaction((tx) => requestDeviceManualWakeInTransaction({ ...input, ...values, tx }));
     } catch (error) {
