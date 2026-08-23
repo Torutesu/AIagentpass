@@ -633,9 +633,17 @@ async function scenario(parent, name, callback) {
             failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
           }
         }
-        emitLiveStage("OPEN_RELOAD");
-        try { await fixture.reloadAndAdoptSession(page); }
-        catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
+        if (register) {
+          emitLiveStage("OPEN_RELOAD");
+          try { await fixture.reloadAndAdoptSession(page); }
+          catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
+        } else {
+          // The no-authenticator scenario intentionally stops before any
+          // WebAuthn ceremony. Bootstrap already established the cookie-bound
+          // session, so an additional reload/rotation would add an unrelated
+          // failure surface before the intended wake-mutation assertion.
+          emitLiveStage("OPEN_RELOAD_SKIPPED");
+        }
         // UI assertions own their own bounded waits. Returning immediately
         // avoids coupling fixture readiness to Chromium locator protocols,
         // which can become non-responsive while the network boundary remains
