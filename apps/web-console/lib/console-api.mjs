@@ -1733,21 +1733,22 @@ function errorResponse(error) {
       : "cloud_api_error";
     const responseBody = { error: { code, message: "Cloud API request failed" } };
     if (typeof source.request_id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(source.request_id)) responseBody.request_id = source.request_id;
-    return jsonResponse(error.status, responseBody);
+    return jsonResponse(error.status, responseBody, { "x-agentpass-error-code": code });
   }
   if (error instanceof ConsoleApiError) {
-    return jsonResponse(error.status, { error: { code: error.code, message: error.message } });
+    return jsonResponse(error.status, { error: { code: error.code, message: error.message } }, { "x-agentpass-error-code": error.code });
   }
-  return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } });
+  return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } }, { "x-agentpass-error-code": "internal_error" });
 }
 
-function jsonResponse(status, body) {
+function jsonResponse(status, body, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",
       pragma: "no-cache",
+      ...extraHeaders,
     },
   });
 }

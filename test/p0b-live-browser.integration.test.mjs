@@ -347,7 +347,10 @@ async function scenario(parent, name, callback) {
               summaryStatus = response.status();
               if (summaryStatus >= 500) {
                 const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
-                summaryErrorCode = contentType === "application/json" ? "body_pending" : "cloud_api_invalid_response";
+                const headerCode = response.headers()["x-agentpass-error-code"];
+                summaryErrorCode = typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(headerCode)
+                  ? headerCode
+                  : contentType === "application/json" ? "body_pending" : "cloud_api_invalid_response";
                 summaryBodyPromise = response.text().then((text) => {
                   try {
                     const body = JSON.parse(text);
