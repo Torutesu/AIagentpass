@@ -34,7 +34,7 @@ const BUILD_TIMEOUT_MS = 180_000;
 // Thirteen isolated scenarios each retain a 120-second owning timeout. The
 // outer bound also covers TLS/PostgreSQL/Chromium startup and deterministic
 // cleanup for every stack; keep it below the CI job's 60-minute hard limit.
-const BROWSER_TIMEOUT_MS = 2_700_000;
+const BROWSER_TIMEOUT_MS = 3_300_000;
 const PROCESS_TIMEOUT_MS = 180_000;
 // Only these static TAP fragments may cross the child-output boundary. The
 // command runner retains the fixed code, never the matched line or adjacent
