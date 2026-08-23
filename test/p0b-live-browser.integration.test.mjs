@@ -369,7 +369,7 @@ async function scenario(parent, name, callback) {
                     } else {
                       const keys = (value) => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
                       summaryBodyCode = keys(body) === "agents,audit,devices,organization,policies"
-                        && keys(body.organization) === "created_at,organization_id,updated_at,version"
+                        && keys(body.organization) === "created_at,name,organization_id,updated_at,version"
                         && Array.isArray(body.devices) && Array.isArray(body.agents) && Array.isArray(body.policies)
                         && keys(body.audit) === "activity,health,next_cursor" ? "body_shape_ok" : "body_shape_invalid";
                     }
