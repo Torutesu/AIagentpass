@@ -355,11 +355,22 @@ function publicError(error, operation) {
   if (error instanceof ControlPlaneStoreError) return error;
   if (isDatabaseError(error)) {
     const wrapped = new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
-    if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(String(error?.code ?? ""))) wrapped.diagnosticCode = String(error.code);
+    const sourceCode = diagnosticSourceCode(error);
+    if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(sourceCode)) wrapped.diagnosticCode = sourceCode;
     return wrapped;
   }
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
   return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
+}
+
+function diagnosticSourceCode(error) {
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const code = String(current.code ?? "");
+    if (/^[0-9A-Z]{5}$/u.test(code)) return code;
+    current = current.cause;
+  }
+  return "";
 }
 
 function isDatabaseError(error) {

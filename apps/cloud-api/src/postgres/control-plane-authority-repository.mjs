@@ -1121,7 +1121,11 @@ async function lockOrganization(tx, organizationId) {
 }
 
 async function lockOrganizationRow(tx, organizationId) {
-  const result = await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [organizationId]);
+  // The online role is intentionally SELECT-only on organizations. A shared
+  // row lock still prevents concurrent organization updates while allowing
+  // the SECURITY DEFINER authority-generation function to upgrade the lock
+  // for the mutation it owns.
+  const result = await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
   if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "organization was not found");
 }
 

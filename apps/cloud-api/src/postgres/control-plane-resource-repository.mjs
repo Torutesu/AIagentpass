@@ -732,7 +732,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
 }
 
 async function lockOrganization(client, organizationId) {
-  const result = await client.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [organizationId]);
+  const result = await client.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
   if (rowCount(result) !== 1) throw notFound("organization", organizationId);
 }
 
