@@ -75,6 +75,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       sessionObserved: false,
       sessionFailed: false,
       sessionStatus: null,
+      wakePendingObserved: false,
       webAuthnSupported,
     };
     page.on("console", (message) => {
@@ -165,6 +166,11 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
       await boundedUiOperation(page, () => page.keyboard.press("Enter"));
+      recentAuthObservation.wakePendingObserved = await boundedUiOperation(page, () => page.waitForFunction(
+        (element) => element?.getAttribute("aria-busy") === "true",
+        await card.elementHandle(),
+        { timeout: 2_000 }
+      )).then(() => true).catch(() => false);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     emitLiveStage("KEYBOARD_CONFIRM_DONE");
     const refreshResponse = await refreshResponsePromise;
@@ -947,6 +953,7 @@ export async function keyboardRecentAuthFailureMarker(observation, page = null) 
       const sessionFailure = keyboardPhaseStatusMarker("SESSION", observation.sessionStatus);
       return sessionFailure ?? "P0B_SAFE_KEYBOARD_AUTH_SESSION_SUCCEEDED_NO_OPTIONS_FAILED";
     }
+    if (observation?.wakePendingObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_CONFIRM_NO_ACTION_FAILED";
     return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED";
   }
   if (observation.optionsFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED";

@@ -74,6 +74,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED", "keyboard_outcome_2xx_response_contract"],
   [null, "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED", "keyboard_outcome_2xx_ui_parse"],
   [null, "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED", "keyboard_auth_options_no_request"],
+  [null, "P0B_SAFE_KEYBOARD_AUTH_CONFIRM_NO_ACTION_FAILED", "keyboard_auth_confirm_no_action"],
   [null, "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED", "keyboard_auth_webauthn_unavailable"],
   [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED", "keyboard_auth_session_transport"],
   [null, "P0B_SAFE_KEYBOARD_AUTH_SESSION_RESPONSE_MISSING_FAILED", "keyboard_auth_session_response_missing"],
