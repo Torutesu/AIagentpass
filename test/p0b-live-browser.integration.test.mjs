@@ -589,11 +589,11 @@ async function scenario(parent, name, callback) {
       // scenario ordinal so CI can identify the failing matrix slice without
       // exposing assertion text, URLs, or fixture data.
       const message = scenarioError instanceof Error ? scenarioError.message : "";
-      const safeMessage = /^P0B_SAFE_[A-Z0-9_]+$/u.test(message);
-      if (safeMessage) {
+      const safeMarker = message.match(/^(P0B_SAFE_[A-Z0-9_]+)(?:\n|$)/u)?.[1] ?? null;
+      if (safeMarker !== null) {
         // The callback's assertion is captured so resources can be closed;
         // re-emit its fixed marker after cleanup before propagating failure.
-        process.stderr.write(`${message}\n`);
+        process.stderr.write(`${safeMarker}\n`);
         throw scenarioError;
       }
       if (lifecycleFailureMarker(scenarioError) === null) {
