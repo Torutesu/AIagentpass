@@ -32,7 +32,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open, getPage, markPhase }) => {
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
-    const { page } = await openScenarioPage(open, getPage, "owner");
+    await waitForScenarioPage(open, getPage, "owner");
+    const page = getPage();
     markPhase("after_open");
     emitLiveStage("ASSERTION_OPEN_RETURNED");
     emitLiveStage("ASSERTION_WAIT_START");
@@ -57,7 +58,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open, getPage }) => {
-    const { page } = await openScenarioPage(open, getPage, "owner");
+    await waitForScenarioPage(open, getPage, "owner");
+    const page = getPage();
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
     emitLiveStage("KEYBOARD_FOCUS_START");
@@ -195,7 +197,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   await scenario(t, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", async ({ fixture, open, getPage }) => {
     await fixture.resetManualWakeEvidence();
-    const { page } = await openScenarioPage(open, getPage, "owner");
+    await waitForScenarioPage(open, getPage, "owner");
+    const page = getPage();
     for (const [name, expected, safeCode] of [
       ["反映待ち Mac", /依頼を受け付けました/u, "P0B_SAFE_WAKE_ACCEPTED_FAILED"],
       ["反映待ち Mac", /既存の依頼へ統合し/u, "P0B_SAFE_WAKE_COALESCED_FAILED"],
@@ -218,7 +221,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "admin completes real WebAuthn and wake mutation", async ({ open, getPage }) => {
-    const { page } = await openScenarioPage(open, getPage, "admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
+    await waitForScenarioPage(open, getPage, "admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
+    const page = getPage();
     const card = deviceCard(page, "反映待ち Mac");
     const diagnosis = observeWakeAttempt(page);
     try {
@@ -242,9 +246,15 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const role of ["auditor", "viewer"]) {
     await scenario(t, `${role} receives no wake mutation control`, async ({ open, getPage }) => {
       let page;
-      if (role === "auditor") page = (await openScenarioPage(open, getPage, role, { safeOpenPrefix: "P0B_SAFE_AUDITOR_OPEN" })).page;
+      if (role === "auditor") {
+        await waitForScenarioPage(open, getPage, role, { safeOpenPrefix: "P0B_SAFE_AUDITOR_OPEN" });
+        page = getPage();
+      }
       else {
-        try { page = (await openScenarioPage(open, getPage, role)).page; }
+        try {
+          await waitForScenarioPage(open, getPage, role);
+          page = getPage();
+        }
         catch { assert.fail("P0B_SAFE_VIEWER_OPEN_FAILED"); }
       }
       const card = deviceCard(page, "反映待ち Mac");
@@ -254,7 +264,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   }
 
   await scenario(t, "owner without an available authenticator fails before wake mutation", async ({ open, getPage }) => {
-    const { page } = await openScenarioPage(open, getPage, "owner", { register: false });
+    await waitForScenarioPage(open, getPage, "owner", { register: false });
+    const page = getPage();
     const mutation = mutationCounter(page);
     const card = deviceCard(page, "反映待ち Mac");
     try { await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click()); }
@@ -269,7 +280,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open, getPage }) => {
-      const { page } = await openScenarioPage(open, getPage, "owner", { safeOpenPrefix: "P0B_SAFE_OWNER_OPEN" });
+      await waitForScenarioPage(open, getPage, "owner", { safeOpenPrefix: "P0B_SAFE_OWNER_OPEN" });
+      const page = getPage();
       const targetId = fixture.devices.find(({ label }) => label === "反映待ち Mac")?.deviceId;
       if (failure === "stale" && !UUID.test(targetId ?? "")) assert.fail("P0B_SAFE_STALE_AUTH_TARGET_FAILED");
       assert.match(targetId ?? "", UUID);
@@ -304,7 +316,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const [role, deviceName] of [["owner", "同期済み Mac"], ["admin", "オフライン Mac"]]) {
     await scenario(t, `${role} completes distinct real WebAuthn device revoke`, async ({ open, getPage }) => {
       let page;
-      try { page = (await openScenarioPage(open, getPage, role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {})).page; }
+      try {
+        await waitForScenarioPage(open, getPage, role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {});
+        page = getPage();
+      }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("owner final open failed"); }
       try { await boundedUiOperation(page, () => page.getByRole("button", { name: "セットアップ", exact: true }).click()); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_SETUP_FAILED"); throw new Error("owner final setup failed"); }
@@ -359,7 +374,7 @@ export function staleAuthCeremonyFailureMarker(error) {
   return "P0B_SAFE_STALE_AUTH_CEREMONY_FAILED";
 }
 
-async function openScenarioPage(open, getPage, ...args) {
+async function waitForScenarioPage(open, getPage, ...args) {
   let openError;
   let opening;
   try {
@@ -375,10 +390,10 @@ async function openScenarioPage(open, getPage, ...args) {
   }
   if (openError !== undefined) throw openError;
   if (getPage() === null) throw new Error("P0B live open handoff missing");
-  // The page handoff is published immediately before open() returns. Awaiting
-  // the unresolved runner promise here would reintroduce the cross-realm
-  // continuation stall; its rejection remains observed above.
-  return { page: getPage() };
+  // Keep the Playwright Page entirely in the scenario closure. Returning it
+  // from any async helper (even nested in a plain object) has triggered
+  // cross-realm thenable assimilation on protected runners. The caller reads
+  // the already-published page through getPage() after this void handoff.
 }
 
 async function scenario(parent, name, callback) {

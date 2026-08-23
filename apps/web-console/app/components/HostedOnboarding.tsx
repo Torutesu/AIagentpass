@@ -74,6 +74,7 @@ export function HostedOnboarding() {
   const [guidanceKind, setGuidanceKind] = useState<Guidance["kind"] | null>(null);
   const [deviceHandoffReady, setDeviceHandoffReady] = useState(false);
   const initialStatusLoadStarted = useRef(false);
+  const statusAbortTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadStatus = useCallback(async (signal?: AbortSignal) => {
     setMessage("");
@@ -100,13 +101,26 @@ export function HostedOnboarding() {
   }, []);
 
   useEffect(() => {
+    // StrictMode replays the effect immediately. Cancel the deferred abort
+    // from that replay, while still aborting a request on a real unmount.
+    if (statusAbortTimer.current !== null) {
+      clearTimeout(statusAbortTimer.current);
+      statusAbortTimer.current = null;
+    }
     // React development/qualification builds may replay effects. The initial
     // status read is safe and idempotent, but sending it twice makes the
     // browser contract nondeterministic and can race a one-time bootstrap
     // transition. Keep one request per mounted onboarding flow.
     if (initialStatusLoadStarted.current) return;
     initialStatusLoadStarted.current = true;
-    void loadStatus();
+    const controller = new AbortController();
+    void loadStatus(controller.signal);
+    return () => {
+      statusAbortTimer.current = setTimeout(() => {
+        controller.abort();
+        statusAbortTimer.current = null;
+      }, 0);
+    };
   }, [loadStatus]);
 
   async function submitOrganization(event: FormEvent<HTMLFormElement>) {
