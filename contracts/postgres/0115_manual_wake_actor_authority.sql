@@ -13,6 +13,7 @@ WHERE status = 'active';
 ALTER VIEW public.agentpass_manual_wake_actor_memberships OWNER TO agentpass_migrator;
 REVOKE ALL PRIVILEGES ON TABLE public.agentpass_manual_wake_actor_memberships
   FROM PUBLIC, agentpass_signer, agentpass_backup, agentpass_maintenance;
+GRANT SELECT ON TABLE public.agentpass_manual_wake_actor_memberships TO agentpass_app;
 CREATE FUNCTION public.agentpass_manual_wake_actor_role(
   p_organization_id uuid,
   p_member_id uuid
