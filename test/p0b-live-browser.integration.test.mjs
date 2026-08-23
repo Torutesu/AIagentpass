@@ -164,7 +164,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     try {
       await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
-      await boundedUiOperation(page, () => confirm.press("Enter"));
+      await boundedUiOperation(page, () => page.keyboard.press("Enter"));
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     emitLiveStage("KEYBOARD_CONFIRM_DONE");
     const refreshResponse = await refreshResponsePromise;
