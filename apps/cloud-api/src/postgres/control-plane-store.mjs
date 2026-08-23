@@ -387,7 +387,11 @@ function findStorageDiagnosticReason(error) {
   for (let depth = 0; depth < 4 && current; depth += 1) {
     const message = typeof current.message === "string" ? current.message : "";
     if (/permission denied for function/iu.test(message)) return "function_permission";
-    if (/permission denied for (?:relation|table)/iu.test(message)) return "table_permission";
+    if (/permission denied for (?:relation|table)/iu.test(message)) {
+      if (/memberships/iu.test(message)) return "table_permission_memberships";
+      if (/device_manual_wake/iu.test(message)) return "table_permission_manual_wake";
+      return "table_permission";
+    }
     if (/SELECT FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE) is not allowed/iu.test(message)) return "lock_function";
     if (/must be owner/iu.test(message)) return "owner_required";
     current = current.cause;
