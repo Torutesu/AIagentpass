@@ -34,7 +34,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
     await withScenarioPage(open, getPage, ["owner"], (page) => (async () => {
+      emitLiveStage("ASSERTION_ACTION_ENTER");
       markPhase("after_open");
+      emitLiveStage("ASSERTION_AFTER_OPEN");
       emitLiveStage("ASSERTION_WAIT_START");
       // Keep these waits serial and let Playwright own each locator deadline.
       // boundedUiOperation closes the page context on timeout; doing that while
@@ -388,9 +390,11 @@ function withScenarioPage(open, getPage, args, action) {
         setTimeout(() => {
           if (settled) return;
           emitLiveStage("HANDOFF_ACTION_START");
+          emitLiveStage("HANDOFF_ACTION_CALLBACK_ENTER");
           let actionResult;
           try { actionResult = action(page); }
           catch (error) { fail(error); return; }
+          emitLiveStage("HANDOFF_ACTION_RETURNED");
           Promise.resolve(actionResult).then((value) => {
             if (settled) return;
             settled = true;
