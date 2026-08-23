@@ -282,7 +282,7 @@ export async function startP0BLiveBrowserFixture({
             await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, 250 * (attempt + 1))));
           }
           throw new Error("unreachable bootstrap retry state");
-        }, SESSION_PATH);
+        }, SESSION_PATH, { timeoutMs: 90_000 });
         stage = "http";
         if (!response.ok) {
           if (response.status === 502) stage = `http_502_${classifySessionBootstrap502(response.body, harness.cloudProcessState(), await harness.cloudReadinessState())}`;
