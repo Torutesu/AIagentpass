@@ -47,11 +47,16 @@ function runScenario(name) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let lastStage = "UNKNOWN";
+    const stageTrace = [];
     let failureTail = "";
     let failureObserved = false;
     const observeStage = (chunk) => {
       const matches = [...String(chunk).matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
-      if (matches.length > 0) lastStage = matches.at(-1)[1];
+      for (const match of matches) {
+        lastStage = match[1];
+        stageTrace.push(lastStage);
+        if (stageTrace.length > 8) stageTrace.shift();
+      }
     };
     const observeFailure = (chunk) => {
       if (failureObserved) return;
@@ -61,6 +66,7 @@ function runScenario(name) {
         const diagnostics = [...failureTail.matchAll(/P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,256}/gu)].map((match) => match[0]);
         for (const diagnostic of diagnostics.slice(-4)) process.stderr.write(`${diagnostic}\n`);
         if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
+          process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${stageTrace.length > 0 ? stageTrace.join(",") : "UNKNOWN"}\n`);
           process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
         }
         // Give the child streams one bounded turn to flush the already-written
