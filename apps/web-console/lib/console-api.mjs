@@ -79,12 +79,13 @@ export class ConsoleApiError extends Error {
 }
 
 class CloudResponseError extends Error {
-  constructor(status, body, secrets) {
+  constructor(status, body, secrets, diagnosticCode = undefined) {
     super("Cloud API request failed");
     this.name = "CloudResponseError";
     this.status = status;
     this.body = body;
     this.secrets = secrets;
+    this.diagnosticCode = diagnosticCode;
   }
 }
 
@@ -1524,7 +1525,10 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
     throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   }
   const safe = sanitizeValue(parsed, config.secrets);
-  if (!response.ok) throw new CloudResponseError(response.status, safe, config.secrets);
+  if (!response.ok) {
+    const diagnosticCode = response.headers?.get("x-agentpass-diagnostic-code") ?? undefined;
+    throw new CloudResponseError(response.status, safe, config.secrets, diagnosticCode);
+  }
   const successBody = preserveOneTimeCredential ? parsed : safe;
   return includeStatus ? { status: response.status, body: successBody } : successBody;
 }
@@ -1733,7 +1737,11 @@ function errorResponse(error) {
       : "cloud_api_error";
     const responseBody = { error: { code, message: "Cloud API request failed" } };
     if (typeof source.request_id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(source.request_id)) responseBody.request_id = source.request_id;
-    return jsonResponse(error.status, responseBody, { "x-agentpass-error-code": code });
+    const headers = { "x-agentpass-error-code": code };
+    if (typeof process !== "undefined" && process.env?.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(error.diagnosticCode ?? "")) {
+      headers["x-agentpass-diagnostic-code"] = error.diagnosticCode;
+    }
+    return jsonResponse(error.status, responseBody, headers);
   }
   if (error instanceof ConsoleApiError) {
     return jsonResponse(error.status, { error: { code: error.code, message: error.message } }, { "x-agentpass-error-code": error.code });
