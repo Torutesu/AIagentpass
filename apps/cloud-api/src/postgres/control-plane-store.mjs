@@ -353,40 +353,9 @@ async function callRepository(fn, repository, operation, input) {
 
 function publicError(error, operation) {
   if (error instanceof ControlPlaneStoreError) return error;
-  if (isDatabaseError(error)) {
-    const wrapped = new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
-    const sourceCode = diagnosticSourceCode(error);
-    if (process.env.P0B_LIVE_BROWSER === "1") {
-      const source = diagnosticSource(error);
-      process.stderr.write(`P0B_DB_ERROR operation=${operation} code=${source.code || "none"} message=${source.message}\n`);
-    }
-    if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(sourceCode)) wrapped.diagnosticCode = sourceCode;
-    return wrapped;
-  }
+  if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
   return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
-}
-
-function diagnosticSourceCode(error) {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    const code = String(current.code ?? "");
-    if (/^[0-9A-Z]{5}$/u.test(code)) return code;
-    current = current.cause;
-  }
-  return "";
-}
-
-function diagnosticSource(error) {
-  let current = error;
-  let latest = { code: "", message: "unknown" };
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    const code = String(current.code ?? "");
-    const message = String(current.message ?? "").replace(/[\r\n]+/gu, " ").slice(0, 180);
-    if (code || message) latest = { code, message };
-    current = current.cause;
-  }
-  return latest;
 }
 
 function isDatabaseError(error) {

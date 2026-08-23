@@ -1144,10 +1144,7 @@ async function databaseOperation(operation) {
   catch (error) {
     if (error instanceof ControlPlaneAuthorityRepositoryError) throw error;
     if (error?.code === "ERR_AUDIT_CURSOR_INVALID") throw error;
-    const wrapped = new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "control-plane authority storage is unavailable", undefined, error);
-    const sourceCode = error?.code ?? error?.cause?.code;
-    if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(String(sourceCode ?? ""))) wrapped.diagnosticCode = String(sourceCode);
-    throw wrapped;
+    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "control-plane authority storage is unavailable", undefined, error);
   }
 }
 
