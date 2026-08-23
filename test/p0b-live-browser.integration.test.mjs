@@ -380,10 +380,14 @@ async function waitForScenarioPage(open, getPage, ...args) {
   await new Promise((resolve, reject) => {
     timeout = setTimeout(() => reject(new Error("P0B live open handoff timed out")), 120_000);
     try {
-      open(...args, {
+      const handoff = {
         onReady: resolve,
         onError: reject
-      });
+      };
+      // Keep the callback in the third positional slot even when the caller
+      // uses the common role-only shorthand and omits options.
+      if (args.length === 1) open(args[0], undefined, handoff);
+      else open(...args, handoff);
     } catch (error) {
       reject(error);
     }
