@@ -38,6 +38,7 @@ function terminate(child) {
 
 function runScenario(name) {
   return new Promise((resolve) => {
+    process.stderr.write("P0B_STAGE_SCENARIO_START_START\n");
     const child = spawn(process.execPath, ["--test", "--test-reporter", "tap", TEST_FILE], {
       cwd: REPOSITORY_ROOT,
       env: { ...process.env, P0B_LIVE_BROWSER: "1", P0B_LIVE_BROWSER_SCENARIO: name },

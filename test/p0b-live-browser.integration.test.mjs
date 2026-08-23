@@ -11,6 +11,7 @@ process.on("uncaughtExceptionMonitor", () => process.stderr.write("P0B_SAFE_CHIL
 process.on("unhandledRejection", () => process.stderr.write("P0B_SAFE_CHILD_UNHANDLED_REJECTION\n"));
 
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
+if (enabled) process.stderr.write("P0B_STAGE_TEST_MODULE_START\n");
 const scenarioFilter = process.env.P0B_LIVE_BROWSER_SCENARIO?.trim() ?? "";
 const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
