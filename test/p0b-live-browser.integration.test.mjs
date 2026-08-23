@@ -32,7 +32,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open, getPage, markPhase }) => {
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
-    await waitForScenarioPage(open, getPage, "owner");
+    waitForScenarioPage(open, getPage, "owner");
+    await waitForScenarioPageReady(open, getPage);
     emitLiveStage("ASSERTION_AFTER_HANDOFF");
     const page = getPage();
     emitLiveStage("ASSERTION_PAGE_READ");
@@ -60,7 +61,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open, getPage }) => {
-    await waitForScenarioPage(open, getPage, "owner");
+    waitForScenarioPage(open, getPage, "owner");
+    await waitForScenarioPageReady(open, getPage);
     const page = getPage();
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
@@ -199,7 +201,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   await scenario(t, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", async ({ fixture, open, getPage }) => {
     await fixture.resetManualWakeEvidence();
-    await waitForScenarioPage(open, getPage, "owner");
+    waitForScenarioPage(open, getPage, "owner");
+    await waitForScenarioPageReady(open, getPage);
     const page = getPage();
     for (const [name, expected, safeCode] of [
       ["反映待ち Mac", /依頼を受け付けました/u, "P0B_SAFE_WAKE_ACCEPTED_FAILED"],
@@ -223,7 +226,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "admin completes real WebAuthn and wake mutation", async ({ open, getPage }) => {
-    await waitForScenarioPage(open, getPage, "admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
+    waitForScenarioPage(open, getPage, "admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
+    await waitForScenarioPageReady(open, getPage);
     const page = getPage();
     const card = deviceCard(page, "反映待ち Mac");
     const diagnosis = observeWakeAttempt(page);
@@ -249,12 +253,14 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     await scenario(t, `${role} receives no wake mutation control`, async ({ open, getPage }) => {
       let page;
       if (role === "auditor") {
-        await waitForScenarioPage(open, getPage, role, { safeOpenPrefix: "P0B_SAFE_AUDITOR_OPEN" });
+        waitForScenarioPage(open, getPage, role, { safeOpenPrefix: "P0B_SAFE_AUDITOR_OPEN" });
+        await waitForScenarioPageReady(open, getPage);
         page = getPage();
       }
       else {
         try {
-          await waitForScenarioPage(open, getPage, role);
+          waitForScenarioPage(open, getPage, role);
+          await waitForScenarioPageReady(open, getPage);
           page = getPage();
         }
         catch { assert.fail("P0B_SAFE_VIEWER_OPEN_FAILED"); }
@@ -266,7 +272,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   }
 
   await scenario(t, "owner without an available authenticator fails before wake mutation", async ({ open, getPage }) => {
-    await waitForScenarioPage(open, getPage, "owner", { register: false });
+    waitForScenarioPage(open, getPage, "owner", { register: false });
+    await waitForScenarioPageReady(open, getPage);
     const page = getPage();
     const mutation = mutationCounter(page);
     const card = deviceCard(page, "反映待ち Mac");
@@ -282,7 +289,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open, getPage }) => {
-      await waitForScenarioPage(open, getPage, "owner", { safeOpenPrefix: "P0B_SAFE_OWNER_OPEN" });
+      waitForScenarioPage(open, getPage, "owner", { safeOpenPrefix: "P0B_SAFE_OWNER_OPEN" });
+      await waitForScenarioPageReady(open, getPage);
       const page = getPage();
       const targetId = fixture.devices.find(({ label }) => label === "反映待ち Mac")?.deviceId;
       if (failure === "stale" && !UUID.test(targetId ?? "")) assert.fail("P0B_SAFE_STALE_AUTH_TARGET_FAILED");
@@ -319,7 +327,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     await scenario(t, `${role} completes distinct real WebAuthn device revoke`, async ({ open, getPage }) => {
       let page;
       try {
-        await waitForScenarioPage(open, getPage, role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {});
+        waitForScenarioPage(open, getPage, role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {});
+        await waitForScenarioPageReady(open, getPage);
         page = getPage();
       }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("owner final open failed"); }
@@ -378,55 +387,35 @@ export function staleAuthCeremonyFailureMarker(error) {
 
 function waitForScenarioPage(open, _getPage, ...args) {
   emitLiveStage("HANDOFF_OPEN_CALL");
-  // Do not pass a Promise resolver across the fixture/Playwright boundary.
-  // Some protected runners expose callback values through a different realm;
-  // a plain state flag keeps the handoff contract independent of thenable
-  // assimilation while retaining a finite wait and typed error path.
-  return new Promise((resolve, reject) => {
-    let ready = false;
-    let openError;
-    const handoff = Object.freeze({
-      onReady: () => { ready = true; },
-      onError: (error) => { openError = error; }
-    });
-    try {
-      // Keep the callback in the third positional slot even when the caller
-      // uses the common role-only shorthand and omits options.
-      if (args.length === 1) open(args[0], undefined, handoff);
-      else open(...args, handoff);
-    } catch (error) {
-      openError = error;
-    }
-    const deadline = Date.now() + 120_000;
-    const poll = () => {
-      if (openError !== undefined) {
-        reject(openError);
-        return;
-      }
-      if (ready) {
-        const wrapperError = open.getError?.();
-        if (wrapperError !== undefined) {
-          reject(wrapperError);
-          return;
-        }
-        emitLiveStage("HANDOFF_READY_STATE");
-        // Keep the Page object entirely outside this helper. Even observing a
-        // Playwright Page through a closure can trigger protected-runner realm
-        // handling at the async-function return boundary; callers read it only
-        // after the helper has completed.
-        emitLiveStage("HANDOFF_PAGE_SEEN");
-        emitLiveStage("HANDOFF_FUNCTION_EXIT");
-        resolve();
-        return;
-      }
-      if (Date.now() >= deadline) {
-        reject(new Error("P0B live open handoff timed out"));
-        return;
-      }
-      setTimeout(poll, 25);
-    };
-    poll();
+  const handoff = Object.freeze({
+    onReady: () => {},
+    onError: () => {}
   });
+  try {
+    // Keep the callback in the third positional slot even when the caller
+    // uses the common role-only shorthand and omits options. The scenario
+    // waits by polling its own page slot, so no Promise or Page crosses this
+    // callback boundary.
+    if (args.length === 1) open(args[0], undefined, handoff);
+    else open(...args, handoff);
+  } catch (error) {
+    Object.defineProperty(open, "__p0b_sync_error", { value: error, configurable: true });
+  }
+}
+
+async function waitForScenarioPageReady(open, getPage) {
+  const deadline = Date.now() + 120_000;
+  while (getPage() === null && open.getError?.() === undefined && open.__p0b_sync_error === undefined && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const syncError = open.__p0b_sync_error;
+  if (syncError !== undefined) throw syncError;
+  const wrapperError = open.getError?.();
+  if (wrapperError !== undefined) throw wrapperError;
+  if (getPage() === null) throw new Error("P0B live open handoff timed out");
+  emitLiveStage("HANDOFF_READY_STATE");
+  emitLiveStage("HANDOFF_PAGE_SEEN");
+  emitLiveStage("HANDOFF_FUNCTION_EXIT");
 }
 
 async function scenario(parent, name, callback) {
