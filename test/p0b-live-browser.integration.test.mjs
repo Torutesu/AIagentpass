@@ -17,6 +17,7 @@ const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
+const UI_ASSERTION_TIMEOUT_MS = 30_000;
 const SCENARIO_RUNTIME_TIMEOUT_MS = 210_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
@@ -36,7 +37,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
       ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
       ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
-    ].map(([label, safeCode]) => page.getByLabel(`同期状態: ${label}`).waitFor()
+    ].map(([label, safeCode]) => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
       .catch(() => assert.fail(safeCode))));
   });
 
@@ -180,7 +181,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_WAKE_CLICK_FAILED"); }
     try { await card.getByRole("button", { name: "確認して送信" }).click(); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED"); }
-    try { await card.getByRole("alert").waitFor(); }
+    try { await card.getByRole("alert").waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS }); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED"); }
     try { assert.equal(mutation.count(), 0); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_MUTATION_FAILED"); }
@@ -230,7 +231,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const device = page.getByRole("listitem").filter({ hasText: deviceName });
       try { await device.getByRole("button", { name: "停止" }).click(); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("owner final stop failed"); }
-      try { await page.getByText(`${deviceName}を停止しました`).waitFor(); }
+      try { await page.getByText(`${deviceName}を停止しました`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS }); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("owner final confirmation failed"); }
     });
   }
@@ -351,6 +352,7 @@ async function scenario(parent, name, callback) {
             }
           );
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
+        page.setDefaultTimeout(UI_ASSERTION_TIMEOUT_MS);
         let summaryStatus = null;
         let summaryErrorCode = null;
         let deploymentStatus = null;
