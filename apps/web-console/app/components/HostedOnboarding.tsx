@@ -30,12 +30,18 @@ type PublicStatus = Readonly<{
 type Screen = "loading" | "signin" | "flow" | "recovery" | "error" | "terminal";
 type Guidance = Readonly<{ kind: "retryable" | "terminal"; message: string }>;
 
+type InitialStatusOutcome = "pending" | "session_required" | "success" | "other";
+type InitialStatusGuard = {
+  startedAt: number;
+  outcome: InitialStatusOutcome;
+  waiters: Set<(outcome: InitialStatusOutcome) => void>;
+};
+
 // Vinext can remount a client boundary while hydrating an unauthenticated
-// page. Keep only the non-sensitive classification for a very short grace
-// window so that the remount does not issue a second bootstrap status read.
-// No cookie, CSRF value, or status payload is retained here.
-const unauthenticatedRemountGrace = new WeakMap<object, number>();
-const UNAUTHENTICATED_REMOUNT_GRACE_MS = 1_000;
+// page. Coalesce only the short-lived, non-sensitive outcome classification;
+// no cookie, CSRF value, or status payload is retained here.
+const initialStatusGuards = new WeakMap<object, InitialStatusGuard>();
+const INITIAL_STATUS_GUARD_MS = 1_000;
 
 const STEPS = [
   { id: "github", label: "GitHubで本人確認", detail: "GitHub identity" },
@@ -95,7 +101,6 @@ export function HostedOnboarding() {
     } catch (error) {
       if (signal?.aborted) return { ok: false as const, error };
       if (error instanceof HostedBootstrapClientError && error.serverCode === "bootstrap_session_required") {
-        if (typeof window === "object") unauthenticatedRemountGrace.set(window, Date.now());
         setScreen("signin");
         setGuidanceKind("terminal");
         return { ok: false as const, error };
@@ -122,14 +127,49 @@ export function HostedOnboarding() {
     if (initialStatusLoadStarted.current) return;
     initialStatusLoadStarted.current = true;
     const browserWindow = typeof window === "object" ? window : null;
-    const unauthenticatedAt = browserWindow === null ? undefined : unauthenticatedRemountGrace.get(browserWindow);
-    if (unauthenticatedAt !== undefined && Date.now() - unauthenticatedAt < UNAUTHENTICATED_REMOUNT_GRACE_MS) {
-      setScreen("signin");
-      setGuidanceKind("terminal");
-      return;
+    const existingGuard = browserWindow === null ? undefined : initialStatusGuards.get(browserWindow);
+    if (existingGuard !== undefined && Date.now() - existingGuard.startedAt < INITIAL_STATUS_GUARD_MS) {
+      if (existingGuard.outcome === "pending") {
+        existingGuard.waiters.add((outcome) => {
+          if (outcome === "session_required") {
+            setScreen("signin");
+            setGuidanceKind("terminal");
+          } else {
+            void loadStatus();
+          }
+        });
+      } else if (existingGuard.outcome === "session_required") {
+        queueMicrotask(() => {
+          setScreen("signin");
+          setGuidanceKind("terminal");
+        });
+      } else {
+        // A successful status token lives only in the original client
+        // closure; a remount must perform its own status read before a
+        // mutation so it never borrows authority from another instance.
+      }
+      if (existingGuard.outcome !== "success" && existingGuard.outcome !== "other") return;
     }
+    const guard = browserWindow === null ? undefined : {
+      startedAt: Date.now(),
+      outcome: "pending" as const,
+      waiters: new Set<(outcome: InitialStatusOutcome) => void>(),
+    };
+    if (browserWindow !== null && guard !== undefined) initialStatusGuards.set(browserWindow, guard);
     const controller = new AbortController();
-    void loadStatus(controller.signal);
+    queueMicrotask(() => {
+      void loadStatus(controller.signal).then((result) => {
+        if (guard === undefined) return;
+        guard.outcome = result.ok
+          ? "success"
+          : result.error instanceof HostedBootstrapClientError && result.error.serverCode === "bootstrap_session_required"
+            ? "session_required"
+            : "other";
+        const waiters = [...guard.waiters];
+        guard.waiters.clear();
+        for (const waiter of waiters) waiter(guard.outcome);
+      });
+    });
     return () => {
       statusAbortTimer.current = setTimeout(() => {
         controller.abort();
