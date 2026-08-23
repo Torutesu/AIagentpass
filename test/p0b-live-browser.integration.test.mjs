@@ -14,6 +14,7 @@ process.on("unhandledRejection", () => process.stderr.write("P0B_SAFE_CHILD_UNHA
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
 if (enabled) process.stderr.write("P0B_STAGE_TEST_MODULE_START\n");
 const scenarioFilter = process.env.P0B_LIVE_BROWSER_SCENARIO?.trim() ?? "";
+const liveStageTrace = [];
 const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
@@ -661,6 +662,7 @@ async function scenario(parent, name, callback) {
       }
     }
     if (scenarioError) {
+      process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${liveStageTrace.length > 0 ? liveStageTrace.join(",") : "UNKNOWN"}\n`);
       // The supervisor intentionally discards arbitrary TAP diagnostics. If a
       // failure escaped the reviewed marker mappers, retain only its bounded
       // scenario ordinal so CI can identify the failing matrix slice without
@@ -699,7 +701,10 @@ async function scenario(parent, name, callback) {
 }
 
 function emitLiveStage(stage) {
-  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) writeSync(2, `P0B_STAGE_${stage}_START\n`);
+  if (!/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) return;
+  liveStageTrace.push(stage);
+  if (liveStageTrace.length > 32) liveStageTrace.shift();
+  writeSync(2, `P0B_STAGE_${stage}_START\n`);
 }
 
 function boundedUiOperation(page, operation) {
