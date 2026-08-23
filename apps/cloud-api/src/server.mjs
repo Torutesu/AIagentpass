@@ -171,11 +171,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     };
     try { return await (trackInFlight ? trackInFlight(operation) : operation()); }
     catch (error) {
-      if (process.env.P0B_LIVE_BROWSER === "1") {
-        const code = typeof error?.code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.code) ? error.code : "unknown";
-        const constraint = typeof error?.constraint === "string" && /^[A-Za-z][A-Za-z0-9_]{0,95}$/u.test(error.constraint) ? error.constraint : "none";
-        process.stderr.write(`P0B_DIAGNOSTIC_CLOUD_ERROR code=${code} constraint=${constraint}\n`);
-      }
       if (!response.headersSent && error?.code === "draining") return send(response, 503, { error: { code: "draining", message: "Service is draining" }, request_id: crypto.randomUUID() });
       if (!response.headersSent) return send(response, 500, { error: { code: "internal_error", message: "Internal error" }, request_id: crypto.randomUUID() });
       response.destroy();
