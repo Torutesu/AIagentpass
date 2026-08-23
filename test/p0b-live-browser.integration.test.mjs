@@ -17,6 +17,7 @@ const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
+const SCENARIO_RUNTIME_TIMEOUT_MS = 150_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
 
@@ -273,6 +274,7 @@ async function scenario(parent, name, callback) {
   // bounded startup deadline. UI assertions still retain Playwright's focused
   // per-action timeout and therefore fail promptly when a state is absent.
   await parent.test(name, { timeout: 120_000 }, async () => {
+    const runtimeTimer = setTimeout(() => process.stderr.write("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED\n"), SCENARIO_RUNTIME_TIMEOUT_MS);
     let fixture;
     let browser;
     let scenarioError;
@@ -445,6 +447,7 @@ async function scenario(parent, name, callback) {
     } catch (error) {
       scenarioError ??= error;
     } finally {
+      clearTimeout(runtimeTimer);
       if (!browserCleanupAttempted) cleanupError = await closeBrowserResources(browser, []);
       try { await fixture?.close(); }
       catch (error) {
