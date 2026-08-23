@@ -480,38 +480,31 @@ async function scenario(parent, name, callback) {
           emitLiveStage("OPEN_UI_READY");
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
-            const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
-            if (summaryReady === 0) {
-              await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
-              if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
-              if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
-              if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
-              if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
-              if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
-              if (summaryParseDiagnostic !== null) {
-                process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
-              }
-              if (summaryRefreshDiagnostic !== null) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
-              if (summaryStatuses.length > 0) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_RESPONSES statuses=${summaryStatuses.join(",")}\n`);
-              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
-              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
-              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
-              if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
-              if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
-              if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");
-              if (summaryErrorCode === "cloud_api_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_ERROR_FAILED");
-              if (summaryErrorCode === "body_pending") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_PENDING_FAILED");
-              if (summaryErrorCode === "body_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_UNAVAILABLE_FAILED");
-              if (summaryErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_INTERNAL_ERROR_FAILED");
-              if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED");
-              const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
-              if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
-              if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
-              if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
-              assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
-            }
-            const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
-            if (deviceReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED");
+            // Do not issue another unbounded browser-protocol query while
+            // diagnosing a UI timeout. The response listener already records
+            // the bounded upstream boundary and is safe to classify here.
+            await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+            if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
+            if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
+            if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
+            if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
+            if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
+            if (summaryParseDiagnostic !== null) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
+            if (summaryRefreshDiagnostic !== null) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
+            if (summaryStatuses.length > 0) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_RESPONSES statuses=${summaryStatuses.join(",")}\n`);
+            if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
+            if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
+            if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
+            if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
+            if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
+            if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");
+            if (summaryErrorCode === "cloud_api_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_ERROR_FAILED");
+            if (summaryErrorCode === "body_pending") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_PENDING_FAILED");
+            if (summaryErrorCode === "body_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_UNAVAILABLE_FAILED");
+            if (summaryErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_INTERNAL_ERROR_FAILED");
+            if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED");
+            if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
+            assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
           } else if (effectiveSafeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
             await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
             if (summaryStatus === null) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_NO_RESPONSE_FAILED");
