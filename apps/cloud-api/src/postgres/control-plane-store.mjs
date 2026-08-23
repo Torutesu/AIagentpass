@@ -73,6 +73,8 @@ export class ControlPlaneStoreError extends Error {
     if (status !== undefined) this.status = status;
     const storageCode = findStorageDiagnosticCode(cause);
     if (storageCode !== undefined) Object.defineProperty(this, "storageCode", { value: storageCode, enumerable: false });
+    const storagePhase = findStorageDiagnosticPhase(cause);
+    if (storagePhase !== undefined) Object.defineProperty(this, "storagePhase", { value: storagePhase, enumerable: false });
   }
 }
 
@@ -366,6 +368,14 @@ function findStorageDiagnosticCode(error) {
   for (let depth = 0; depth < 4 && current; depth += 1) {
     const code = typeof current.code === "string" ? current.code.toUpperCase() : "";
     if (STORAGE_DIAGNOSTIC_CODES.has(code)) return code;
+    current = current.cause;
+  }
+  return undefined;
+}
+function findStorageDiagnosticPhase(error) {
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current.storagePhase === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(current.storagePhase)) return current.storagePhase;
     current = current.cause;
   }
   return undefined;

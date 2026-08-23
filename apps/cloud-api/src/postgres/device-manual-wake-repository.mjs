@@ -56,12 +56,12 @@ export function createPostgresDeviceManualWakeRepository({
       ? normalizeNormalizedInput(input)
       : normalizeInput(input, now);
     try {
-      await tx.query(
+      await storageQuery(tx, "idempotency_lock",
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) AS locked",
         [`agentpass:device-manual-wake:idempotency:${values.organizationId}:${values.actorId}:${values.idempotencyKey}`]
       );
 
-      const state = await tx.query(`SELECT d.id AS device_id,d.status AS device_status,
+      const state = await storageQuery(tx, "device_state", `SELECT d.id AS device_id,d.status AS device_status,
           state.desired_generation,state.observed_generation,state.refresh_state,
           active.outbox_id AS active_outbox_id
         FROM devices AS d
@@ -83,7 +83,7 @@ export function createPostgresDeviceManualWakeRepository({
         throw new DeviceManualWakeRepositoryError("ERR_DEVICE_UNAVAILABLE", "device is unavailable for manual wake");
       }
 
-      const actor = await tx.query(`SELECT role
+      const actor = await storageQuery(tx, "actor_membership", `SELECT role
         FROM memberships
         WHERE organization_id=$1 AND member_id=$2 AND status='active'
         FOR SHARE`, [values.organizationId, values.actorId]);
@@ -91,7 +91,7 @@ export function createPostgresDeviceManualWakeRepository({
         throw new DeviceManualWakeRepositoryError("ERR_ACTOR_UNAVAILABLE", "manual wake actor is unavailable");
       }
 
-      const existing = await tx.query(`SELECT request_id,organization_id,device_id,actor_id,idempotency_key,
+      const existing = await storageQuery(tx, "replay_ledger", `SELECT request_id,organization_id,device_id,actor_id,idempotency_key,
           body_digest,desired_generation,active_outbox_id,result,requested_at,response_json
         FROM device_manual_wake_requests
         WHERE organization_id=$1 AND actor_id=$2 AND idempotency_key=$3
@@ -111,7 +111,7 @@ export function createPostgresDeviceManualWakeRepository({
       const generationNeedsRefresh = observedGeneration === null || observedGeneration < desiredGeneration;
       let activeOutboxId = null;
       if (generationNeedsRefresh) {
-        const selectedOutbox = await tx.query(`SELECT outbox_id
+        const selectedOutbox = await storageQuery(tx, "refresh_outbox", `SELECT outbox_id
           FROM device_refresh_outbox
           WHERE organization_id=$1 AND device_id=$2 AND desired_generation=$3
             AND status IN ('pending','delivered')
@@ -136,7 +136,7 @@ export function createPostgresDeviceManualWakeRepository({
         result,
         requested_at: values.requestedAt
       });
-      const inserted = await tx.query(`INSERT INTO device_manual_wake_requests
+      const inserted = await storageQuery(tx, "request_ledger", `INSERT INTO device_manual_wake_requests
           (organization_id,device_id,actor_id,idempotency_key,request_id,body_digest,
            desired_generation,active_outbox_id,result,requested_at,response_json)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11::jsonb)
@@ -171,7 +171,7 @@ export function createPostgresDeviceManualWakeRepository({
 }
 
 async function upsertWakeEvent(tx, values) {
-  const inserted = await tx.query(`INSERT INTO device_manual_wake_events
+  const inserted = await storageQuery(tx, "wake_event_insert", `INSERT INTO device_manual_wake_events
       (organization_id,device_id,desired_generation,active_outbox_id,wake_count,
        first_requested_at,last_requested_at,last_actor_id)
     VALUES ($1,$2,$3,$4,1,$5::timestamptz,$5::timestamptz,$6)
@@ -182,7 +182,7 @@ async function upsertWakeEvent(tx, values) {
   ]);
   if (rowCount(inserted) === 1) return "accepted";
 
-  const updated = await tx.query(`UPDATE device_manual_wake_events
+  const updated = await storageQuery(tx, "wake_event_update", `UPDATE device_manual_wake_events
     SET active_outbox_id=$4,
         wake_count=LEAST(wake_count+1,$5),
         last_requested_at=$6::timestamptz,
@@ -254,6 +254,16 @@ function mapError(error) {
   if (error?.code === "23505") return new DeviceManualWakeRepositoryError("ERR_IDEMPOTENCY_CONFLICT", "manual wake identity conflicts with an existing request", error);
   if (error?.code === "23503") return new DeviceManualWakeRepositoryError("ERR_DEVICE_UNAVAILABLE", "device is unavailable for manual wake", error);
   return new DeviceManualWakeRepositoryError("ERR_DATABASE", "manual wake storage is unavailable", error);
+}
+
+async function storageQuery(tx, phase, text, params) {
+  try {
+    return await tx.query(text, params);
+  } catch (error) {
+    const wrapped = new DeviceManualWakeRepositoryError("ERR_DATABASE", "manual wake storage is unavailable", error);
+    Object.defineProperty(wrapped, "storagePhase", { value: phase, enumerable: false });
+    throw wrapped;
+  }
 }
 
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("client must provide query(text, params)"); }
