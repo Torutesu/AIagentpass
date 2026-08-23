@@ -614,7 +614,7 @@ async function scenario(parent, name, callback) {
 }
 
 function emitLiveStage(stage) {
-  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
+  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) writeSync(2, `P0B_STAGE_${stage}_START\n`);
 }
 
 function boundedUiOperation(page, operation) {
