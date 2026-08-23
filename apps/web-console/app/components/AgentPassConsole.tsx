@@ -1522,7 +1522,15 @@ export function AgentPassConsole() {
         fetchConsole("/api/console?resource=deployment-readiness", { signal }),
       ]);
       if (response.status === 401 || response.status === 403 || deploymentResponse.status === 401 || deploymentResponse.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status === 401 || response.status === 403 ? response.status : deploymentResponse.status);
-      if (!response.ok) throw new Error("summary unavailable");
+      if (!response.ok) {
+        let code = `http_${response.status}`;
+        try {
+          const payload: unknown = await response.clone().json();
+          if (isPlainRecord(payload) && isPlainRecord(payload.error) && typeof payload.error.code === "string"
+            && /^[a-z][a-z0-9_]{0,63}$/u.test(payload.error.code)) code = payload.error.code;
+        } catch {}
+        throw new Error(`summary_${code}`);
+      }
       let deployment: DeploymentReadiness | null = null;
       if (deploymentResponse.ok) {
         try {
