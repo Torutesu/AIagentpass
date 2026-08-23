@@ -63,7 +63,10 @@ function runScenario(name) {
         if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
           process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
         }
-        terminate(child);
+        // Give the child streams one bounded turn to flush the already-written
+        // code-only diagnostics before terminating the isolated process.
+        const flushTimer = setTimeout(() => terminate(child), 100);
+        flushTimer.unref?.();
       }
     };
     child.stdout?.on("data", (chunk) => {
