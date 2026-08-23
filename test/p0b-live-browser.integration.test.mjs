@@ -340,6 +340,7 @@ async function scenario(parent, name, callback) {
         let summaryStatus = null;
         let summaryErrorCode = null;
         let deploymentStatus = null;
+        let summaryBodyCode = null;
         let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
@@ -357,16 +358,28 @@ async function scenario(parent, name, callback) {
                 summaryErrorCode = typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(headerCode)
                   ? headerCode
                   : contentType === "application/json" ? "body_pending" : "cloud_api_invalid_response";
-                summaryBodyPromise = response.text().then((text) => {
+              }
+              summaryBodyPromise = response.text().then((text) => {
                   try {
                     const body = JSON.parse(text);
-                    const code = body?.error?.code;
-                    summaryErrorCode = typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "body_unavailable";
+                    if (summaryStatus >= 500) {
+                      const code = body?.error?.code;
+                      summaryErrorCode = typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "body_unavailable";
+                    } else {
+                      const keys = (value) => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+                      summaryBodyCode = keys(body) === "agents,audit,devices,organization,policies"
+                        && keys(body.organization) === "created_at,organization_id,updated_at,version"
+                        && Array.isArray(body.devices) && Array.isArray(body.agents) && Array.isArray(body.policies)
+                        && keys(body.audit) === "activity,health,next_cursor" ? "body_shape_ok" : "body_shape_invalid";
+                    }
                   } catch {
-                    summaryErrorCode = "body_unavailable";
+                    if (summaryStatus >= 500) summaryErrorCode = "body_unavailable";
+                    else summaryBodyCode = "body_invalid";
                   }
-                }).catch(() => { summaryErrorCode = "body_unavailable"; });
-              }
+                }).catch(() => {
+                  if (summaryStatus >= 500) summaryErrorCode = "body_unavailable";
+                  else summaryBodyCode = "body_invalid";
+              });
             }
           } catch {}
         };
@@ -446,6 +459,9 @@ async function scenario(parent, name, callback) {
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
               if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
+              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
+              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
+              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
               if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
             }
