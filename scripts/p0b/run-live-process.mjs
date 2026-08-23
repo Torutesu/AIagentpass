@@ -865,6 +865,11 @@ function emitCommandDiagnostic(stage, result) {
   const marker = typeof result?.internal?.safe_failure_code === "string"
     ? result.internal.safe_failure_code : "none";
   process.stderr.write(`p0b-command: stage=${safeStage} exit=${exitCode} signal=${signal} duration_ms=${duration} stdout_bytes=${stdoutBytes} stderr_bytes=${stderrBytes} marker=${marker}\n`);
+  for (const diagnostic of Array.isArray(result?.internal?.diagnostics) ? result.internal.diagnostics.slice(0, 8) : []) {
+    if (typeof diagnostic === "string" && /^P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,256}$/u.test(diagnostic)) {
+      process.stderr.write(`p0b-diagnostic: ${diagnostic}\n`);
+    }
+  }
 }
 
 function emitSupervisorDiagnostic(stage, error) {

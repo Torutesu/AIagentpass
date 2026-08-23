@@ -19,6 +19,7 @@ const TERMINATION_GRACE_MS = 250;
 // coarse `not ok` line and then keeps a browser/socket handle open can survive
 // until the supervisor's much larger process timeout.
 const PROVISIONAL_FAILURE_GRACE_MS = 1_000;
+const DIAGNOSTIC_TAIL_BYTES = 2_048;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 const SAFE_REASON = Object.freeze({
@@ -115,13 +116,14 @@ function includesMarker(haystack, needle) {
   return false;
 }
 
-function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode }) {
+function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode, diagnostics }) {
   return Object.freeze({
     spawn_error: spawnError,
     timed_out: timedOut,
     skip_marker: skipMarker,
     callback_failed: callbackFailed,
     safe_failure_code: safeFailureCode,
+    diagnostics: Object.freeze([...diagnostics]),
     settled: true
   });
 }
@@ -164,11 +166,14 @@ export function runQualificationCommand(command, args, options) {
   let stderrBytes = 0;
   let stdoutMarkerTail = Buffer.alloc(0);
   let stderrMarkerTail = Buffer.alloc(0);
+  let stdoutDiagnosticTail = Buffer.alloc(0);
+  let stderrDiagnosticTail = Buffer.alloc(0);
   let skipMarker = false;
   let safeFailureCode = null;
   let safeFailureTerminal = false;
   let safeFailureStdoutTail = Buffer.alloc(0);
   let safeFailureStderrTail = Buffer.alloc(0);
+  const diagnostics = new Set();
   let spawnError = false;
   let timedOut = false;
   let callbackFailed = false;
@@ -204,6 +209,11 @@ export function runQualificationCommand(command, args, options) {
     const bytes = asBytes(chunk);
     const previous = stream === "stdout" ? safeFailureStdoutTail : safeFailureStderrTail;
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
+    const diagnosticTail = stream === "stdout" ? stdoutDiagnosticTail : stderrDiagnosticTail;
+    const diagnosticCandidate = diagnosticTail.byteLength === 0 ? bytes : Buffer.concat([diagnosticTail, bytes]);
+    for (const match of diagnosticCandidate.toString("utf8").matchAll(/P0B_DIAGNOSTIC_(?:SUMMARY_HEADER status=\d{3} code=(?:[a-z][a-z0-9_]{0,63}|none) content_type=(?:json|other)|SUMMARY_REFRESH code=[A-Za-z0-9_.:-]{1,96}|SUMMARY_PARSE path=[.$\w\[\]]{1,128} reason=[a-z_]{1,64}|SUMMARY_RESPONSES statuses=\d{3}(?:,\d{3}){0,7})/gu)) {
+      if (diagnostics.size < 8) diagnostics.add(match[0]);
+    }
     for (const entry of safeFailureMarkers) {
       if (includesMarker(candidate, entry.marker)) {
         if (entry.code === "scenario_timeout") {
@@ -239,6 +249,11 @@ export function runQualificationCommand(command, args, options) {
     const nextTail = candidate.byteLength <= tailBytes ? Buffer.from(candidate) : Buffer.from(candidate.subarray(candidate.byteLength - tailBytes));
     if (stream === "stdout") safeFailureStdoutTail = nextTail;
     else safeFailureStderrTail = nextTail;
+    const nextDiagnosticTail = diagnosticCandidate.byteLength <= DIAGNOSTIC_TAIL_BYTES
+      ? Buffer.from(diagnosticCandidate)
+      : Buffer.from(diagnosticCandidate.subarray(diagnosticCandidate.byteLength - DIAGNOSTIC_TAIL_BYTES));
+    if (stream === "stdout") stdoutDiagnosticTail = nextDiagnosticTail;
+    else stderrDiagnosticTail = nextDiagnosticTail;
   };
 
   return new Promise((resolve) => {
@@ -273,7 +288,7 @@ export function runQualificationCommand(command, args, options) {
         stderr_bytes: stderrBytes,
         reason: passed ? null : reason ?? SAFE_REASON.unknown
       };
-      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode })));
+      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode, diagnostics })));
     };
 
     const requestKill = (signal) => {
