@@ -320,17 +320,17 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   let cloudProxy;
   let consoleProxy;
   try {
-    emitP0BStage(env, "CERTIFICATES");
+    emitP0BStage("CERTIFICATES");
     const certificates = await createTestCertificates(temp);
-    emitP0BStage(env, "DATABASE");
+    emitP0BStage("DATABASE");
     database = await createDisposablePostgres({ env });
-    emitP0BStage(env, "AUTHORITIES");
+    emitP0BStage("AUTHORITIES");
     const databaseAuthorities = await prepareP0BDatabaseAuthorities(database);
     const organizationId = crypto.randomUUID();
-    emitP0BStage(env, "RUNTIME_FILES");
+    emitP0BStage("RUNTIME_FILES");
     const files = await createRuntimeFiles(temp);
     if (prepareDatabase) {
-      emitP0BStage(env, "PREPARE_DATABASE");
+      emitP0BStage("PREPARE_DATABASE");
       await prepareDatabase(Object.freeze({
       pool: database.pool,
       organizationId,
@@ -338,14 +338,14 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       refreshNonceKey: Buffer.from(files.refreshNonceKey)
       }));
     }
-    emitP0BStage(env, "DEPLOYMENT_DIGESTS");
+    emitP0BStage("DEPLOYMENT_DIGESTS");
     const deploymentDigests = await p0BDeploymentDigests({
       repoRoot,
       database,
       sourceCommit: env.P0B_SOURCE_COMMIT,
       sourceTree: env.P0B_SOURCE_TREE
     });
-    emitP0BStage(env, "TRUSTED_CA");
+    emitP0BStage("TRUSTED_CA");
     const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
     const cloudPort = await reservePort();
     const cloudTlsPort = await reservePort();
@@ -434,10 +434,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       P0B_REFRESH_HINT_PRIVATE_KEY_PATH: files.refreshPrivateKey,
       NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
-    emitP0BStage(env, "CLOUD_START");
+    emitP0BStage("CLOUD_START");
     cloudProcess = spawnProcess(process.execPath, [P0B_CLOUD_PROCESS], repoRoot, p0bEnvironment(env, common));
     cloudProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: cloudPort, port: cloudTlsPort });
-    emitP0BStage(env, "CLOUD_READY");
+    emitP0BStage("CLOUD_READY");
     await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs, process: cloudProcess, label: "cloud" });
     const consoleEnv = p0bEnvironment(env, {
       NODE_ENV: "test",
@@ -456,11 +456,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       WRANGLER_LOG_PATH: path.join(temp, "wrangler.log"),
       MINIFLARE_REGISTRY_PATH: path.join(temp, "registry")
     });
-    emitP0BStage(env, "CONSOLE_START");
+    emitP0BStage("CONSOLE_START");
     if (consoleBuild && !fs.existsSync(path.join(repoRoot, "apps/web-console/dist"))) throw new P0BSkip("console_build_missing", "Console dist is missing; run the Console build before P0-B");
     consoleProcess = spawnProcess(process.execPath, [path.join(repoRoot, "apps/web-console/node_modules/vinext/dist/cli.js"), "start", "--hostname", LOOPBACK, "--port", String(consolePort)], path.join(repoRoot, "apps/web-console"), consoleEnv);
     consoleProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: consolePort, port: consoleTlsPort });
-    emitP0BStage(env, "CONSOLE_READY");
+    emitP0BStage("CONSOLE_READY");
     await waitForHttps(`https://localhost:${consoleTlsPort}/`, certificates.caCert, { path: "/", expectedStatus: 200, timeoutMs: waitTimeoutMs, process: consoleProcess, label: "console" });
     return Object.freeze({
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
@@ -495,8 +495,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   }
 }
 
-function emitP0BStage(env, stage) {
-  if (env?.P0B_LIVE_BROWSER === "1" && /^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
+function emitP0BStage(stage) {
+  // Stage names are fixed, secret-free diagnostics. Emit them for every
+  // harness invocation so the isolated live-browser supervisor can recover a
+  // precise stop point even when the child environment is filtered upstream.
+  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
 }
 
 export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
