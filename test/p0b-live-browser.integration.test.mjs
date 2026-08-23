@@ -599,7 +599,10 @@ async function scenario(parent, name, callback) {
       const message = scenarioError instanceof Error ? scenarioError.message : "";
       const safeMarker = message.match(/^(P0B_SAFE_[A-Z0-9_]+)(?:\n|$)/u)?.[1] ?? null;
       if (safeMarker !== null) {
-        if (safeMarker.startsWith("P0B_SAFE_SCENARIO_UNCLASSIFIED_")) writeSync(2, "P0B_SAFE_SCENARIO_ERROR_OTHER_FAILED\n");
+        if (safeMarker.startsWith("P0B_SAFE_SCENARIO_UNCLASSIFIED_")) {
+          writeSync(2, `P0B_DIAGNOSTIC_SCENARIO_ERROR kind=other stage=${callbackPhase}\n`);
+          writeSync(2, "P0B_SAFE_SCENARIO_ERROR_OTHER_FAILED\n");
+        }
         // The callback's assertion is captured so resources can be closed;
         // re-emit its fixed marker after cleanup before propagating failure.
         process.stderr.write(`${safeMarker}\n`);
