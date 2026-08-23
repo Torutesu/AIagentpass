@@ -375,16 +375,20 @@ export function staleAuthCeremonyFailureMarker(error) {
 }
 
 async function waitForScenarioPage(open, getPage, ...args) {
-  let openError = open.getError?.();
   emitLiveStage("HANDOFF_OPEN_CALL");
-  try { open(...args); }
-  catch (error) { throw error; }
-  const deadline = Date.now() + 120_000;
-  while (getPage() === null && openError === undefined) {
-    openError = open.getError?.();
-    if (Date.now() >= deadline) throw new Error("P0B live open handoff timed out");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  let timeout;
+  await new Promise((resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error("P0B live open handoff timed out")), 120_000);
+    try {
+      open(...args, {
+        onReady: resolve,
+        onError: reject
+      });
+    } catch (error) {
+      reject(error);
+    }
+  }).finally(() => clearTimeout(timeout));
+  const openError = open.getError?.();
   if (openError !== undefined) throw openError;
   if (getPage() === null) throw new Error("P0B live open handoff missing");
   emitLiveStage("HANDOFF_PAGE_SEEN");
@@ -443,7 +447,7 @@ async function scenario(parent, name, callback) {
       const contexts = [];
       let openedPage = null;
       let openingError;
-      const openInternal = async (role, { register = true, safeOpenPrefix = null } = {}) => {
+      const openInternal = async (role, { register = true, safeOpenPrefix = null } = {}, handoff = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
@@ -603,14 +607,18 @@ async function scenario(parent, name, callback) {
         // independent of Playwright's object shape.
         openedPage = page;
         emitLiveStage("OPEN_RETURN_DONE");
+        handoff.onReady?.();
         return;
       };
       // Do not expose the async runner promise to the scenario callback. A
       // protected runner can inspect thenables across the Playwright realm;
       // this fire-and-observe wrapper publishes only through getPage().
-      const open = (role, options) => {
+      const open = (role, options, handoff = {}) => {
         openingError = undefined;
-        void openInternal(role, options).catch((error) => { openingError = error; });
+        void openInternal(role, options, handoff).catch((error) => {
+          openingError = error;
+          handoff.onError?.(error);
+        });
       };
       open.getError = () => openingError;
       try {

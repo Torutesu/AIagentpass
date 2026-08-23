@@ -43,7 +43,10 @@ type InitialStatusGuard = {
 const initialStatusGuardKey = Symbol.for("agentpass.onboarding.initial-status-guard");
 const initialStatusGuards = ((globalThis as unknown as Record<symbol, WeakMap<object, InitialStatusGuard>>)[initialStatusGuardKey]
   ??= new WeakMap<object, InitialStatusGuard>());
-const INITIAL_STATUS_GUARD_MS = 1_000;
+// Hosted CI and first-load cold starts can take several seconds before the
+// status response resolves. Keep the remount handoff alive for that bounded
+// period so a slow first read is not aborted and replayed.
+const INITIAL_STATUS_GUARD_MS = 10_000;
 
 const STEPS = [
   { id: "github", label: "GitHubで本人確認", detail: "GitHub identity" },
