@@ -178,3 +178,26 @@ test("M2-A3 lifecycle: expiry preserves rows and exact revocation serializes wit
   assert.equal(hooked.rows[0].revocation_status, "active");
   await assert.rejects(hookConsumption.consumeAgentSessionGrant(hookInput));
 });
+
+test("M2-A3 lifecycle: device-scoped authority revocation succeeds with no active sessions", {
+  skip: !DATABASE_URL,
+  timeout: 30_000
+}, async (t) => {
+  const fixture = await createAgentSessionHumanHttpFixture({
+    connectionString: DATABASE_URL,
+    applicationVersion: "m2-a3-device-revocation"
+  });
+  t.after(() => fixture.cleanup());
+  const issued = await fixture.repository.issueAgentSessionGrant(fixture.issueInput());
+  const lifecycle = createPostgresAgentSessionLifecycleRepository({ client: fixture.pool });
+  const result = await lifecycle.revokeAuthority({
+    organization_id: fixture.ids.organization,
+    device_id: fixture.ids.device
+  });
+  assert.deepEqual(result, [1, 0]);
+  const state = await fixture.pool.query(
+    "SELECT status FROM agent_session_grants WHERE organization_id=$1 AND grant_id=$2",
+    [fixture.ids.organization, issued.grant.statement.grant_id]
+  );
+  assert.equal(state.rows[0]?.status, "revoked");
+});
