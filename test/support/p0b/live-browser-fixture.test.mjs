@@ -9,6 +9,7 @@ import {
   classifyStoredSessionState,
   findExactActiveRecentAuthSession,
   P0BLiveBrowserFixtureError,
+  runP0BPageEvaluate,
   runP0BLifecycle,
   startP0BLiveBrowserFixture
 } from "./live-browser-fixture.mjs";
@@ -66,6 +67,22 @@ test("bounded lifecycle clears its timer after success", async () => {
     timeoutCode: "startup_timeout"
   });
   assert.equal(result, "ready");
+});
+
+test("page evaluation timeout closes the browser context", async () => {
+  let contextClosed = false;
+  const page = {
+    evaluate: () => new Promise(() => {}),
+    context: () => ({ close: async () => { contextClosed = true; } }),
+    goto: async () => {},
+    setExtraHTTPHeaders: async () => {}
+  };
+  await assert.rejects(
+    runP0BPageEvaluate(page, () => "never", undefined, { timeoutMs: 5 }),
+    (error) => error instanceof P0BLiveBrowserFixtureError && error.code === "page_evaluate_timeout"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contextClosed, true);
 });
 
 test("bootstrap 502 classification exposes only fixed failure classes", () => {

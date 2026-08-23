@@ -14,6 +14,7 @@ const SESSION_PATH = "/api/auth/session";
 const SESSION_CORRELATION_HEADER = "agentpass-p0b-session-correlation";
 const DEFAULT_STARTUP_TIMEOUT_MS = 90_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
+const PAGE_EVALUATE_TIMEOUT_MS = 30_000;
 const USER_EMAILS = Object.freeze({
   owner: "p0b-owner@example.test",
   admin: "p0b-admin@example.test",
@@ -72,6 +73,25 @@ export function runP0BLifecycle(operation, {
         clearTimeout(timer);
         reject(error);
       });
+  });
+}
+
+/**
+ * Bound a Playwright page evaluation and close its context if the browser
+ * protocol itself stops responding. Playwright's default timeout does not
+ * cover Frame.evaluate, so an outer lifecycle deadline is required here.
+ */
+export function runP0BPageEvaluate(page, pageFunction, arg, { timeoutMs = PAGE_EVALUATE_TIMEOUT_MS } = {}) {
+  assertPage(page);
+  if (typeof pageFunction !== "function") throw new TypeError("P0-B page evaluation must be a function");
+  return runP0BLifecycle(() => page.evaluate(pageFunction, arg), {
+    timeoutMs,
+    timeoutCode: "page_evaluate_timeout",
+    timeoutMessage: "P0-B browser page evaluation timed out",
+    onTimeout: () => {
+      const context = typeof page.context === "function" ? page.context() : null;
+      return context?.close?.();
+    }
   });
 }
 
@@ -235,7 +255,7 @@ export async function startP0BLiveBrowserFixture({
         // and the exact production session endpoint.
         await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
         stage = "response";
-        const response = await page.evaluate(async (sessionPath) => {
+        const response = await runP0BPageEvaluate(page, async (sessionPath) => {
           for (let attempt = 0; attempt < 8; attempt += 1) {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 10_000);
@@ -295,17 +315,24 @@ export async function startP0BLiveBrowserFixture({
       assertPage(page);
       try {
         roleDescriptor(safeSeed, role);
-        const cdp = await page.context().newCDPSession(page);
-        await cdp.send("WebAuthn.enable");
-        await cdp.send("WebAuthn.addVirtualAuthenticator", {
-          options: {
-            protocol: "ctap2",
-            transport: "internal",
-            hasResidentKey: true,
-            hasUserVerification: true,
-            automaticPresenceSimulation: true,
-            isUserVerified: true
-          }
+        await runP0BLifecycle(async () => {
+          const cdp = await page.context().newCDPSession(page);
+          await cdp.send("WebAuthn.enable");
+          await cdp.send("WebAuthn.addVirtualAuthenticator", {
+            options: {
+              protocol: "ctap2",
+              transport: "internal",
+              hasResidentKey: true,
+              hasUserVerification: true,
+              automaticPresenceSimulation: true,
+              isUserVerified: true
+            }
+          });
+        }, {
+          timeoutMs: PAGE_EVALUATE_TIMEOUT_MS,
+          timeoutCode: "cdp_timeout",
+          timeoutMessage: "P0-B WebAuthn CDP operation timed out",
+          onTimeout: () => page.context().close().catch(() => {})
         });
       } catch {
         throw new P0BLiveBrowserFixtureError("webauthn_unavailable", "P0-B WebAuthn virtual authenticator is unavailable");
@@ -319,7 +346,7 @@ export async function startP0BLiveBrowserFixture({
       if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
       if (state.registered) return Object.freeze({ registered: true });
       try {
-        const result = await page.evaluate(async ({ organizationId, csrfToken }) => {
+        const result = await runP0BPageEvaluate(page, async ({ organizationId, csrfToken }) => {
           const toBytes = (value) => {
             const padding = "=".repeat((4 - (value.length % 4)) % 4);
             const binary = atob(value.replaceAll("-", "+").replaceAll("_", "/") + padding);
@@ -433,7 +460,7 @@ export async function startP0BLiveBrowserFixture({
       const state = pageState.get(page);
       let authorizationId;
       try {
-        authorizationId = await page.evaluate(async ({ organizationId, csrfToken, operation }) => {
+        authorizationId = await runP0BPageEvaluate(page, async ({ organizationId, csrfToken, operation }) => {
           const toBytes = (value) => {
             const padding = "=".repeat((4 - (value.length % 4)) % 4);
             const binary = atob(value.replaceAll("-", "+").replaceAll("_", "/") + padding);

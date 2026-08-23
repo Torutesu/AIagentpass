@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { chromium } from "../apps/web-console/node_modules/@playwright/test/index.mjs";
 import { P0BSkip } from "./support/p0b/harness.mjs";
-import { P0BLiveBrowserFixtureError, runP0BLifecycle, startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
+import { P0BLiveBrowserFixtureError, runP0BPageEvaluate, runP0BLifecycle, startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
 
 // Keep supervisor diagnostics fixed and secret-free when the browser child
 // exits before Node's TAP reporter can serialize a test failure.
@@ -50,7 +50,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
     try {
       await wake.focus();
-      assert.equal(await wake.evaluate((element) => element === document.activeElement), true);
+      assert.equal(await boundedUiOperation(page, () => wake.evaluate((element) => element === document.activeElement)), true);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
     let refreshRequestObserved = false;
     let refreshRequestFailed = false;
@@ -66,7 +66,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       sessionObserved: false,
       sessionFailed: false,
       sessionStatus: null,
-      webAuthnSupported: await page.evaluate(() => typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function"),
+      webAuthnSupported: await runP0BPageEvaluate(page, () => typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function").catch(() => false),
     };
     page.on("request", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
@@ -105,7 +105,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const confirm = card.getByRole("button", { name: "確認して送信" });
     try {
       await confirm.focus();
-      assert.equal(await confirm.evaluate((element) => element === document.activeElement), true);
+      assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
       await confirm.press("Enter");
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     const refreshResponse = await refreshResponsePromise;
@@ -243,7 +243,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 });
 
 async function requestRefreshStatus(page, { authorizationId, csrfToken, targetId }) {
-  return page.evaluate(async ({ authorizationId, csrfToken, targetId }) => {
+  return runP0BPageEvaluate(page, async ({ authorizationId, csrfToken, targetId }) => {
     const response = await fetch("/api/console?operation=device.refresh.request", {
       method: "POST",
       headers: {
