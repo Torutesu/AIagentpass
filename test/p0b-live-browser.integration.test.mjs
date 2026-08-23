@@ -21,6 +21,21 @@ const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
 const UI_ASSERTION_TIMEOUT_MS = 30_000;
 const SCENARIO_RUNTIME_TIMEOUT_MS = 210_000;
+const SCENARIO_NAMES = Object.freeze([
+  "renders all six real PostgreSQL device states",
+  "accepts keyboard wake from the real pending device",
+  "shows accepted, coalesced, and no-pending outcomes from the real wake ledger",
+  "admin completes real WebAuthn and wake mutation",
+  "auditor receives no wake mutation control",
+  "viewer receives no wake mutation control",
+  "owner without an available authenticator fails before wake mutation",
+  "owner stale authorization is rejected by the real Cloud boundary",
+  "owner replayed authorization is rejected by the real Cloud boundary",
+  "owner cross_operation authorization is rejected by the real Cloud boundary",
+  "owner cross_tenant authorization is rejected by the real Cloud boundary",
+  "owner completes distinct real WebAuthn device revoke",
+  "admin completes distinct real WebAuthn device revoke"
+]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
 
@@ -415,7 +430,8 @@ async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
   selectedScenarioCount += 1;
   const scenarioOrdinal = selectedScenarioCount;
-  emitLiveStage(`SCENARIO_${String(scenarioOrdinal).padStart(2, "0")}`);
+  const scenarioId = SCENARIO_NAMES.indexOf(name) + 1;
+  emitLiveStage(`SCENARIO_${String(scenarioId > 0 ? scenarioId : scenarioOrdinal).padStart(2, "0")}`);
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
