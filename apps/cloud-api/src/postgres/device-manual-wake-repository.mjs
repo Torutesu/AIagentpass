@@ -46,7 +46,7 @@ export function createPostgresDeviceManualWakeRepository({
       try {
         return await requestDeviceManualWakeInTransaction({ ...input, ...values });
       } catch (error) {
-        if (error?.code === "ERR_DATABASE" && error?.cause?.code === "42501") {
+        if (error?.code === "ERR_DATABASE") {
           try {
             const probe = await diagnosticClient.query(`SELECT current_user, session_user,
                 has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
@@ -66,7 +66,7 @@ export function createPostgresDeviceManualWakeRepository({
     try {
       return await inTransaction((tx) => requestDeviceManualWakeInTransaction({ ...input, ...values, tx }));
     } catch (error) {
-      if (error?.code === "ERR_DATABASE" && error?.cause?.code === "42501") {
+      if (error?.code === "ERR_DATABASE") {
         try {
           const probe = await diagnosticClient.query(`SELECT current_user, session_user,
               has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
