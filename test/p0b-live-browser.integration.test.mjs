@@ -66,10 +66,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       optionsFailed: false,
       optionsStatus: null,
       optionsResponse: null,
+      optionsErrorCodePromise: null,
       verifyObserved: false,
       verifyFailed: false,
       verifyStatus: null,
       verifyResponse: null,
+      verifyErrorCodePromise: null,
       sessionObserved: false,
       sessionFailed: false,
       sessionStatus: null,
@@ -94,10 +96,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       if (phase === "options") {
         recentAuthObservation.optionsStatus = response.status();
         recentAuthObservation.optionsResponse = response;
+        if (response.status() >= 400) recentAuthObservation.optionsErrorCodePromise = safeRecentAuthErrorCode(response, page);
       }
       if (phase === "verify") {
         recentAuthObservation.verifyStatus = response.status();
         recentAuthObservation.verifyResponse = response;
+        if (response.status() >= 400) recentAuthObservation.verifyErrorCodePromise = safeRecentAuthErrorCode(response, page);
       }
       if (isKeyboardSessionRequest(response.request())) recentAuthObservation.sessionStatus = response.status();
     });
@@ -128,7 +132,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       assert.match(await requireWakeStatus(page, card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
       if (recentAuthObservation.optionsStatus >= 500) {
-        const code = await safeRecentAuthErrorCode(recentAuthObservation.optionsResponse, page);
+        const code = await (recentAuthObservation.optionsErrorCodePromise ?? safeRecentAuthErrorCode(recentAuthObservation.optionsResponse, page));
         if (/^[a-z][a-z0-9_]{0,63}$/u.test(code ?? "")) process.stdout.write(`P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}\n`);
       }
       assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed, recentAuthObservation }, page));
