@@ -33,6 +33,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
     await open("owner");
+    emitLiveStage("ASSERTION_AFTER_OPEN_RESUME");
     const page = getPage();
     markPhase("after_open");
     emitLiveStage("ASSERTION_OPEN_RETURNED");
