@@ -365,10 +365,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
         const consoleDiagnostics = fixture?.consoleFailureDiagnostics?.() ?? [];
         if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorSource === "cloud") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorSource === "console") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_CONSOLE_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED";
-        else if (role === "owner" && revokeErrorCode === "internal_error") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED";
+        if (role === "owner" && revokeErrorSource === "cloud") throw new Error("P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED");
+        if (role === "owner" && revokeErrorSource === "console") throw new Error("P0B_SAFE_OWNER_FINAL_STOP_CONSOLE_ERROR_FAILED");
+        if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") throw new Error("P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED");
+        if (role === "owner" && revokeErrorCode === "internal_error") throw new Error("P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED");
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
