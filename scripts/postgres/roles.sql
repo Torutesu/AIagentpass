@@ -557,4 +557,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT EXECUTE ON FUNCTIONS TO agentpass_migrator;
 
+-- Manual wake performs a read-only active-membership check in its caller
+-- transaction. Reassert this narrow read grant after reconciliation.
+DO $$
+BEGIN
+  IF to_regclass('public.memberships') IS NOT NULL THEN
+    GRANT SELECT ON TABLE public.memberships TO agentpass_app;
+  END IF;
+END
+$$;
+
 COMMIT;
