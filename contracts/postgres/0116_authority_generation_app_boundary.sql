@@ -35,10 +35,10 @@ BEGIN
   FOR UPDATE;
 
   next_generation := COALESCE(current_generation, 0) + 1;
-  UPDATE public.control_plane_authority_generations
-  SET superseded_at = COALESCE(superseded_at, request_issued_at)
-  WHERE organization_id = request_organization_id
-    AND superseded_at IS NULL;
+  UPDATE public.control_plane_authority_generations AS authority
+  SET superseded_at = COALESCE(authority.superseded_at, request_issued_at)
+  WHERE authority.organization_id = request_organization_id
+    AND authority.superseded_at IS NULL;
 
   INSERT INTO public.control_plane_authority_generations (organization_id, generation, issued_at)
   VALUES (request_organization_id, next_generation, request_issued_at);

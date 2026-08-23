@@ -1,9 +1,8 @@
 BEGIN;
 
--- 0116 introduced the application boundary for authority generation. Qualify
--- the selected catalog columns because RETURNS TABLE exposes an OUT variable
--- named generation, which otherwise makes PostgreSQL reject the function as
--- ambiguous before a device revoke can advance the generation.
+-- Complete the OUT-parameter qualification for installations that already
+-- applied 0116 or 0117. Every catalog reference is explicit so the online
+-- revoke path remains executable under PostgreSQL's PL/pgSQL name rules.
 CREATE OR REPLACE FUNCTION public.agentpass_advance_authority_generation(
   request_organization_id uuid,
   request_issued_at timestamptz DEFAULT clock_timestamp()
