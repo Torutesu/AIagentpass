@@ -358,6 +358,12 @@ async function scenario(parent, name, callback) {
               summaryBodyCode = null;
               if (summaryStatus >= 500) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_STATUS status=${summaryStatus}\n`);
               if (summaryStatus >= 500) {
+                let statusText = "none";
+                try {
+                  const candidateStatusText = response.statusText();
+                  if (typeof candidateStatusText === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(candidateStatusText)) statusText = candidateStatusText;
+                } catch {}
+                process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_CODE code=${statusText}\n`);
                 let responseHeaders = {};
                 try {
                   const candidateHeaders = response.headers();

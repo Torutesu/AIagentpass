@@ -1744,6 +1744,7 @@ function errorResponse(error) {
 function jsonResponse(status, body, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
+    statusText: typeof extraHeaders["x-agentpass-error-code"] === "string" ? extraHeaders["x-agentpass-error-code"] : "",
     headers: {
       "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",

@@ -178,7 +178,7 @@ export function runQualificationCommand(command, args, options) {
     const bytes = asBytes(chunk);
     const previous = stream === "stdout" ? stdoutDiagnosticTail : stderrDiagnosticTail;
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
-    for (const match of candidate.toString("utf8").matchAll(/P0B_DIAGNOSTIC_(?:SUMMARY_STATUS status=\d{3}|SUMMARY_HEADER status=\d{3} code=(?:[a-z][a-z0-9_]{0,63}|none) content_type=(?:json|other)|SUMMARY_REFRESH code=[A-Za-z0-9_.:-]{1,96}|SUMMARY_PARSE path=[.$\w\[\]]{1,128} reason=[a-z_]{1,64}|SUMMARY_RESPONSES statuses=\d{3}(?:,\d{3}){0,7})/gu)) {
+    for (const match of candidate.toString("utf8").matchAll(/P0B_DIAGNOSTIC_(?:SUMMARY_CODE code=(?:[a-z][a-z0-9_]{0,63}|none)|SUMMARY_STATUS status=\d{3}|SUMMARY_HEADER status=\d{3} code=(?:[a-z][a-z0-9_]{0,63}|none) content_type=(?:json|other)|SUMMARY_REFRESH code=[A-Za-z0-9_.:-]{1,96}|SUMMARY_PARSE path=[.$\w\[\]]{1,128} reason=[a-z_]{1,64}|SUMMARY_RESPONSES statuses=\d{3}(?:,\d{3}){0,7})/gu)) {
       if (diagnostics.size < 8) diagnostics.add(match[0]);
     }
     const next = candidate.byteLength <= DIAGNOSTIC_TAIL_BYTES
