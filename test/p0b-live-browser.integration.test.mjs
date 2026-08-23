@@ -333,7 +333,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         markPhase("after_open");
       let revokeStatus = null;
       let revokeErrorCode = null;
-      let revokeErrorSource = null;
       const observeRevokeResponse = (response) => {
         try {
           const url = new URL(response.url());
@@ -341,8 +340,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
             revokeStatus = response.status();
             const code = response.headers()["x-agentpass-error-code"];
             if (/^[a-z][a-z0-9._:-]{0,63}$/u.test(code ?? "")) revokeErrorCode = code;
-            const source = response.headers()["x-agentpass-error-source"];
-            if (source === "cloud" || source === "console") revokeErrorSource = source;
             if (response.status() >= 500) writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE_RESPONSE status=${response.status()} code=${revokeErrorCode ?? "none"}\n`);
           }
         } catch {}
@@ -365,8 +362,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
         const consoleDiagnostics = fixture?.consoleFailureDiagnostics?.() ?? [];
         if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorSource === "cloud") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorSource === "console") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_CONSOLE_ERROR_FAILED";
         else if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED";
         else if (role === "owner" && revokeErrorCode === "internal_error") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED";
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
