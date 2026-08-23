@@ -5,6 +5,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const config = fs.readFileSync(path.join(root, "playwright.config.ts"), "utf8");
+const viteConfig = fs.readFileSync(path.join(root, "vite.config.ts"), "utf8");
 const packageManifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const runner = fs.readFileSync(path.join(root, "scripts", "run-browser-e2e.mjs"), "utf8");
 const ciWorkflow = fs.readFileSync(path.resolve(root, "..", "..", ".github/workflows/ci.yml"), "utf8");
@@ -24,6 +25,12 @@ test("browser E2E has a deterministic loopback server contract", () => {
   assert.match(runner, /delete env\.NODE_DEBUG/);
   assert.match(runner, /server\.once\("error"/u);
   assert.match(runner, /child\.once\("error"/u);
+  assert.match(runner, /detached: detachedProcessGroup/u);
+  assert.match(runner, /process\.kill\(-child\.pid, signal\)/u);
+  assert.match(runner, /AGENTPASS_BROWSER_E2E_MANAGED_SERVER: "true"/u);
+  assert.match(viteConfig, /AGENTPASS_BROWSER_E2E_MANAGED_SERVER/u);
+  assert.match(viteConfig, /managedBrowserE2e\s*\? \[\]/u);
+  assert.match(viteConfig, /cloudflare\(/u);
   assert.match(runner, /port_collision/);
   assert.match(runner, /sandbox_eperm/);
   assert.match(runner, /status: "not_run"/);

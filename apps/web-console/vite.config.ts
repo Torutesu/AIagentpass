@@ -39,6 +39,7 @@ export default defineConfig(async () => {
   process.env.WRANGLER_WRITE_LOGS ??= "false";
   process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
+  const managedBrowserE2e = process.env.AGENTPASS_BROWSER_E2E_MANAGED_SERVER === "true";
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
@@ -50,13 +51,17 @@ export default defineConfig(async () => {
     plugins: [
       vinext(),
       sites(),
-      cloudflare({
-        // Browser qualification must not open an unrelated inspector listener.
-        // The inspector is not part of the Console runtime contract.
-        inspectorPort: false,
-        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-        config: localBindingConfig,
-      }),
+      ...(managedBrowserE2e
+        ? []
+        : [
+            cloudflare({
+              // Browser qualification must not open an unrelated inspector listener.
+              // The inspector is not part of the Console runtime contract.
+              inspectorPort: false,
+              viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+              config: localBindingConfig,
+            }),
+          ]),
     ],
   };
 });

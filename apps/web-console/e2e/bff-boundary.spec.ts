@@ -124,7 +124,7 @@ test("passes the real browser session, CSRF, and WebAuthn transport through the 
 
   const organization = await browserJson(page, `/api/console?resource=organization`);
   expect(organization.status).toBe(200);
-  expect(organization.cacheControl).toBe("no-store, max-age=0");
+  expect(organization.cacheControl).toBe("no-store");
   expect(organization.body).toMatchObject({ organization: { organization_id: BFF_ORGANIZATION_ID } });
 
   const observations = cloud?.observations() ?? [];
@@ -161,7 +161,7 @@ test("fails closed when the same browser session is downgraded or expires", asyn
   cloud?.setState({ mode: "expired" });
   const expired = await browserJson(page, `/api/console?resource=organization`);
   expect(expired.status).toBe(401);
-  expect(expired.body).toMatchObject({ error: { code: "cloud_api_error", message: "Cloud API request failed" } });
+  expect(expired.body).toMatchObject({ error: { code: "session_expired", message: "Cloud API request failed" } });
   expect(JSON.stringify(expired.body)).not.toContain("fixture-session_expired");
 
   cloud?.setState({ mode: "revoked" });

@@ -202,15 +202,16 @@ test("posts the exact bound envelope and marks delivery only after the exact ACK
   await assertNoHandoffSecret(page, state, NONCE, ENROLLMENT_SECRET);
 });
 
-test("keeps the one-time manual fallback when the ACK is not exact", async ({ page }) => {
+test("fails closed without rendering a credential when the ACK is not exact", async ({ page }) => {
   const state = await openLiveSetup(page, HandoffMode.invalidAck);
   await page.getByLabel("端末名").fill("Fallback handoff Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("標準入力");
-  await expect(page.locator(".secret-output")).toContainText(ENROLLMENT_SECRET);
+  await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("自動受け渡しに失敗しました");
+  await expect(page.locator(".secret-output")).toHaveCount(0);
   expect(state.postBodies).toHaveLength(1);
   expect((await browserStorageSnapshot(page)).local).toEqual({});
   expect((await browserStorageSnapshot(page)).session).toEqual({});
+  expect((await page.locator("body").textContent()) ?? "").not.toContain(ENROLLMENT_SECRET);
 });
 
 test.afterEach(async ({ page }) => {

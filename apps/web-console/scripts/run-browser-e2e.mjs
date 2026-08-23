@@ -34,6 +34,8 @@ function classifyError(error, fallback = "loopback_unavailable") {
   return fallback;
 }
 
+const detachedProcessGroup = process.platform !== "win32";
+
 function requestReady() {
   return new Promise((resolve) => {
     const request = http.get(`http://127.0.0.1:${port}/`, (response) => {
@@ -59,10 +61,21 @@ function collectResults(suite, results) {
 
 async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
+  const signalChild = (signal) => {
+    if (detachedProcessGroup && child.pid) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    child.kill(signal);
+  };
+  signalChild("SIGTERM");
   await new Promise((resolve) => {
     const timer = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null) signalChild("SIGKILL");
       resolve();
     }, 5_000);
     timer.unref?.();
@@ -80,6 +93,7 @@ function serverEnvironment() {
   return {
     ...env,
     NODE_ENV: "test",
+    AGENTPASS_BROWSER_E2E_MANAGED_SERVER: "true",
     AGENTPASS_CLOUD_API_URL: cloudUrl,
     AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API: "true",
     AGENTPASS_ORGANIZATION_ID: organizationId,
@@ -92,6 +106,7 @@ const server = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "
   env: serverEnvironment(),
   stdio: ["ignore", "ignore", "pipe"],
   shell: false,
+  detached: detachedProcessGroup,
 });
 let serverStderr = "";
 let serverSpawnError;

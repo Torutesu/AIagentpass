@@ -519,6 +519,7 @@ for (const role of ["owner", "admin"] as const) {
         path: `/api/auth/organizations/${ORGANIZATION_ID}/invitations/${INVITATION_ID}/revoke`,
         body: {},
         ifMatch: '"2"',
+        recentAuth: AUTHORIZATION_ID,
       });
       assertOrganizationMutation(roleRequest, {
         method: "PATCH",

@@ -45,7 +45,7 @@ const DATE = "2026-08-12T00:00:00.000Z";
 const REQUEST_ID = "69999999-9999-4999-8999-999999999999";
 const ROLE_MEMBER_MEMBERSHIP_ID = "34444444-4444-4444-8444-444444444444";
 const INVITATION_ID = "85555555-5555-4555-8555-555555555555";
-const INVITATION_TOKEN = "one-time-invitation-token-for-e2e";
+const INVITATION_TOKEN = "one-time-invitation-token-for-e2e-123456789";
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,254}$/u;
 const activeAuthenticators = new WeakMap<Page, VirtualAuthenticator>();
 
@@ -140,7 +140,7 @@ async function installRoutes(page: Page, failure: FailureMode): Promise<Mutation
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === "/api/auth/session") return json(route, session("owner"));
+    if (url.pathname === "/api/auth/session" || url.pathname === "/api/auth/session/resume") return json(route, session("owner"));
     if (url.pathname === "/api/auth/webauthn/options" && request.method() === "POST") {
       state.authenticationOptions.push(parseRequestBody(route));
       return json(route, { challenge_id: "57777777-7777-4777-8777-777777777777", options: authenticationOptions() });
@@ -282,8 +282,8 @@ test("fails closed when a mocked role change returns a stale version", async ({ 
 
 test("fails closed when a mocked member revoke is forbidden", async ({ page }) => {
   const state = await openOrganization(page, "member_forbidden");
-  await page.getByRole("button", { name: "監査担当を削除", exact: true }).click();
-  await page.getByRole("button", { name: "削除を確定", exact: true }).click();
+  await page.getByRole("button", { name: "監査担当のアクセスを失効", exact: true }).click();
+  await page.getByRole("button", { name: "失効を確定", exact: true }).click();
 
   await expect(page.getByRole("alert")).toContainText("この操作を実行する権限がありません");
   await expect(page.locator(`#member-details-${OTHER_MEMBER_ID}`)).toHaveText("Auditor · 有効 · v1");
@@ -296,7 +296,7 @@ test("fails closed on a mocked stale invitation revoke and restores the pending 
   const state = await openOrganization(page, "invitation_stale");
   await page.getByRole("button", { name: "Viewer招待を取り消す", exact: true }).click();
 
-  await expect(page.getByRole("alert")).toContainText("他の管理者が先に変更しました");
+  await expect(page.getByRole("alert")).toContainText("招待の状態が別の操作で変わったため");
   const row = page.locator("li.organization-list-row").filter({ hasText: "Viewer 招待" });
   await expect(row).toHaveAttribute("data-state", "pending");
   await expect(row).toContainText("有効 · 有効期限");
@@ -308,8 +308,8 @@ test("fails closed on a mocked idempotency conflict without accepting optimistic
   const state = await openOrganization(page, "invitation_idempotency");
   await page.getByRole("button", { name: "Viewer招待を取り消す", exact: true }).click();
 
-  await expect(page.getByRole("alert")).toContainText("同じ操作がすでに別の結果として受け付けられています");
-  await expect(page.getByRole("button", { name: "最新状態を確認", exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("招待の状態が別の操作で変わったため");
+  await expect(page.getByRole("button", { name: "最新情報を読み込む", exact: true })).toBeVisible();
   const row = page.locator("li.organization-list-row").filter({ hasText: "Viewer 招待" });
   await expect(row).toHaveAttribute("data-state", "pending");
   await expect(row.getByRole("button", { name: "Viewer招待を取り消す", exact: true })).toBeVisible();
@@ -323,9 +323,9 @@ test("fails closed when a mocked invitation replay is rejected", async ({ page }
   await tokenInput.fill(INVITATION_TOKEN);
   await page.getByRole("button", { name: "招待を受け入れる", exact: true }).click();
 
-  await expect(page.getByRole("alert")).toContainText("すでに使用されています");
-  await expect(page.getByRole("button", { name: "招待情報を更新", exact: true })).toBeVisible();
-  await expect(tokenInput).toHaveValue(INVITATION_TOKEN);
+  await expect(page.getByRole("alert")).toContainText("招待の状態を確認できなかったため");
+  await expect(page.getByRole("button", { name: "最新情報を読み込む", exact: true })).toBeVisible();
+  await expect(tokenInput).toHaveValue("");
   await expect(page.getByRole("heading", { name: "招待トークン（一度だけ表示）" })).toHaveCount(0);
   expect(state.acceptedInvitationCalls).toBe(1);
   assertIdempotentMutation(state, "/api/auth/invitations/accept", "POST");
