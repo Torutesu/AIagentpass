@@ -37,7 +37,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
       ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
       ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
-    ].map(([label, safeCode]) => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
+    ].map(([label, safeCode]) => boundedUiOperation(
+      page,
+      () => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
+    )
       .catch(() => assert.fail(safeCode))));
   });
 
@@ -181,7 +184,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_WAKE_CLICK_FAILED"); }
     try { await card.getByRole("button", { name: "確認して送信" }).click(); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED"); }
-    try { await card.getByRole("alert").waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS }); }
+    try { await boundedUiOperation(page, () => card.getByRole("alert").waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED"); }
     try { assert.equal(mutation.count(), 0); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_MUTATION_FAILED"); }
@@ -231,7 +234,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const device = page.getByRole("listitem").filter({ hasText: deviceName });
       try { await device.getByRole("button", { name: "停止" }).click(); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("owner final stop failed"); }
-      try { await page.getByText(`${deviceName}を停止しました`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS }); }
+      try { await boundedUiOperation(page, () => page.getByText(`${deviceName}を停止しました`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("owner final confirmation failed"); }
     });
   }
@@ -527,6 +530,15 @@ async function scenario(parent, name, callback) {
 
 function emitLiveStage(stage) {
   if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
+}
+
+function boundedUiOperation(page, operation) {
+  return runP0BLifecycle(operation, {
+    timeoutMs: UI_ASSERTION_TIMEOUT_MS,
+    timeoutCode: "ui_assertion_timeout",
+    timeoutMessage: "P0-B browser UI assertion timed out",
+    onTimeout: () => page.context().close().catch(() => {})
+  });
 }
 
 async function closeBrowserResources(browser, contexts) {
