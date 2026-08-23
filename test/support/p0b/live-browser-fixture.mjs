@@ -161,6 +161,9 @@ export async function startP0BLiveBrowserFixture({
         timeoutMs: startupTimeoutMs,
         timeoutCode: "startup_timeout",
         timeoutMessage: "P0-B live browser fixture startup timed out",
+        onTimeout: () => {
+          if (env?.P0B_LIVE_BROWSER === "1") process.stderr.write("P0B_SAFE_LIFECYCLE_STARTUP_TIMEOUT_FAILED\n");
+        },
         onLateSuccess: (lateHarness) => lateHarness?.close?.()
       });
   } catch (error) {

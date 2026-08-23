@@ -276,6 +276,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_LIFECYCLE_DATABASE_SCHEMA_CONNECTION_FAILED", "lifecycle_database_schema_connection"],
   [null, "P0B_SAFE_LIFECYCLE_DATABASE_SCHEMA_QUERY_FAILED", "lifecycle_database_schema_query"],
   [null, "P0B_SAFE_LIFECYCLE_EXTERNAL_DEPENDENCY_FAILED", "lifecycle_external_dependency"],
+  [null, "P0B_SAFE_LIFECYCLE_STARTUP_TIMEOUT_FAILED", "lifecycle_startup_timeout"],
   [null, "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED", "lifecycle_browser_startup_timeout"],
   [null, "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED", "lifecycle_browser_start"],
   [null, "P0B_SAFE_LIFECYCLE_CLOUD_START_FAILED", "lifecycle_cloud_start"],
