@@ -1527,6 +1527,9 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
   const safe = sanitizeValue(parsed, config.secrets);
   if (!response.ok) {
     const diagnosticCode = response.headers?.get("x-agentpass-diagnostic-code") ?? undefined;
+    if (globalThis.process?.env?.P0B_LIVE_BROWSER === "1") {
+      process.stderr.write(`P0B_CLOUD_RESPONSE status=${response.status} diagnostic=${diagnosticCode ?? "none"} body=${JSON.stringify(safe)}\n`);
+    }
     throw new CloudResponseError(response.status, safe, config.secrets, diagnosticCode);
   }
   const successBody = preserveOneTimeCredential ? parsed : safe;
