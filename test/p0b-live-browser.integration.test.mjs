@@ -616,7 +616,10 @@ async function scenario(parent, name, callback) {
             ? "timeout"
             : "other";
       writeSync(2, `P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=${callbackPhase}\n`);
-      writeSync(2, `P0B_SAFE_SCENARIO_ERROR_${scenarioErrorKind.toUpperCase()}_FAILED\n`);
+      const phaseMarker = callbackPhase === "after_open"
+        ? `P0B_SAFE_SCENARIO_ERROR_${scenarioErrorKind.toUpperCase()}_AFTER_OPEN_FAILED`
+        : `P0B_SAFE_SCENARIO_ERROR_${scenarioErrorKind.toUpperCase()}_BEFORE_OPEN_FAILED`;
+      writeSync(2, `${phaseMarker}\n`);
       if (lifecycleFailureMarker(scenarioError) === null) {
         process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
       }

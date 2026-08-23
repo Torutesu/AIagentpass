@@ -110,6 +110,8 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_SCENARIO_ERROR_FIXTURE_FAILED", "scenario_error_fixture"],
   [null, "P0B_SAFE_SCENARIO_ERROR_TIMEOUT_FAILED", "scenario_error_timeout"],
   [null, "P0B_SAFE_SCENARIO_ERROR_OTHER_FAILED", "scenario_error_other"],
+  [null, "P0B_SAFE_SCENARIO_ERROR_OTHER_AFTER_OPEN_FAILED", "scenario_error_other_after_open"],
+  [null, "P0B_SAFE_SCENARIO_ERROR_OTHER_BEFORE_OPEN_FAILED", "scenario_error_other_before_open"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_01_FAILED", "scenario_unclassified_01"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_02_FAILED", "scenario_unclassified_02"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_03_FAILED", "scenario_unclassified_03"],
