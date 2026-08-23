@@ -685,7 +685,11 @@ export async function main(argv = process.argv.slice(2)) {
           },
           timeoutMs: BROWSER_TIMEOUT_MS,
           safeFailureMarkers: LIVE_BROWSER_SAFE_FAILURE_MARKERS,
-          terminateOnSafeFailure: true,
+          // The scenario runner owns the isolated child boundary and emits
+          // the final fixed stage trace before returning its non-zero status.
+          // Do not terminate it from this parent on the first marker, or the
+          // trace can be lost in the signal race.
+          terminateOnSafeFailure: false,
           onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
         commands.push(commandEvidence("browser-e2e", ["node", ...childArgs], "repository", result));
