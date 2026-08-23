@@ -1,10 +1,9 @@
 BEGIN;
 
--- Authority reductions advance the organization generation from the online
--- application role. Keep the mutation function-only: the application role
--- may not lock or update the generation/catalog tables directly, while the
--- migrator-owned SECURITY DEFINER function performs the exact tenant-scoped
--- transition and refreshes the row-level lock boundary.
+-- 0116 introduced the application boundary for authority generation. Qualify
+-- the selected catalog columns because RETURNS TABLE exposes an OUT variable
+-- named generation, which otherwise makes PostgreSQL reject the function as
+-- ambiguous before a device revoke can advance the generation.
 CREATE OR REPLACE FUNCTION public.agentpass_advance_authority_generation(
   request_organization_id uuid,
   request_issued_at timestamptz DEFAULT clock_timestamp()
