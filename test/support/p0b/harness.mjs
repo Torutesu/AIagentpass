@@ -487,9 +487,9 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       },
       consoleFailureDiagnostics() {
         const output = `${consoleProcess?.p0bDiagnostics?.stdout ?? ""}\n${consoleProcess?.p0bDiagnostics?.stderr ?? ""}`;
-        return [...output.matchAll(/P0B_DIAGNOSTIC_(CONSOLE_ERROR|CONSOLE_UPSTREAM_ERROR|CONSOLE_INTERNAL_ERROR) code=([a-z][a-z0-9._:-]{0,63})/gu)]
+        return [...output.matchAll(/P0B_DIAGNOSTIC_CONSOLE_ERROR code=([a-z][a-z0-9._:-]{0,63})/gu)]
           .slice(-4)
-          .map((match) => `P0B_DIAGNOSTIC_${match[1]} code=${match[2]}`);
+          .map((match) => `P0B_DIAGNOSTIC_CONSOLE_ERROR code=${match[1]}`);
       },
       async cloudReadinessState() {
         if (!cloudProcess || cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null) return "unavailable";
