@@ -14,5 +14,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.device_manual_wake_events,
 -- device state is locked. Re-assert the reviewed read/lock boundary here so
 -- databases upgraded from older role bootstrap scripts cannot lose it.
 GRANT SELECT ON TABLE public.memberships TO agentpass_app;
+GRANT SELECT (organization_id, member_id, role, status) ON TABLE public.memberships TO agentpass_app;
 
 COMMIT;

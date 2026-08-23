@@ -563,6 +563,7 @@ DO $$
 BEGIN
   IF to_regclass('public.memberships') IS NOT NULL THEN
     GRANT SELECT ON TABLE public.memberships TO agentpass_app;
+    GRANT SELECT (organization_id, member_id, role, status) ON TABLE public.memberships TO agentpass_app;
   END IF;
 END
 $$;
