@@ -962,12 +962,27 @@ function safeReadinessCode(body) {
 
 function httpsRequest(url, { ca, headers, timeoutMs }) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      callback();
+    };
     const request = https.request({ protocol: url.protocol, hostname: url.hostname, port: url.port, path: `${url.pathname}${url.search}`, method: "GET", ca, rejectUnauthorized: true, headers }, (response) => {
       let body = ""; response.setEncoding("utf8"); response.on("data", (chunk) => { if (body.length < 64 * 1024) body += chunk; });
-      response.on("end", () => resolve({ status: response.statusCode, body }));
+      response.on("end", () => finish(() => resolve({ status: response.statusCode, body })));
     });
-    request.setTimeout(timeoutMs, () => request.destroy(new Error("timeout")));
-    request.once("error", reject); request.end();
+    const deadline = setTimeout(() => {
+      try { request.destroy(new Error("timeout")); } catch {}
+      finish(() => reject(new Error("timeout")));
+    }, timeoutMs);
+    request.setTimeout(timeoutMs, () => {
+      try { request.destroy(new Error("timeout")); } catch {}
+      finish(() => reject(new Error("timeout")));
+    });
+    request.once("error", (error) => finish(() => reject(error)));
+    request.end();
   });
 }
 
