@@ -370,11 +370,14 @@ function withScenarioPage(open, getPage, args, action) {
   return new Promise((resolve, reject) => {
     const handoff = Object.freeze({
       onReady: () => {
+        emitLiveStage("HANDOFF_CALLBACK_START");
         const page = getPage();
         if (page === null) {
+          emitLiveStage("HANDOFF_PAGE_MISSING");
           reject(new Error("P0B live open handoff missing"));
           return;
         }
+        emitLiveStage("HANDOFF_PAGE_READY");
         Promise.resolve().then(() => action(page)).then(resolve, reject);
       },
       onError: reject
