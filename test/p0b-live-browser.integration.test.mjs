@@ -165,7 +165,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     try {
       await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
-      await boundedUiOperation(page, () => confirm.press("Enter"));
+      await boundedUiOperation(page, () => confirm.click());
       recentAuthObservation.wakePendingObserved = await boundedUiOperation(page, () => card.getAttribute("aria-busy"))
         .then((value) => value === "true").catch(() => false);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
@@ -196,6 +196,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const diagnosis = safeCode === "P0B_SAFE_WAKE_ACCEPTED_FAILED" ? observeWakeAttempt(page) : null;
       try {
         await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click());
+        await boundedUiOperation(page, () => card.getByRole("button", { name: "確認して送信" }).click());
         assert.match(await requireWakeStatus(page, card), expected);
       } catch {
         if (diagnosis !== null) {
@@ -211,7 +212,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" })).page;
     const card = deviceCard(page, "反映待ち Mac");
     const diagnosis = observeWakeAttempt(page);
-    try { await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click()); }
+    try {
+      await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click());
+      await boundedUiOperation(page, () => card.getByRole("button", { name: "確認して送信" }).click());
+    }
     catch { assert.fail("P0B_SAFE_ADMIN_WAKE_CLICK_FAILED"); }
     try {
       assert.match(await requireWakeStatus(page, card, "P0B_SAFE_ADMIN_WAKE_UI"), /依頼を受け付けました|既存の依頼へ統合し/u);
