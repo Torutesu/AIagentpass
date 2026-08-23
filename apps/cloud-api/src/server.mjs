@@ -104,6 +104,26 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
   if (operationalProbeSecret !== undefined && (!Buffer.isBuffer(operationalProbeSecret) || operationalProbeSecret.length !== 32)) throw new TypeError("operationalProbeSecret must be an exact 32-byte Buffer");
   if ((readiness !== undefined || operationalMetrics !== undefined) && operationalProbeSecret === undefined) throw new TypeError("operationalProbeSecret is required for operational endpoints");
+  // A hosted readiness report performs database, schema, and managed-signer
+  // checks. The Console fans out several requests at once; running that full
+  // probe once per request can consume the application pool and make the
+  // readiness gate report its own transient saturation. Coalesce concurrent
+  // admission checks and retain only a very short healthy lease. The health
+  // endpoint below remains uncached so operators still get a fresh report.
+  const applicationReadinessCacheTtlMs = 500;
+  let applicationReadinessCache;
+  let applicationReadinessInFlight;
+  async function applicationReadinessReport() {
+    const current = Date.now();
+    if (applicationReadinessCache !== undefined && current < applicationReadinessCache.expiresAt) return applicationReadinessCache.report;
+    if (applicationReadinessInFlight !== undefined) return applicationReadinessInFlight;
+    applicationReadinessInFlight = Promise.resolve().then(() => readiness()).then(publicReadinessReport).catch(() => undefined).then((report) => {
+      if (report?.ready === true) applicationReadinessCache = Object.freeze({ report, expiresAt: Date.now() + applicationReadinessCacheTtlMs });
+      else applicationReadinessCache = undefined;
+      return report;
+    }).finally(() => { applicationReadinessInFlight = undefined; });
+    return applicationReadinessInFlight;
+  }
   const controlBundleSigner = createControlBundleSigner(bundleSigner, now);
   const capabilityAuthoritySigner = createCapabilityAuthoritySigner(capabilitySigner, bundleSigner);
   if (bundleSigner && !bundleSigner.privateKey && enrollmentCredentialSecret === undefined) throw new TypeError("enrollmentCredentialSecret is required with a managed ControlBundle signer");
@@ -142,8 +162,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return report ? send(response, 200, report) : send(response, 503, { version: 1, valid: false, code: "metrics_unavailable" });
       }
       if (readiness) {
-        let report;
-        try { report = publicReadinessReport(await readiness()); } catch { report = undefined; }
+        const report = await applicationReadinessReport();
         if (!report || report.ready !== true) {
           return send(response, 503, { error: { code: "service_not_ready", message: "Service is not ready" }, request_id: crypto.randomUUID() });
         }

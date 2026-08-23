@@ -41,6 +41,29 @@ test("exposes secret-free readiness and metrics while drain rejects new applicat
   assert.equal((await rejected.json()).error.code, "draining");
 });
 
+test("coalesces concurrent application readiness probes without caching health checks", async (t) => {
+  let calls = 0;
+  const server = createCloudApi({
+    store: {},
+    readiness: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { version: 1, ready: true, status: "ready", code: "ready" };
+    },
+    operationalProbeSecret: PROBE_SECRET
+  });
+  const base = startInMemoryHttpServer(server);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const applicationResponses = await Promise.all(Array.from({ length: 4 }, () => fetch(`${base}/v1/organizations/p0b`)));
+  assert.equal(calls, 1);
+  assert.ok(applicationResponses.every((response) => response.status !== 503));
+
+  const health = await fetch(`${base}/health/ready`, { headers: PROBE_HEADERS });
+  assert.equal(health.status, 200);
+  assert.equal(calls, 2);
+});
+
 test("malformed operational providers fail closed without reflecting their values", async (t) => {
   const server = createCloudApi({
     store: {},
