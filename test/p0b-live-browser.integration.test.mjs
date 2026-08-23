@@ -593,6 +593,14 @@ async function scenario(parent, name, callback) {
         process.stderr.write(`${safeMarker}\n`);
         throw scenarioError;
       }
+      const scenarioErrorKind = scenarioError instanceof P0BLiveBrowserFixtureError
+        ? "fixture"
+        : scenarioError?.name === "AssertionError"
+          ? "assertion"
+          : scenarioError?.name === "TimeoutError"
+            ? "timeout"
+            : "other";
+      process.stderr.write(`P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=callback\n`);
       if (lifecycleFailureMarker(scenarioError) === null) {
         process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
       }
