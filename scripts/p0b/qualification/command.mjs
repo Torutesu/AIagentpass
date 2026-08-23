@@ -174,6 +174,19 @@ export function runQualificationCommand(command, args, options) {
   let safeFailureStdoutTail = Buffer.alloc(0);
   let safeFailureStderrTail = Buffer.alloc(0);
   const diagnostics = new Set();
+  const observeDiagnostics = (chunk, stream) => {
+    const bytes = asBytes(chunk);
+    const previous = stream === "stdout" ? stdoutDiagnosticTail : stderrDiagnosticTail;
+    const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
+    for (const match of candidate.toString("utf8").matchAll(/P0B_DIAGNOSTIC_(?:SUMMARY_HEADER status=\d{3} code=(?:[a-z][a-z0-9_]{0,63}|none) content_type=(?:json|other)|SUMMARY_REFRESH code=[A-Za-z0-9_.:-]{1,96}|SUMMARY_PARSE path=[.$\w\[\]]{1,128} reason=[a-z_]{1,64}|SUMMARY_RESPONSES statuses=\d{3}(?:,\d{3}){0,7})/gu)) {
+      if (diagnostics.size < 8) diagnostics.add(match[0]);
+    }
+    const next = candidate.byteLength <= DIAGNOSTIC_TAIL_BYTES
+      ? Buffer.from(candidate)
+      : Buffer.from(candidate.subarray(candidate.byteLength - DIAGNOSTIC_TAIL_BYTES));
+    if (stream === "stdout") stdoutDiagnosticTail = next;
+    else stderrDiagnosticTail = next;
+  };
   let spawnError = false;
   let timedOut = false;
   let callbackFailed = false;
@@ -209,11 +222,6 @@ export function runQualificationCommand(command, args, options) {
     const bytes = asBytes(chunk);
     const previous = stream === "stdout" ? safeFailureStdoutTail : safeFailureStderrTail;
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
-    const diagnosticTail = stream === "stdout" ? stdoutDiagnosticTail : stderrDiagnosticTail;
-    const diagnosticCandidate = diagnosticTail.byteLength === 0 ? bytes : Buffer.concat([diagnosticTail, bytes]);
-    for (const match of diagnosticCandidate.toString("utf8").matchAll(/P0B_DIAGNOSTIC_(?:SUMMARY_HEADER status=\d{3} code=(?:[a-z][a-z0-9_]{0,63}|none) content_type=(?:json|other)|SUMMARY_REFRESH code=[A-Za-z0-9_.:-]{1,96}|SUMMARY_PARSE path=[.$\w\[\]]{1,128} reason=[a-z_]{1,64}|SUMMARY_RESPONSES statuses=\d{3}(?:,\d{3}){0,7})/gu)) {
-      if (diagnostics.size < 8) diagnostics.add(match[0]);
-    }
     for (const entry of safeFailureMarkers) {
       if (includesMarker(candidate, entry.marker)) {
         if (entry.code === "scenario_timeout") {
@@ -249,11 +257,6 @@ export function runQualificationCommand(command, args, options) {
     const nextTail = candidate.byteLength <= tailBytes ? Buffer.from(candidate) : Buffer.from(candidate.subarray(candidate.byteLength - tailBytes));
     if (stream === "stdout") safeFailureStdoutTail = nextTail;
     else safeFailureStderrTail = nextTail;
-    const nextDiagnosticTail = diagnosticCandidate.byteLength <= DIAGNOSTIC_TAIL_BYTES
-      ? Buffer.from(diagnosticCandidate)
-      : Buffer.from(diagnosticCandidate.subarray(diagnosticCandidate.byteLength - DIAGNOSTIC_TAIL_BYTES));
-    if (stream === "stdout") stdoutDiagnosticTail = nextDiagnosticTail;
-    else stderrDiagnosticTail = nextDiagnosticTail;
   };
 
   return new Promise((resolve) => {
@@ -341,6 +344,7 @@ export function runQualificationCommand(command, args, options) {
       const bytes = asBytes(chunk);
       stdoutHash.update(bytes);
       stdoutBytes += bytes.byteLength;
+      observeDiagnostics(bytes, "stdout");
       observeMarker(bytes, "stdout");
       observeSafeFailureMarker(bytes, "stdout");
     });
@@ -348,6 +352,7 @@ export function runQualificationCommand(command, args, options) {
       const bytes = asBytes(chunk);
       stderrHash.update(bytes);
       stderrBytes += bytes.byteLength;
+      observeDiagnostics(bytes, "stderr");
       observeMarker(bytes, "stderr");
       observeSafeFailureMarker(bytes, "stderr");
     });
