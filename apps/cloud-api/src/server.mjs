@@ -2225,7 +2225,7 @@ function mapRefreshRequestRepositoryError(error) {
 }
 function mapError(error) {
   if (error?.[API_ERROR] === true) return error;
-  if (error?.status) return { status: 500, code: "internal_error", message: "Internal error" };
+  if (error?.status) return { status: 500, code: internalDiagnosticCode(error), message: "Internal error" };
   if (error.code === "ERR_AUDIT_CURSOR_INVALID") return { status: 400, code: "invalid_cursor", message: "Cursor is invalid" };
   if (["invalid_session_cookie", "session_not_found", "session_revoked", "session_expired"].includes(error.code)) return { status: 401, code: "human_session_invalid", message: "Authentication failed" };
   if (["invalid_origin", "csrf_token_required", "invalid_csrf_token"].includes(error.code)) return { status: 403, code: "human_session_request_denied", message: "Authentication failed" };
@@ -2242,5 +2242,11 @@ function mapError(error) {
   if (error.code === "ERR_DEVICE_AUDIT_INBOX_UNAVAILABLE") return { status: 503, code: "device_audit_inbox_unavailable", message: "Device audit ingestion is temporarily unavailable", headers: { "retry-after": "1" } };
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };
-  return { status: 500, code: "internal_error", message: "Internal error" };
+  return { status: 500, code: internalDiagnosticCode(error), message: "Internal error" };
+}
+function internalDiagnosticCode(error) {
+  const name = typeof error?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/u.test(error.name)
+    ? error.name.toLowerCase()
+    : "error";
+  return `internal_${name}`;
 }
