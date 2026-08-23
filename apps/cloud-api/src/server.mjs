@@ -314,6 +314,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
+      if (process.env.P0B_LIVE_BROWSER === "1") {
+        const code = typeof error?.code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.code) ? error.code : "unknown";
+        const constraint = typeof error?.constraint === "string" && /^[A-Za-z][A-Za-z0-9_]{0,95}$/u.test(error.constraint) ? error.constraint : "none";
+        process.stderr.write(`P0B_DIAGNOSTIC_CLOUD_ERROR code=${code} constraint=${constraint}\n`);
+      }
       if (!response.headersSent && !response.writableEnded) {
         send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
       } else if (!response.writableEnded && typeof response.destroy === "function") {
