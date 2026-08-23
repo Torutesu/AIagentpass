@@ -32,32 +32,31 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open, getPage, markPhase }) => {
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
-    waitForScenarioPage(open, getPage, "owner");
-    await waitForScenarioPageReady(open, getPage);
-    emitLiveStage("ASSERTION_AFTER_HANDOFF");
-    const page = getPage();
-    emitLiveStage("ASSERTION_PAGE_READ");
-    markPhase("after_open");
-    emitLiveStage("ASSERTION_OPEN_RETURNED");
-    emitLiveStage("ASSERTION_WAIT_START");
-    // Keep these waits serial and let Playwright own each locator deadline.
-    // boundedUiOperation closes the page context on timeout; doing that while
-    // several state waits are active can turn a missing-state assertion into a
-    // generic "context closed" error before the fixed marker is captured.
-    for (const [label, safeCode] of [
-      ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
-      ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
-      ["ブロック中", "P0B_SAFE_STATE_MISSING_BLOCKED"],
-      ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
-      ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
-      ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
-    ]) {
-      try {
-        await page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS });
-      } catch {
-        assert.fail(safeCode);
+    await withScenarioPage(open, getPage, ["owner"], async (page) => {
+      emitLiveStage("ASSERTION_AFTER_HANDOFF");
+      emitLiveStage("ASSERTION_PAGE_READ");
+      markPhase("after_open");
+      emitLiveStage("ASSERTION_OPEN_RETURNED");
+      emitLiveStage("ASSERTION_WAIT_START");
+      // Keep these waits serial and let Playwright own each locator deadline.
+      // boundedUiOperation closes the page context on timeout; doing that while
+      // several state waits are active can turn a missing-state assertion into a
+      // generic "context closed" error before the fixed marker is captured.
+      for (const [label, safeCode] of [
+        ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
+        ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
+        ["ブロック中", "P0B_SAFE_STATE_MISSING_BLOCKED"],
+        ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
+        ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
+        ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
+      ]) {
+        try {
+          await page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS });
+        } catch {
+          assert.fail(safeCode);
+        }
       }
-    }
+    });
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open, getPage }) => {
@@ -416,6 +415,28 @@ async function waitForScenarioPageReady(open, getPage) {
   emitLiveStage("HANDOFF_READY_STATE");
   emitLiveStage("HANDOFF_PAGE_SEEN");
   emitLiveStage("HANDOFF_FUNCTION_EXIT");
+}
+
+function withScenarioPage(open, getPage, args, action) {
+  return new Promise((resolve, reject) => {
+    const handoff = Object.freeze({
+      onReady: () => {
+        const page = getPage();
+        if (page === null) {
+          reject(new Error("P0B live open handoff missing"));
+          return;
+        }
+        Promise.resolve().then(() => action(page)).then(resolve, reject);
+      },
+      onError: reject
+    });
+    try {
+      if (args.length === 1) open(args[0], undefined, handoff);
+      else open(...args, handoff);
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 async function scenario(parent, name, callback) {
