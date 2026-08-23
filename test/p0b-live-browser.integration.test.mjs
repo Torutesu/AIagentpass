@@ -346,7 +346,8 @@ async function scenario(parent, name, callback) {
             if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
               summaryStatus = response.status();
               if (summaryStatus >= 500) {
-                summaryErrorCode = "body_pending";
+                const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+                summaryErrorCode = contentType === "application/json" ? "body_pending" : "cloud_api_invalid_response";
                 summaryBodyPromise = response.text().then((text) => {
                   try {
                     const body = JSON.parse(text);
