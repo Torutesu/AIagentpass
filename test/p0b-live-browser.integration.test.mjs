@@ -51,12 +51,16 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("owner")).page;
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
+    emitLiveStage("KEYBOARD_FOCUS_START");
     try {
       await boundedUiOperation(page, () => wake.focus());
       assert.equal(await boundedUiOperation(page, () => wake.evaluate((element) => element === document.activeElement)), true);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
+    emitLiveStage("KEYBOARD_FOCUS_DONE");
     let refreshRequestObserved = false;
     let refreshRequestFailed = false;
+    emitLiveStage("KEYBOARD_EVALUATE_START");
+    const webAuthnSupported = await runP0BPageEvaluate(page, () => typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function").catch(() => false);
     const recentAuthObservation = {
       optionsObserved: false,
       optionsFailed: false,
@@ -69,7 +73,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       sessionObserved: false,
       sessionFailed: false,
       sessionStatus: null,
-      webAuthnSupported: await runP0BPageEvaluate(page, () => typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function").catch(() => false),
+      webAuthnSupported,
     };
     page.on("request", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
@@ -97,21 +101,28 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       }
       if (isKeyboardSessionRequest(response.request())) recentAuthObservation.sessionStatus = response.status();
     });
+    emitLiveStage("KEYBOARD_RESPONSE_WAIT_START");
     const refreshResponsePromise = page.waitForResponse((response) => {
       return isKeyboardRefreshRequest(response.request());
     }, { timeout: 15_000 }).catch(() => null);
+    emitLiveStage("KEYBOARD_RESPONSE_WAIT_DONE");
     // Send Enter through the already-resolved control. This still exercises
     // keyboard activation while preventing a late focus shift (for example a
     // hydration or live-region update) from dispatching Enter to the page.
+    emitLiveStage("KEYBOARD_PRESS_START");
     try { await boundedUiOperation(page, () => wake.press("Enter")); }
     catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
+    emitLiveStage("KEYBOARD_PRESS_DONE");
     const confirm = card.getByRole("button", { name: "確認して送信" });
+    emitLiveStage("KEYBOARD_CONFIRM_START");
     try {
       await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
       await boundedUiOperation(page, () => confirm.press("Enter"));
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
+    emitLiveStage("KEYBOARD_CONFIRM_DONE");
     const refreshResponse = await refreshResponsePromise;
+    emitLiveStage("KEYBOARD_RESPONSE_DONE");
     try {
       assert.match(await requireWakeStatus(page, card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
