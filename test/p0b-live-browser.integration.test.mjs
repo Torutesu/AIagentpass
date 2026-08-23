@@ -115,6 +115,11 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         recentAuthObservation.optionsStatus = response.status();
         recentAuthObservation.optionsResponse = response;
         if (response.status() >= 400) {
+          const headerCode = response.headers()["x-agentpass-error-code"];
+          if (/^[a-z][a-z0-9_]{0,63}$/u.test(headerCode ?? "")) {
+            const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${headerCode}`;
+            process.stdout.write(`${diagnostic}\n`);
+          }
           recentAuthObservation.optionsErrorCodePromise = safeRecentAuthErrorCode(response, page).then((code) => {
             if (/^[a-z][a-z0-9_]{0,63}$/u.test(code ?? "")) {
               const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}`;

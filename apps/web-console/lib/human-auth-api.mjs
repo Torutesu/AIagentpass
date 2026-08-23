@@ -263,6 +263,10 @@ async function relayResponse(response, { allowSetCookie = false, allowClearedSes
   if (passkeyMutation !== undefined && response.status >= 200 && response.status < 300) validatePasskeyMutationResponse(value, passkeyMutation);
   if (requireClearedSessionBody && (response.status < 200 || response.status >= 300 || !isExactObject(value, ["session"]) || value.session !== null)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", expires: "0", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
+  // Preserve the already-public bounded Cloud error code in a response header
+  // so browser qualification can classify a 5xx without consuming the body.
+  const errorCode = value?.error?.code;
+  if (response.status >= 400 && typeof errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/u.test(errorCode)) headers.set("x-agentpass-error-code", errorCode);
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (requireSetCookie && response.status >= 200 && response.status < 300 && setCookie === null) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
