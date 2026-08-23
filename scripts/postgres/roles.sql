@@ -141,7 +141,7 @@ BEGIN
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND c.relname NOT IN (
         'schema_migrations', 'schema_migration_attempts', 'release_candidates',
-        'organizations', 'memberships', 'organization_invitations', 'agentpass_manual_wake_actor_memberships',
+        'organizations', 'memberships', 'organization_invitations',
         'human_sessions', 'webauthn_credentials', 'webauthn_challenges',
         'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges',
         'owner_recovery_sessions', 'owner_recovery_webauthn_challenges',
@@ -378,7 +378,6 @@ BEGIN
     ,'agentpass_human_identity_resolve(text,text,uuid)'
     ,'agentpass_human_identity_find(text,text)'
     ,'agentpass_human_identity_list_memberships(text,text,uuid)'
-    ,'agentpass_manual_wake_actor_role(uuid,uuid)'
     ,'agentpass_human_credential_registration_status(uuid,uuid,uuid,bytea)'
     ,'agentpass_owner_recovery_register_credential(uuid,uuid,uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean,timestamptz)'
     ,'agentpass_owner_recovery_find_credential(uuid,uuid,uuid,uuid,bytea,bytea,timestamptz)'
@@ -557,15 +556,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT EXECUTE ON FUNCTIONS TO agentpass_migrator;
-
--- The manual-wake projection is intentionally read-only for the online role;
--- reassert its SELECT grant after every deny-by-default reconciliation pass.
-DO $$
-BEGIN
-  IF to_regclass('public.agentpass_manual_wake_actor_memberships') IS NOT NULL THEN
-    GRANT SELECT ON TABLE public.agentpass_manual_wake_actor_memberships TO agentpass_app;
-  END IF;
-END
-$$;
 
 COMMIT;
