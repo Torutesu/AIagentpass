@@ -1374,6 +1374,7 @@ export function AgentPassConsole() {
   const modalRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
   const summaryInFlightRef = useRef<Promise<SummaryRefreshResult> | null>(null);
+  const initialSummaryStartedRef = useRef(false);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
   const organizationOptionsEpoch = useRef(0);
@@ -1683,8 +1684,13 @@ export function AgentPassConsole() {
   }, [confirmOpen, helpOpen, mobileOpen, workspaceOpen]);
 
   useEffect(() => {
+    if (initialSummaryStartedRef.current) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => void refreshSummary(controller.signal), 0);
+    const timer = window.setTimeout(() => {
+      if (initialSummaryStartedRef.current) return;
+      initialSummaryStartedRef.current = true;
+      void refreshSummary(controller.signal);
+    }, 0);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
