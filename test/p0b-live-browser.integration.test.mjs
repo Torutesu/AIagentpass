@@ -346,9 +346,15 @@ async function scenario(parent, name, callback) {
             if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
               summaryStatus = response.status();
               if (summaryStatus >= 500) {
-              summaryBodyPromise = response.json().then((body) => {
-                  const code = body?.error?.code;
-                  summaryErrorCode = typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "body_unavailable";
+                summaryErrorCode = "body_pending";
+                summaryBodyPromise = response.text().then((text) => {
+                  try {
+                    const body = JSON.parse(text);
+                    const code = body?.error?.code;
+                    summaryErrorCode = typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "body_unavailable";
+                  } catch {
+                    summaryErrorCode = "body_unavailable";
+                  }
                 }).catch(() => { summaryErrorCode = "body_unavailable"; });
               }
             }
@@ -421,6 +427,7 @@ async function scenario(parent, name, callback) {
               if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");
               if (summaryErrorCode === "cloud_api_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_ERROR_FAILED");
+              if (summaryErrorCode === "body_pending") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_PENDING_FAILED");
               if (summaryErrorCode === "body_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_INTERNAL_ERROR_FAILED");
               if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED");

@@ -140,6 +140,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED", "owner_open_summary_cloud_unavailable"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED", "owner_open_summary_cloud_timeout"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_ERROR_FAILED", "owner_open_summary_cloud_error"],
+  [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_PENDING_FAILED", "owner_open_summary_cloud_body_pending"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_UNAVAILABLE_FAILED", "owner_open_summary_cloud_body_unavailable"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_INTERNAL_ERROR_FAILED", "owner_open_summary_internal_error"],
   [null, "P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED", "owner_open_summary_cloud_other_error"],
