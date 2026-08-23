@@ -729,6 +729,8 @@ async function scenario(parent, name, callback) {
       if (pendingFinalRevokeMarker !== null) {
         writeSync(2, `${pendingFinalRevokeMarker}\n`);
         pendingFinalRevokeMarker = null;
+        process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${liveStageTrace.length > 0 ? liveStageTrace.join(",") : "UNKNOWN"}\n`);
+        throw scenarioError;
       }
       process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${liveStageTrace.length > 0 ? liveStageTrace.join(",") : "UNKNOWN"}\n`);
       // The supervisor intentionally discards arbitrary TAP diagnostics. If a
