@@ -344,6 +344,7 @@ async function scenario(parent, name, callback) {
           try {
             const url = new URL(response.url());
             if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
+              if (summaryStatus !== null) return;
               summaryStatus = response.status();
               if (summaryStatus >= 500) {
                 const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
