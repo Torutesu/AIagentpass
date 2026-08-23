@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
-import { ConsoleSummaryParseError, parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
+import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { parseDeploymentReadiness, type DeploymentReadiness } from "../deployment-readiness";
 import { deriveAccessPosture, type AccessPostureInput, type PostureItem } from "../access-posture";
 import { BROWSER_CLI_HANDOFF_EVENTS, BROWSER_CLI_HANDOFF_LIMITS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
@@ -1557,11 +1557,6 @@ export function AgentPassConsole() {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
       if (epoch !== summaryEpoch.current) return "unavailable";
-      const diagnostic = error instanceof Error ? error.message : "unknown_error";
-      if (/^[A-Za-z0-9_.:-]{1,96}$/u.test(diagnostic)) console.warn("AgentPass summary refresh rejected", diagnostic);
-      if (error instanceof ConsoleSummaryParseError) {
-        console.warn("AgentPass summary contract rejected", error.path, error.reason);
-      }
       organizationIdRef.current = null;
       setSessionRole(null);
       setAuditSession(null);
