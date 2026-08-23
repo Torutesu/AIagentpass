@@ -559,7 +559,10 @@ async function scenario(parent, name, callback) {
         // which can become non-responsive while the network boundary remains
         // diagnosable through the response listener above.
         emitLiveStage("OPEN_UI_READY");
-        return Object.freeze({ page });
+        emitLiveStage("OPEN_RETURN_START");
+        const opened = Object.freeze({ page });
+        emitLiveStage("OPEN_RETURN_DONE");
+        return opened;
       };
       try {
         emitLiveStage("SCENARIO_ASSERTIONS");
