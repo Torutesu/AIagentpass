@@ -113,7 +113,7 @@ export function createPostgresControlPlaneStore(options = {}) {
     const fn = repository?.[method];
     if (typeof fn !== "function") throw unavailable(operation);
     const qualified = tenant ? qualifyTenant(input, operation) : cloneInput(input);
-    return callRepository(fn, repository, operation, context ? addAuthorityContext(qualified) : qualified);
+    return callRepository(fn, repository, operation, context ? addAuthorityContext(qualified) : qualified, options.diagnosticClient);
   };
 
   const createRevocation = async (input = {}) => {
@@ -352,12 +352,35 @@ function normalizeInputKey(key) {
   return String(key).replace(/[-_]/gu, "").toLowerCase();
 }
 
-async function callRepository(fn, repository, operation, input) {
+async function callRepository(fn, repository, operation, input, diagnosticClient = undefined) {
   try {
     return await fn.call(repository, input);
   } catch (error) {
+    if (diagnosticClient && hasCauseCode(error, "42501")) {
+      try {
+        const probe = await diagnosticClient.query(`SELECT current_user, session_user,
+            has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
+            has_column_privilege(current_user, 'public.memberships', 'organization_id', 'SELECT') AS organization_select,
+            has_column_privilege(current_user, 'public.memberships', 'member_id', 'SELECT') AS member_select,
+            has_column_privilege(current_user, 'public.memberships', 'role', 'SELECT') AS role_select,
+            has_column_privilege(current_user, 'public.memberships', 'status', 'SELECT') AS status_select`);
+        const row = probe.rows?.[0];
+        const identity = [row?.current_user, row?.session_user, row?.table_select, row?.organization_select,
+          row?.member_select, row?.role_select, row?.status_select].map((value) => String(value)).join("_");
+        Object.defineProperty(error, "storageIdentity", { value: identity, enumerable: false });
+      } catch {}
+    }
     throw publicError(error, operation);
   }
+}
+
+function hasCauseCode(error, expected) {
+  let current = error;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (current.code === expected) return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 function publicError(error, operation) {
