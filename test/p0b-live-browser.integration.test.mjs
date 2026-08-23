@@ -96,7 +96,16 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       if (phase === "options") {
         recentAuthObservation.optionsStatus = response.status();
         recentAuthObservation.optionsResponse = response;
-        if (response.status() >= 400) recentAuthObservation.optionsErrorCodePromise = safeRecentAuthErrorCode(response, page);
+        if (response.status() >= 400) {
+          recentAuthObservation.optionsErrorCodePromise = safeRecentAuthErrorCode(response, page).then((code) => {
+            if (/^[a-z][a-z0-9_]{0,63}$/u.test(code ?? "")) {
+              const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}`;
+              process.stdout.write(`${diagnostic}\n`);
+              if (process.env.GITHUB_ACTIONS === "true") process.stderr.write(`::error title=P0B diagnostic::${diagnostic}\n`);
+            }
+            return code;
+          });
+        }
       }
       if (phase === "verify") {
         recentAuthObservation.verifyStatus = response.status();
