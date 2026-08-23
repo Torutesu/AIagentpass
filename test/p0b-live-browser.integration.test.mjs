@@ -367,32 +367,42 @@ export function staleAuthCeremonyFailureMarker(error) {
 
 function withScenarioPage(open, getPage, args, action) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     const handoff = Object.freeze({
       onReady: () => {
+        if (settled) return;
         emitLiveStage("HANDOFF_CALLBACK_START");
         const page = getPage();
         if (page === null) {
           emitLiveStage("HANDOFF_PAGE_MISSING");
-          reject(new Error("P0B live open handoff missing"));
+          fail(new Error("P0B live open handoff missing"));
           return;
         }
         emitLiveStage("HANDOFF_PAGE_READY");
         setTimeout(() => {
+          if (settled) return;
           emitLiveStage("HANDOFF_ACTION_START");
           let actionResult;
           try { actionResult = action(page); }
-          catch (error) { reject(error); return; }
-          Promise.resolve(actionResult).then(resolve, reject);
+          catch (error) { fail(error); return; }
+          Promise.resolve(actionResult).then((value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          }, fail);
         }, 0);
       },
-      onError: reject
+      onError: fail
     });
     try {
       if (args.length === 1) open(args[0], undefined, handoff);
       else open(...args, handoff);
-    } catch (error) {
-      reject(error);
-    }
+    } catch (error) { fail(error); }
   });
 }
 
