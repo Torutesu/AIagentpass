@@ -356,6 +356,10 @@ function publicError(error, operation) {
   if (isDatabaseError(error)) {
     const wrapped = new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
     const sourceCode = diagnosticSourceCode(error);
+    if (process.env.P0B_LIVE_BROWSER === "1") {
+      const source = diagnosticSource(error);
+      process.stderr.write(`P0B_DB_ERROR operation=${operation} code=${source.code || "none"} message=${source.message}\n`);
+    }
     if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(sourceCode)) wrapped.diagnosticCode = sourceCode;
     return wrapped;
   }
@@ -371,6 +375,18 @@ function diagnosticSourceCode(error) {
     current = current.cause;
   }
   return "";
+}
+
+function diagnosticSource(error) {
+  let current = error;
+  let latest = { code: "", message: "unknown" };
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const code = String(current.code ?? "");
+    const message = String(current.message ?? "").replace(/[\r\n]+/gu, " ").slice(0, 180);
+    if (code || message) latest = { code, message };
+    current = current.cause;
+  }
+  return latest;
 }
 
 function isDatabaseError(error) {
