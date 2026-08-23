@@ -154,11 +154,6 @@ export async function handleConsoleRequest(request, options = {}) {
 
     throw new ConsoleApiError(405, "method_not_allowed", "Method not allowed");
   } catch (error) {
-    if (globalThis.process?.env?.P0B_LIVE_BROWSER === "1") {
-      const code = typeof error?.code === "string" ? error.code.replace(/[^A-Za-z0-9_.-]/gu, "").slice(0, 64) : "none";
-      const status = Number.isInteger(error?.status) ? error.status : "none";
-      process.stderr.write(`P0B_CONSOLE_ERROR code=${code || "none"} status=${status}\n`);
-    }
     return errorResponse(error);
   }
 }

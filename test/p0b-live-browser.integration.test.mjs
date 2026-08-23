@@ -334,17 +334,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const observeRevokeResponse = (response) => {
         try {
           const url = new URL(response.url());
-          if (url.pathname === "/api/console" && url.searchParams.get("operation") === "revoke-device") {
-            revokeStatus = response.status();
-            if (revokeStatus >= 500) {
-              const headerCode = response.headers()["x-agentpass-error-code"];
-              process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_HEADER code=${typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(headerCode) ? headerCode : "none"}\n`);
-              response.clone().json().then((body) => {
-                const code = typeof body?.error?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(body.error.code) ? body.error.code : "none";
-                process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_BODY code=${code}\n`);
-              }).catch(() => process.stderr.write("P0B_DIAGNOSTIC_FINAL_REVOKE_BODY code=unavailable\n"));
-            }
-          }
+          if (url.pathname === "/api/console" && url.searchParams.get("operation") === "revoke-device") revokeStatus = response.status();
         } catch {}
       };
       page.on("response", observeRevokeResponse);

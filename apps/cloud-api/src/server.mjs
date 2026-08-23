@@ -306,11 +306,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       if (result.status === 204) sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers });
       else send(response, result.status ?? 200, result.omitRequestId ? result.body : { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
     } catch (error) {
-      if (process.env.P0B_LIVE_BROWSER === "1") {
-        const code = typeof error?.code === "string" ? error.code.replace(/[^A-Za-z0-9_.-]/gu, "").slice(0, 64) : "none";
-        const status = Number.isInteger(error?.status) ? error.status : "none";
-        process.stderr.write(`P0B_SERVER_ERROR code=${code || "none"} status=${status}\n`);
-      }
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
