@@ -24,14 +24,19 @@ import {
 
 const RP_ID = "localhost";
 const OPERATION = "device.enrollment.issue";
+const CONSOLE_OPERATION = "issue-device-enrollment";
 const STALE_CHALLENGE_ID = "69999999-9999-4999-8999-999999999999";
 const OTHER_ORGANIZATION_ID = "77777777-7777-4777-8777-777777777777";
 const CANDIDATE_ID = "qualification-agent-2026-08";
 const DEVICE_FINGERPRINT = `SHA256:${"q".repeat(43)}`;
-const ENROLLMENT_SECRET = "qualification-secret-must-not-enter-evidence";
+const ENROLLMENT_SECRET = "Q".repeat(43);
 const SESSION_COOKIE = "agentpass_qualification_session=opaque-runtime-cookie";
 const EXTERNAL_QUALIFICATION_MODE = "external";
 const activeAuthenticators = new WeakMap<Page, VirtualAuthenticator>();
+const HANDOFF_PORT = 49152;
+const CORRELATION_ID = "A".repeat(43);
+const NONCE = "B".repeat(43);
+const HANDOFF_URL = `http://127.0.0.1:${HANDOFF_PORT}/v1/browser-cli-handoffs/${CORRELATION_ID}`;
 
 const REQUIRED_CHECKS = [
   "authenticator_origin_rp",
@@ -206,7 +211,7 @@ async function installQualificationRoutes(page: Page): Promise<QualificationStat
     state.sessionCookieSeen ||= headers.cookie === SESSION_COOKIE;
     state.csrfSeen ||= headers["agentpass-csrf"] === CSRF_TOKEN;
 
-    if (url.pathname === "/api/auth/session") {
+    if (url.pathname === "/api/auth/session" || url.pathname === "/api/auth/session/resume") {
       state.sessionCalls += 1;
       return route.fulfill({
         status: 200,
@@ -258,7 +263,7 @@ async function installQualificationRoutes(page: Page): Promise<QualificationStat
     const url = new URL(request.url());
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, consoleSummary());
     if (request.method() === "GET" && url.searchParams.get("resource") === "deployment-readiness") return json(route, deploymentReadiness());
-    if (request.method() !== "POST" || url.searchParams.get("operation") !== OPERATION) return json(route, { error: { code: "not_found", message: "Not found" } }, 404);
+    if (request.method() !== "POST" || url.searchParams.get("operation") !== CONSOLE_OPERATION) return json(route, { error: { code: "not_found", message: "Not found" } }, 404);
     const body = parseRequestBody(route);
     const auth = request.headers()["agentpass-recent-auth"] ?? "";
     state.issueBodies.push(body);
@@ -285,15 +290,37 @@ async function installQualificationRoutes(page: Page): Promise<QualificationStat
         platform: "macos",
         organization_id: ORGANIZATION_ID,
         expires_at: ACTIVE_EXPIRES_AT,
-        challenge_id: CHALLENGE_ID,
+        challenge_id: "78888888-8888-4888-8888-888888888888",
         nonce: CHALLENGE,
-        challenge: { challenge_id: CHALLENGE_ID, nonce: CHALLENGE, expires_at: ACTIVE_EXPIRES_AT, candidate_id: CANDIDATE_ID, device_key_fingerprint: DEVICE_FINGERPRINT },
+        challenge: { challenge_id: "78888888-8888-4888-8888-888888888888", nonce: CHALLENGE, expires_at: ACTIVE_EXPIRES_AT, candidate_id: CANDIDATE_ID, device_key_fingerprint: DEVICE_FINGERPRINT },
         candidate_binding: { version: 1, enrollment_id: "78888888-8888-4888-8888-888888888888", organization_id: ORGANIZATION_ID, device_id: "41111111-1111-4111-8111-111111111111", candidate_id: CANDIDATE_ID, artifact_sha256: "c".repeat(64), source_commit: "d".repeat(40), team_id: "APPLETEAM1", device_key_fingerprint: DEVICE_FINGERPRINT, expires_at: ACTIVE_EXPIRES_AT },
         credential: ENROLLMENT_SECRET,
         possession_receipt_verification: { key_id: "qualification", algorithm: "ed25519", public_key: "-----BEGIN PUBLIC KEY-----\nqualification\n-----END PUBLIC KEY-----" },
         endpoint: "/v1/enrollments/78888888-8888-4888-8888-888888888888",
       },
     }, 201);
+  });
+  await page.route(`http://127.0.0.1:${HANDOFF_PORT}/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const origin = request.headers().origin ?? "http://localhost:4173";
+    const headers = {
+      "access-control-allow-headers": "content-type",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-private-network": "true",
+      "cache-control": "no-store",
+      "content-type": "application/json",
+      "access-control-allow-origin": origin,
+      vary: "Origin",
+    };
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers, body: "" });
+    if (request.method() === "GET" && url.pathname.endsWith("/preflight")) {
+      return route.fulfill({ status: 200, headers, body: JSON.stringify({ version: 1, correlation_id: CORRELATION_ID, nonce: NONCE, platform: "macos", candidate_id: CANDIDATE_ID, device_key_fingerprint: DEVICE_FINGERPRINT }) });
+    }
+    if (request.method() === "POST" && url.pathname.endsWith(`/browser-cli-handoffs/${CORRELATION_ID}`)) {
+      return route.fulfill({ status: 200, headers, body: JSON.stringify({ version: 1, ok: true, consumed: true }) });
+    }
+    return route.fulfill({ status: 404, headers, body: JSON.stringify({ error: { code: "not_found" } }) });
   });
   return state;
 }
@@ -303,8 +330,11 @@ async function openQualificationSetup(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u })).toBeVisible();
   await page.getByRole("button", { name: "セットアップ", exact: true }).click();
   await expect(page.getByRole("heading", { name: "パスキーを登録" })).toBeVisible();
-  await page.getByLabel("公開preflight JSON").fill(JSON.stringify({ version: 1, platform: "macos", candidate_id: CANDIDATE_ID, device_key_fingerprint: DEVICE_FINGERPRINT }));
-  await page.getByRole("button", { name: "公開preflightを確認", exact: true }).click();
+  await page.context().grantPermissions(["local-network-access"], { origin: "http://localhost:4173" });
+  await page.goto(`/#${HANDOFF_URL}`);
+  await page.reload();
+  await expect(page).toHaveURL(/\/$/u);
+  await expect(page.locator('[data-install-state="connected"]')).toBeVisible();
   await expect(page.getByText("公開preflightを確認しました")).toBeVisible();
 }
 
@@ -359,22 +389,22 @@ test("qualification: real-browser WebAuthn binds unattended agent issuance and e
   await openQualificationSetup(page);
   await page.getByLabel("端末名").fill("Qualification Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("credentialはブラウザに表示せず破棄しました");
+  await expect(page.locator('[data-live-handoff-state="delivered"]')).toBeVisible();
   await expect(page.locator(".secret-output")).toHaveCount(0);
   expect((await page.locator("body").textContent()) ?? "").not.toContain(ENROLLMENT_SECRET);
   expect(state.issueBodies[0]).toMatchObject({ proof_version: 2, candidate_id: CANDIDATE_ID, device_key_fingerprint: DEVICE_FINGERPRINT, label: "Qualification Mac", platform: "macos", ttl_ms: 600000 });
   expect(state.issueAuth).toEqual([AUTHORIZATION_ID]);
 
   const replayBody = state.issueBodies[0];
-  const replayStatus = await page.evaluate(async ({ body, csrf, authorization }) => {
-    const response = await fetch("/api/console?operation=device.enrollment.issue", {
+  const replayStatus = await page.evaluate(async ({ body, csrf, authorization, operation }) => {
+    const response = await fetch(`/api/console?operation=${operation}`, {
       method: "POST",
       headers: { "content-type": "application/json", "agentpass-csrf": csrf, "agentpass-recent-auth": authorization, "idempotency-key": crypto.randomUUID() },
       body: JSON.stringify(body),
       credentials: "same-origin",
     });
     return response.status;
-  }, { body: replayBody, csrf: CSRF_TOKEN, authorization: AUTHORIZATION_ID });
+  }, { body: replayBody, csrf: CSRF_TOKEN, authorization: AUTHORIZATION_ID, operation: CONSOLE_OPERATION });
   state.replayStatus = replayStatus;
   expect(replayStatus).toBe(403);
 
@@ -403,8 +433,14 @@ test("qualification: real-browser WebAuthn binds unattended agent issuance and e
   expect(crossTenantStatus).toBe(403);
 
   state.outage = true;
+  // A live handoff is one-time by design. Establish a fresh public-only
+  // handoff before exercising the independent outage path.
+  await page.goto(`/#${HANDOFF_URL}`);
+  await page.reload();
+  await expect(page.locator('[data-live-handoff-state="connected"]')).toBeVisible();
+  await page.getByLabel("端末名").fill("Qualification Mac outage");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("登録情報を発行できませんでした");
+  await expect(page.locator('[data-enrollment-state="outcome-unknown"]')).toContainText("発行結果を確認できませんでした");
   await expect(page.locator(".secret-output")).toHaveCount(0);
   expect((await browserStorageSnapshot(page)).local).toEqual({});
   expect((await browserStorageSnapshot(page)).session).toEqual({});

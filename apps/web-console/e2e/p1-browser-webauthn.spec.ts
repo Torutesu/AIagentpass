@@ -18,7 +18,7 @@ import {
   type VirtualAuthenticator,
 } from "./support/browser-fixtures";
 
-type SecurityMode = "initial_registration" | "step_up_registration" | "replay" | "credential_loss" | "response_loss";
+type SecurityMode = "initial_registration" | "step_up_registration" | "replay" | "credential_loss" | "response_loss" | "invalid_preflight";
 
 type BrowserSecurityState = {
   registrationOptionsCalls: number;
@@ -38,6 +38,10 @@ const ENROLLMENT_SECRET = "a".repeat(43);
 const ENROLLMENT_CANDIDATE = "candidate-e2e-2026-08";
 const ENROLLMENT_FINGERPRINT = `SHA256:${"f".repeat(43)}`;
 const activeAuthenticators = new WeakMap<Page, VirtualAuthenticator>();
+const HANDOFF_PORT = 49152;
+const CORRELATION_ID = "A".repeat(43);
+const NONCE = "B".repeat(43);
+const HANDOFF_URL = `http://127.0.0.1:${HANDOFF_PORT}/v1/browser-cli-handoffs/${CORRELATION_ID}`;
 
 function registrationOptions() {
   return {
@@ -149,6 +153,32 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
     }, 201);
   });
 
+  await page.route(`http://127.0.0.1:${HANDOFF_PORT}/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const origin = request.headers().origin ?? "http://localhost:4173";
+    const headers = {
+      "access-control-allow-headers": "content-type",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-private-network": "true",
+      "cache-control": "no-store",
+      "content-type": "application/json",
+      "access-control-allow-origin": origin,
+      vary: "Origin",
+    };
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers, body: "" });
+    if (request.method() === "GET" && url.pathname.endsWith("/preflight")) {
+      const preflight = mode === "invalid_preflight"
+        ? { version: 1, correlation_id: "E".repeat(43), nonce: NONCE, platform: "linux", candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT }
+        : { version: 1, correlation_id: CORRELATION_ID, nonce: NONCE, platform: "macos", candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT };
+      return route.fulfill({ status: 200, headers, body: JSON.stringify(preflight) });
+    }
+    if (request.method() === "POST" && url.pathname.endsWith(`/browser-cli-handoffs/${CORRELATION_ID}`)) {
+      return route.fulfill({ status: 200, headers, body: JSON.stringify({ version: 1, ok: true, consumed: true }) });
+    }
+    return route.fulfill({ status: 404, headers, body: JSON.stringify({ error: { code: "not_found" } }) });
+  });
+
   return state;
 }
 
@@ -167,13 +197,12 @@ function passkeyRegistrationCard(page: Page) {
 }
 
 async function importPreflight(page: Page): Promise<void> {
-  await page.getByLabel("公開preflight JSON").fill(JSON.stringify({
-    version: 1,
-    platform: "macos",
-    candidate_id: ENROLLMENT_CANDIDATE,
-    device_key_fingerprint: ENROLLMENT_FINGERPRINT,
-  }));
-  await page.getByRole("button", { name: "公開preflightを確認", exact: true }).click();
+  await page.context().grantPermissions(["local-network-access"], { origin: "http://localhost:4173" });
+  await page.goto(`/#${HANDOFF_URL}`);
+  await page.reload();
+  await expect(page).toHaveURL(/\/$/u);
+  await expect(page.locator('[data-install-state="connected"]')).toBeVisible();
+  await expect(page.locator('[data-live-handoff-state="connected"]')).toBeVisible();
   await expect(page.getByText("公開preflightを確認しました")).toBeVisible();
 }
 
@@ -232,15 +261,14 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   const issue = page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true });
 
   await issue.click();
-  await expect(page.getByRole("alert")).toContainText("credentialはブラウザに表示せず破棄しました");
+  await expect(page.locator('[data-live-handoff-state="delivered"]')).toBeVisible();
   await expect(page.locator(".secret-output")).toHaveCount(0);
-  await page.getByRole("button", { name: "表示を消す", exact: true }).click();
 
   await issue.click();
-  await expect(page.getByRole("alert")).toContainText("登録情報を発行できませんでした");
-  expect(state.enrollmentCalls).toBe(2);
-  expect(state.enrollmentRecentAuth).toEqual([AUTHORIZATION_ID, AUTHORIZATION_ID]);
-  expect(state.enrollmentBodies).toEqual([{ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }, { proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }]);
+  await expect(page.getByRole("alert")).toContainText("Macのセットアップ接続が確認できません");
+  expect(state.enrollmentCalls).toBe(1);
+  expect(state.enrollmentRecentAuth).toEqual([AUTHORIZATION_ID]);
+  expect(state.enrollmentBodies).toHaveLength(1);
   await assertNoBrowserStorageSecret(page, ENROLLMENT_SECRET);
   await assertNoBrowserStorageSecret(page, AUTHORIZATION_ID);
 });
@@ -279,39 +307,28 @@ test("fails closed when the virtual authenticator has lost the credential", asyn
   await assertNoBrowserStorageSecret(page, AUTHORIZATION_ID);
 });
 
-test("rejects malformed or unknown preflight fields before WebAuthn", async ({ page }) => {
+test("fails closed on a malformed live preflight before WebAuthn", async ({ page }) => {
   activeAuthenticators.set(page, await installVirtualAuthenticator(page));
-  const state = await installSecurityRoutes(page, "initial_registration");
+  const state = await installSecurityRoutes(page, "invalid_preflight");
   await openSetup(page);
-  await page.getByLabel("公開preflight JSON").fill(JSON.stringify({
-    version: 1,
-    platform: "macos",
-    candidate_id: ENROLLMENT_CANDIDATE,
-    device_key_fingerprint: ENROLLMENT_FINGERPRINT,
-    credential: "must-never-be-accepted",
-  }));
-  await page.getByRole("button", { name: "公開preflightを確認", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("公開preflightを検証できませんでした");
+  await page.context().grantPermissions(["local-network-access"], { origin: "http://localhost:4173" });
+  await page.goto(`/#${HANDOFF_URL}`);
+  await page.reload();
+  await expect(page.locator('[data-install-state="failed"]')).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("自動受け渡しに失敗しました");
   expect(state.authenticationOptionsCalls).toBe(0);
   expect(state.authenticationVerifyCalls).toBe(0);
   expect(state.enrollmentCalls).toBe(0);
-  await assertNoBrowserStorageSecret(page, "must-never-be-accepted");
+  await assertNoBrowserStorageSecret(page, NONCE);
 });
 
-test("keeps the manual path available only as an explicit advanced fallback", async ({ page }) => {
+test("does not expose an unauthenticated manual enrollment path", async ({ page }) => {
   activeAuthenticators.set(page, await installVirtualAuthenticator(page));
   const state = await installSecurityRoutes(page, "initial_registration");
   await openSetup(page);
-  await page.getByText("上級者向け：preflight JSONを使えない場合の手入力", { exact: true }).click();
-  await page.getByRole("button", { name: "手入力を使う", exact: true }).click();
-  await page.getByLabel("端末名").fill("Advanced E2E Mac");
-  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
-  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
-  await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("credentialはブラウザに表示せず破棄しました");
-  await expect(page.locator(".secret-output")).toHaveCount(0);
-  expect(state.enrollmentCalls).toBe(1);
-  expect(state.enrollmentBodies[0]).toEqual({ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Advanced E2E Mac", platform: "macos", ttl_ms: 600000 });
+  await expect(page.getByText("上級者向け：preflight JSONを使えない場合の手入力", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true })).toBeDisabled();
+  expect(state.enrollmentCalls).toBe(0);
 });
 
 async function removeCredential(authenticator: VirtualAuthenticator): Promise<void> {
