@@ -259,7 +259,7 @@ BEGIN
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
         OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
-          OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agentpass_manual_wake_actor_memberships',
+          OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
           'agent_session_signing_capability_expiry_audit_events',
           'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads',
           'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions',
