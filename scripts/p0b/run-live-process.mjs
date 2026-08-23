@@ -181,6 +181,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED", "owner_final_stop_cloud_invalid_response"],
   [null, "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED", "owner_final_stop_internal_error"],
   [null, "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED", "owner_final_stop_upstream_error"],
+  [null, "P0B_SAFE_OWNER_FINAL_STOP_CONSOLE_ERROR_FAILED", "owner_final_stop_console_error"],
   [null, "P0B_SAFE_OWNER_FINAL_STATE_NOT_VISIBLE_FAILED", "owner_final_state_not_visible"],
   [null, "P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED", "owner_open_device_card_not_ready"],
   [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_HTTP_400_FAILED", "owner_open_bootstrap_http_400"],
