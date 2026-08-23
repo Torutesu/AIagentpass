@@ -47,16 +47,28 @@ function runScenario(name) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let lastStage = "UNKNOWN";
+    let failureTail = "";
+    let failureObserved = false;
     const observeStage = (chunk) => {
       const matches = [...String(chunk).matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
       if (matches.length > 0) lastStage = matches.at(-1)[1];
     };
+    const observeFailure = (chunk) => {
+      if (failureObserved) return;
+      failureTail = `${failureTail}${String(chunk)}`.slice(-1024);
+      if (/P0B_SAFE_[A-Z][A-Z0-9_]{1,127}_FAILED/gu.test(failureTail)) {
+        failureObserved = true;
+        terminate(child);
+      }
+    };
     child.stdout?.on("data", (chunk) => {
       observeStage(chunk);
+      observeFailure(chunk);
       process.stdout.write(chunk);
     });
     child.stderr?.on("data", (chunk) => {
       observeStage(chunk);
+      observeFailure(chunk);
       process.stderr.write(chunk);
     });
     let settled = false;
