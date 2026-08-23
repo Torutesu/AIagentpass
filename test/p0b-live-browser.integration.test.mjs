@@ -459,10 +459,10 @@ async function scenario(parent, name, callback) {
               if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
               if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
               if (summaryParseDiagnostic !== null) {
-                process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
+                process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
               }
-              if (summaryRefreshDiagnostic !== null) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
-              if (summaryStatuses.length > 0) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_RESPONSES statuses=${summaryStatuses.join(",")}\n`);
+              if (summaryRefreshDiagnostic !== null) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
+              if (summaryStatuses.length > 0) process.stdout.write(`P0B_DIAGNOSTIC_SUMMARY_RESPONSES statuses=${summaryStatuses.join(",")}\n`);
               if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
               if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
               if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
