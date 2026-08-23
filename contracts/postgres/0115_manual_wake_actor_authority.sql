@@ -1,9 +1,9 @@
 BEGIN;
 
 -- Keep the online role away from the memberships base table for manual-wake
--- authorization. The migrator-owned function returns only the bounded role
--- value needed by the repository and takes the membership lock under the
--- authority owner, preserving the check during the caller transaction.
+-- authorization. The existing migrator-owned registration projection exposes
+-- only the active session binding and membership role; the authority function
+-- returns only the bounded role value needed by the repository.
 CREATE FUNCTION public.agentpass_manual_wake_actor_role(
   p_organization_id uuid,
   p_member_id uuid
@@ -15,11 +15,11 @@ PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
-  SELECT m.role
-  FROM public.memberships AS m
+  SELECT m.membership_role
+  FROM public.agentpass_webauthn_registration_sessions AS m
   WHERE m.organization_id = p_organization_id
     AND m.member_id = p_member_id
-    AND m.status = 'active'
+    AND m.membership_status = 'active'
   FOR SHARE;
 $$;
 
