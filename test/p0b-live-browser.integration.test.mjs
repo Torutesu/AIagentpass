@@ -166,11 +166,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
       await boundedUiOperation(page, () => page.keyboard.press("Enter"));
-      recentAuthObservation.wakePendingObserved = await boundedUiOperation(page, () => page.waitForFunction(
-        (element) => element?.getAttribute("aria-busy") === "true",
-        await card.elementHandle(),
-        { timeout: 2_000 }
-      )).then(() => true).catch(() => false);
+      recentAuthObservation.wakePendingObserved = await boundedUiOperation(page, () => card.getAttribute("aria-busy"))
+        .then((value) => value === "true").catch(() => false);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     emitLiveStage("KEYBOARD_CONFIRM_DONE");
     const refreshResponse = await refreshResponsePromise;
