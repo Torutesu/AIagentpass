@@ -109,7 +109,8 @@ test("P0-B keyboard diagnostics separate transport, 2xx contract, and UI parsing
 });
 
 test("P0-B keyboard diagnostics localize pre-refresh recent-auth failures without unsafe response bodies", async () => {
-  assert.equal(await keyboardRecentAuthFailureMarker(), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker(), "P0B_SAFE_KEYBOARD_AUTH_CONFIRM_NO_ACTION_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ wakePendingObserved: true }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED");
   assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: false }), "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED");
   assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED");
   assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 401 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_4XX_FAILED");
