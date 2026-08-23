@@ -376,45 +376,57 @@ export function staleAuthCeremonyFailureMarker(error) {
   return "P0B_SAFE_STALE_AUTH_CEREMONY_FAILED";
 }
 
-async function waitForScenarioPage(open, _getPage, ...args) {
+function waitForScenarioPage(open, _getPage, ...args) {
   emitLiveStage("HANDOFF_OPEN_CALL");
   // Do not pass a Promise resolver across the fixture/Playwright boundary.
   // Some protected runners expose callback values through a different realm;
   // a plain state flag keeps the handoff contract independent of thenable
   // assimilation while retaining a finite wait and typed error path.
-  let ready = false;
-  let openError;
-  const handoff = Object.freeze({
-    onReady: () => { ready = true; },
-    onError: (error) => { openError = error; }
+  return new Promise((resolve, reject) => {
+    let ready = false;
+    let openError;
+    const handoff = Object.freeze({
+      onReady: () => { ready = true; },
+      onError: (error) => { openError = error; }
+    });
+    try {
+      // Keep the callback in the third positional slot even when the caller
+      // uses the common role-only shorthand and omits options.
+      if (args.length === 1) open(args[0], undefined, handoff);
+      else open(...args, handoff);
+    } catch (error) {
+      openError = error;
+    }
+    const deadline = Date.now() + 120_000;
+    const poll = () => {
+      if (openError !== undefined) {
+        reject(openError);
+        return;
+      }
+      if (ready) {
+        const wrapperError = open.getError?.();
+        if (wrapperError !== undefined) {
+          reject(wrapperError);
+          return;
+        }
+        emitLiveStage("HANDOFF_READY_STATE");
+        // Keep the Page object entirely outside this helper. Even observing a
+        // Playwright Page through a closure can trigger protected-runner realm
+        // handling at the async-function return boundary; callers read it only
+        // after the helper has completed.
+        emitLiveStage("HANDOFF_PAGE_SEEN");
+        emitLiveStage("HANDOFF_FUNCTION_EXIT");
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error("P0B live open handoff timed out"));
+        return;
+      }
+      setTimeout(poll, 25);
+    };
+    poll();
   });
-  try {
-    // Keep the callback in the third positional slot even when the caller
-    // uses the common role-only shorthand and omits options.
-    if (args.length === 1) open(args[0], undefined, handoff);
-    else open(...args, handoff);
-  } catch (error) {
-    openError = error;
-  }
-  const deadline = Date.now() + 120_000;
-  while (!ready && openError === undefined && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  if (openError !== undefined) throw openError;
-  if (!ready) throw new Error("P0B live open handoff timed out");
-  const wrapperError = open.getError?.();
-  if (wrapperError !== undefined) throw wrapperError;
-  emitLiveStage("HANDOFF_READY_STATE");
-  // Keep the Page object entirely outside this async helper. Even observing a
-  // Playwright Page through a closure can trigger protected-runner realm
-  // handling at the async-function return boundary; callers read it only
-  // after the helper has completed.
-  emitLiveStage("HANDOFF_PAGE_SEEN");
-  emitLiveStage("HANDOFF_FUNCTION_EXIT");
-  // Keep the Playwright Page entirely in the scenario closure. Returning it
-  // from any async helper (even nested in a plain object) has triggered
-  // cross-realm thenable assimilation on protected runners. The caller reads
-  // the already-published page through getPage() after this void handoff.
 }
 
 async function scenario(parent, name, callback) {
