@@ -339,10 +339,15 @@ async function scenario(parent, name, callback) {
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         let summaryStatus = null;
         let summaryErrorCode = null;
+        let deploymentStatus = null;
         let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
             const url = new URL(response.url());
+            if (url.pathname === "/api/console" && url.searchParams.get("resource") === "deployment-readiness") {
+              deploymentStatus ??= response.status();
+              return;
+            }
             if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
               if (summaryStatus !== null) return;
               summaryStatus = response.status();
@@ -428,6 +433,8 @@ async function scenario(parent, name, callback) {
               if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
               if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
               if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
+              if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
+              if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
               if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
               if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");
