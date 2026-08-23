@@ -375,16 +375,12 @@ export function staleAuthCeremonyFailureMarker(error) {
 }
 
 async function waitForScenarioPage(open, getPage, ...args) {
-  let openError;
-  let opening;
-  try {
-    opening = open(...args);
-    opening.then(undefined, (error) => { openError = error; });
-  } catch (error) {
-    throw error;
-  }
+  let openError = open.getError?.();
+  try { open(...args); }
+  catch (error) { throw error; }
   const deadline = Date.now() + 120_000;
   while (getPage() === null && openError === undefined) {
+    openError = open.getError?.();
     if (Date.now() >= deadline) throw new Error("P0B live open handoff timed out");
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -444,7 +440,8 @@ async function scenario(parent, name, callback) {
       emitLiveStage("BROWSER_READY");
       const contexts = [];
       let openedPage = null;
-      const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
+      let openingError;
+      const openInternal = async (role, { register = true, safeOpenPrefix = null } = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
@@ -606,6 +603,14 @@ async function scenario(parent, name, callback) {
         emitLiveStage("OPEN_RETURN_DONE");
         return;
       };
+      // Do not expose the async runner promise to the scenario callback. A
+      // protected runner can inspect thenables across the Playwright realm;
+      // this fire-and-observe wrapper publishes only through getPage().
+      const open = (role, options) => {
+        openingError = undefined;
+        void openInternal(role, options).catch((error) => { openingError = error; });
+      };
+      open.getError = () => openingError;
       try {
         emitLiveStage("SCENARIO_ASSERTIONS");
         await callback({
