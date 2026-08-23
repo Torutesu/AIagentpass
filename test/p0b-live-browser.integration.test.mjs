@@ -29,7 +29,10 @@ let selectedScenarioCount = 0;
 // 120-second bounds remain the owning hang detector.
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 1_800_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
+    emitLiveStage("ASSERTION_OPEN_CALL");
     const page = (await open("owner")).page;
+    emitLiveStage("ASSERTION_OPEN_RETURNED");
+    emitLiveStage("ASSERTION_WAIT_START");
     await Promise.all([
       ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
       ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
