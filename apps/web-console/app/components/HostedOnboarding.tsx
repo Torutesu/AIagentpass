@@ -41,6 +41,7 @@ type InitialStatusGuard = {
 // page. Coalesce only the short-lived, non-sensitive outcome classification;
 // no cookie, CSRF value, or status payload is retained here.
 const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
+const initialStatusDomMarker = "data-agentpass-initial-status";
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
 // period so a slow first read is not aborted and replayed.
@@ -130,6 +131,28 @@ export function HostedOnboarding() {
     if (initialStatusLoadStarted.current) return;
     initialStatusLoadStarted.current = true;
     const browserWindow = typeof window === "object" ? window : null;
+    const documentRoot = typeof document === "object" ? document.documentElement : null;
+    const domOutcome = documentRoot?.getAttribute(initialStatusDomMarker);
+    // A hydration boundary can be evaluated in a separate client bundle. The
+    // document marker is only a non-sensitive outcome classification and is a
+    // final duplicate-request guard when Window properties are not shared.
+    if (domOutcome === "pending") return;
+    if (domOutcome === "session_required") {
+      queueMicrotask(() => {
+        setScreen("signin");
+        setGuidanceKind("terminal");
+      });
+      return;
+    }
+    if (domOutcome === "other") {
+      queueMicrotask(() => {
+        const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+        setMessage(guidance.message);
+        setGuidanceKind(guidance.kind);
+        setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+      });
+      return;
+    }
     // Store the short-lived classification directly on Window so duplicate
     // client bundles produced during hydration still share the same guard.
     // Only the outcome label is retained; no response, cookie, or CSRF value
@@ -178,6 +201,7 @@ export function HostedOnboarding() {
       waiters: new Set<(outcome: InitialStatusOutcome) => void>(),
     };
     if (browserWindow !== null && guard !== undefined) Reflect.set(browserWindow, initialStatusGuardKey, guard);
+    documentRoot?.setAttribute(initialStatusDomMarker, "pending");
     const controller = new AbortController();
     queueMicrotask(() => {
       void loadStatus(controller.signal).then((result) => {
@@ -187,6 +211,7 @@ export function HostedOnboarding() {
           : result.error instanceof HostedBootstrapClientError && result.error.serverCode === "bootstrap_session_required"
             ? "session_required"
             : "other";
+        documentRoot?.setAttribute(initialStatusDomMarker, guard.outcome);
         const waiters = [...guard.waiters];
         guard.waiters.clear();
         for (const waiter of waiters) waiter(guard.outcome);
