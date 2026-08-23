@@ -343,6 +343,7 @@ async function scenario(parent, name, callback) {
         let summaryBodyCode = null;
         let summaryParseDiagnostic = null;
         let summaryRefreshDiagnostic = null;
+        const summaryStatuses = [];
         let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
@@ -353,6 +354,7 @@ async function scenario(parent, name, callback) {
             }
             if (url.pathname === "/api/console" && url.searchParams.get("resource") === "summary") {
               summaryStatus = response.status();
+              if (summaryStatuses.length < 8) summaryStatuses.push(summaryStatus);
               summaryBodyCode = null;
               if (summaryStatus >= 500) {
                 const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
@@ -460,6 +462,7 @@ async function scenario(parent, name, callback) {
                 process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
               }
               if (summaryRefreshDiagnostic !== null) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
+              if (summaryStatuses.length > 0) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_RESPONSES statuses=${summaryStatuses.join(",")}\n`);
               if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
               if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
               if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
