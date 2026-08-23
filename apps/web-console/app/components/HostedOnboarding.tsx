@@ -30,6 +30,13 @@ type PublicStatus = Readonly<{
 type Screen = "loading" | "signin" | "flow" | "recovery" | "error" | "terminal";
 type Guidance = Readonly<{ kind: "retryable" | "terminal"; message: string }>;
 
+// Vinext can remount a client boundary while hydrating an unauthenticated
+// page. Keep only the non-sensitive classification for a very short grace
+// window so that the remount does not issue a second bootstrap status read.
+// No cookie, CSRF value, or status payload is retained here.
+const unauthenticatedRemountGrace = new WeakMap<object, number>();
+const UNAUTHENTICATED_REMOUNT_GRACE_MS = 1_000;
+
 const STEPS = [
   { id: "github", label: "GitHubで本人確認", detail: "GitHub identity" },
   { id: "organization", label: "ワークスペース作成", detail: "Organization" },
@@ -88,6 +95,7 @@ export function HostedOnboarding() {
     } catch (error) {
       if (signal?.aborted) return { ok: false as const, error };
       if (error instanceof HostedBootstrapClientError && error.serverCode === "bootstrap_session_required") {
+        if (typeof window === "object") unauthenticatedRemountGrace.set(window, Date.now());
         setScreen("signin");
         setGuidanceKind("terminal");
         return { ok: false as const, error };
@@ -113,6 +121,13 @@ export function HostedOnboarding() {
     // transition. Keep one request per mounted onboarding flow.
     if (initialStatusLoadStarted.current) return;
     initialStatusLoadStarted.current = true;
+    const browserWindow = typeof window === "object" ? window : null;
+    const unauthenticatedAt = browserWindow === null ? undefined : unauthenticatedRemountGrace.get(browserWindow);
+    if (unauthenticatedAt !== undefined && Date.now() - unauthenticatedAt < UNAUTHENTICATED_REMOUNT_GRACE_MS) {
+      setScreen("signin");
+      setGuidanceKind("terminal");
+      return;
+    }
     const controller = new AbortController();
     void loadStatus(controller.signal);
     return () => {
