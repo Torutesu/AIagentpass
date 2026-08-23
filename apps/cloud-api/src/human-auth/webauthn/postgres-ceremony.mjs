@@ -166,6 +166,7 @@ export class PostgresWebAuthnCeremonyError extends Error {
     void cause;
     this.name = "PostgresWebAuthnCeremonyError";
     this.code = code;
+    Object.defineProperty(this, "retryable", { value: cause?.code === "55P03" || cause?.code === "40001", enumerable: false });
   }
 }
 
@@ -203,6 +204,10 @@ export function createPostgresWebAuthnCeremony({
   assertDuration(verifierTimeoutMs, "verifierTimeoutMs", 1_000, MAX_VERIFIER_TIMEOUT_MS);
 
   async function begin(input = {}) {
+    return withTransientStorageRetry(() => beginOnce(input));
+  }
+
+  async function beginOnce(input = {}) {
     const context = normalizeContext(input);
     const issuedAt = assertClock(now());
     const requestedTtl = input.ttlMs ?? ttlMs;
@@ -387,6 +392,27 @@ export function createPostgresWebAuthnCeremony({
       // diagnostics to the caller.
     }
   }
+}
+
+async function withTransientStorageRetry(operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isTransientStorageError(error) || attempt >= 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
+function isTransientStorageError(error) {
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (current.retryable === true) return true;
+    if (current.code === "55P03" || current.code === "40001") return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 async function query(client, clientQuery, params, { mapConstraint = false } = {}) {

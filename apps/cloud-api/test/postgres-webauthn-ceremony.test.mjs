@@ -229,6 +229,25 @@ test("persists only the challenge digest and binds the issued row to the exact c
   assert.equal(issued.challenge_expires_at, new Date(Date.parse([...client.rows.values()][0].created_at) + 60_000).toISOString());
 });
 
+test("retries one transient capacity-lock timeout before issuing a challenge", async () => {
+  const client = new FakePgClient({ now: () => 1_900_000_000_000 });
+  const originalQuery = client.query.bind(client);
+  let failed = false;
+  client.query = async (text, params) => {
+    if (!failed && String(text).includes("pg_advisory_xact_lock")) {
+      failed = true;
+      const error = new Error("lock not available");
+      error.code = "55P03";
+      throw error;
+    }
+    return originalQuery(text, params);
+  };
+  const { coordinator } = create({ client });
+  const issued = await coordinator.begin(context);
+  assert.match(issued.challenge_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(client.calls.filter(({ sql }) => sql.startsWith("SELECT pg_advisory_xact_lock")).length, 1);
+});
+
 test("persists and claims the optional resource context hash exactly", async () => {
   const { client, coordinator } = create({});
   const issued = await coordinator.begin({ ...context, context_hash: contextHash });
