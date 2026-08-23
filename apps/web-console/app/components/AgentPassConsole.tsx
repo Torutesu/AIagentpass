@@ -1493,7 +1493,7 @@ export function AgentPassConsole() {
 
   const refreshSummaryCore = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
     if (signal !== undefined && Math.max(lastSummarySuccessAtRef.current, lastInitialSummarySuccessAt) > 0
-      && Date.now() - Math.max(lastSummarySuccessAtRef.current, lastInitialSummarySuccessAt) < 5_000) return "ready";
+      && Date.now() - Math.max(lastSummarySuccessAtRef.current, lastInitialSummarySuccessAt) < 60_000) return "ready";
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
