@@ -118,12 +118,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           process.stdout.write(`${diagnostic}\n`);
           if (process.env.GITHUB_ACTIONS === "true") process.stderr.write(`::error title=P0B diagnostic::${diagnostic}\n`);
         }
-        const diagnosticCode = response.headers()["x-agentpass-diagnostic-code"];
-        if (/^[a-z][a-z0-9_]{0,127}$/u.test(diagnosticCode ?? "")) {
-          const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OUTCOME_INTERNAL code=${diagnosticCode}`;
-          process.stdout.write(`${diagnostic}\n`);
-          if (process.env.GITHUB_ACTIONS === "true") process.stderr.write(`::error title=P0B diagnostic::${diagnostic}\n`);
-        }
       }
       if (phase === "options") {
         recentAuthObservation.optionsStatus = response.status();

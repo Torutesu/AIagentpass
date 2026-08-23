@@ -1738,13 +1738,7 @@ function errorResponse(error) {
   if (error instanceof ConsoleApiError) {
     return jsonResponse(error.status, { error: { code: error.code, message: error.message } }, { "x-agentpass-error-code": error.code });
   }
-  const errorName = typeof error?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/u.test(error.name)
-    ? error.name.toLowerCase()
-    : "error";
-  return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } }, {
-    "x-agentpass-error-code": `internal_${errorName}`,
-    "x-agentpass-diagnostic-code": `internal_${errorName}`,
-  });
+  return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } }, { "x-agentpass-error-code": "internal_error" });
 }
 
 function jsonResponse(status, body, extraHeaders = {}) {
