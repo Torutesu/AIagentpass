@@ -378,11 +378,13 @@ function withScenarioPage(open, getPage, args, action) {
           return;
         }
         emitLiveStage("HANDOFF_PAGE_READY");
-        emitLiveStage("HANDOFF_ACTION_START");
-        let actionResult;
-        try { actionResult = action(page); }
-        catch (error) { reject(error); return; }
-        Promise.resolve(actionResult).then(resolve, reject);
+        setTimeout(() => {
+          emitLiveStage("HANDOFF_ACTION_START");
+          let actionResult;
+          try { actionResult = action(page); }
+          catch (error) { reject(error); return; }
+          Promise.resolve(actionResult).then(resolve, reject);
+        }, 0);
       },
       onError: reject
     });
