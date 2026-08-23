@@ -13,8 +13,9 @@ const qualificationSpec = fs.readFileSync(path.join(root, "e2e", "webauthn-agent
 
 test("browser E2E has a deterministic loopback server contract", () => {
   assert.match(config, /--hostname 127\.0\.0\.1/);
-  assert.match(config, /baseURL: `http:\/\/127\.0\.0\.1:\$\{e2ePort\}`/);
-  assert.match(config, /url: `http:\/\/127\.0\.0\.1:\$\{e2ePort\}\/`/);
+  assert.match(config, /const browserHost = process\.env\.PLAYWRIGHT_BROWSER_HOST === "127\.0\.0\.1" \? "127\.0\.0\.1" : "localhost"/);
+  assert.match(config, /baseURL: `http:\/\/\$\{browserHost\}:\$\{e2ePort\}`/);
+  assert.match(config, /url: `http:\/\/\$\{browserHost\}:\$\{e2ePort\}\/`/);
   assert.match(config, /reuseExistingServer: false/);
   assert.match(config, /env -u NODE_OPTIONS -u NODE_DEBUG/);
   assert.match(runner, /spawn\([^\n]+\["run", "dev", "--", "--hostname", "127\.0\.0\.1", "--port", String\(port\)\]/u);
