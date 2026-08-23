@@ -123,6 +123,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     emitLiveStage("KEYBOARD_CONFIRM_DONE");
     const refreshResponse = await refreshResponsePromise;
     emitLiveStage("KEYBOARD_RESPONSE_DONE");
+    emitLiveStage("KEYBOARD_OUTCOME_START");
     try {
       assert.match(await requireWakeStatus(page, card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
@@ -653,8 +654,11 @@ async function requireWakeStatus(page, card, failurePrefix) {
   const status = card.getByRole("status");
   const alert = card.getByRole("alert");
   const outcome = card.locator('[role="status"]:visible, [role="alert"]:visible').first();
+  emitLiveStage("KEYBOARD_OUTCOME_LOCATORS_DONE");
+  emitLiveStage("KEYBOARD_OUTCOME_WAIT_START");
   try { await boundedUiOperation(page, () => outcome.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })); }
   catch { return failWakeStatus(failurePrefix, "TIMEOUT"); }
+  emitLiveStage("KEYBOARD_OUTCOME_WAIT_DONE");
   let alertVisible = false;
   try { alertVisible = await boundedUiOperation(page, () => alert.isVisible()); } catch {}
   const outcomeType = alertVisible ? "alert" : "status";
