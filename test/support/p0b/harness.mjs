@@ -478,12 +478,6 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
         if (!cloudProcess) return "exited";
         return cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null ? "exited" : "running";
       },
-      cloudFailureDiagnostics() {
-        const output = `${cloudProcess?.p0bDiagnostics?.stdout ?? ""}\n${cloudProcess?.p0bDiagnostics?.stderr ?? ""}`;
-        return [...output.matchAll(/P0B_DIAGNOSTIC_CLOUD_ERROR code=([A-Za-z][A-Za-z0-9_]{0,63}) constraint=([A-Za-z][A-Za-z0-9_]{0,95}|none)/gu)]
-          .slice(-4)
-          .map((match) => `P0B_DIAGNOSTIC_CLOUD_ERROR code=${match[1]} constraint=${match[2]}`);
-      },
       async cloudReadinessState() {
         if (!cloudProcess || cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null) return "unavailable";
         try {
