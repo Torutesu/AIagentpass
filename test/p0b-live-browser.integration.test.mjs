@@ -436,9 +436,10 @@ async function scenario(parent, name, callback) {
               if (summaryErrorCode === "body_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_BODY_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_INTERNAL_ERROR_FAILED");
               if (summaryStatus >= 500) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_OTHER_ERROR_FAILED");
-              if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
+              if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
+              if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
             }
             const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
