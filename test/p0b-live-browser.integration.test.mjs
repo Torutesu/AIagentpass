@@ -77,6 +77,24 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       sessionStatus: null,
       webAuthnSupported,
     };
+    page.on("console", (message) => {
+      const text = message.text();
+      if (/^P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=[a-z][a-z0-9_]{0,63}$/u.test(text)) process.stdout.write(`${text}\n`);
+    });
+    await runP0BPageEvaluate(page, () => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await originalFetch(...args);
+        const requestUrl = typeof args[0] === "string" ? args[0] : args[0]?.url;
+        if (typeof requestUrl === "string" && requestUrl.includes("/api/auth/webauthn/options") && response.status >= 500) {
+          response.clone().json().then((body) => {
+            const code = body?.error?.code;
+            if (/^[a-z][a-z0-9_]{0,63}$/.test(code ?? "")) console.log(`P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}`);
+          }).catch(() => {});
+        }
+        return response;
+      };
+    }).catch(() => {});
     page.on("request", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
       const phase = keyboardRecentAuthPhase(request);
