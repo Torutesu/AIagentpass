@@ -459,6 +459,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-p0b-cloud",
       AGENTPASS_IDENTITY_ASSERTION_KID: "p0b-console-v1",
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
+      P0B_LIVE_BROWSER: "1",
       NODE_EXTRA_CA_CERTS: trustedCaBundle,
       VINEXT_TRUSTED_HOSTS: `localhost:${consoleTlsPort}`,
       WRANGLER_LOG_PATH: path.join(temp, "wrangler.log"),
