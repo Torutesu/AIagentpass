@@ -376,25 +376,35 @@ export function staleAuthCeremonyFailureMarker(error) {
 
 async function waitForScenarioPage(open, getPage, ...args) {
   emitLiveStage("HANDOFF_OPEN_CALL");
-  let timeout;
-  await new Promise((resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error("P0B live open handoff timed out")), 120_000);
-    try {
-      const handoff = {
-        onReady: resolve,
-        onError: reject
-      };
-      // Keep the callback in the third positional slot even when the caller
-      // uses the common role-only shorthand and omits options.
-      if (args.length === 1) open(args[0], undefined, handoff);
-      else open(...args, handoff);
-    } catch (error) {
-      reject(error);
-    }
-  }).finally(() => clearTimeout(timeout));
-  const openError = open.getError?.();
+  // Do not pass a Promise resolver across the fixture/Playwright boundary.
+  // Some protected runners expose callback values through a different realm;
+  // a plain state flag keeps the handoff contract independent of thenable
+  // assimilation while retaining a finite wait and typed error path.
+  let ready = false;
+  let openError;
+  const handoff = Object.freeze({
+    onReady: () => { ready = true; },
+    onError: (error) => { openError = error; }
+  });
+  try {
+    // Keep the callback in the third positional slot even when the caller
+    // uses the common role-only shorthand and omits options.
+    if (args.length === 1) open(args[0], undefined, handoff);
+    else open(...args, handoff);
+  } catch (error) {
+    openError = error;
+  }
+  const deadline = Date.now() + 120_000;
+  while (!ready && openError === undefined && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   if (openError !== undefined) throw openError;
+  if (!ready) throw new Error("P0B live open handoff timed out");
+  const wrapperError = open.getError?.();
+  if (wrapperError !== undefined) throw wrapperError;
+  emitLiveStage("HANDOFF_READY_STATE");
   if (getPage() === null) throw new Error("P0B live open handoff missing");
+  emitLiveStage("HANDOFF_PAGE_READ");
   emitLiveStage("HANDOFF_PAGE_SEEN");
   // Keep the Playwright Page entirely in the scenario closure. Returning it
   // from any async helper (even nested in a plain object) has triggered
