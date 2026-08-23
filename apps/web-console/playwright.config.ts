@@ -17,6 +17,7 @@ const bffCloudPort = Number.parseInt(process.env.PLAYWRIGHT_CLOUD_API_PORT ?? "4
 const configuredBffCloudPort = Number.isInteger(bffCloudPort) && bffCloudPort >= 1024 && bffCloudPort <= 65_535
   ? bffCloudPort
   : 4_310;
+const browserHost = process.env.PLAYWRIGHT_BROWSER_HOST === "127.0.0.1" ? "127.0.0.1" : "localhost";
 const bffCloudUrl = `http://127.0.0.1:${configuredBffCloudPort}/`;
 const bffOrganizationId = "11111111-1111-4111-8111-111111111111";
 const bffCursorSecret = "A".repeat(43);
@@ -41,7 +42,7 @@ export default defineConfig({
   // below, so retaining test output would add no supported diagnostic value.
   preserveOutput: "never",
   use: {
-    baseURL: `http://127.0.0.1:${e2ePort}`,
+    baseURL: `http://${browserHost}:${e2ePort}`,
     ...devices["Desktop Chrome"],
     browserName: "chromium",
     headless: true,
@@ -67,7 +68,7 @@ export default defineConfig({
       `npm run dev -- --hostname 127.0.0.1 --port ${e2ePort}`,
     ].join(" "),
     cwd: ".",
-    url: `http://127.0.0.1:${e2ePort}/`,
+    url: `http://${browserHost}:${e2ePort}/`,
     timeout: webServerTimeout,
     reuseExistingServer: false,
     gracefulShutdown: { signal: "SIGTERM", timeout: shutdownTimeout },

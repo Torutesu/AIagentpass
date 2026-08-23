@@ -241,6 +241,7 @@ async function installVirtualAuthenticator(page: Page): Promise<void> {
       isUserVerified: true,
     },
   });
+  await cdp.send("WebAuthn.setUserVerified", { authenticatorId, isUserVerified: true });
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   await cdp.send("WebAuthn.addCredential", {
     authenticatorId,
@@ -272,6 +273,9 @@ test("renders all device states with accessible labels and keyboard wake", async
   await wake.focus();
   await expect(wake).toBeFocused();
   await page.keyboard.press("Enter");
+  const confirm = pendingCard.getByRole("button", { name: "確認して送信" });
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(pendingCard.getByRole("status")).toContainText("依頼を受け付けました");
 });
 
@@ -281,6 +285,7 @@ test("proves accepted, coalesced, and no-pending-refresh UI outcomes", async ({ 
   for (let index = 0; index < names.length; index += 1) {
     const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: names[index] }) });
     await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+    await card.getByRole("button", { name: "確認して送信" }).click();
     await expect(card.getByRole("status")).toContainText(messages[index]);
   }
 });
@@ -313,6 +318,8 @@ test.describe("role and recent-auth matrix", () => {
     test("allows a recent-authenticated wake request", async ({ page }) => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+      await card.getByRole("button", { name: "確認して送信" }).click();
+      await page.waitForTimeout(1_000);
       await expect(card.getByRole("status")).toContainText("依頼を受け付けました");
       expect(routeStates.get(page)).toMatchObject({ wakeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
     });
@@ -331,6 +338,7 @@ test.describe("role and recent-auth matrix", () => {
     test("allows a recent-authenticated coalesced request", async ({ page }) => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+      await card.getByRole("button", { name: "確認して送信" }).click();
       await expect(card.getByRole("status")).toContainText("既存の依頼へ統合し、再通知しました");
       expect(routeStates.get(page)).toMatchObject({ wakeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
     });
@@ -360,6 +368,7 @@ test.describe("role and recent-auth matrix", () => {
     test("fails closed before the wake request", async ({ page }) => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+      await card.getByRole("button", { name: "確認して送信" }).click();
       await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
       expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 0, protocolViolations: [] });
     });
@@ -371,6 +380,7 @@ test.describe("role and recent-auth matrix", () => {
       test("fails closed after the WebAuthn ceremony and before wake mutation", async ({ page }) => {
         const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
         await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+        await card.getByRole("button", { name: "確認して送信" }).click();
         await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
         expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
       });

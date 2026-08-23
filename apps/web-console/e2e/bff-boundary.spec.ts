@@ -76,7 +76,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.context().addCookies([{
     name: "__Host-agentpass_session",
     value: BFF_SESSION_TOKEN,
-    domain: "127.0.0.1",
+    domain: process.env.PLAYWRIGHT_BROWSER_HOST === "127.0.0.1" ? "127.0.0.1" : "localhost",
     path: "/",
     secure: true,
     httpOnly: true,
@@ -131,7 +131,7 @@ test("passes the real browser session, CSRF, and WebAuthn transport through the 
   expect(observations.filter(({ path }) => path === "/api/auth/webauthn/options").at(-1)).toMatchObject({
     cookiePresent: true,
     csrfPresent: true,
-    origin: expect.stringMatching(/^http:\/\/127\.0\.0\.1:/u),
+    origin: expect.stringMatching(/^http:\/\/localhost:/u),
   });
   expect(observations.filter(({ path }) => path === "/api/auth/webauthn/verify").at(-1)).toMatchObject({
     cookiePresent: true,

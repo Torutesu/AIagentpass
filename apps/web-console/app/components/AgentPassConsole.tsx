@@ -738,6 +738,7 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
   const [wakeError, setWakeError] = useState("");
   const [wakeOutcome, setWakeOutcome] = useState("");
   const wakeInFlight = useRef(false);
+  const wakeConfirmRef = useRef<HTMLButtonElement | null>(null);
   const requestWake = async () => {
     if (!canRequestRefreshForRole || !device.deviceId || wakeInFlight.current) return;
     wakeInFlight.current = true;
@@ -761,6 +762,9 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
     setWakeConfirming(true);
   };
   const [wakeConfirming, setWakeConfirming] = useState(false);
+  useEffect(() => {
+    if (wakeConfirming) wakeConfirmRef.current?.focus();
+  }, [wakeConfirming]);
   return (
     <article className={`health-card device-state-card state-${state}`} aria-busy={wakePending}>
       <div className="health-head">
@@ -769,7 +773,7 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
       </div>
       <p className="device-state-description">{deviceStateDescription(state)}</p>
       {canRequestRefreshForRole ? <div className="device-wake-action">
-        {wakeConfirming && !wakePending ? <span className="operation-control"><span className="section-note" role="status" aria-live="polite">端末へWake requestを送信します。適用完了はこの操作では確認しません。</span><button className="secondary-button device-wake-button" type="button" onClick={() => { setWakeConfirming(false); void requestWake(); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); } }}>確認して送信</button><button className="text-button" type="button" onClick={() => setWakeConfirming(false)}>キャンセル</button></span> : <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={requestWakeWithConfirmation}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>}
+        {wakeConfirming && !wakePending ? <span className="operation-control"><span className="section-note" role="status" aria-live="polite">端末へWake requestを送信します。適用完了はこの操作では確認しません。</span><button ref={wakeConfirmRef} className="secondary-button device-wake-button" type="button" onClick={() => { setWakeConfirming(false); void requestWake(); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); } }}>確認して送信</button><button className="text-button" type="button" onClick={() => setWakeConfirming(false)}>キャンセル</button></span> : <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={requestWakeWithConfirmation}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>}
         <p className="device-wake-copy">端末への配信は未確認です。適用・同期の完了を示す操作ではありません。</p>
         {wakeOutcome ? <p className="device-wake-outcome" role="status" aria-live="polite">{wakeOutcome}</p> : null}
         {wakeError ? <p className="device-wake-error" role="alert">{wakeError}</p> : null}
