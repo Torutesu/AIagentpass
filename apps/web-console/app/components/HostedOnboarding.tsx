@@ -42,6 +42,8 @@ type InitialStatusGuard = {
 // no cookie, CSRF value, or status payload is retained here.
 const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
 const initialStatusDomMarker = "data-agentpass-initial-status";
+const initialStatusWindowNamePrefix = "agentpass-onboarding-status:";
+const INITIAL_STATUS_RELOAD_WINDOW_MS = 30_000;
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
 // period so a slow first read is not aborted and replayed.
@@ -133,6 +135,11 @@ export function HostedOnboarding() {
     const browserWindow = typeof window === "object" ? window : null;
     const documentRoot = typeof document === "object" ? document.documentElement : null;
     const domOutcome = documentRoot?.getAttribute(initialStatusDomMarker);
+    const windowNameMatch = browserWindow?.name.match(/^agentpass-onboarding-status:(session_required|other):([0-9]+)$/u);
+    const windowNameOutcome = windowNameMatch !== null && windowNameMatch !== undefined
+      && Date.now() - Number(windowNameMatch[2]) < INITIAL_STATUS_RELOAD_WINDOW_MS
+      ? windowNameMatch[1]
+      : undefined;
     // A hydration boundary can be evaluated in a separate client bundle. The
     // document marker is only a non-sensitive outcome classification and is a
     // final duplicate-request guard when Window properties are not shared.
@@ -145,6 +152,22 @@ export function HostedOnboarding() {
       return;
     }
     if (domOutcome === "other") {
+      queueMicrotask(() => {
+        const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+        setMessage(guidance.message);
+        setGuidanceKind(guidance.kind);
+        setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+      });
+      return;
+    }
+    if (windowNameOutcome === "session_required") {
+      queueMicrotask(() => {
+        setScreen("signin");
+        setGuidanceKind("terminal");
+      });
+      return;
+    }
+    if (windowNameOutcome === "other") {
       queueMicrotask(() => {
         const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
         setMessage(guidance.message);
@@ -212,6 +235,9 @@ export function HostedOnboarding() {
             ? "session_required"
             : "other";
         documentRoot?.setAttribute(initialStatusDomMarker, guard.outcome);
+        if (guard.outcome === "session_required" || guard.outcome === "other") {
+          if (browserWindow !== null) browserWindow.name = `${initialStatusWindowNamePrefix}${guard.outcome}:${Date.now()}`;
+        }
         const waiters = [...guard.waiters];
         guard.waiters.clear();
         for (const waiter of waiters) waiter(guard.outcome);
