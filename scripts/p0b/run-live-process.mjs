@@ -362,6 +362,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_AUDITOR_OPEN_REGISTRATION_FAILED", "auditor_open_registration"],
   [null, "P0B_SAFE_AUDITOR_OPEN_RELOAD_FAILED", "auditor_open_reload"],
   [null, "P0B_SAFE_AUDITOR_OPEN_READINESS_FAILED", "auditor_open_readiness"],
+  [null, "P0B_SAFE_AUDITOR_OPEN_FAILED", "auditor_open"],
   [null, "P0B_SAFE_AUDITOR_WAKE_CONTROL_FAILED", "auditor_wake_control"],
   [null, "P0B_SAFE_VIEWER_OPEN_FAILED", "viewer_open"],
   [null, "P0B_SAFE_VIEWER_WAKE_CONTROL_FAILED", "viewer_wake_control"],
