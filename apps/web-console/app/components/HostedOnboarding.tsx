@@ -40,7 +40,9 @@ type InitialStatusGuard = {
 // Vinext can remount a client boundary while hydrating an unauthenticated
 // page. Coalesce only the short-lived, non-sensitive outcome classification;
 // no cookie, CSRF value, or status payload is retained here.
-const initialStatusGuards = new WeakMap<object, InitialStatusGuard>();
+const initialStatusGuardKey = Symbol.for("agentpass.onboarding.initial-status-guard");
+const initialStatusGuards = ((globalThis as unknown as Record<symbol, WeakMap<object, InitialStatusGuard>>)[initialStatusGuardKey]
+  ??= new WeakMap<object, InitialStatusGuard>());
 const INITIAL_STATUS_GUARD_MS = 1_000;
 
 const STEPS = [
