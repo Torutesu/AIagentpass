@@ -521,9 +521,6 @@ BEGIN
   IF to_regclass('public.agentpass_webauthn_registration_sessions') IS NOT NULL THEN
     GRANT SELECT ON TABLE public.agentpass_webauthn_registration_sessions TO agentpass_app;
   END IF;
-  IF to_regclass('public.agentpass_manual_wake_actor_memberships') IS NOT NULL THEN
-    GRANT SELECT ON TABLE public.agentpass_manual_wake_actor_memberships TO agentpass_app;
-  END IF;
   IF to_regclass('public.webauthn_challenges') IS NOT NULL THEN
     GRANT SELECT, INSERT, UPDATE ON TABLE public.webauthn_challenges TO agentpass_app;
   END IF;

@@ -705,7 +705,8 @@ table_privilege_observations AS (
       OR t.relname IN ('organization_invitations', 'human_sessions', 'webauthn_credentials', 'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges', 'owner_recovery_sessions', 'owner_recovery_webauthn_challenges', 'owner_recovery_idempotency_records', 'owner_recovery_outbox', 'owner_recovery_outbox_retention_ledger', 'owner_recovery_outbox_transition_heads', 'owner_recovery_outbox_transition_ledger', 'capabilities', 'agent_session_signing_capability_reservations', 'agent_session_signing_capability_expiry_audit_events', 'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads', 'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions', 'human_identity_assertion_replays', 'upstream_identities', 'device_request_nonces', 'rate_limit_buckets', 'anonymous_rate_limit_buckets') THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
-      CASE WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
+      CASE WHEN t.relname = 'agentpass_manual_wake_actor_memberships' THEN NULL
+        WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'
           OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
           OR t.relname = 'agentpass_manual_wake_actor_memberships'
