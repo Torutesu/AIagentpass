@@ -310,8 +310,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
       if (!response.headersSent && !response.writableEnded) {
-        if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(String(error?.code ?? ""))) {
-          response.setHeader("x-agentpass-diagnostic-code", String(error.code));
+        if (process.env.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(String(error?.diagnosticCode ?? error?.code ?? ""))) {
+          response.setHeader("x-agentpass-diagnostic-code", String(error.diagnosticCode ?? error.code));
         }
         send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
       } else if (!response.writableEnded && typeof response.destroy === "function") {
