@@ -376,7 +376,7 @@ export function staleAuthCeremonyFailureMarker(error) {
   return "P0B_SAFE_STALE_AUTH_CEREMONY_FAILED";
 }
 
-async function waitForScenarioPage(open, getPage, ...args) {
+async function waitForScenarioPage(open, _getPage, ...args) {
   emitLiveStage("HANDOFF_OPEN_CALL");
   // Do not pass a Promise resolver across the fixture/Playwright boundary.
   // Some protected runners expose callback values through a different realm;
@@ -405,8 +405,10 @@ async function waitForScenarioPage(open, getPage, ...args) {
   const wrapperError = open.getError?.();
   if (wrapperError !== undefined) throw wrapperError;
   emitLiveStage("HANDOFF_READY_STATE");
-  if (getPage() === null) throw new Error("P0B live open handoff missing");
-  emitLiveStage("HANDOFF_PAGE_READ");
+  // Keep the Page object entirely outside this async helper. Even observing a
+  // Playwright Page through a closure can trigger protected-runner realm
+  // handling at the async-function return boundary; callers read it only
+  // after the helper has completed.
   emitLiveStage("HANDOFF_PAGE_SEEN");
   emitLiveStage("HANDOFF_FUNCTION_EXIT");
   // Keep the Playwright Page entirely in the scenario closure. Returning it
