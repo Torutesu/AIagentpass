@@ -21,7 +21,7 @@ class AuditClient {
     if (text.startsWith("SELECT request_hash,response_status,response_json")) return result([{ request_hash: this.requestHash, response_status: 102, response_json: {} }]);
     if (text.startsWith("UPDATE idempotency_records")) { this.storedResponse = JSON.parse(params[4]); return { rows: [], rowCount: 1 }; }
     if (text.includes("pg_advisory_xact_lock")) return result([{}]);
-    if (text.startsWith("SELECT 1 FROM memberships")) return result([{ "?column?": 1 }]);
+    if (text.startsWith("SELECT public.agentpass_manual_wake_actor_role")) return result([{ role: "admin" }]);
     if (text.startsWith("SELECT sequence,event_hash FROM admin_audit_heads")) return result([{ sequence: 0, event_hash: "0".repeat(64) }]);
     if (text.startsWith("INSERT INTO admin_audit_events")) { this.event = JSON.parse(params[9]); return result([{ created_at: params[10] }]); }
     if (text.startsWith("UPDATE admin_audit_heads")) return { rows: [], rowCount: 1 };
@@ -61,7 +61,7 @@ test("append locks the tenant chain and commits idempotency, event, and head on 
   assert.equal(event.event_hash, crypto.createHash("sha256").update(canonicalJson(client.event), "utf8").digest("hex"));
   assert.deepEqual(client.calls.slice(0, 2).map(({ text }) => text), ["BEGIN", client.calls[1].text]);
   assert.equal(client.calls.at(-1).text, "COMMIT");
-  assert.ok(client.calls.some(({ text, params }) => text.startsWith("SELECT 1 FROM memberships") && params[0] === organizationId && params[1] === actorId));
+  assert.ok(client.calls.some(({ text, params }) => text.startsWith("SELECT public.agentpass_manual_wake_actor_role") && params[0] === organizationId && params[1] === actorId));
   assert.ok(client.calls.some(({ text }) => text.includes("admin_audit_heads") && text.includes("FOR UPDATE")));
   assert.deepEqual(client.storedResponse, event);
 

@@ -107,9 +107,8 @@ export function createPostgresAdminAuditRepository({ client, now = () => new Dat
 
   async function appendEvent(tx, values) {
     await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:admin-audit:${values.organizationId}`]);
-    const actor = await tx.query(`SELECT 1 FROM memberships
-      WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR SHARE`, [values.organizationId, values.actorId]);
-    if (rowCount(actor) !== 1) throw new AdminAuditRepositoryError("ERR_ACTOR", "audit actor is not an active organization member");
+    const actor = await tx.query("SELECT public.agentpass_manual_wake_actor_role($1,$2) AS role", [values.organizationId, values.actorId]);
+    if (rowCount(actor) !== 1 || typeof actor.rows[0]?.role !== "string") throw new AdminAuditRepositoryError("ERR_ACTOR", "audit actor is not an active organization member");
     const headResult = await tx.query(`SELECT sequence,event_hash FROM admin_audit_heads
       WHERE organization_id=$1 FOR UPDATE`, [values.organizationId]);
     if (rowCount(headResult) !== 1) throw new AdminAuditRepositoryError("ERR_AUDIT_HEAD", "admin audit head is unavailable");
