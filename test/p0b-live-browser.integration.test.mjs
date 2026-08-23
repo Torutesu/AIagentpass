@@ -342,11 +342,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).click());
       }
       catch { assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_FAILED"); }
-      try {
-        await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).waitFor({ state: "hidden", timeout: UI_ASSERTION_TIMEOUT_MS }));
-        await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS }));
-      }
-      catch { assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED" : "P0B_SAFE_OWNER_FINAL_CONFIRM_FAILED"); }
+      try { await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).waitFor({ state: "hidden", timeout: UI_ASSERTION_TIMEOUT_MS })); }
+      catch { assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED"); }
+      try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
+      catch { assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STATE_NOT_VISIBLE_FAILED" : "P0B_SAFE_OWNER_FINAL_STATE_NOT_VISIBLE_FAILED"); }
       });
     });
   }
