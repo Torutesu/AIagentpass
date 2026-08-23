@@ -314,6 +314,7 @@ type LiveHandoffRef = { current: LiveHandoffSession | null };
 type LiveHandoffDelivery = LiveHandoffSession["delivery"];
 const createLiveHandoffDelivery = createBrowserCliHandoffDelivery as unknown as (options: { handoff: LiveHandoffDescriptor; preflight: LiveHandoffPreflight }) => LiveHandoffDelivery;
 let initialSummaryClaimed = false;
+let lastInitialSummarySuccessAt = 0;
 
 function parseV2EnrollmentInvitation(payload: unknown, organizationId: string, expectedPreflight: PublicEnrollmentPreflight): Record<string, unknown> {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
@@ -1491,7 +1492,8 @@ export function AgentPassConsole() {
   };
 
   const refreshSummaryCore = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
-    if (signal !== undefined && Date.now() - lastSummarySuccessAtRef.current < 5_000) return "ready";
+    if (signal !== undefined && Math.max(lastSummarySuccessAtRef.current, lastInitialSummarySuccessAt) > 0
+      && Date.now() - Math.max(lastSummarySuccessAtRef.current, lastInitialSummarySuccessAt) < 5_000) return "ready";
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
@@ -1539,6 +1541,7 @@ export function AgentPassConsole() {
       setSummaryState("ready");
       setLastSynced("たった今");
       lastSummarySuccessAtRef.current = Date.now();
+      lastInitialSummarySuccessAt = lastSummarySuccessAtRef.current;
       return "ready";
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
