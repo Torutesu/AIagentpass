@@ -1738,7 +1738,7 @@ function errorResponse(error) {
     const responseBody = { error: { code, message: "Cloud API request failed" } };
     if (typeof source.request_id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(source.request_id)) responseBody.request_id = source.request_id;
     const headers = { "x-agentpass-error-code": code };
-    if (typeof process !== "undefined" && process.env?.P0B_LIVE_BROWSER === "1" && /^[0-9A-Z]{5}$/u.test(error.diagnosticCode ?? "")) {
+    if (/^[0-9A-Z]{5}$/u.test(error.diagnosticCode ?? "")) {
       headers["x-agentpass-diagnostic-code"] = error.diagnosticCode;
     }
     return jsonResponse(error.status, responseBody, headers);
