@@ -29,9 +29,11 @@ let selectedScenarioCount = 0;
 // reached its thirteenth isolated stack after 20 minutes; per-scenario
 // 120-second bounds remain the owning hang detector.
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 1_800_000 }, async (t) => {
-  await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
+  await scenario(t, "renders all six real PostgreSQL device states", async ({ open, markPhase }) => {
+    markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
     const page = (await open("owner")).page;
+    markPhase("after_open");
     emitLiveStage("ASSERTION_OPEN_RETURNED");
     emitLiveStage("ASSERTION_WAIT_START");
     // Keep these waits serial and let Playwright own each locator deadline.
@@ -371,6 +373,7 @@ async function scenario(parent, name, callback) {
     let fixture;
     let browser;
     let scenarioError;
+    let callbackPhase = "callback";
     let cleanupError;
     let browserCleanupAttempted = false;
     try {
@@ -560,7 +563,14 @@ async function scenario(parent, name, callback) {
       };
       try {
         emitLiveStage("SCENARIO_ASSERTIONS");
-        await callback({ fixture, browser, open });
+        await callback({
+          fixture,
+          browser,
+          open,
+          markPhase: (phase) => {
+            if (phase === "before_open" || phase === "after_open") callbackPhase = phase;
+          }
+        });
       } catch (error) {
         scenarioError = error;
       }
@@ -602,7 +612,7 @@ async function scenario(parent, name, callback) {
           : scenarioError?.name === "TimeoutError"
             ? "timeout"
             : "other";
-      writeSync(2, `P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=callback\n`);
+      writeSync(2, `P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=${callbackPhase}\n`);
       writeSync(2, `P0B_SAFE_SCENARIO_ERROR_${scenarioErrorKind.toUpperCase()}_FAILED\n`);
       if (lifecycleFailureMarker(scenarioError) === null) {
         process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
