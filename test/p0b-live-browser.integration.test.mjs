@@ -339,6 +339,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
             revokeStatus = response.status();
             const code = response.headers()["x-agentpass-error-code"];
             if (/^[a-z][a-z0-9._:-]{0,63}$/u.test(code ?? "")) revokeErrorCode = code;
+            if (response.status() >= 500) writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE_RESPONSE status=${response.status()} code=${revokeErrorCode ?? "none"}\n`);
           }
         } catch {}
       };
