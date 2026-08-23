@@ -342,6 +342,7 @@ async function scenario(parent, name, callback) {
         let deploymentStatus = null;
         let summaryBodyCode = null;
         let summaryParseDiagnostic = null;
+        let summaryRefreshDiagnostic = null;
         let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
@@ -388,6 +389,8 @@ async function scenario(parent, name, callback) {
         page.on("console", (message) => {
           const match = message.text().match(/^AgentPass summary contract rejected ([.$\w\[\]]+) ([a-z_]+)$/u);
           if (match && match[1].length <= 128 && match[2].length <= 64) summaryParseDiagnostic = Object.freeze({ path: match[1], reason: match[2] });
+          const refresh = message.text().match(/^AgentPass summary refresh rejected ([A-Za-z0-9_.:-]{1,96})$/u);
+          if (refresh) summaryRefreshDiagnostic = refresh[1];
         });
         if (register) {
           emitLiveStage("OPEN_AUTHENTICATOR");
@@ -456,6 +459,7 @@ async function scenario(parent, name, callback) {
               if (summaryParseDiagnostic !== null) {
                 process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
               }
+              if (summaryRefreshDiagnostic !== null) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_REFRESH code=${summaryRefreshDiagnostic}\n`);
               if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
               if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
               if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");

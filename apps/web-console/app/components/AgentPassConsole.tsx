@@ -1521,6 +1521,8 @@ export function AgentPassConsole() {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
       if (epoch !== summaryEpoch.current) return "unavailable";
+      const diagnostic = error instanceof Error ? error.message : "unknown_error";
+      if (/^[A-Za-z0-9_.:-]{1,96}$/u.test(diagnostic)) console.warn("AgentPass summary refresh rejected", diagnostic);
       if (error instanceof ConsoleSummaryParseError) {
         console.warn("AgentPass summary contract rejected", error.path, error.reason);
       }
