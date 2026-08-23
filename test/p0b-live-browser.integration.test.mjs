@@ -38,7 +38,6 @@ const SCENARIO_NAMES = Object.freeze([
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
-let pendingFinalRevokeMarker = null;
 
 // Thirteen authority scenarios each own a fresh TLS PostgreSQL/Cloud/Console
 // stack. A complete successful matrix is longer than the earlier failure-
@@ -361,9 +360,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       catch {
         writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
         const consoleDiagnostics = fixture?.consoleFailureDiagnostics?.() ?? [];
-        if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED";
-        else if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED";
-        else if (role === "owner" && revokeErrorCode === "internal_error") pendingFinalRevokeMarker = "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED";
+        if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED\n");
+        if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED\n");
+        if (role === "owner" && revokeErrorCode === "internal_error") writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED\n");
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
@@ -726,10 +725,6 @@ async function scenario(parent, name, callback) {
     if (scenarioError) {
       for (const diagnostic of fixture?.cloudFailureDiagnostics?.() ?? []) process.stderr.write(`${diagnostic}\n`);
       for (const diagnostic of fixture?.consoleFailureDiagnostics?.() ?? []) process.stderr.write(`${diagnostic}\n`);
-      if (pendingFinalRevokeMarker !== null) {
-        writeSync(2, `${pendingFinalRevokeMarker}\n`);
-        pendingFinalRevokeMarker = null;
-      }
       process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${liveStageTrace.length > 0 ? liveStageTrace.join(",") : "UNKNOWN"}\n`);
       // The supervisor intentionally discards arbitrary TAP diagnostics. If a
       // failure escaped the reviewed marker mappers, retain only its bounded
