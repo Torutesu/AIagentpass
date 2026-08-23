@@ -141,7 +141,7 @@ BEGIN
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND c.relname NOT IN (
         'schema_migrations', 'schema_migration_attempts', 'release_candidates',
-        'organizations', 'memberships', 'organization_invitations',
+        'organizations', 'memberships', 'organization_invitations', 'agentpass_manual_wake_actor_memberships',
         'human_sessions', 'webauthn_credentials', 'webauthn_challenges',
         'owner_recovery_requests', 'owner_recovery_approvals', 'owner_recovery_exchanges',
         'owner_recovery_sessions', 'owner_recovery_webauthn_challenges',
@@ -259,7 +259,7 @@ BEGIN
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
         OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
-        OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations',
+          OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agentpass_manual_wake_actor_memberships',
           'agent_session_signing_capability_expiry_audit_events',
           'agent_session_signing_capability_expiry_audit_heads', 'agent_capability_sequence_heads',
           'agent_session_launch_authority_handoffs', 'agent_session_grants', 'agent_sessions',
@@ -520,6 +520,9 @@ DO $$
 BEGIN
   IF to_regclass('public.agentpass_webauthn_registration_sessions') IS NOT NULL THEN
     GRANT SELECT ON TABLE public.agentpass_webauthn_registration_sessions TO agentpass_app;
+  END IF;
+  IF to_regclass('public.agentpass_manual_wake_actor_memberships') IS NOT NULL THEN
+    GRANT SELECT ON TABLE public.agentpass_manual_wake_actor_memberships TO agentpass_app;
   END IF;
   IF to_regclass('public.webauthn_challenges') IS NOT NULL THEN
     GRANT SELECT, INSERT, UPDATE ON TABLE public.webauthn_challenges TO agentpass_app;
