@@ -60,7 +60,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open, getPage }) => {
+    emitLiveStage("KEYBOARD_SCENARIO_START");
     return withScenarioPage(open, getPage, ["owner"], async (page) => {
+      emitLiveStage("KEYBOARD_ACTION_START");
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
     emitLiveStage("KEYBOARD_FOCUS_START");
