@@ -50,7 +50,6 @@ function runScenario(name) {
     const stageTrace = [];
     let failureTail = "";
     let failureObserved = false;
-    const diagnostics = [];
     const observeStage = (chunk) => {
       const matches = [...String(chunk).matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
       for (const match of matches) {
@@ -63,15 +62,12 @@ function runScenario(name) {
       }
     };
     const observeFailure = (chunk) => {
-      for (const match of String(chunk).matchAll(/P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,1024}/gu)) {
-        diagnostics.push(match[0]);
-        if (diagnostics.length > 8) diagnostics.shift();
-      }
       if (failureObserved) return;
       failureTail = `${failureTail}${String(chunk)}`.slice(-1024);
       if (/P0B_SAFE_[A-Z][A-Z0-9_]{1,127}_FAILED/gu.test(failureTail)) {
         failureObserved = true;
         emitStageTrace();
+        const diagnostics = [...failureTail.matchAll(/P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,1024}/gu)].map((match) => match[0]);
         for (const diagnostic of diagnostics.slice(-4)) process.stderr.write(`${diagnostic}\n`);
         if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
           emitStageTrace();
