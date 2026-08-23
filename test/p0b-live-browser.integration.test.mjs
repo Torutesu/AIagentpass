@@ -661,12 +661,14 @@ async function requireWakeStatus(page, card, failurePrefix) {
   emitLiveStage("KEYBOARD_OUTCOME_WAIT_DONE");
   let alertVisible = false;
   try { alertVisible = await boundedUiOperation(page, () => alert.isVisible()); } catch {}
+  emitLiveStage("KEYBOARD_OUTCOME_ALERT_DONE");
   const outcomeType = alertVisible ? "alert" : "status";
   if (outcomeType === "alert") {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_ALERT_FAILED`);
     assert.fail("wake failed");
   }
   if (outcomeType !== "status") return failWakeStatus(failurePrefix, "TIMEOUT");
+  emitLiveStage("KEYBOARD_OUTCOME_TEXT_START");
   try { return await boundedUiOperation(page, () => card.getByRole("status").innerText()); }
   catch {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_INVALID_FAILED`);
