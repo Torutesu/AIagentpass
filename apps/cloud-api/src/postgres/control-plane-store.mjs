@@ -353,12 +353,6 @@ async function callRepository(fn, repository, operation, input) {
 
 function publicError(error, operation) {
   if (error instanceof ControlPlaneStoreError) return error;
-  if (process.env.P0B_LIVE_BROWSER === "1") {
-    const code = typeof error?.code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.code) ? error.code : "unknown";
-    const constraint = typeof error?.constraint === "string" && /^[A-Za-z][A-Za-z0-9_]{0,95}$/u.test(error.constraint) ? error.constraint : "none";
-    const op = typeof operation === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(operation) ? operation : "unknown";
-    process.stderr.write(`P0B_DIAGNOSTIC_CLOUD_STORE_ERROR operation=${op} code=${code} constraint=${constraint}\n`);
-  }
   if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
   return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
