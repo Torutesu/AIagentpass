@@ -32,7 +32,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open, getPage, markPhase }) => {
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
-    await withScenarioPage(open, getPage, ["owner"], async (page) => {
+    await withScenarioPage(open, getPage, ["owner"], (page) => {
       emitLiveStage("ASSERTION_AFTER_HANDOFF");
       emitLiveStage("ASSERTION_PAGE_READ");
       markPhase("after_open");
@@ -42,6 +42,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       // boundedUiOperation closes the page context on timeout; doing that while
       // several state waits are active can turn a missing-state assertion into a
       // generic "context closed" error before the fixed marker is captured.
+      return (async () => {
       for (const [label, safeCode] of [
         ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
         ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
@@ -56,6 +57,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           assert.fail(safeCode);
         }
       }
+      })();
     });
   });
 
