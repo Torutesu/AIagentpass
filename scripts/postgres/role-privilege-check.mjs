@@ -184,6 +184,7 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_prune_shared_control_expired(integer)'),
     ('agentpass_prune_anonymous_rate_limits(integer)'),
     ('agentpass_prune_human_identity_assertion_replays(integer)'),
+    ('agentpass_advance_authority_generation(uuid,timestamptz)'),
     ('agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)'),
     ('agentpass_agent_signing_capability_reserve(uuid,uuid,uuid,uuid,bytea,uuid,uuid,bytea,text,text,boolean,integer,bigint)'),
     ('agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)'),
