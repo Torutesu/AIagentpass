@@ -1375,6 +1375,7 @@ export function AgentPassConsole() {
   const modalRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
   const summaryInFlightRef = useRef<Promise<SummaryRefreshResult> | null>(null);
+  const lastSummarySuccessAtRef = useRef(0);
   const initialSummaryStartedRef = useRef(false);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
@@ -1490,6 +1491,7 @@ export function AgentPassConsole() {
   };
 
   const refreshSummaryCore = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
+    if (signal !== undefined && Date.now() - lastSummarySuccessAtRef.current < 5_000) return "ready";
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
@@ -1536,6 +1538,7 @@ export function AgentPassConsole() {
       setSessionState("active");
       setSummaryState("ready");
       setLastSynced("たった今");
+      lastSummarySuccessAtRef.current = Date.now();
       return "ready";
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
