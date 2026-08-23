@@ -50,6 +50,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED", "wake_ledger_accepted_ui_status"],
   [null, "P0B_SAFE_KEYBOARD_FOCUS_FAILED", "keyboard_focus"],
   [null, "P0B_SAFE_KEYBOARD_PRESS_FAILED", "keyboard_press"],
+  [null, "P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED", "keyboard_confirm_press"],
   [null, "P0B_SAFE_KEYBOARD_OUTCOME_FAILED", "keyboard_outcome"],
   [null, "P0B_SAFE_KEYBOARD_OUTCOME_ALERT_FAILED", "keyboard_outcome_alert"],
   [null, "P0B_SAFE_KEYBOARD_OUTCOME_TIMEOUT_FAILED", "keyboard_outcome_timeout"],

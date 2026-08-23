@@ -94,6 +94,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     // hydration or live-region update) from dispatching Enter to the page.
     try { await wake.press("Enter"); }
     catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
+    const confirm = card.getByRole("button", { name: "確認して送信" });
+    try {
+      await confirm.focus();
+      assert.equal(await confirm.evaluate((element) => element === document.activeElement), true);
+      await confirm.press("Enter");
+    } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     const refreshResponse = await refreshResponsePromise;
     try {
       assert.match(await requireWakeStatus(card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
