@@ -440,7 +440,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     emitP0BStage("CLOUD_READY");
     await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs, process: cloudProcess, label: "cloud" });
     const consoleEnv = p0bEnvironment(env, {
-      NODE_ENV: "test",
+      // Run the real Console bundle in production mode. The live qualification
+      // must exercise the same React lifecycle and request scheduling as the
+      // deployed surface; test mode enables development-only duplicate effects
+      // that can race the one-time session boundary.
+      NODE_ENV: "production",
       PORT: consolePort,
       AGENTPASS_CLOUD_API_URL: `https://localhost:${cloudTlsPort}/`,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
