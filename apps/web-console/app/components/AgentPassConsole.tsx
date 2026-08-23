@@ -1373,6 +1373,7 @@ export function AgentPassConsole() {
   const confirmTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modalRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
+  const summaryInFlightRef = useRef<Promise<SummaryRefreshResult> | null>(null);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
   const organizationOptionsEpoch = useRef(0);
@@ -1486,7 +1487,7 @@ export function AgentPassConsole() {
     scrollConsoleToTop();
   };
 
-  const refreshSummary = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
+  const refreshSummaryCore = useCallback(async (signal?: AbortSignal): Promise<SummaryRefreshResult> => {
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
@@ -1556,6 +1557,16 @@ export function AgentPassConsole() {
       if (!signal?.aborted && epoch === summaryEpoch.current) setRefreshing(false);
     }
   }, []);
+
+  const refreshSummary = useCallback((signal?: AbortSignal): Promise<SummaryRefreshResult> => {
+    if (summaryInFlightRef.current !== null) return summaryInFlightRef.current;
+    const promise = refreshSummaryCore(signal);
+    summaryInFlightRef.current = promise;
+    void promise.finally(() => {
+      if (summaryInFlightRef.current === promise) summaryInFlightRef.current = null;
+    });
+    return promise;
+  }, [refreshSummaryCore]);
 
   const handleOrganizationSwitched = useCallback((session: OrganizationSession): void => {
     // Fence the previous tenant projection before the new summary request
