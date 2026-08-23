@@ -560,7 +560,7 @@ async function scenario(parent, name, callback) {
         // diagnosable through the response listener above.
         emitLiveStage("OPEN_UI_READY");
         emitLiveStage("OPEN_RETURN_START");
-        const opened = Object.freeze({ page });
+        const opened = { page };
         emitLiveStage("OPEN_RETURN_DONE");
         return opened;
       };
