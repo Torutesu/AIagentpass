@@ -376,6 +376,7 @@ export function staleAuthCeremonyFailureMarker(error) {
 
 async function waitForScenarioPage(open, getPage, ...args) {
   let openError = open.getError?.();
+  emitLiveStage("HANDOFF_OPEN_CALL");
   try { open(...args); }
   catch (error) { throw error; }
   const deadline = Date.now() + 120_000;
@@ -386,6 +387,7 @@ async function waitForScenarioPage(open, getPage, ...args) {
   }
   if (openError !== undefined) throw openError;
   if (getPage() === null) throw new Error("P0B live open handoff missing");
+  emitLiveStage("HANDOFF_PAGE_SEEN");
   // Keep the Playwright Page entirely in the scenario closure. Returning it
   // from any async helper (even nested in a plain object) has triggered
   // cross-realm thenable assimilation on protected runners. The caller reads

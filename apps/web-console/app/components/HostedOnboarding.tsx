@@ -173,10 +173,14 @@ export function HostedOnboarding() {
       });
     });
     return () => {
+      // A hydration remount can happen in a different component instance. Give
+      // the shared pending guard time to hand the result to that instance
+      // before aborting the original read; aborting immediately turns a
+      // harmless remount into a second status request.
       statusAbortTimer.current = setTimeout(() => {
         controller.abort();
         statusAbortTimer.current = null;
-      }, 0);
+      }, INITIAL_STATUS_GUARD_MS);
     };
   }, [loadStatus]);
 
