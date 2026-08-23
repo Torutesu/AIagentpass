@@ -33,7 +33,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     markPhase("before_open");
     emitLiveStage("ASSERTION_OPEN_CALL");
     await waitForScenarioPage(open, getPage, "owner");
+    emitLiveStage("ASSERTION_AFTER_HANDOFF");
     const page = getPage();
+    emitLiveStage("ASSERTION_PAGE_READ");
     markPhase("after_open");
     emitLiveStage("ASSERTION_OPEN_RETURNED");
     emitLiveStage("ASSERTION_WAIT_START");
@@ -406,6 +408,7 @@ async function waitForScenarioPage(open, getPage, ...args) {
   if (getPage() === null) throw new Error("P0B live open handoff missing");
   emitLiveStage("HANDOFF_PAGE_READ");
   emitLiveStage("HANDOFF_PAGE_SEEN");
+  emitLiveStage("HANDOFF_FUNCTION_EXIT");
   // Keep the Playwright Page entirely in the scenario closure. Returning it
   // from any async helper (even nested in a plain object) has triggered
   // cross-realm thenable assimilation on protected runners. The caller reads
