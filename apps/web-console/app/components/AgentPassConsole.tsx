@@ -1492,8 +1492,24 @@ export function AgentPassConsole() {
     try {
       const session = await consoleSessionContext.get(signal);
       const { organizationId } = session;
+      const fetchSummary = async (): Promise<Response> => {
+        let response = await fetchConsole("/api/console?resource=summary", { signal });
+        if (![502, 503, 504].includes(response.status)) return response;
+        await new Promise<void>((resolve, reject) => {
+          const timer = window.setTimeout(() => {
+            signal?.removeEventListener("abort", abort);
+            resolve();
+          }, 250);
+          const abort = () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          };
+          signal?.addEventListener("abort", abort, { once: true });
+        });
+        return fetchConsole("/api/console?resource=summary", { signal });
+      };
       const [response, deploymentResponse] = await Promise.all([
-        fetchConsole("/api/console?resource=summary", { signal }),
+        fetchSummary(),
         fetchConsole("/api/console?resource=deployment-readiness", { signal }),
       ]);
       if (response.status === 401 || response.status === 403 || deploymentResponse.status === 401 || deploymentResponse.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status === 401 || response.status === 403 ? response.status : deploymentResponse.status);
