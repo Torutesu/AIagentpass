@@ -10,8 +10,8 @@ CREATE FUNCTION public.agentpass_manual_wake_actor_role(
 )
 RETURNS text
 LANGUAGE sql
-VOLATILE
-PARALLEL UNSAFE
+STABLE
+PARALLEL SAFE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
@@ -19,8 +19,7 @@ AS $$
   FROM public.agentpass_webauthn_registration_sessions AS m
   WHERE m.organization_id = p_organization_id
     AND m.member_id = p_member_id
-    AND m.membership_status = 'active'
-  FOR SHARE;
+    AND m.membership_status = 'active';
 $$;
 
 ALTER FUNCTION public.agentpass_manual_wake_actor_role(uuid,uuid) OWNER TO agentpass_migrator;
