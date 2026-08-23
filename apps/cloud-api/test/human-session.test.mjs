@@ -249,6 +249,31 @@ test("fails closed when authority changes between session lookup and activity up
   );
 });
 
+test("coalesces concurrent activity touches for one session", async () => {
+  const repository = new MemorySessionRepository();
+  const f = fixture({ repository });
+  const issued = await issue(f);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let touchCalls = 0;
+  const originalTouch = repository.updateSessionActivity.bind(repository);
+  repository.updateSessionActivity = async (input) => {
+    touchCalls += 1;
+    await gate;
+    return originalTouch(input);
+  };
+
+  const first = f.service.authenticateRequest({ cookie: issued.cookie, method: "GET", origin: ORIGIN });
+  const second = f.service.authenticateRequest({ cookie: issued.cookie, method: "GET", origin: ORIGIN });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(touchCalls, 1);
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.session.session_id, issued.session.session_id);
+  assert.equal(b.session.session_id, issued.session.session_id);
+  assert.equal(touchCalls, 1);
+});
+
 test("rejects a role or tenant substitution returned by the activity update", async () => {
   const repository = new MemorySessionRepository();
   const f = fixture({ repository });

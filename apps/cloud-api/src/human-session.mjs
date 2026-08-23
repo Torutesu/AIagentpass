@@ -195,6 +195,11 @@ export function createHumanSessionService(options = {}) {
   const randomBytes = options.randomBytes ?? crypto.randomBytes;
   if (typeof clock !== "function" || typeof randomBytes !== "function") fail(HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
   const locks = new Map();
+  // A Console page can issue several authenticated reads at once. Coalesce
+  // their activity touch for one session so those reads do not contend on the
+  // same PostgreSQL row and trip the database lock timeout. The shared result
+  // remains authoritative and every waiter still re-validates continuity.
+  const touchInFlight = new Map();
 
   const nowMs = () => normalizeNow(clock());
 
@@ -473,10 +478,18 @@ export function createHumanSessionService(options = {}) {
   }
 
   async function touch(record, now) {
+    const existing = touchInFlight.get(record.session_id);
+    if (existing !== undefined) {
+      const updated = await existing;
+      assertSessionContinuity(record, updated);
+      await ensureActive(updated, now);
+      return updated;
+    }
     const nextIdleMs = Math.min(now + idleTtlMs, Date.parse(record.expires_at));
     const activityAt = new Date(now).toISOString();
     const patch = { sessionId: record.session_id, session_id: record.session_id, activityAt, activity_at: activityAt, lastSeenAt: activityAt, last_seen_at: activityAt, idleExpiresAt: new Date(nextIdleMs).toISOString(), idle_expires_at: new Date(nextIdleMs).toISOString() };
-    if (typeof repository.updateSessionActivity === "function") {
+    const operation = (async () => {
+      if (typeof repository.updateSessionActivity !== "function") return record;
       const updated = await repository.updateSessionActivity(patch);
       // A concurrent role/revocation/epoch change makes the conditional
       // activity update miss. Never continue with the stale pre-change row.
@@ -484,8 +497,13 @@ export function createHumanSessionService(options = {}) {
       assertSessionContinuity(record, updated);
       await ensureActive(updated, now);
       return updated;
+    })();
+    touchInFlight.set(record.session_id, operation);
+    try {
+      return await operation;
+    } finally {
+      if (touchInFlight.get(record.session_id) === operation) touchInFlight.delete(record.session_id);
     }
-    return record;
   }
 
   async function enforceSessionLimit(memberId, now, limit) {
