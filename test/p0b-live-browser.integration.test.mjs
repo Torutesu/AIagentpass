@@ -33,10 +33,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("owner")).page;
     emitLiveStage("ASSERTION_OPEN_RETURNED");
     emitLiveStage("ASSERTION_WAIT_START");
-    // Keep these waits serial. boundedUiOperation closes the page context when
-    // its lifecycle deadline expires; running six closing waits concurrently
-    // can turn the first missing-state marker into a generic Playwright
-    // "context closed" rejection and lose the reviewed safe classification.
+    // Keep these waits serial and let Playwright own each locator deadline.
+    // boundedUiOperation closes the page context on timeout; doing that while
+    // several state waits are active can turn a missing-state assertion into a
+    // generic "context closed" error before the fixed marker is captured.
     for (const [label, safeCode] of [
       ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
       ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
@@ -46,10 +46,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
     ]) {
       try {
-        await boundedUiOperation(
-          page,
-          () => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
-        );
+        await page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS });
       } catch {
         assert.fail(safeCode);
       }
