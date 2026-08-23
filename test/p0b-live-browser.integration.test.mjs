@@ -293,6 +293,7 @@ async function scenario(parent, name, callback) {
         failLifecycle(error);
       }
       try {
+        emitLiveStage("BROWSER_START");
         browser = await runP0BLifecycle(
           () => chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${fixture.tlsSpkiPin}`] }),
           {
@@ -307,6 +308,7 @@ async function scenario(parent, name, callback) {
           ? error
           : new P0BLiveBrowserFixtureError("browser_startup_failed", "P0-B live browser startup failed");
       }
+      emitLiveStage("BROWSER_READY");
       const contexts = [];
       const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
@@ -438,6 +440,7 @@ async function scenario(parent, name, callback) {
         return page;
       };
       try {
+        emitLiveStage("SCENARIO_ASSERTIONS");
         await callback({ fixture, browser, open });
       } catch (error) {
         scenarioError = error;
@@ -479,6 +482,10 @@ async function scenario(parent, name, callback) {
     }
     if (cleanupError) failLifecycle(cleanupError);
   });
+}
+
+function emitLiveStage(stage) {
+  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
 }
 
 async function closeBrowserResources(browser, contexts) {

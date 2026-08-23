@@ -58,6 +58,9 @@ function runScenario(name) {
       failureTail = `${failureTail}${String(chunk)}`.slice(-1024);
       if (/P0B_SAFE_[A-Z][A-Z0-9_]{1,127}_FAILED/gu.test(failureTail)) {
         failureObserved = true;
+        if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
+          process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
+        }
         terminate(child);
       }
     };
