@@ -1742,7 +1742,7 @@ function errorResponse(error) {
     ? error.name.toLowerCase()
     : "error";
   return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } }, {
-    "x-agentpass-error-code": "internal_error",
+    "x-agentpass-error-code": `internal_${errorName}`,
     "x-agentpass-diagnostic-code": `internal_${errorName}`,
   });
 }
