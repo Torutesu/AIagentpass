@@ -33,18 +33,27 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("owner")).page;
     emitLiveStage("ASSERTION_OPEN_RETURNED");
     emitLiveStage("ASSERTION_WAIT_START");
-    await Promise.all([
+    // Keep these waits serial. boundedUiOperation closes the page context when
+    // its lifecycle deadline expires; running six closing waits concurrently
+    // can turn the first missing-state marker into a generic Playwright
+    // "context closed" rejection and lose the reviewed safe classification.
+    for (const [label, safeCode] of [
       ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
       ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
       ["ブロック中", "P0B_SAFE_STATE_MISSING_BLOCKED"],
       ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
       ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
       ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
-    ].map(([label, safeCode]) => boundedUiOperation(
-      page,
-      () => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
-    )
-      .catch(() => assert.fail(safeCode))));
+    ]) {
+      try {
+        await boundedUiOperation(
+          page,
+          () => page.getByLabel(`同期状態: ${label}`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })
+        );
+      } catch {
+        assert.fail(safeCode);
+      }
+    }
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open }) => {
