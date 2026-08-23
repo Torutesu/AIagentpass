@@ -9,5 +9,6 @@ test("0114 grants the online role only the manual wake ledger boundary", async (
   assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/u);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE public\.device_manual_wake_events,[\s\S]*public\.device_manual_wake_requests/u);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE ON TABLE public\.device_manual_wake_events,[\s\S]*public\.device_manual_wake_requests TO agentpass_app/u);
+  assert.match(sql, /GRANT SELECT ON TABLE public\.memberships TO agentpass_app/u);
   assert.doesNotMatch(sql, /GRANT .* ON TABLE public\.(?:human_sessions|webauthn_credentials|webauthn_challenges)/u);
 });

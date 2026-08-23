@@ -10,4 +10,9 @@ REVOKE ALL PRIVILEGES ON TABLE public.device_manual_wake_events,
 GRANT SELECT, INSERT, UPDATE ON TABLE public.device_manual_wake_events,
   public.device_manual_wake_requests TO agentpass_app;
 
+-- Manual wake authenticates the actor inside the same transaction while the
+-- device state is locked. Re-assert the reviewed read/lock boundary here so
+-- databases upgraded from older role bootstrap scripts cannot lose it.
+GRANT SELECT ON TABLE public.memberships TO agentpass_app;
+
 COMMIT;
