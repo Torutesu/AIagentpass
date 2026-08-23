@@ -66,11 +66,11 @@ function runScenario(name) {
       failureTail = `${failureTail}${String(chunk)}`.slice(-1024);
       if (/P0B_SAFE_[A-Z][A-Z0-9_]{1,127}_FAILED/gu.test(failureTail)) {
         failureObserved = true;
-        process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${stageTrace.length > 0 ? stageTrace.join(",") : "UNKNOWN"}\n`);
+        emitStageTrace();
         const diagnostics = [...failureTail.matchAll(/P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,256}/gu)].map((match) => match[0]);
         for (const diagnostic of diagnostics.slice(-4)) process.stderr.write(`${diagnostic}\n`);
         if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
-          process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${stageTrace.length > 0 ? stageTrace.join(",") : "UNKNOWN"}\n`);
+          emitStageTrace();
           process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
         }
         // Give the child streams one bounded turn to flush the already-written
@@ -94,8 +94,12 @@ function runScenario(name) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (!passed && !failureObserved) emitStageTrace();
       resolve(passed);
     };
+    function emitStageTrace() {
+      process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${stageTrace.length > 0 ? stageTrace.join(",") : "UNKNOWN"}\n`);
+    }
     const timer = setTimeout(() => {
       terminate(child);
       process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
