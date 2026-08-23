@@ -359,6 +359,7 @@ async function scenario(parent, name, callback) {
               if (summaryStatus >= 500) {
                 const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
                 const headerCode = response.headers()["x-agentpass-error-code"];
+                process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_HEADER status=${summaryStatus} code=${typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(headerCode) ? headerCode : "none"} content_type=${contentType === "application/json" ? "json" : "other"}\n`);
                 summaryErrorCode = typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(headerCode)
                   ? headerCode
                   : contentType === "application/json" ? "body_pending" : "cloud_api_invalid_response";
