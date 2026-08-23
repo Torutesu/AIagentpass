@@ -47,11 +47,16 @@ function runScenario(name) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let lastStage = "UNKNOWN";
-    child.stdout?.on("data", (chunk) => process.stdout.write(chunk));
-    child.stderr?.on("data", (chunk) => {
-      const text = String(chunk);
-      const matches = [...text.matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
+    const observeStage = (chunk) => {
+      const matches = [...String(chunk).matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
       if (matches.length > 0) lastStage = matches.at(-1)[1];
+    };
+    child.stdout?.on("data", (chunk) => {
+      observeStage(chunk);
+      process.stdout.write(chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      observeStage(chunk);
       process.stderr.write(chunk);
     });
     let settled = false;
