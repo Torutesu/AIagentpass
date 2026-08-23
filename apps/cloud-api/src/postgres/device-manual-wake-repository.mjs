@@ -118,9 +118,7 @@ export function createPostgresDeviceManualWakeRepository({
         throw new DeviceManualWakeRepositoryError("ERR_DEVICE_UNAVAILABLE", "device is unavailable for manual wake");
       }
 
-      const actor = await storageQuery(tx, "actor_membership", `SELECT role
-        FROM public.memberships
-        WHERE organization_id=$1 AND member_id=$2 AND status='active'`, [values.organizationId, values.actorId]);
+      const actor = await storageQuery(tx, "actor_membership", "SELECT public.agentpass_manual_wake_actor_role($1,$2) AS role", [values.organizationId, values.actorId]);
       if (rowCount(actor) !== 1 || !ROLES.has(actor.rows[0].role)) {
         throw new DeviceManualWakeRepositoryError("ERR_ACTOR_UNAVAILABLE", "manual wake actor is unavailable");
       }

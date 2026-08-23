@@ -378,6 +378,7 @@ BEGIN
     ,'agentpass_human_identity_resolve(text,text,uuid)'
     ,'agentpass_human_identity_find(text,text)'
     ,'agentpass_human_identity_list_memberships(text,text,uuid)'
+    ,'agentpass_manual_wake_actor_role(uuid,uuid)'
     ,'agentpass_human_credential_registration_status(uuid,uuid,uuid,bytea)'
     ,'agentpass_owner_recovery_register_credential(uuid,uuid,uuid,uuid,uuid,bytea,bytea,bigint,text[],text,boolean,boolean,timestamptz)'
     ,'agentpass_owner_recovery_find_credential(uuid,uuid,uuid,uuid,bytea,bytea,timestamptz)'

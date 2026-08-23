@@ -162,7 +162,7 @@ class ManualWakeFake {
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
     if (text.includes("FROM devices AS d") && text.includes("device_control_plane_state")) return { rows: this.stateRows, rowCount: this.stateRows.length };
-    if (text.startsWith("SELECT role") && text.includes("FROM memberships")) return { rows: [{ role: "admin" }], rowCount: 1 };
+    if (text.startsWith("SELECT public.agentpass_manual_wake_actor_role")) return { rows: [{ role: "admin" }], rowCount: 1 };
     if (text.startsWith("SELECT request_id") && text.includes("FROM device_manual_wake_requests")) {
       const key = `${params[0]}:${params[1]}:${params[2]}`;
       const stored = this.requests.get(key);
