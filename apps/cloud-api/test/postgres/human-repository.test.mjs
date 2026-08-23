@@ -11,6 +11,26 @@ test("stores session digests as bytes and uses exact tenant/member binding", asy
   assert.equal(Buffer.isBuffer(calls[0].params[5]),true); assert.equal(calls[0].params[5].length,32); assert.match(calls[0].text,/agentpass_human_session_create/);
 });
 
+test("retries one transient session-touch lock timeout", async () => {
+  let calls = 0;
+  const client = {
+    async query(text) {
+      assert.match(text, /agentpass_human_session_touch/u);
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error("lock not available");
+        error.code = "55P03";
+        throw error;
+      }
+      return { rows: [{ session: { id: ids.session, member_id: ids.member, membership_id: ids.membership, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64), created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-12T01:00:00.000Z", last_seen_at: "2026-08-12T00:00:01.000Z", idle_expires_at: "2026-08-12T00:30:00.000Z", recent_auth_at: null, revoked_at: null } }], rowCount: 1 };
+    }
+  };
+  const repo = createPostgresHumanRepository({ client });
+  const updated = await repo.updateSessionActivity({ session_id: ids.session, last_seen_at: "2026-08-12T00:00:01.000Z", idle_expires_at: "2026-08-12T00:30:00.000Z" });
+  assert.equal(updated.session_id, ids.session);
+  assert.equal(calls, 2);
+});
+
 test("refuses session issuance when the exact active membership no longer exists", async () => {
   const client = { async query() { return { rows: [], rowCount: 0 }; } };
   const repo = createPostgresHumanRepository({ client });

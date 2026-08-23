@@ -162,7 +162,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function updateSessionActivity(input) {
-    const result = await client.query("SELECT public.agentpass_human_session_touch($1::uuid,$2::timestamptz,$3::timestamptz) AS session", [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
+    const result = await withLockTimeoutRetry(() => client.query("SELECT public.agentpass_human_session_touch($1::uuid,$2::timestamptz,$3::timestamptz) AS session", [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]));
     return sessionRow(result.rows?.[0]?.session);
   }
 
@@ -693,6 +693,17 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const result = await tx.query(`DELETE FROM idempotency_records
       WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$4`, [organizationId, principalId, idempotencyKey, requestHash]);
     if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+  }
+}
+
+async function withLockTimeoutRetry(operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error?.code !== "55P03" || attempt >= 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 }
 
