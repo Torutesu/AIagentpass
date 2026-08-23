@@ -360,9 +360,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       catch {
         writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
         const consoleDiagnostics = fixture?.consoleFailureDiagnostics?.() ?? [];
-        if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) assert.fail("P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED");
-        if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED");
-        if (role === "owner" && revokeErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED");
+        if (role === "owner" && consoleDiagnostics.some((diagnostic) => diagnostic.startsWith("P0B_DIAGNOSTIC_CONSOLE_UPSTREAM_ERROR"))) writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_UPSTREAM_ERROR_FAILED\n");
+        if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED\n");
+        if (role === "owner" && revokeErrorCode === "internal_error") writeSync(2, "P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED\n");
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
