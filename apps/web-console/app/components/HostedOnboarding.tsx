@@ -73,6 +73,7 @@ export function HostedOnboarding() {
   const [message, setMessage] = useState("");
   const [guidanceKind, setGuidanceKind] = useState<Guidance["kind"] | null>(null);
   const [deviceHandoffReady, setDeviceHandoffReady] = useState(false);
+  const initialStatusLoadStarted = useRef(false);
 
   const loadStatus = useCallback(async (signal?: AbortSignal) => {
     setMessage("");
@@ -99,12 +100,13 @@ export function HostedOnboarding() {
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => void loadStatus(controller.signal), 0);
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
+    // React development/qualification builds may replay effects. The initial
+    // status read is safe and idempotent, but sending it twice makes the
+    // browser contract nondeterministic and can race a one-time bootstrap
+    // transition. Keep one request per mounted onboarding flow.
+    if (initialStatusLoadStarted.current) return;
+    initialStatusLoadStarted.current = true;
+    void loadStatus();
   }, [loadStatus]);
 
   async function submitOrganization(event: FormEvent<HTMLFormElement>) {
