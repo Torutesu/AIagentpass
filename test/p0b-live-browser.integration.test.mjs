@@ -359,6 +359,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       try { await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).waitFor({ state: "hidden", timeout: UI_ASSERTION_TIMEOUT_MS })); }
       catch {
         writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
+        if (role === "owner" && revokeErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_FINAL_STOP_CLOUD_INVALID_RESPONSE_FAILED");
+        if (role === "owner" && revokeErrorCode === "internal_error") assert.fail("P0B_SAFE_OWNER_FINAL_STOP_INTERNAL_ERROR_FAILED");
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
