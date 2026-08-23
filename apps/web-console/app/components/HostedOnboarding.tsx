@@ -143,14 +143,27 @@ export function HostedOnboarding() {
           if (outcome === "session_required") {
             setScreen("signin");
             setGuidanceKind("terminal");
-          } else {
-            void loadStatus();
+          } else if (outcome === "other") {
+            // Keep the initial read one-shot across hydration remounts. A
+            // remount must not turn a transient/invalid response into a
+            // duplicate request; the explicit retry control owns recovery.
+            const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+            setMessage(guidance.message);
+            setGuidanceKind(guidance.kind);
+            setScreen(guidance.kind === "terminal" ? "terminal" : "error");
           }
         });
       } else if (existingGuard.outcome === "session_required") {
         queueMicrotask(() => {
           setScreen("signin");
           setGuidanceKind("terminal");
+        });
+      } else if (existingGuard.outcome === "other") {
+        queueMicrotask(() => {
+          const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+          setMessage(guidance.message);
+          setGuidanceKind(guidance.kind);
+          setScreen(guidance.kind === "terminal" ? "terminal" : "error");
         });
       } else {
         // A successful status token lives only in the original client
