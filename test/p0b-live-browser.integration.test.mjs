@@ -406,14 +406,14 @@ async function scenario(parent, name, callback) {
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         emitLiveStage("OPEN_READY");
         try {
-          await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
-          await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
+          await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor({ timeout: 15_000 });
+          await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor({ timeout: 15_000 });
           emitLiveStage("OPEN_UI_READY");
         } catch {
           if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
             const summaryReady = await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).count().catch(() => 0);
             if (summaryReady === 0) {
-              await summaryBodyPromise;
+              await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
               if (summaryStatus === null) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NO_RESPONSE_FAILED");
               if (summaryStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_401_FAILED");
               if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
@@ -428,7 +428,7 @@ async function scenario(parent, name, callback) {
             const deviceReady = await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).count().catch(() => 0);
             if (deviceReady === 0) assert.fail("P0B_SAFE_OWNER_OPEN_DEVICE_CARD_NOT_READY_FAILED");
           } else if (effectiveSafeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
-            await summaryBodyPromise;
+            await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
             if (summaryStatus === null) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_NO_RESPONSE_FAILED");
             if (summaryStatus >= 400 && summaryStatus < 500) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_HTTP_4XX_FAILED");
             if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
@@ -436,7 +436,7 @@ async function scenario(parent, name, callback) {
             if (summaryStatus >= 500) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_HTTP_5XX_FAILED");
             if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_ADMIN_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
           } else if (effectiveSafeOpenPrefix === "P0B_SAFE_AUDITOR_OPEN") {
-            await summaryBodyPromise;
+            await Promise.race([summaryBodyPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
             if (summaryStatus === null) assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_NO_RESPONSE_FAILED");
             if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
             if (summaryStatus >= 400) assert.fail("P0B_SAFE_AUDITOR_OPEN_SUMMARY_HTTP_FAILED");
