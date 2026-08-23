@@ -1502,7 +1502,7 @@ export function AgentPassConsole() {
       const session = await consoleSessionContext.get(signal);
       const { organizationId } = session;
       const fetchSummary = async (): Promise<Response> => {
-        let response = await fetchConsole("/api/console?resource=summary", { signal });
+        const response = await fetchConsole("/api/console?resource=summary", { signal });
         if (![502, 503, 504].includes(response.status)) return response;
         await new Promise<void>((resolve, reject) => {
           const timer = window.setTimeout(() => {
@@ -1528,7 +1528,9 @@ export function AgentPassConsole() {
           const payload: unknown = await response.clone().json();
           if (isPlainRecord(payload) && isPlainRecord(payload.error) && typeof payload.error.code === "string"
             && /^[a-z][a-z0-9_]{0,63}$/u.test(payload.error.code)) code = payload.error.code;
-        } catch {}
+        } catch {
+          // Keep the response fail-closed when its error body is not JSON.
+        }
         throw new Error(`summary_${code}`);
       }
       let deployment: DeploymentReadiness | null = null;
