@@ -75,6 +75,8 @@ export class ControlPlaneStoreError extends Error {
     if (storageCode !== undefined) Object.defineProperty(this, "storageCode", { value: storageCode, enumerable: false });
     const storagePhase = findStorageDiagnosticPhase(cause);
     if (storagePhase !== undefined) Object.defineProperty(this, "storagePhase", { value: storagePhase, enumerable: false });
+    const storageReason = findStorageDiagnosticReason(cause);
+    if (storageReason !== undefined) Object.defineProperty(this, "storageReason", { value: storageReason, enumerable: false });
   }
 }
 
@@ -376,6 +378,18 @@ function findStorageDiagnosticPhase(error) {
   let current = error;
   for (let depth = 0; depth < 4 && current; depth += 1) {
     if (typeof current.storagePhase === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(current.storagePhase)) return current.storagePhase;
+    current = current.cause;
+  }
+  return undefined;
+}
+function findStorageDiagnosticReason(error) {
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const message = typeof current.message === "string" ? current.message : "";
+    if (/permission denied for function/iu.test(message)) return "function_permission";
+    if (/permission denied for (?:relation|table)/iu.test(message)) return "table_permission";
+    if (/SELECT FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE) is not allowed/iu.test(message)) return "lock_function";
+    if (/must be owner/iu.test(message)) return "owner_required";
     current = current.cause;
   }
   return undefined;
