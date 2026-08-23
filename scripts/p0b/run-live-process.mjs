@@ -22,7 +22,6 @@ const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(SCRIPT_DIRECTORY, "../..");
 const CONSOLE_ROOT = path.join(REPOSITORY_ROOT, "apps/web-console");
 const LIVE_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-process.integration.test.mjs");
-const LIVE_BROWSER_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-browser.integration.test.mjs");
 const DEFAULT_FIXTURE_TIMEOUT_MS = 45_000;
 const MAX_ENV_FILE_BYTES = 16 * 1024;
 const DEFAULT_REPORT_OUTPUT = path.join(REPOSITORY_ROOT, ".agentpass", "qualification", "p0b.json");
@@ -31,10 +30,11 @@ const BUILD_TIMEOUT_MS = 180_000;
 // Cloud, and Console stack per authority scenario. Keep the outer supervisor
 // above the complete matrix budget; each scenario retains its own tighter
 // deadline so a single stuck interaction still fails locally.
-// Thirteen isolated scenarios each retain a 120-second owning timeout. The
+// Thirteen isolated scenarios each retain a bounded process timeout. The
 // outer bound also covers TLS/PostgreSQL/Chromium startup and deterministic
-// cleanup for every stack; keep it below the CI job's 60-minute hard limit.
-const BROWSER_TIMEOUT_MS = 5_400_000;
+// cleanup for every stack; it is deliberately finite and matches the CI job
+// budget rather than allowing a leaked child to run indefinitely.
+const BROWSER_TIMEOUT_MS = 9_000_000;
 const PROCESS_TIMEOUT_MS = 180_000;
 // Only these static TAP fragments may cross the child-output boundary. The
 // command runner retains the fixed code, never the matched line or adjacent
@@ -103,6 +103,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_OTHER_FAILED", "keyboard_auth_verify_http_other"],
   [null, "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED", "keyboard_auth_verified_no_refresh"],
   [null, "P0B_SAFE_SCENARIO_NOT_FOUND", "scenario_not_found"],
+  [null, "P0B_SAFE_SCENARIO_TIMEOUT_", "scenario_timeout"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_01_FAILED", "scenario_unclassified_01"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_02_FAILED", "scenario_unclassified_02"],
   [null, "P0B_SAFE_SCENARIO_UNCLASSIFIED_03_FAILED", "scenario_unclassified_03"],
@@ -647,7 +648,11 @@ export async function main(argv = process.argv.slice(2)) {
     if (!failure) {
       try {
         if (interrupted) throw new OrchestrationError("interrupted");
-        const childArgs = ["--test", "--test-reporter", "tap", path.relative(REPOSITORY_ROOT, LIVE_BROWSER_TEST)];
+        // Execute each matrix scenario in its own process. The Node test
+        // runner can report a timed-out subtest while retaining browser or
+        // fixture handles; isolating the scenario lets the reviewed runner
+        // kill that process group and continue/abort deterministically.
+        const childArgs = ["scripts/p0b/run-live-browser-scenarios.mjs"];
         const result = await runQualificationCommand(process.execPath, childArgs, {
           cwd: REPOSITORY_ROOT,
           env: {
@@ -853,7 +858,12 @@ function emitSupervisorDiagnostic(stage, error) {
   const safeStage = /^[a-z][a-z0-9-]{0,31}$/u.test(stage) ? stage : "unknown";
   const name = typeof error?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/u.test(error.name) ? error.name : "Error";
   const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,47}$/u.test(error.code) ? error.code : "none";
-  process.stderr.write(`p0b-supervisor: stage=${safeStage} class=${name} code=${code}\n`);
+  // Keep diagnostics secret-free while retaining the owning source line for
+  // unexpected supervisor failures. Never forward exception messages or full
+  // paths, which may contain environment-specific material.
+  const stack = typeof error?.stack === "string" ? error.stack : "";
+  const location = stack.match(/(?:run-live-process\.mjs|command\.mjs):([0-9]+):[0-9]+/u)?.[1] ?? "none";
+  process.stderr.write(`p0b-supervisor: stage=${safeStage} class=${name} code=${code} line=${location}\n`);
 }
 
 function gateEvidence(id, metadata) {

@@ -9,7 +9,7 @@ const MARKER_TAIL_BYTES = SKIP_MARKER.byteLength - 1;
 // The protected browser matrix currently has more than 128 fixed stage
 // markers. Keep a finite ceiling above that reviewed registry so adding a
 // marker cannot make qualification fail before the child process starts.
-const MAX_SAFE_FAILURE_MARKERS = 320;
+const MAX_SAFE_FAILURE_MARKERS = 384;
 const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
 const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
@@ -206,7 +206,10 @@ export function runQualificationCommand(command, args, options) {
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
     for (const entry of safeFailureMarkers) {
       if (includesMarker(candidate, entry.marker)) {
-        if (entry.code === "lifecycle_cloud_health_unknown_key" || entry.code === "lifecycle_cloud_readiness_code") {
+        if (entry.code === "scenario_timeout") {
+          const diagnostic = candidate.toString("utf8").match(/P0B_SAFE_SCENARIO_TIMEOUT_([A-Z][A-Z0-9_]*)_FAILED/u)?.[1];
+          safeFailureCode = diagnostic === undefined ? entry.code : `${entry.code}_${diagnostic.toLowerCase()}`;
+        } else if (entry.code === "lifecycle_cloud_health_unknown_key" || entry.code === "lifecycle_cloud_readiness_code") {
           const prefix = entry.code === "lifecycle_cloud_health_unknown_key" ? "P0B_SAFE_LIFECYCLE_CLOUD_HEALTH_UNKNOWN_KEY_" : "P0B_SAFE_LIFECYCLE_CLOUD_READINESS_CODE_";
           const diagnostic = candidate.toString("utf8").match(new RegExp(`${prefix}([A-Z][A-Z0-9_]*)_FAILED`, "u"))?.[1];
           safeFailureCode = diagnostic === undefined ? entry.code : `${entry.code}_${diagnostic.toLowerCase()}`;

@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+
+const REPOSITORY_ROOT = new URL("../../", import.meta.url).pathname;
+const TEST_FILE = "test/p0b-live-browser.integration.test.mjs";
+const SCENARIOS = Object.freeze([
+  "renders all six real PostgreSQL device states",
+  "accepts keyboard wake from the real pending device",
+  "shows accepted, coalesced, and no-pending outcomes from the real wake ledger",
+  "admin completes real WebAuthn and wake mutation",
+  "auditor receives no wake mutation control",
+  "viewer receives no wake mutation control",
+  "owner without an available authenticator fails before wake mutation",
+  "owner stale authorization is rejected by the real Cloud boundary",
+  "owner replayed authorization is rejected by the real Cloud boundary",
+  "owner cross_operation authorization is rejected by the real Cloud boundary",
+  "owner cross_tenant authorization is rejected by the real Cloud boundary",
+  "owner completes distinct real WebAuthn device revoke",
+  "admin completes distinct real WebAuthn device revoke"
+]);
+// A hosted runner may spend nearly a minute pulling/starting the disposable
+// PostgreSQL and TLS stack before the 120-second scenario budget begins. Keep
+// a hard ten-minute process boundary while leaving the complete 13-scenario
+// matrix below the supervisor's 150-minute outer bound.
+const SCENARIO_TIMEOUT_MS = 600_000;
+const POSIX = process.platform !== "win32";
+
+function terminate(child) {
+  if (POSIX && Number.isSafeInteger(child.pid) && child.pid > 0) {
+    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+    setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 250).unref?.();
+    return;
+  }
+  try { child.kill("SIGTERM"); } catch {}
+  setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 250).unref?.();
+}
+
+function runScenario(name) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ["--test", "--test-reporter", "tap", TEST_FILE], {
+      cwd: REPOSITORY_ROOT,
+      env: { ...process.env, P0B_LIVE_BROWSER: "1", P0B_LIVE_BROWSER_SCENARIO: name },
+      detached: POSIX,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let lastStage = "UNKNOWN";
+    child.stdout?.on("data", (chunk) => process.stdout.write(chunk));
+    child.stderr?.on("data", (chunk) => {
+      const text = String(chunk);
+      const matches = [...text.matchAll(/P0B_STAGE_([A-Z][A-Z0-9_]{1,47})_START/gu)];
+      if (matches.length > 0) lastStage = matches.at(-1)[1];
+      process.stderr.write(chunk);
+    });
+    let settled = false;
+    const finish = (passed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(passed);
+    };
+    const timer = setTimeout(() => {
+      terminate(child);
+      process.stderr.write(`P0B_SAFE_SCENARIO_TIMEOUT_${lastStage}_FAILED\n`);
+      finish(false);
+    }, SCENARIO_TIMEOUT_MS);
+    timer.unref?.();
+    child.once("error", () => finish(false));
+    child.once("close", (code, signal) => finish(code === 0 && signal === null));
+  });
+}
+
+for (const scenario of SCENARIOS) {
+  // Run serially: every scenario owns a fresh database, Cloud, Console, and
+  // browser stack. A hard child boundary guarantees leaked handles cannot
+  // stall the complete qualification matrix indefinitely.
+  if (!(await runScenario(scenario))) process.exitCode = 1;
+  if (process.exitCode === 1) break;
+}

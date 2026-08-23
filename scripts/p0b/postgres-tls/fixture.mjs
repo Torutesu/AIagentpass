@@ -31,6 +31,7 @@ const PROVENANCE_INSPECT_FORMAT = [
 const MAX_CLOCK_SKEW_MS = 5_000;
 const MAX_PROTECTED_ENV_BYTES = 16 * 1024;
 const MAX_CA_BYTES = 1024 * 1024;
+const COMMAND_TIMEOUT_MS = 120_000;
 
 export class FixtureError extends Error {
   constructor(code, message) {
@@ -663,20 +664,50 @@ function parsePositiveInteger(value, label) {
   return parsed;
 }
 
-function runCommand(command, args, { cwd, allowFailure = false } = {}) {
+function runCommand(command, args, { cwd, allowFailure = false, timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
+    let settled = false;
+    let timer;
+    let killTimer;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      callback();
+    };
+    const terminate = () => {
+      try {
+        if (process.platform !== "win32" && Number.isSafeInteger(child.pid) && child.pid > 0) process.kill(-child.pid, "SIGTERM");
+        else child.kill("SIGTERM");
+      } catch {}
+      killTimer = setTimeout(() => {
+        try {
+          if (process.platform !== "win32" && Number.isSafeInteger(child.pid) && child.pid > 0) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {}
+      }, 500);
+    };
     child.stdout?.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-16_384); });
     child.stderr?.resume();
     child.once("error", (error) => {
-      if (error.code === "ENOENT") reject(new FixtureError("command_missing", `${command} is unavailable`));
-      else reject(new FixtureError("command_failed", `${command} could not be started`));
+      finish(() => {
+        if (error.code === "ENOENT") reject(new FixtureError("command_missing", `${command} is unavailable`));
+        else reject(new FixtureError("command_failed", `${command} could not be started`));
+      });
     });
     child.once("close", (code) => {
-      if (code === 0 || allowFailure) resolve(stdout);
-      else reject(new FixtureError("command_failed", `${command} failed`));
+      finish(() => {
+        if (code === 0 || allowFailure) resolve(stdout);
+        else reject(new FixtureError("command_failed", `${command} failed`));
+      });
     });
+    timer = setTimeout(() => {
+      terminate();
+      finish(() => reject(new FixtureError("command_timeout", `${command} timed out`)));
+    }, timeoutMs);
   });
 }
 

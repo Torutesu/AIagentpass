@@ -88,6 +88,9 @@ test("node-postgres receives explicit CA and hostname verification without conne
   assert.equal(pool.options.password, "p@ss");
   assert.equal(pool.options.ssl.rejectUnauthorized, true);
   assert.equal(pool.options.ssl.ca, ca);
+  assert.equal(pool.options.statement_timeout, 60_000);
+  assert.equal(pool.options.lock_timeout, 15_000);
+  assert.equal(pool.options.query_timeout, 65_000);
 });
 
 test("generated certificate is accepted for localhost and rejected for a different hostname", async (t) => {

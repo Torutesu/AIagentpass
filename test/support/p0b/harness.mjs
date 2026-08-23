@@ -27,6 +27,10 @@ const P0B_PROCESS_FORCE_TIMEOUT_MS = 1_000;
 const P0B_PROXY_CLOSE_TIMEOUT_MS = 1_500;
 const P0B_POOL_CLOSE_TIMEOUT_MS = 2_000;
 const P0B_DATABASE_QUERY_TIMEOUT_MS = 2_000;
+const P0B_STATEMENT_TIMEOUT_MS = 60_000;
+const P0B_LOCK_TIMEOUT_MS = 15_000;
+const P0B_QUERY_TIMEOUT_MS = 65_000;
+const P0B_COMMAND_TIMEOUT_MS = 30_000;
 const P0B_TEMP_CLEANUP_TIMEOUT_MS = 2_000;
 const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
@@ -129,6 +133,11 @@ export function createVerifiedPostgresPoolOptions(value, { ca } = {}) {
   };
   if (url.port) options.port = Number(url.port);
   if (ca !== undefined) options.ssl.ca = ca;
+  // Bound every disposable qualification query so a blocked migration or
+  // lock cannot hide the owning stage until the outer browser timeout.
+  options.statement_timeout = P0B_STATEMENT_TIMEOUT_MS;
+  options.lock_timeout = P0B_LOCK_TIMEOUT_MS;
+  options.query_timeout = P0B_QUERY_TIMEOUT_MS;
   return options;
 }
 
@@ -311,23 +320,32 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   let cloudProxy;
   let consoleProxy;
   try {
+    emitP0BStage(env, "CERTIFICATES");
     const certificates = await createTestCertificates(temp);
+    emitP0BStage(env, "DATABASE");
     database = await createDisposablePostgres({ env });
+    emitP0BStage(env, "AUTHORITIES");
     const databaseAuthorities = await prepareP0BDatabaseAuthorities(database);
     const organizationId = crypto.randomUUID();
+    emitP0BStage(env, "RUNTIME_FILES");
     const files = await createRuntimeFiles(temp);
-    if (prepareDatabase) await prepareDatabase(Object.freeze({
+    if (prepareDatabase) {
+      emitP0BStage(env, "PREPARE_DATABASE");
+      await prepareDatabase(Object.freeze({
       pool: database.pool,
       organizationId,
       refreshNonceKeyId: files.refreshNonceKeyId,
       refreshNonceKey: Buffer.from(files.refreshNonceKey)
-    }));
+      }));
+    }
+    emitP0BStage(env, "DEPLOYMENT_DIGESTS");
     const deploymentDigests = await p0BDeploymentDigests({
       repoRoot,
       database,
       sourceCommit: env.P0B_SOURCE_COMMIT,
       sourceTree: env.P0B_SOURCE_TREE
     });
+    emitP0BStage(env, "TRUSTED_CA");
     const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
     const cloudPort = await reservePort();
     const cloudTlsPort = await reservePort();
@@ -416,8 +434,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       P0B_REFRESH_HINT_PRIVATE_KEY_PATH: files.refreshPrivateKey,
       NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
+    emitP0BStage(env, "CLOUD_START");
     cloudProcess = spawnProcess(process.execPath, [P0B_CLOUD_PROCESS], repoRoot, p0bEnvironment(env, common));
     cloudProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: cloudPort, port: cloudTlsPort });
+    emitP0BStage(env, "CLOUD_READY");
     await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs, process: cloudProcess, label: "cloud" });
     const consoleEnv = p0bEnvironment(env, {
       NODE_ENV: "test",
@@ -436,9 +456,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       WRANGLER_LOG_PATH: path.join(temp, "wrangler.log"),
       MINIFLARE_REGISTRY_PATH: path.join(temp, "registry")
     });
+    emitP0BStage(env, "CONSOLE_START");
     if (consoleBuild && !fs.existsSync(path.join(repoRoot, "apps/web-console/dist"))) throw new P0BSkip("console_build_missing", "Console dist is missing; run the Console build before P0-B");
     consoleProcess = spawnProcess(process.execPath, [path.join(repoRoot, "apps/web-console/node_modules/vinext/dist/cli.js"), "start", "--hostname", LOOPBACK, "--port", String(consolePort)], path.join(repoRoot, "apps/web-console"), consoleEnv);
     consoleProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: consolePort, port: consoleTlsPort });
+    emitP0BStage(env, "CONSOLE_READY");
     await waitForHttps(`https://localhost:${consoleTlsPort}/`, certificates.caCert, { path: "/", expectedStatus: 200, timeoutMs: waitTimeoutMs, process: consoleProcess, label: "console" });
     return Object.freeze({
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
@@ -471,6 +493,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     const diagnostic = redactP0BDiagnostic(error?.message ?? "unknown");
     throw new Error(`P0-B harness startup failed (${diagnostic || "unknown"})`);
   }
+}
+
+function emitP0BStage(env, stage) {
+  if (env?.P0B_LIVE_BROWSER === "1" && /^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
 }
 
 export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
@@ -942,10 +968,32 @@ function httpsRequest(url, { ca, headers, timeoutMs }) {
   });
 }
 
-function runCommand(command, args, cwd) {
+function runCommand(command, args, cwd, timeoutMs = P0B_COMMAND_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "ignore", "ignore"] });
-    child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error("command failed")));
+    const child = spawn(command, args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "ignore", "ignore"] });
+    let settled = false;
+    let timer;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const terminate = () => {
+      try {
+        if (process.platform !== "win32" && Number.isSafeInteger(child.pid) && child.pid > 0) process.kill(-child.pid, "SIGTERM");
+        else child.kill("SIGTERM");
+      } catch {}
+      setTimeout(() => {
+        try {
+          if (process.platform !== "win32" && Number.isSafeInteger(child.pid) && child.pid > 0) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {}
+      }, 500).unref?.();
+    };
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("exit", (code) => finish(() => code === 0 ? resolve() : reject(new Error("command failed"))));
+    timer = setTimeout(() => { terminate(); finish(() => reject(new Error("command timeout"))); }, timeoutMs);
   });
 }
 
