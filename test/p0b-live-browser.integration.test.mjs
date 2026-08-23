@@ -52,7 +52,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
     try {
-      await wake.focus();
+      await boundedUiOperation(page, () => wake.focus());
       assert.equal(await boundedUiOperation(page, () => wake.evaluate((element) => element === document.activeElement)), true);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
     let refreshRequestObserved = false;
@@ -103,17 +103,17 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     // Send Enter through the already-resolved control. This still exercises
     // keyboard activation while preventing a late focus shift (for example a
     // hydration or live-region update) from dispatching Enter to the page.
-    try { await wake.press("Enter"); }
+    try { await boundedUiOperation(page, () => wake.press("Enter")); }
     catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
     const confirm = card.getByRole("button", { name: "確認して送信" });
     try {
-      await confirm.focus();
+      await boundedUiOperation(page, () => confirm.focus());
       assert.equal(await boundedUiOperation(page, () => confirm.evaluate((element) => element === document.activeElement)), true);
-      await confirm.press("Enter");
+      await boundedUiOperation(page, () => confirm.press("Enter"));
     } catch { assert.fail("P0B_SAFE_KEYBOARD_CONFIRM_PRESS_FAILED"); }
     const refreshResponse = await refreshResponsePromise;
     try {
-      assert.match(await requireWakeStatus(card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
+      assert.match(await requireWakeStatus(page, card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
       if (recentAuthObservation.optionsStatus >= 500) {
         const code = await safeRecentAuthErrorCode(recentAuthObservation.optionsResponse);
@@ -134,8 +134,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const card = deviceCard(page, name);
       const diagnosis = safeCode === "P0B_SAFE_WAKE_ACCEPTED_FAILED" ? observeWakeAttempt(page) : null;
       try {
-        await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-        assert.match(await requireWakeStatus(card), expected);
+        await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click());
+        assert.match(await requireWakeStatus(page, card), expected);
       } catch {
         if (diagnosis !== null) {
           const refreshResponse = await diagnosis.refreshResponsePromise;
@@ -150,10 +150,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" })).page;
     const card = deviceCard(page, "反映待ち Mac");
     const diagnosis = observeWakeAttempt(page);
-    try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
+    try { await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click()); }
     catch { assert.fail("P0B_SAFE_ADMIN_WAKE_CLICK_FAILED"); }
     try {
-      assert.match(await requireWakeStatus(card, "P0B_SAFE_ADMIN_WAKE_UI"), /依頼を受け付けました|既存の依頼へ統合し/u);
+      assert.match(await requireWakeStatus(page, card, "P0B_SAFE_ADMIN_WAKE_UI"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
       const refreshResponse = await diagnosis.refreshResponsePromise;
       const uiFailure = error instanceof Error && error.message === "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED"
@@ -174,7 +174,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         catch { assert.fail("P0B_SAFE_VIEWER_OPEN_FAILED"); }
       }
       const card = deviceCard(page, "反映待ち Mac");
-      try { assert.equal(await card.getByRole("button", { name: "Wake requestを依頼" }).count(), 0); }
+      try { assert.equal(await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).count()), 0); }
       catch { assert.fail(role === "auditor" ? "P0B_SAFE_AUDITOR_WAKE_CONTROL_FAILED" : "P0B_SAFE_VIEWER_WAKE_CONTROL_FAILED"); }
     });
   }
@@ -183,9 +183,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = (await open("owner", { register: false })).page;
     const mutation = mutationCounter(page);
     const card = deviceCard(page, "反映待ち Mac");
-    try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
+    try { await boundedUiOperation(page, () => card.getByRole("button", { name: "Wake requestを依頼" }).click()); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_WAKE_CLICK_FAILED"); }
-    try { await card.getByRole("button", { name: "確認して送信" }).click(); }
+    try { await boundedUiOperation(page, () => card.getByRole("button", { name: "確認して送信" }).click()); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_CONFIRM_FAILED"); }
     try { await boundedUiOperation(page, () => card.getByRole("alert").waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })); }
     catch { assert.fail("P0B_SAFE_MISSING_AUTHENTICATOR_ALERT_FAILED"); }
@@ -232,10 +232,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       let page;
       try { page = (await open(role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {})).page; }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_OPEN_FAILED"); throw new Error("owner final open failed"); }
-      try { await page.getByRole("button", { name: "セットアップ", exact: true }).click(); }
+      try { await boundedUiOperation(page, () => page.getByRole("button", { name: "セットアップ", exact: true }).click()); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_SETUP_FAILED"); throw new Error("owner final setup failed"); }
       const device = page.getByRole("listitem").filter({ hasText: deviceName });
-      try { await device.getByRole("button", { name: "停止" }).click(); }
+      try { await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).click()); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_STOP_FAILED"); throw new Error("owner final stop failed"); }
       try { await boundedUiOperation(page, () => page.getByText(`${deviceName}を停止しました`).waitFor({ timeout: UI_ASSERTION_TIMEOUT_MS })); }
       catch { if (role === "admin") assert.fail("P0B_SAFE_ADMIN_FINAL_CONFIRM_FAILED"); throw new Error("owner final confirmation failed"); }
@@ -638,21 +638,21 @@ function safeRegistrationMarker(code, prefix) {
   return match === null ? null : `${prefix}_REGISTRATION_${match[1].toUpperCase()}_${match[2]}_FAILED`;
 }
 
-async function requireWakeStatus(card, failurePrefix) {
+async function requireWakeStatus(page, card, failurePrefix) {
   const status = card.getByRole("status");
   const alert = card.getByRole("alert");
   const outcome = card.locator('[role="status"]:visible, [role="alert"]:visible').first();
-  try { await outcome.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS }); }
+  try { await boundedUiOperation(page, () => outcome.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })); }
   catch { return failWakeStatus(failurePrefix, "TIMEOUT"); }
   let alertVisible = false;
-  try { alertVisible = await alert.isVisible(); } catch {}
+  try { alertVisible = await boundedUiOperation(page, () => alert.isVisible()); } catch {}
   const outcomeType = alertVisible ? "alert" : "status";
   if (outcomeType === "alert") {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_ALERT_FAILED`);
     assert.fail("wake failed");
   }
   if (outcomeType !== "status") return failWakeStatus(failurePrefix, "TIMEOUT");
-  try { return await card.getByRole("status").innerText(); }
+  try { return await boundedUiOperation(page, () => card.getByRole("status").innerText()); }
   catch {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_INVALID_FAILED`);
     throw new Error("wake status unavailable");
