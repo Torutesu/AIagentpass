@@ -315,6 +315,7 @@ async function scenario(parent, name, callback) {
         let context;
         let page;
         try {
+          emitLiveStage("OPEN_CONTEXT");
           context = await runP0BLifecycle(
             () => browser.newContext({ ignoreHTTPSErrors: false }),
             {
@@ -325,6 +326,7 @@ async function scenario(parent, name, callback) {
             }
           );
           contexts.push(context);
+          emitLiveStage("OPEN_PAGE");
           page = await runP0BLifecycle(
             () => context.newPage(),
             {
@@ -354,9 +356,11 @@ async function scenario(parent, name, callback) {
         };
         page.on("response", summaryResponseListener);
         if (register) {
+          emitLiveStage("OPEN_AUTHENTICATOR");
           try { await fixture.installVirtualAuthenticator(page, role); }
           catch { failSafeOpen(effectiveSafeOpenPrefix, "AUTHENTICATOR"); }
         }
+        emitLiveStage("OPEN_BOOTSTRAP");
         try { await fixture.bootstrap(page, role); }
         catch (error) {
           const bootstrap503Marker = safeBootstrap503Marker(error?.code);
@@ -397,8 +401,10 @@ async function scenario(parent, name, callback) {
             failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
           }
         }
+        emitLiveStage("OPEN_RELOAD");
         try { await fixture.reloadAndAdoptSession(page); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
+        emitLiveStage("OPEN_READY");
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
