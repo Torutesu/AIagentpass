@@ -58,7 +58,7 @@ function runScenario(name) {
         // Keep enough fixed, secret-free stages to identify the scenario
         // boundary when a child is terminated before TAP can serialize its
         // failure. This remains bounded and excludes page/error payloads.
-        if (stageTrace.length > 32) stageTrace.shift();
+        if (stageTrace.length > 64) stageTrace.shift();
       }
     };
     const observeFailure = (chunk) => {

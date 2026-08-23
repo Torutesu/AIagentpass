@@ -415,6 +415,7 @@ async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
   selectedScenarioCount += 1;
   const scenarioOrdinal = selectedScenarioCount;
+  emitLiveStage(`SCENARIO_${String(scenarioOrdinal).padStart(2, "0")}`);
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
@@ -707,7 +708,7 @@ async function scenario(parent, name, callback) {
 function emitLiveStage(stage) {
   if (!/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) return;
   liveStageTrace.push(stage);
-  if (liveStageTrace.length > 32) liveStageTrace.shift();
+  if (liveStageTrace.length > 64) liveStageTrace.shift();
   writeSync(2, `P0B_STAGE_${stage}_START\n`);
 }
 
