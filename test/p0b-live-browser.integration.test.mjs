@@ -128,10 +128,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       assert.match(await requireWakeStatus(page, card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
       if (recentAuthObservation.optionsStatus >= 500) {
-        const code = await safeRecentAuthErrorCode(recentAuthObservation.optionsResponse);
+        const code = await safeRecentAuthErrorCode(recentAuthObservation.optionsResponse, page);
         if (/^[a-z][a-z0-9_]{0,63}$/u.test(code ?? "")) process.stdout.write(`P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}\n`);
       }
-      assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed, recentAuthObservation }));
+      assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed, recentAuthObservation }, page));
     }
   });
 
@@ -151,7 +151,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       } catch {
         if (diagnosis !== null) {
           const refreshResponse = await diagnosis.refreshResponsePromise;
-          assert.fail(await wakeAcceptedFailureMarker(refreshResponse, diagnosis.observation));
+          assert.fail(await wakeAcceptedFailureMarker(refreshResponse, diagnosis.observation, page));
         }
         assert.fail(safeCode);
       }
@@ -173,7 +173,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         : error instanceof Error && error.message === "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED"
           ? "timeout"
           : "copy_mismatch";
-      assert.fail(await adminWakeFailureMarker(refreshResponse, diagnosis.observation, uiFailure));
+      assert.fail(await adminWakeFailureMarker(refreshResponse, diagnosis.observation, uiFailure, page));
     }
   });
 
@@ -743,12 +743,12 @@ export function lifecycleFailureMarker(error) {
   ]).get(error.code) ?? null;
 }
 
-export async function keyboardOutcomeFailureMarker(response, observation = {}) {
+export async function keyboardOutcomeFailureMarker(response, observation = {}, page = null) {
   if (response === null) {
     if (observation.refreshRequestFailed === true) return "P0B_SAFE_KEYBOARD_OUTCOME_TRANSPORT_FAILED";
     if (observation.refreshRequestObserved === true) return "P0B_SAFE_KEYBOARD_OUTCOME_RESPONSE_TIMEOUT_FAILED";
     return Object.hasOwn(observation, "recentAuthObservation")
-      ? keyboardRecentAuthFailureMarker(observation.recentAuthObservation)
+      ? keyboardRecentAuthFailureMarker(observation.recentAuthObservation, page)
       : "P0B_SAFE_KEYBOARD_OUTCOME_NO_REQUEST_FAILED";
   }
   const status = response.status();
@@ -773,7 +773,7 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
         : "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_OTHER_FAILED";
   }
   let payload;
-  try { payload = await response.json(); }
+  try { payload = await (page ? boundedUiOperation(page, () => response.json()) : response.json()); }
   catch { return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED"; }
   if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED";
   return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED";
@@ -819,12 +819,12 @@ function observeWakeAttempt(page) {
   };
 }
 
-export async function wakeAcceptedFailureMarker(response, observation = {}) {
+export async function wakeAcceptedFailureMarker(response, observation = {}, page = null) {
   if (response === null || response.status() < 200 || response.status() >= 300) {
-    return keyboardOutcomeFailureMarker(response, observation);
+    return keyboardOutcomeFailureMarker(response, observation, page);
   }
   let payload;
-  try { payload = await response.json(); }
+  try { payload = await (page ? boundedUiOperation(page, () => response.json()) : response.json()); }
   catch { return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED"; }
   if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED";
   if (payload.refresh_request.status === "coalesced") return "P0B_SAFE_WAKE_ACCEPTED_GOT_COALESCED_FAILED";
@@ -833,11 +833,11 @@ export async function wakeAcceptedFailureMarker(response, observation = {}) {
   return "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED";
 }
 
-export async function adminWakeFailureMarker(response, observation = {}, uiFailure = null) {
+export async function adminWakeFailureMarker(response, observation = {}, uiFailure = null, page = null) {
   const recentAuth = observation?.recentAuthObservation ?? {};
-  const optionsFailure = await adminRecentAuthPhaseFailureMarker("OPTIONS", recentAuth);
+  const optionsFailure = await adminRecentAuthPhaseFailureMarker("OPTIONS", recentAuth, page);
   if (optionsFailure !== null) return optionsFailure;
-  const verifyFailure = await adminRecentAuthPhaseFailureMarker("VERIFY", recentAuth);
+  const verifyFailure = await adminRecentAuthPhaseFailureMarker("VERIFY", recentAuth, page);
   if (verifyFailure !== null) return verifyFailure;
 
   if (response === null || response === undefined) {
@@ -849,7 +849,7 @@ export async function adminWakeFailureMarker(response, observation = {}, uiFailu
   const status = response.status();
   if (status < 200 || status >= 300) return adminRefreshHttpFailureMarker(status);
   let payload;
-  try { payload = await response.json(); }
+  try { payload = await (page ? boundedUiOperation(page, () => response.json()) : response.json()); }
   catch { return "P0B_SAFE_ADMIN_WAKE_REFRESH_2XX_RESPONSE_CONTRACT_FAILED"; }
   if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_ADMIN_WAKE_REFRESH_2XX_RESPONSE_CONTRACT_FAILED";
   if (uiFailure === "alert") return "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED";
@@ -857,7 +857,7 @@ export async function adminWakeFailureMarker(response, observation = {}, uiFailu
   return "P0B_SAFE_ADMIN_WAKE_UI_COPY_MISMATCH_FAILED";
 }
 
-async function adminRecentAuthPhaseFailureMarker(phase, observation) {
+async function adminRecentAuthPhaseFailureMarker(phase, observation, page = null) {
   const prefix = `P0B_SAFE_ADMIN_WAKE_AUTH_${phase}`;
   const key = phase.toLowerCase();
   const observed = observation?.[`${key}Observed`] === true;
@@ -871,7 +871,7 @@ async function adminRecentAuthPhaseFailureMarker(phase, observation) {
   if (failed || !Number.isInteger(status)) return `${prefix}_TRANSPORT_FAILED`;
   if (status >= 200 && status < 300) return null;
   if (phase === "VERIFY" && status === 401) {
-    const code = await safeRecentAuthErrorCode(observation.verifyResponse);
+    const code = await safeRecentAuthErrorCode(observation.verifyResponse, page);
     const detail = new Map([
       ["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"],
       ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"],
@@ -893,7 +893,7 @@ function adminRefreshHttpFailureMarker(status) {
   return "P0B_SAFE_ADMIN_WAKE_REFRESH_HTTP_OTHER_FAILED";
 }
 
-export async function keyboardRecentAuthFailureMarker(observation) {
+export async function keyboardRecentAuthFailureMarker(observation, page = null) {
   if (!observation || observation.optionsObserved !== true) {
     if (observation?.webAuthnSupported === false) return "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED";
     if (observation?.sessionFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED";
@@ -909,7 +909,7 @@ export async function keyboardRecentAuthFailureMarker(observation) {
   if (observation.verifyObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED";
   if (observation.verifyFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED";
   if (observation.verifyStatus === 401) {
-    const code = await safeRecentAuthErrorCode(observation.verifyResponse);
+    const code = await safeRecentAuthErrorCode(observation.verifyResponse, page);
     const detail = new Map([
       ["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"],
       ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"],
@@ -922,10 +922,10 @@ export async function keyboardRecentAuthFailureMarker(observation) {
   return "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED";
 }
 
-async function safeRecentAuthErrorCode(response) {
+async function safeRecentAuthErrorCode(response, page = null) {
   if (!response || typeof response.json !== "function") return null;
   try {
-    const body = await response.json();
+    const body = await (page ? boundedUiOperation(page, () => response.json()) : response.json());
     const code = body?.error?.code;
     return typeof code === "string" ? code : null;
   } catch { return null; }
