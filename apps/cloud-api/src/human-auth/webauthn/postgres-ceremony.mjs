@@ -164,8 +164,6 @@ export class PostgresWebAuthnCeremonyError extends Error {
     this.name = "PostgresWebAuthnCeremonyError";
     this.code = code;
     Object.defineProperty(this, "retryable", { value: cause?.code === "55P03" || cause?.code === "40001", enumerable: false });
-    const safeCodes = new Set(["55P03", "40001", "57014", "23505", "42501", "42P01", "42703", "42883", "08000"]);
-    Object.defineProperty(this, "storageCode", { value: safeCodes.has(cause?.code) ? String(cause.code).toLowerCase() : undefined, enumerable: false });
   }
 }
 

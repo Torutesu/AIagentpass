@@ -58,7 +58,6 @@ export const CONTROL_PLANE_STORE_ERROR_CODES = Object.freeze({
 const DATABASE_MESSAGE = "control-plane database operation failed";
 const UNAVAILABLE_MESSAGE = "control-plane operation is unavailable";
 const DATABASE_ERROR_CODES = new Set(["ERR_DATABASE", "ERR_DB_CLIENT", "ERR_DB_RESULT", "XX000", "08000", "08003", "08006"]);
-const STORAGE_DIAGNOSTIC_CODES = new Set(["42501", "42P01", "42703", "42883", "23503", "23505", "55P03", "40001", "57014", "08000", "08003", "08006", "XX000"]);
 const SAFE_IDENTITY_KEYS = new Set(["member_id", "organization_id", "role", "device_id", "enrollment_id"]);
 const DEVICE_PLANE_SENSITIVE_KEYS = new Set([
   "accesstoken", "authorization", "bearertoken", "password", "privatekey", "privatekeypem",
@@ -66,19 +65,11 @@ const DEVICE_PLANE_SENSITIVE_KEYS = new Set([
 ]);
 
 export class ControlPlaneStoreError extends Error {
-  constructor(code, message, status = undefined, cause = undefined) {
+  constructor(code, message, status = undefined) {
     super(message);
     this.name = "ControlPlaneStoreError";
     this.code = code;
     if (status !== undefined) this.status = status;
-    const storageCode = findStorageDiagnosticCode(cause);
-    if (storageCode !== undefined) Object.defineProperty(this, "storageCode", { value: storageCode, enumerable: false });
-    const storagePhase = findStorageDiagnosticPhase(cause);
-    if (storagePhase !== undefined) Object.defineProperty(this, "storagePhase", { value: storagePhase, enumerable: false });
-    const storageReason = findStorageDiagnosticReason(cause);
-    if (storageReason !== undefined) Object.defineProperty(this, "storageReason", { value: storageReason, enumerable: false });
-    const storageIdentity = findStorageDiagnosticIdentity(cause);
-    if (storageIdentity !== undefined) Object.defineProperty(this, "storageIdentity", { value: storageIdentity, enumerable: false });
   }
 }
 
@@ -107,13 +98,13 @@ export function createPostgresControlPlaneStore(options = {}) {
   const capabilityReservationRepository = options.capabilityReservationRepository ?? options.capabilityReservation
     ?? (client && options.capabilityNonceSecret ? createPostgresCapabilityReservationRepository({ client, nonceSecret: options.capabilityNonceSecret, now }) : undefined);
   const deviceManualWakeRepository = options.deviceManualWakeRepository ?? options.deviceManualWake
-    ?? (client ? createPostgresDeviceManualWakeRepository({ client, diagnosticClient: options.diagnosticClient, now }) : undefined);
+    ?? (client ? createPostgresDeviceManualWakeRepository({ client, now }) : undefined);
 
   const delegate = (repository, method, operation, { tenant = true, context = false } = {}) => async (input = {}) => {
     const fn = repository?.[method];
     if (typeof fn !== "function") throw unavailable(operation);
     const qualified = tenant ? qualifyTenant(input, operation) : cloneInput(input);
-    return callRepository(fn, repository, operation, context ? addAuthorityContext(qualified) : qualified, options.diagnosticClient);
+    return callRepository(fn, repository, operation, context ? addAuthorityContext(qualified) : qualified);
   };
 
   const createRevocation = async (input = {}) => {
@@ -352,84 +343,19 @@ function normalizeInputKey(key) {
   return String(key).replace(/[-_]/gu, "").toLowerCase();
 }
 
-async function callRepository(fn, repository, operation, input, diagnosticClient = undefined) {
+async function callRepository(fn, repository, operation, input) {
   try {
     return await fn.call(repository, input);
   } catch (error) {
-    if (diagnosticClient && hasCauseCode(error, "42501")) {
-      try {
-        const probe = await diagnosticClient.query(`SELECT current_user, session_user,
-            has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
-            has_column_privilege(current_user, 'public.memberships', 'organization_id', 'SELECT') AS organization_select,
-            has_column_privilege(current_user, 'public.memberships', 'member_id', 'SELECT') AS member_select,
-            has_column_privilege(current_user, 'public.memberships', 'role', 'SELECT') AS role_select,
-            has_column_privilege(current_user, 'public.memberships', 'status', 'SELECT') AS status_select`);
-        const row = probe.rows?.[0];
-        const identity = [row?.current_user, row?.session_user, row?.table_select, row?.organization_select,
-          row?.member_select, row?.role_select, row?.status_select].map((value) => String(value)).join("_");
-        Object.defineProperty(error, "storageIdentity", { value: identity, enumerable: false });
-      } catch {}
-    }
     throw publicError(error, operation);
   }
 }
 
-function hasCauseCode(error, expected) {
-  let current = error;
-  for (let depth = 0; depth < 8 && current; depth += 1) {
-    if (current.code === expected) return true;
-    current = current.cause;
-  }
-  return false;
-}
-
 function publicError(error, operation) {
   if (error instanceof ControlPlaneStoreError) return error;
-  if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503, error);
+  if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
-  return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503, error);
-}
-
-function findStorageDiagnosticCode(error) {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    const code = typeof current.code === "string" ? current.code.toUpperCase() : "";
-    if (STORAGE_DIAGNOSTIC_CODES.has(code)) return code;
-    current = current.cause;
-  }
-  return undefined;
-}
-function findStorageDiagnosticPhase(error) {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    if (typeof current.storagePhase === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(current.storagePhase)) return current.storagePhase;
-    current = current.cause;
-  }
-  return undefined;
-}
-function findStorageDiagnosticReason(error) {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    const message = typeof current.message === "string" ? current.message : "";
-    if (/permission denied for function/iu.test(message)) return "function_permission";
-    if (/permission denied for (?:relation|table)/iu.test(message)) {
-      if (/memberships/iu.test(message)) return "table_permission_memberships";
-      if (/device_manual_wake/iu.test(message)) return "table_permission_manual_wake";
-      return "table_permission";
-    }
-    if (/SELECT FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE) is not allowed/iu.test(message)) return "lock_function";
-    if (/must be owner/iu.test(message)) return "owner_required";
-    current = current.cause;
-  }
-  return undefined;
-}
-function findStorageDiagnosticIdentity(error) {
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    if (typeof current.storageIdentity === "string" && /^[a-z][a-z0-9_]{0,127}$/u.test(current.storageIdentity)) return current.storageIdentity;
-    current = current.cause;
-  }
-  return undefined;
+  return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
 }
 
 function isDatabaseError(error) {

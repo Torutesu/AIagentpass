@@ -267,8 +267,6 @@ async function relayResponse(response, { allowSetCookie = false, allowClearedSes
   // so browser qualification can classify a 5xx without consuming the body.
   const errorCode = value?.error?.code;
   if (response.status >= 400 && typeof errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/u.test(errorCode)) headers.set("x-agentpass-error-code", errorCode);
-  const diagnosticCode = response.headers.get("x-agentpass-diagnostic-code");
-  if (response.status >= 500 && typeof diagnosticCode === "string" && /^[a-z][a-z0-9_]{0,127}$/u.test(diagnosticCode)) headers.set("x-agentpass-diagnostic-code", diagnosticCode);
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (requireSetCookie && response.status >= 200 && response.status < 300 && setCookie === null) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");

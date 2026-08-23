@@ -2215,8 +2215,7 @@ function platformPromotionErrorCode(code) {
 }
 function mapRefreshRequestRepositoryError(error) {
   if (error?.code === "ERR_DATABASE" || error?.code === "ERR_CONTROL_PLANE_UNAVAILABLE") {
-    const diagnostic = [error?.storageCode, error?.storagePhase, error?.storageReason, error?.storageIdentity].filter((value) => typeof value === "string").map((value) => `_${value.toLowerCase()}`).join("");
-    return apiError(`refresh_request_unavailable${diagnostic}`, 503, "Refresh request is unavailable");
+    return apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
   }
   if (error?.status) return error;
   if (error?.code === "ERR_NOT_FOUND") return apiError("not_found", 404, "Resource not found");
