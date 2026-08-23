@@ -453,12 +453,12 @@ async function scenario(parent, name, callback) {
               if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
               if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
               if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
-              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
-              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
-              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
               if (summaryParseDiagnostic !== null) {
                 process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
               }
+              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
+              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
+              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
               if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
               if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");

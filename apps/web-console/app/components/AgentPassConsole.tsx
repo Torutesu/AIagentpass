@@ -1521,7 +1521,7 @@ export function AgentPassConsole() {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
       if (epoch !== summaryEpoch.current) return "unavailable";
-      if (error instanceof ConsoleSummaryParseError && process.env.NODE_ENV !== "production") {
+      if (error instanceof ConsoleSummaryParseError) {
         console.warn("AgentPass summary contract rejected", error.path, error.reason);
       }
       organizationIdRef.current = null;
