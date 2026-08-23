@@ -436,6 +436,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const hostedIdentityBootstrapRepository = createPostgresHostedIdentityBootstrapRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
+    diagnosticClient: pool,
     organizationRepository,
     capabilityAuthorityRepository,
     sharedControlRepository,

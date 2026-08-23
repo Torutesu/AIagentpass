@@ -107,7 +107,7 @@ export function createPostgresControlPlaneStore(options = {}) {
   const capabilityReservationRepository = options.capabilityReservationRepository ?? options.capabilityReservation
     ?? (client && options.capabilityNonceSecret ? createPostgresCapabilityReservationRepository({ client, nonceSecret: options.capabilityNonceSecret, now }) : undefined);
   const deviceManualWakeRepository = options.deviceManualWakeRepository ?? options.deviceManualWake
-    ?? (client ? createPostgresDeviceManualWakeRepository({ client, now }) : undefined);
+    ?? (client ? createPostgresDeviceManualWakeRepository({ client, diagnosticClient: options.diagnosticClient, now }) : undefined);
 
   const delegate = (repository, method, operation, { tenant = true, context = false } = {}) => async (input = {}) => {
     const fn = repository?.[method];

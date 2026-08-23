@@ -30,6 +30,7 @@ export class DeviceManualWakeRepositoryError extends Error {
  */
 export function createPostgresDeviceManualWakeRepository({
   client,
+  diagnosticClient = client,
   now = () => new Date().toISOString(),
   maxWakeCount = DEFAULT_MAX_WAKE_COUNT
 } = {}) {
@@ -47,7 +48,7 @@ export function createPostgresDeviceManualWakeRepository({
       } catch (error) {
         if (error?.code === "ERR_DATABASE" && error?.cause?.code === "42501") {
           try {
-            const probe = await client.query(`SELECT current_user, session_user,
+            const probe = await diagnosticClient.query(`SELECT current_user, session_user,
                 has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
                 has_column_privilege(current_user, 'public.memberships', 'organization_id', 'SELECT') AS organization_select,
                 has_column_privilege(current_user, 'public.memberships', 'member_id', 'SELECT') AS member_select,
@@ -67,7 +68,7 @@ export function createPostgresDeviceManualWakeRepository({
     } catch (error) {
       if (error?.code === "ERR_DATABASE" && error?.cause?.code === "42501") {
         try {
-          const probe = await client.query(`SELECT current_user, session_user,
+          const probe = await diagnosticClient.query(`SELECT current_user, session_user,
               has_table_privilege(current_user, 'public.memberships', 'SELECT') AS table_select,
               has_column_privilege(current_user, 'public.memberships', 'organization_id', 'SELECT') AS organization_select,
               has_column_privilege(current_user, 'public.memberships', 'member_id', 'SELECT') AS member_select,
