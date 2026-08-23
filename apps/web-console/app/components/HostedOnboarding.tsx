@@ -42,7 +42,7 @@ type InitialStatusGuard = {
 // no cookie, CSRF value, or status payload is retained here.
 const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
 const initialStatusDomMarker = "data-agentpass-initial-status";
-const initialStatusWindowNamePrefix = "agentpass-onboarding-status:";
+const initialStatusHistoryKey = "__agentpass_onboarding_status__";
 const INITIAL_STATUS_RELOAD_WINDOW_MS = 30_000;
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
@@ -135,10 +135,16 @@ export function HostedOnboarding() {
     const browserWindow = typeof window === "object" ? window : null;
     const documentRoot = typeof document === "object" ? document.documentElement : null;
     const domOutcome = documentRoot?.getAttribute(initialStatusDomMarker);
-    const windowNameMatch = browserWindow?.name.match(/^agentpass-onboarding-status:(session_required|other):([0-9]+)$/u);
-    const windowNameOutcome = windowNameMatch !== null && windowNameMatch !== undefined
-      && Date.now() - Number(windowNameMatch[2]) < INITIAL_STATUS_RELOAD_WINDOW_MS
-      ? windowNameMatch[1]
+    const historyStatus = browserWindow?.history.state;
+    const historyOutcome = historyStatus !== null && typeof historyStatus === "object"
+      && historyStatus !== undefined && initialStatusHistoryKey in historyStatus
+      && typeof historyStatus[initialStatusHistoryKey] === "object"
+      && historyStatus[initialStatusHistoryKey] !== null
+      && typeof historyStatus[initialStatusHistoryKey].outcome === "string"
+      && (historyStatus[initialStatusHistoryKey].outcome === "session_required" || historyStatus[initialStatusHistoryKey].outcome === "other")
+      && typeof historyStatus[initialStatusHistoryKey].at === "number"
+      && Date.now() - historyStatus[initialStatusHistoryKey].at < INITIAL_STATUS_RELOAD_WINDOW_MS
+      ? historyStatus[initialStatusHistoryKey].outcome
       : undefined;
     // A hydration boundary can be evaluated in a separate client bundle. The
     // document marker is only a non-sensitive outcome classification and is a
@@ -160,14 +166,14 @@ export function HostedOnboarding() {
       });
       return;
     }
-    if (windowNameOutcome === "session_required") {
+    if (historyOutcome === "session_required") {
       queueMicrotask(() => {
         setScreen("signin");
         setGuidanceKind("terminal");
       });
       return;
     }
-    if (windowNameOutcome === "other") {
+    if (historyOutcome === "other") {
       queueMicrotask(() => {
         const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
         setMessage(guidance.message);
@@ -236,7 +242,16 @@ export function HostedOnboarding() {
             : "other";
         documentRoot?.setAttribute(initialStatusDomMarker, guard.outcome);
         if (guard.outcome === "session_required" || guard.outcome === "other") {
-          if (browserWindow !== null) browserWindow.name = `${initialStatusWindowNamePrefix}${guard.outcome}:${Date.now()}`;
+          if (browserWindow !== null) {
+            const currentHistory = browserWindow.history.state;
+            const safeHistory = currentHistory !== null && typeof currentHistory === "object" && !Array.isArray(currentHistory)
+              ? currentHistory
+              : {};
+            browserWindow.history.replaceState({
+              ...safeHistory,
+              [initialStatusHistoryKey]: { outcome: guard.outcome, at: Date.now() },
+            }, "", browserWindow.location.href);
+          }
         }
         const waiters = [...guard.waiters];
         guard.waiters.clear();
