@@ -389,7 +389,14 @@ function mapServiceError(error, phase) {
     if (error.code === WEBAUTHN_ERROR_CODES.CAPACITY_EXCEEDED) return new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_UNAVAILABLE, { status: 503, cause: error });
     return new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_VERIFICATION_FAILED, { status: 401, cause: error });
   }
-  return new HumanAuthHttpError(phase === "begin" ? HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_UNAVAILABLE : HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_VERIFICATION_FAILED, { status: phase === "begin" ? 503 : 401, cause: error });
+  const diagnostic = phase === "begin" && typeof error?.code === "string" && /^ERR_WEBAUTHN_[A-Z_]+$/u.test(error.code)
+    ? error.code.toLowerCase()
+    : undefined;
+  return new HumanAuthHttpError(phase === "begin" ? HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_UNAVAILABLE : HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_VERIFICATION_FAILED, {
+    status: phase === "begin" ? 503 : 401,
+    ...(diagnostic === undefined ? {} : { headers: { "X-AgentPass-Diagnostic-Code": diagnostic } }),
+    cause: error
+  });
 }
 
 function mapError(error) {

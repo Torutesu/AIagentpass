@@ -120,6 +120,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
             const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${headerCode}`;
             process.stdout.write(`${diagnostic}\n`);
           }
+          const storageDiagnostic = response.headers()["x-agentpass-diagnostic-code"];
+          if (/^[a-z][a-z0-9_]{0,127}$/u.test(storageDiagnostic ?? "")) process.stdout.write(`P0B_DIAGNOSTIC_KEYBOARD_STORAGE code=${storageDiagnostic}\n`);
           recentAuthObservation.optionsErrorCodePromise = safeRecentAuthErrorCode(response, page).then((code) => {
             if (/^[a-z][a-z0-9_]{0,63}$/u.test(code ?? "")) {
               const diagnostic = `P0B_DIAGNOSTIC_KEYBOARD_OPTIONS code=${code}`;
