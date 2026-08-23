@@ -449,7 +449,6 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       // deployed surface; test mode enables development-only duplicate effects
       // that can race the one-time session boundary.
       NODE_ENV: "production",
-      P0B_LIVE_BROWSER: "1",
       PORT: consolePort,
       AGENTPASS_CLOUD_API_URL: `https://localhost:${cloudTlsPort}/`,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
@@ -484,12 +483,6 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
         return [...output.matchAll(/P0B_DIAGNOSTIC_CLOUD_ERROR code=([A-Za-z][A-Za-z0-9_]{0,63}) constraint=([A-Za-z][A-Za-z0-9_]{0,95}|none)/gu)]
           .slice(-4)
           .map((match) => `P0B_DIAGNOSTIC_CLOUD_ERROR code=${match[1]} constraint=${match[2]}`);
-      },
-      consoleFailureDiagnostics() {
-        const output = `${consoleProcess?.p0bDiagnostics?.stdout ?? ""}\n${consoleProcess?.p0bDiagnostics?.stderr ?? ""}`;
-        return [...output.matchAll(/P0B_DIAGNOSTIC_CONSOLE_ERROR code=([a-z][a-z0-9._:-]{0,63})/gu)]
-          .slice(-4)
-          .map((match) => `P0B_DIAGNOSTIC_CONSOLE_ERROR code=${match[1]}`);
       },
       async cloudReadinessState() {
         if (!cloudProcess || cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null) return "unavailable";

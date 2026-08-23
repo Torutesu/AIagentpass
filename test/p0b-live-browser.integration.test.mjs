@@ -357,7 +357,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       catch { assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_FAILED"); }
       try { await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).waitFor({ state: "hidden", timeout: UI_ASSERTION_TIMEOUT_MS })); }
       catch {
-        writeSync(2, `P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
+        process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} code=${revokeErrorCode ?? "none"}\n`);
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
@@ -719,7 +719,6 @@ async function scenario(parent, name, callback) {
     }
     if (scenarioError) {
       for (const diagnostic of fixture?.cloudFailureDiagnostics?.() ?? []) process.stderr.write(`${diagnostic}\n`);
-      for (const diagnostic of fixture?.consoleFailureDiagnostics?.() ?? []) process.stderr.write(`${diagnostic}\n`);
       process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${liveStageTrace.length > 0 ? liveStageTrace.join(",") : "UNKNOWN"}\n`);
       // The supervisor intentionally discards arbitrary TAP diagnostics. If a
       // failure escaped the reviewed marker mappers, retain only its bounded

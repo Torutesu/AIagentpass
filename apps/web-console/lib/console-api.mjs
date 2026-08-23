@@ -1732,15 +1732,12 @@ function errorResponse(error) {
       ? sourceError.code
       : "cloud_api_error";
     const responseBody = { error: { code, message: "Cloud API request failed" } };
-    if (process.env.P0B_LIVE_BROWSER === "1") process.stderr.write(`P0B_DIAGNOSTIC_CONSOLE_ERROR code=${code}\n`);
     if (typeof source.request_id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(source.request_id)) responseBody.request_id = source.request_id;
     return jsonResponse(error.status, responseBody, { "x-agentpass-error-code": code });
   }
   if (error instanceof ConsoleApiError) {
-    if (process.env.P0B_LIVE_BROWSER === "1") process.stderr.write(`P0B_DIAGNOSTIC_CONSOLE_ERROR code=${error.code}\n`);
     return jsonResponse(error.status, { error: { code: error.code, message: error.message } }, { "x-agentpass-error-code": error.code });
   }
-  if (process.env.P0B_LIVE_BROWSER === "1") process.stderr.write("P0B_DIAGNOSTIC_CONSOLE_ERROR code=internal_error\n");
   return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } }, { "x-agentpass-error-code": "internal_error" });
 }
 
