@@ -41,8 +41,6 @@ type InitialStatusGuard = {
 // page. Coalesce only the short-lived, non-sensitive outcome classification;
 // no cookie, CSRF value, or status payload is retained here.
 const initialStatusGuardKey = Symbol.for("agentpass.onboarding.initial-status-guard");
-const initialStatusGuards = ((globalThis as unknown as Record<symbol, WeakMap<object, InitialStatusGuard>>)[initialStatusGuardKey]
-  ??= new WeakMap<object, InitialStatusGuard>());
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
 // period so a slow first read is not aborted and replayed.
@@ -132,7 +130,13 @@ export function HostedOnboarding() {
     if (initialStatusLoadStarted.current) return;
     initialStatusLoadStarted.current = true;
     const browserWindow = typeof window === "object" ? window : null;
-    const existingGuard = browserWindow === null ? undefined : initialStatusGuards.get(browserWindow);
+    // Store the short-lived classification directly on Window so duplicate
+    // client bundles produced during hydration still share the same guard.
+    // Only the outcome label is retained; no response, cookie, or CSRF value
+    // crosses the bundle boundary.
+    const existingGuard = browserWindow === null
+      ? undefined
+      : Reflect.get(browserWindow, initialStatusGuardKey) as InitialStatusGuard | undefined;
     if (existingGuard !== undefined && Date.now() - existingGuard.startedAt < INITIAL_STATUS_GUARD_MS) {
       if (existingGuard.outcome === "pending") {
         existingGuard.waiters.add((outcome) => {
@@ -160,7 +164,7 @@ export function HostedOnboarding() {
       outcome: "pending" as const,
       waiters: new Set<(outcome: InitialStatusOutcome) => void>(),
     };
-    if (browserWindow !== null && guard !== undefined) initialStatusGuards.set(browserWindow, guard);
+    if (browserWindow !== null && guard !== undefined) Reflect.set(browserWindow, initialStatusGuardKey, guard);
     const controller = new AbortController();
     queueMicrotask(() => {
       void loadStatus(controller.signal).then((result) => {
