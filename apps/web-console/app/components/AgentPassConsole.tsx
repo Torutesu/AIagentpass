@@ -313,6 +313,7 @@ type LiveHandoffSession = Readonly<{
 type LiveHandoffRef = { current: LiveHandoffSession | null };
 type LiveHandoffDelivery = LiveHandoffSession["delivery"];
 const createLiveHandoffDelivery = createBrowserCliHandoffDelivery as unknown as (options: { handoff: LiveHandoffDescriptor; preflight: LiveHandoffPreflight }) => LiveHandoffDelivery;
+let initialSummaryClaimed = false;
 
 function parseV2EnrollmentInvitation(payload: unknown, organizationId: string, expectedPreflight: PublicEnrollmentPreflight): Record<string, unknown> {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
@@ -1684,10 +1685,11 @@ export function AgentPassConsole() {
   }, [confirmOpen, helpOpen, mobileOpen, workspaceOpen]);
 
   useEffect(() => {
-    if (initialSummaryStartedRef.current) return;
+    if (initialSummaryStartedRef.current || initialSummaryClaimed) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      if (initialSummaryStartedRef.current) return;
+      if (initialSummaryStartedRef.current || initialSummaryClaimed) return;
+      initialSummaryClaimed = true;
       initialSummaryStartedRef.current = true;
       void refreshSummary(controller.signal);
     }, 0);
