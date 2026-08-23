@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeSync } from "node:fs";
 import test from "node:test";
 
 import { chromium } from "../apps/web-console/node_modules/@playwright/test/index.mjs";
@@ -600,7 +601,7 @@ async function scenario(parent, name, callback) {
           : scenarioError?.name === "TimeoutError"
             ? "timeout"
             : "other";
-      process.stderr.write(`P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=callback\n`);
+      writeSync(2, `P0B_DIAGNOSTIC_SCENARIO_ERROR kind=${scenarioErrorKind} stage=callback\n`);
       if (lifecycleFailureMarker(scenarioError) === null) {
         process.stderr.write(`P0B_SAFE_SCENARIO_UNCLASSIFIED_${String(scenarioOrdinal).padStart(2, "0")}_FAILED\n`);
       }
