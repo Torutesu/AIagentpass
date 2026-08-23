@@ -40,7 +40,7 @@ type InitialStatusGuard = {
 // Vinext can remount a client boundary while hydrating an unauthenticated
 // page. Coalesce only the short-lived, non-sensitive outcome classification;
 // no cookie, CSRF value, or status payload is retained here.
-const initialStatusGuardKey = Symbol.for("agentpass.onboarding.initial-status-guard");
+const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
 // Hosted CI and first-load cold starts can take several seconds before the
 // status response resolves. Keep the remount handoff alive for that bounded
 // period so a slow first read is not aborted and replayed.
