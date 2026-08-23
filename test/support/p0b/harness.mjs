@@ -481,9 +481,11 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       },
       cloudFailureDiagnostics() {
         const output = `${cloudProcess?.p0bDiagnostics?.stdout ?? ""}\n${cloudProcess?.p0bDiagnostics?.stderr ?? ""}`;
-        return [...output.matchAll(/P0B_DIAGNOSTIC_CLOUD_ERROR code=([A-Za-z][A-Za-z0-9_]{0,63}) constraint=([A-Za-z][A-Za-z0-9_]{0,95}|none)/gu)]
+        return [...output.matchAll(/P0B_DIAGNOSTIC_CLOUD_(?:ERROR code=([A-Za-z][A-Za-z0-9_]{0,63}) constraint=([A-Za-z][A-Za-z0-9_]{0,95}|none)|STORE_ERROR operation=([A-Za-z][A-Za-z0-9_.-]{0,63}) code=([A-Za-z][A-Za-z0-9_]{0,63}) constraint=([A-Za-z][A-Za-z0-9_]{0,95}|none))/gu)]
           .slice(-4)
-          .map((match) => `P0B_DIAGNOSTIC_CLOUD_ERROR code=${match[1]} constraint=${match[2]}`);
+          .map((match) => match[3] === undefined
+            ? `P0B_DIAGNOSTIC_CLOUD_ERROR code=${match[1]} constraint=${match[2]}`
+            : `P0B_DIAGNOSTIC_CLOUD_STORE_ERROR operation=${match[3]} code=${match[4]} constraint=${match[5]}`);
       },
       consoleFailureDiagnostics() {
         const output = `${consoleProcess?.p0bDiagnostics?.stdout ?? ""}\n${consoleProcess?.p0bDiagnostics?.stderr ?? ""}`;
