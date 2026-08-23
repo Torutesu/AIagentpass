@@ -941,7 +941,17 @@ async function safeRecentAuthErrorCode(response, page = null) {
     const body = await (page ? boundedUiOperation(page, () => response.json()) : response.json());
     const code = body?.error?.code;
     return typeof code === "string" ? code : null;
-  } catch { return null; }
+  } catch {
+    // Some Chromium versions reject response.json() after the page has
+    // already consumed the stream. A bounded text fallback keeps diagnostics
+    // available without retaining or printing the response body.
+    if (typeof response.text !== "function") return null;
+    try {
+      const text = await (page ? boundedUiOperation(page, () => response.text()) : response.text());
+      const code = JSON.parse(text)?.error?.code;
+      return typeof code === "string" ? code : null;
+    } catch { return null; }
+  }
 }
 
 function keyboardPhaseStatusMarker(phase, status) {
