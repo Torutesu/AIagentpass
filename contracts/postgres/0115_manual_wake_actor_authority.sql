@@ -24,6 +24,7 @@ AS $$
 $$;
 
 ALTER FUNCTION public.agentpass_manual_wake_actor_role(uuid,uuid) OWNER TO agentpass_migrator;
+GRANT SELECT ON TABLE public.memberships TO agentpass_migrator;
 REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_manual_wake_actor_role(uuid,uuid)
   FROM PUBLIC, agentpass_signer, agentpass_backup, agentpass_maintenance;
 GRANT EXECUTE ON FUNCTION public.agentpass_manual_wake_actor_role(uuid,uuid) TO agentpass_app;
