@@ -347,9 +347,13 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     });
     emitP0BStage("TRUSTED_CA");
     const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
+    emitP0BStage("PORT_CLOUD");
     const cloudPort = await reservePort();
+    emitP0BStage("PORT_CLOUD_TLS");
     const cloudTlsPort = await reservePort();
+    emitP0BStage("PORT_CONSOLE");
     const consolePort = await reservePort();
+    emitP0BStage("PORT_CONSOLE_TLS");
     const consoleTlsPort = await reservePort();
     const common = {
       P0B_SOURCE_COMMIT: env.P0B_SOURCE_COMMIT,
