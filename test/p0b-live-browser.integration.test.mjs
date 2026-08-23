@@ -356,6 +356,7 @@ async function scenario(parent, name, callback) {
               summaryStatus = response.status();
               if (summaryStatuses.length < 8) summaryStatuses.push(summaryStatus);
               summaryBodyCode = null;
+              if (summaryStatus >= 500) process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_STATUS status=${summaryStatus}\n`);
               if (summaryStatus >= 500) {
                 const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
                 const headerCode = response.headers()["x-agentpass-error-code"];
