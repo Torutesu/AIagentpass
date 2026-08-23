@@ -341,6 +341,7 @@ async function scenario(parent, name, callback) {
         let summaryErrorCode = null;
         let deploymentStatus = null;
         let summaryBodyCode = null;
+        let summaryParseDiagnostic = null;
         let summaryBodyPromise = Promise.resolve();
         const summaryResponseListener = (response) => {
           try {
@@ -384,6 +385,10 @@ async function scenario(parent, name, callback) {
           } catch {}
         };
         page.on("response", summaryResponseListener);
+        page.on("console", (message) => {
+          const match = message.text().match(/^AgentPass summary contract rejected ([.$\w\[\]]+) ([a-z_]+)$/u);
+          if (match && match[1].length <= 128 && match[2].length <= 64) summaryParseDiagnostic = Object.freeze({ path: match[1], reason: match[2] });
+        });
         if (register) {
           emitLiveStage("OPEN_AUTHENTICATOR");
           try { await fixture.installVirtualAuthenticator(page, role); }
@@ -448,6 +453,12 @@ async function scenario(parent, name, callback) {
               if (summaryStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_HTTP_403_FAILED");
               if (deploymentStatus === 401) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_401_FAILED");
               if (deploymentStatus === 403) assert.fail("P0B_SAFE_OWNER_OPEN_DEPLOYMENT_HTTP_403_FAILED");
+              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
+              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
+              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
+              if (summaryParseDiagnostic !== null) {
+                process.stderr.write(`P0B_DIAGNOSTIC_SUMMARY_PARSE path=${summaryParseDiagnostic.path} reason=${summaryParseDiagnostic.reason}\n`);
+              }
               if (summaryErrorCode === "cloud_api_invalid_response") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_INVALID_RESPONSE_FAILED");
               if (summaryErrorCode === "cloud_api_unavailable") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_UNAVAILABLE_FAILED");
               if (summaryErrorCode === "cloud_api_timeout") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_CLOUD_TIMEOUT_FAILED");
@@ -459,9 +470,6 @@ async function scenario(parent, name, callback) {
               const status = await page.locator("#safe-status-heading").textContent().catch(() => "");
               if (status === "安全状態を確認できません") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_ERROR_FAILED");
               if (status === "Cloudの状態を確認中です") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_LOADING_FAILED");
-              if (summaryBodyCode === "body_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_INVALID_FAILED");
-              if (summaryBodyCode === "body_shape_invalid") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_FAILED");
-              if (summaryBodyCode === "body_shape_ok") assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_BODY_SHAPE_OK_FAILED");
               if (summaryStatus >= 200 && summaryStatus < 300) assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_RESPONSE_CONTRACT_FAILED");
               assert.fail("P0B_SAFE_OWNER_OPEN_SUMMARY_NOT_READY_FAILED");
             }

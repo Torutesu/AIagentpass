@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
-import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
+import { ConsoleSummaryParseError, parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { parseDeploymentReadiness, type DeploymentReadiness } from "../deployment-readiness";
 import { deriveAccessPosture, type AccessPostureInput, type PostureItem } from "../access-posture";
 import { BROWSER_CLI_HANDOFF_EVENTS, BROWSER_CLI_HANDOFF_LIMITS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
@@ -1521,6 +1521,9 @@ export function AgentPassConsole() {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return "unavailable";
       if (epoch !== summaryEpoch.current) return "unavailable";
+      if (error instanceof ConsoleSummaryParseError && process.env.NODE_ENV !== "production") {
+        console.warn("AgentPass summary contract rejected", error.path, error.reason);
+      }
       organizationIdRef.current = null;
       setSessionRole(null);
       setAuditSession(null);
