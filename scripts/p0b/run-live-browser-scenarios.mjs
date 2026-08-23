@@ -63,6 +63,7 @@ function runScenario(name) {
       failureTail = `${failureTail}${String(chunk)}`.slice(-1024);
       if (/P0B_SAFE_[A-Z][A-Z0-9_]{1,127}_FAILED/gu.test(failureTail)) {
         failureObserved = true;
+        process.stderr.write(`P0B_DIAGNOSTIC_STAGE_TRACE stages=${stageTrace.length > 0 ? stageTrace.join(",") : "UNKNOWN"}\n`);
         const diagnostics = [...failureTail.matchAll(/P0B_DIAGNOSTIC_[A-Z_]+ [A-Za-z0-9_=,.:\[\]-]{1,256}/gu)].map((match) => match[0]);
         for (const diagnostic of diagnostics.slice(-4)) process.stderr.write(`${diagnostic}\n`);
         if (failureTail.includes("P0B_SAFE_SCENARIO_RUNTIME_TIMEOUT_FAILED")) {
