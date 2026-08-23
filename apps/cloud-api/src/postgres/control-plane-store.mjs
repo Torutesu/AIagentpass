@@ -58,6 +58,7 @@ export const CONTROL_PLANE_STORE_ERROR_CODES = Object.freeze({
 const DATABASE_MESSAGE = "control-plane database operation failed";
 const UNAVAILABLE_MESSAGE = "control-plane operation is unavailable";
 const DATABASE_ERROR_CODES = new Set(["ERR_DATABASE", "ERR_DB_CLIENT", "ERR_DB_RESULT", "XX000", "08000", "08003", "08006"]);
+const STORAGE_DIAGNOSTIC_CODES = new Set(["42501", "42P01", "42703", "42883", "23503", "23505", "55P03", "40001", "57014", "08000", "08003", "08006", "XX000"]);
 const SAFE_IDENTITY_KEYS = new Set(["member_id", "organization_id", "role", "device_id", "enrollment_id"]);
 const DEVICE_PLANE_SENSITIVE_KEYS = new Set([
   "accesstoken", "authorization", "bearertoken", "password", "privatekey", "privatekeypem",
@@ -65,11 +66,13 @@ const DEVICE_PLANE_SENSITIVE_KEYS = new Set([
 ]);
 
 export class ControlPlaneStoreError extends Error {
-  constructor(code, message, status = undefined) {
+  constructor(code, message, status = undefined, cause = undefined) {
     super(message);
     this.name = "ControlPlaneStoreError";
     this.code = code;
     if (status !== undefined) this.status = status;
+    const storageCode = findStorageDiagnosticCode(cause);
+    if (storageCode !== undefined) Object.defineProperty(this, "storageCode", { value: storageCode, enumerable: false });
   }
 }
 
@@ -353,9 +356,19 @@ async function callRepository(fn, repository, operation, input) {
 
 function publicError(error, operation) {
   if (error instanceof ControlPlaneStoreError) return error;
-  if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
+  if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503, error);
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
-  return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
+  return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503, error);
+}
+
+function findStorageDiagnosticCode(error) {
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const code = typeof current.code === "string" ? current.code.toUpperCase() : "";
+    if (STORAGE_DIAGNOSTIC_CODES.has(code)) return code;
+    current = current.cause;
+  }
+  return undefined;
 }
 
 function isDatabaseError(error) {
