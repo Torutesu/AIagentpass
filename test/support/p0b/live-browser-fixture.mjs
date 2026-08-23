@@ -233,18 +233,26 @@ export async function startP0BLiveBrowserFixture({
         // This avoids racing the application's own hydration/bootstrap while
         // retaining Chromium TLS validation, identity headers, Set-Cookie,
         // and the exact production session endpoint.
-        await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded" });
+        await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
         stage = "response";
         const response = await page.evaluate(async (sessionPath) => {
           for (let attempt = 0; attempt < 8; attempt += 1) {
-            const result = await fetch(sessionPath, {
-              method: "POST",
-              headers: { accept: "application/json", "content-type": "application/json" },
-              body: "{}",
-              cache: "no-store",
-              credentials: "same-origin",
-              redirect: "error"
-            });
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10_000);
+            let result;
+            try {
+              result = await fetch(sessionPath, {
+                method: "POST",
+                headers: { accept: "application/json", "content-type": "application/json" },
+                body: "{}",
+                cache: "no-store",
+                credentials: "same-origin",
+                redirect: "error",
+                signal: controller.signal
+              });
+            } finally {
+              clearTimeout(timer);
+            }
             let body = null;
             try { body = await result.json(); } catch {}
             if (result.status !== 502 || attempt === 7) return { ok: result.ok, status: result.status, body };
@@ -686,14 +694,14 @@ export async function seedP0BHumanBrowserDatabase({ pool, organizationId, refres
 export async function awaitConsoleSessionRotation(page, target, descriptor, organizationId) {
   return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
     paths: new Set(["/api/auth/session/resume", SESSION_PATH]),
-    navigate: () => page.goto(target.toString(), { waitUntil: "domcontentloaded" })
+    navigate: () => page.goto(target.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 })
   });
 }
 
 export async function awaitConsoleSessionReload(page, descriptor, organizationId) {
   return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
     paths: new Set(["/api/auth/session/resume"]),
-    navigate: () => page.reload({ waitUntil: "domcontentloaded" })
+    navigate: () => page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 })
   });
 }
 
