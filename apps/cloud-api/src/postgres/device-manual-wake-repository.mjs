@@ -84,7 +84,7 @@ export function createPostgresDeviceManualWakeRepository({
       }
 
       const actor = await storageQuery(tx, "actor_membership", `SELECT role
-        FROM memberships
+        FROM public.memberships
         WHERE organization_id=$1 AND member_id=$2 AND status='active'`, [values.organizationId, values.actorId]);
       if (rowCount(actor) !== 1 || !ROLES.has(actor.rows[0].role)) {
         throw new DeviceManualWakeRepositoryError("ERR_ACTOR_UNAVAILABLE", "manual wake actor is unavailable");
