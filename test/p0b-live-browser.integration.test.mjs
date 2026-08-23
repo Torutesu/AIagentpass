@@ -378,7 +378,10 @@ function withScenarioPage(open, getPage, args, action) {
           return;
         }
         emitLiveStage("HANDOFF_PAGE_READY");
-        Promise.resolve().then(() => action(page)).then(resolve, reject);
+        let actionResult;
+        try { actionResult = action(page); }
+        catch (error) { reject(error); return; }
+        Promise.resolve(actionResult).then(resolve, reject);
       },
       onError: reject
     });
