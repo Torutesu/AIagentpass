@@ -348,14 +348,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
               if (typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(headerCode)) {
                 process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_CODE code=${headerCode}\n`);
               }
-              response.text().then((body) => {
-                try {
-                  const code = JSON.parse(body)?.error?.code;
-                  if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(code)) {
-                    process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_BODY code=${code}\n`);
-                  }
-                } catch {}
-              }).catch(() => {});
             }
           }
         } catch {}
