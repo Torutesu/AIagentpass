@@ -508,7 +508,12 @@ function emitP0BStage(stage) {
   // Stage names are fixed, secret-free diagnostics. Emit them for every
   // harness invocation so the isolated live-browser supervisor can recover a
   // precise stop point even when the child environment is filtered upstream.
-  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
+  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) {
+    process.stderr.write(`P0B_STAGE_${stage}_START\n`);
+    if (process.env.P0B_DIAGNOSTIC_ERRORS === "1") {
+      process.stdout.write(`P0B_DIAGNOSTIC_PROCESS_STAGE stage=${stage.toLowerCase()}\n`);
+    }
+  }
 }
 
 export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
