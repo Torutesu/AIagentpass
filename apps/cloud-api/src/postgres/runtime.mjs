@@ -450,6 +450,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
           : revocation.target_type === "agent"
             ? { agent_id: revocation.target_id }
             : null;
+      if (revocation.target_type === "device") {
+        await tx.query(`UPDATE devices
+          SET status='revoked'
+          WHERE organization_id=$1 AND id=$2 AND status='active'`, [revocation.organization_id, revocation.target_id]);
+      }
       if (selector) await agentSessionLifecycleRepository.revokeAuthorityInTransaction({
         tx,
         organization_id: revocation.organization_id,
