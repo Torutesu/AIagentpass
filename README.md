@@ -1,10 +1,39 @@
 # AgentPass
 
-The current production execution order and exit gates are in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). The implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md). The current operator packet is indexed in [docs/runbooks/README.md](docs/runbooks/README.md).
+[English](README.md) · [日本語](README.ja.md)
 
-AgentPass is an OSS policy broker for coding-agent operations. It keeps signing keys in the platform security boundary and gives an agent permission to perform a narrowly scoped operation, rather than handing the agent a secret.
+![AgentPass — permission, not key material](docs/assets/agentpass-hero.png)
 
-> Early alpha: macOS + Git SSH signing. Review the threat model before using production keys.
+> Give AI coding agents permission to work — never the private key.
+
+AgentPass is an open-source macOS policy broker for Claude Code, Cursor, and
+other coding agents. It keeps signing keys inside the protected Mac boundary
+and grants only a short-lived, repository-scoped capability for the requested
+Git operation.
+
+**Who it is for:** developers who want unattended AI-assisted commits,
+vibe-coders who do not want to paste secrets into an agent, and teams that need
+repository/branch/operation limits, revocation, and an audit trail.
+
+**What it solves:** plaintext keys and broad tokens in agent environments,
+accidental writes to the wrong repository or branch, and the false choice
+between unattended automation and least privilege.
+
+**Current status:** Early Alpha — macOS + Git SSH signing. Start with a test
+repository. Review [THREAT_MODEL.md](THREAT_MODEL.md) before using production
+keys.
+
+<p align="center"><a href="#quick-start">Try it locally in minutes →</a></p>
+
+### How the boundary works
+
+![AgentPass security boundary](docs/assets/agentpass-boundary.svg)
+
+Further reading: [execution plan](docs/V1_EXECUTION_PLAN.md), [detailed design](docs/DETAILED_DESIGN.md), [architecture](docs/AGENT_PLATFORM_ARCHITECTURE.md), [qualification runbook](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md), and [operator packet](docs/runbooks/README.md).
+
+Hosted deployment choices, including self-hosted OSS, a low-cost private beta,
+and an operator-funded hosted service, are documented in
+[docs/HOSTED_DEPLOYMENT_OPTIONS.md](docs/HOSTED_DEPLOYMENT_OPTIONS.md).
 
 ## Start here
 
