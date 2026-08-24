@@ -2228,7 +2228,13 @@ function mapRefreshRequestRepositoryError(error) {
 }
 function mapError(error) {
   if (error?.[API_ERROR] === true) return error;
-  if (error?.status) return { status: 500, code: "internal_error", message: "Internal error" };
+  if (error?.status) {
+    if (process.env.P0B_DIAGNOSTIC_ERRORS === "1") {
+      const diagnostic = diagnosticErrorCode(error);
+      return { status: 500, code: `internal_${diagnostic}`, message: "Internal error" };
+    }
+    return { status: 500, code: "internal_error", message: "Internal error" };
+  }
   if (error.code === "ERR_AUDIT_CURSOR_INVALID") return { status: 400, code: "invalid_cursor", message: "Cursor is invalid" };
   if (["invalid_session_cookie", "session_not_found", "session_revoked", "session_expired"].includes(error.code)) return { status: 401, code: "human_session_invalid", message: "Authentication failed" };
   if (["invalid_origin", "csrf_token_required", "invalid_csrf_token"].includes(error.code)) return { status: 403, code: "human_session_request_denied", message: "Authentication failed" };
@@ -2246,4 +2252,16 @@ function mapError(error) {
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };
   return { status: 500, code: "internal_error", message: "Internal error" };
+}
+
+function diagnosticErrorCode(error) {
+  const seen = new Set();
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object" && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const code = typeof current.code === "string" ? current.code.toLowerCase() : "";
+    if (/^[a-z][a-z0-9_]{0,47}$/u.test(code) && code !== "err_database") return code;
+    current = current.cause;
+  }
+  return "database";
 }

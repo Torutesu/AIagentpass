@@ -521,6 +521,7 @@ export function buildTestEnvironment(base, fixtureEnvironment) {
     // A caller's stale disable flag must not turn this live qualification into
     // a successful-looking skipped test.
     P0B_DISABLE_EXTERNAL: "false",
+    P0B_DIAGNOSTIC_ERRORS: "1",
     ...(scenario === undefined ? {} : { P0B_LIVE_BROWSER_SCENARIO: scenario })
   });
 }
