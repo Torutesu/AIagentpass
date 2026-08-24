@@ -54,6 +54,7 @@ const SHARED_CONTROL_APP_FUNCTIONS = Object.freeze([
   'agentpass_prune_human_identity_assertion_replays(integer)',
   'agentpass_advance_authority_generation(uuid,timestamptz)',
   'agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)',
+  'agentpass_record_device_bundle_ack(uuid,uuid,bigint,integer,bigint,text,text,text,timestamptz,bytea)',
 ]);
 
 const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([
