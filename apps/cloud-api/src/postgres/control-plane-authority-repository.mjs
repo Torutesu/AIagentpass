@@ -376,12 +376,13 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const values = normalizeAuthorityAdvanceInput(input, now);
     const nonceCodec = requireRefreshNonceCodec(refreshNonceCodec);
     return databaseOperation(() => transaction(client, async (tx) => {
-      let diagnosticStage = "organization_lock";
+      let diagnosticStage = "organization_advisory_lock";
       try {
       // This is the repository-wide organization lock. The migration helper
       // takes its own compatible generation lock as well; keeping this lock
       // first makes reductions and bundle snapshots share one ordering point.
       await lockOrganization(tx, values.organizationId);
+      diagnosticStage = "organization_row_lock";
       await lockOrganizationRow(tx, values.organizationId);
       let revocation;
       if (values.reduction !== undefined) {
@@ -449,7 +450,8 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       return Object.freeze({ organization_id: values.organizationId, generation, devices: Object.freeze(enqueued), ...(revocation === undefined ? {} : { revocation }) });
       } catch (error) {
         if (process.env.P0B_DIAGNOSTIC_ERRORS === "1") {
-          throw new ControlPlaneAuthorityRepositoryError(`ERR_DB_STAGE_${diagnosticStage.toUpperCase()}`, "control-plane authority storage is unavailable");
+          const sqlState = typeof error?.code === "string" && /^[0-9A-Z]{2,5}$/u.test(error.code) ? `_${error.code.toLowerCase()}` : "";
+          throw new ControlPlaneAuthorityRepositoryError(`ERR_DB_STAGE_${diagnosticStage.toUpperCase()}${sqlState}`, "control-plane authority storage is unavailable");
         }
         throw error;
       }
