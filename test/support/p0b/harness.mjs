@@ -428,6 +428,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "1",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
       P0B_LIVE_BROWSER: "1",
+      ...(env.P0B_DIAGNOSTIC_ERRORS === "1" ? { P0B_DIAGNOSTIC_ERRORS: "1" } : {}),
       P0B_CONTROL_BUNDLE_PRIVATE_KEY_PATH: files.controlBundlePrivateKey,
       P0B_CAPABILITY_PRIVATE_KEY_PATH: files.capabilityPrivateKey,
       P0B_AUDIT_ANCHOR_PRIVATE_KEY_PATH: files.auditAnchorPrivateKey,
