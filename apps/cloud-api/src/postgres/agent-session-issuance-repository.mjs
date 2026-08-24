@@ -309,7 +309,10 @@ async function prepareTenantAndOrganization(tx, organizationId) {
   const verified = await tx.query("SELECT current_setting('agentpass.organization_id',true) AS organization_id", []);
   if (rowCount(verified) !== 1 || verified.rows[0]?.organization_id !== organizationId) throw failure("unavailable");
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`agentpass:organization:${organizationId}`]);
-  const organization = await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
+  // The app role is intentionally SELECT-only on organizations. The
+  // transaction-scoped advisory lock provides ordering; authoritative
+  // SECURITY DEFINER routines take the row lock when a mutation needs one.
+  const organization = await tx.query("SELECT 1 FROM organizations WHERE id=$1", [organizationId]);
   if (rowCount(organization) !== 1) throw failure("not_found");
 }
 

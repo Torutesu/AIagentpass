@@ -732,7 +732,11 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
 }
 
 async function lockOrganization(client, organizationId) {
-  const result = await client.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
+  // The app role deliberately has no UPDATE privilege on organizations, which
+  // PostgreSQL also requires for SELECT ... FOR SHARE. Advisory ordering is
+  // sufficient here; SECURITY DEFINER authority routines own row locks.
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+  const result = await client.query("SELECT id FROM organizations WHERE id=$1", [organizationId]);
   if (rowCount(result) !== 1) throw notFound("organization", organizationId);
 }
 

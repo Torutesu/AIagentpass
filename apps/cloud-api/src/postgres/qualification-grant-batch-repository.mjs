@@ -690,7 +690,9 @@ async function setTenantContext(tx, organizationId) {
 
 async function lockAuthority(tx, organizationId, deviceId, agentId, agentKind) {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`agentpass:qualification-grant-batch:${organizationId}:${deviceId}`]);
-  const organization = await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR UPDATE", [organizationId]);
+  // organizations is SELECT-only for the app role. Keep the deterministic
+  // advisory lock for ordering and let the authority function own row locks.
+  const organization = await tx.query("SELECT 1 FROM organizations WHERE id=$1", [organizationId]);
   if (rowCount(organization) !== 1) throw failure("NOT_FOUND");
   const audience = await tx.query(`SELECT d.status AS device_status,a.status AS agent_status
     FROM devices d JOIN agents a ON a.organization_id=d.organization_id AND a.device_id=d.id
