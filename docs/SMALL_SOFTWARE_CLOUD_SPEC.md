@@ -32,6 +32,11 @@ cross-agent authorization, release provenance, user access, secret mediation,
 audit, revocation, and lifecycle system that makes generated software safe to
 use inside a real organization.
 
+The complementary maintenance plane is specified in
+[Self-Maintaining APIs](SELF_MAINTAINING_APIS_SPEC.md). Together, the product
+promise becomes: deploy AI-built software safely, then keep it working as its
+dependencies and APIs change.
+
 ## 2. Strategic position
 
 ### 2.1 Category

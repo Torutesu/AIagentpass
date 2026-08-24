@@ -9,6 +9,12 @@ and Implementation Specification](SMALL_SOFTWARE_CLOUD_SPEC.md). That document
 defines the future `agentpass publish` product and does not supersede the
 production gates in this roadmap.
 
+The corresponding maintenance-plane proposal is [AgentPass Self-Maintaining
+APIs — Product and Implementation Specification](SELF_MAINTAINING_APIS_SPEC.md).
+It adds signed provider advisories, affected-code detection, isolated repair,
+Draft PRs, and verified republishing without granting provider agents standing
+repository access.
+
 The ordered, issue-level execution backlog for this roadmap is maintained in
 [`EXECUTION_PLAN.md`](./EXECUTION_PLAN.md).
 
