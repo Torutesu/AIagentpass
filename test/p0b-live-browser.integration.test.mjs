@@ -338,7 +338,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           const url = new URL(response.url());
           if (url.pathname === "/api/console" && url.searchParams.get("operation") === "revoke-device") {
             revokeStatus = response.status();
-            if (revokeStatus >= 500) {
+            if (revokeStatus >= 400) {
               try {
                 const candidate = response.statusText();
                 if (typeof candidate === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(candidate)) revokeStatusText = candidate;
