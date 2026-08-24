@@ -6,7 +6,7 @@ on:
   pull_request:
 
 concurrency:
-  group: agentpass-ci-${{ github.event.pull_request.number || github.ref }}
+  group: agentpass-ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 permissions:

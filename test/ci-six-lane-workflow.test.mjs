@@ -32,7 +32,7 @@ test("canonical CI exposes exactly six source-bound qualification lanes", () => 
   assertSixLanes(ciSource);
   const ci = workflow(ciSource);
   assert.equal(ci.concurrency?.["cancel-in-progress"], true);
-  assert.equal(ci.concurrency?.group, "agentpass-ci-${{ github.event.pull_request.number || github.ref }}");
+  assert.equal(ci.concurrency?.group, "agentpass-ci-${{ github.head_ref || github.ref }}");
   assert.doesNotMatch(ciSource, /(?:^|\n)\s*(?:steps:\s*[&*]|[&*]postgres-authority-qualification)/u);
   assert.match(postgresActionSource, /using: composite/u);
   assert.match(postgresActionSource, /inputs:\n\s+postgres-version:/u);
