@@ -8,12 +8,12 @@ aspect: 16:9
 language: en
 audience: vibe-coders and developers using Claude Code or Cursor
 length: 30s
-angle: concrete security moment — an agent asks to push, AgentPass grants one bounded operation, and the key never leaves the protected Mac boundary
+angle: concrete everyday moment — someone wants AI to write code without handing it their password; AgentPass grants one small, time-limited permission and turns it off automatically
 ---
 
 ## Intent
 
-Market AgentPass as an Early Alpha open-source macOS policy broker. Lead with the moment a non-expert is about to paste an SSH key into an AI coding agent, then show the safer permission boundary.
+Market AgentPass as an Early Alpha open-source macOS safety layer. Lead with the moment a non-expert is about to paste a password into an AI coding tool, then show a simple three-part promise: choose what, choose where, choose how long.
 
 ## Assets
 

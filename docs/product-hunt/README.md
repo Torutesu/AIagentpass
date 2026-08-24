@@ -14,13 +14,13 @@ This folder contains the launch-ready copy and artwork for the AgentPass Product
 
 ### Description (under 260 characters)
 
-AgentPass is an open-source macOS policy broker for Claude Code, Cursor, and other AI coding agents. It keeps signing keys inside the protected Mac boundary and grants short-lived, repository-scoped permission instead of handing agents private keys.
+AgentPass is an open-source macOS safety layer for Claude Code, Cursor, and other AI coding tools. It lets AI do one useful task without handing it your password, then turns that permission off automatically.
 
 ### First comment
 
-AI coding agents are great at moving fast. The dangerous part is giving them a private key that can move everywhere. AgentPass keeps the key inside the protected Mac boundary and gives the agent only the smallest, shortest-lived permission needed for one Git operation.
+Want AI to write code but worried about giving it your password? AgentPass lets you choose what the AI can do, where it can do it, and how long it can do it. Your secret stays protected, and the permission turns off when the task is done.
 
-This is an Early Alpha for macOS + Git SSH signing. Try it with a test repository, read the threat model, and tell us what would make the boundary useful in your workflow.
+This is an Early Alpha for macOS. Try it with a test project, read the threat model, and tell us what would make AI feel safe enough to use every day.
 
 ## Gallery order
 
@@ -31,7 +31,7 @@ Product Hunt recommends 1270x760 gallery artwork and requires at least two image
 
 ## Demo video
 
-`videos/agentpass-product-hunt/renders/agentpass-product-hunt_2026-08-24_18-06-19.mp4` is a 30-second silent Product Hunt demo. It follows one concrete scene: an AI agent asks to push, the unsafe broad-key path is rejected, and AgentPass grants one repository/branch/operation-scoped capability that expires in 10 minutes.
+`videos/agentpass-product-hunt/renders/agentpass-product-hunt_2026-08-24_18-13-59.mp4` is a 30-second silent Product Hunt demo. It follows one everyday scene: someone wants AI to write code, refuses to share a password, chooses what/where/how long, and lets AgentPass turn the permission off automatically.
 
 The terminal and policy card are marketing visualizations, not screenshots of a live hosted Console. Keep that distinction explicit in the launch copy.
 
