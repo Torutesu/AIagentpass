@@ -726,7 +726,11 @@ export async function main(argv = process.argv.slice(2)) {
         const childArgs = ["--test", "--test-reporter", "tap", "test/p0b-live-process.integration.test.mjs"];
         const result = await runQualificationCommand(process.execPath, childArgs, {
           cwd: REPOSITORY_ROOT,
-          env: buildTestEnvironment(process.env, fixtureEnvironment),
+          env: {
+            ...buildTestEnvironment(process.env, fixtureEnvironment),
+            P0B_SOURCE_COMMIT: sourceBefore.commit,
+            P0B_SOURCE_TREE: sourceTreeBefore
+          },
           timeoutMs: PROCESS_TIMEOUT_MS,
           onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
