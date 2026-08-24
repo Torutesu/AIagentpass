@@ -464,6 +464,8 @@ jobs:
           : "${AGENTPASS_QUALIFICATION_RUNNER_ID:?protected WebAuthn qualification runner binding is required}"
           : "${AGENTPASS_QUALIFICATION_ARTIFACT_SHA256:?protected WebAuthn qualification artifact binding is required}"
           : "${AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST:?protected WebAuthn deployment binding is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN:?protected WebAuthn origin binding is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_RP_ID:?protected WebAuthn RP ID binding is required}"
           export AGENTPASS_SOURCE_TREE="$(git rev-parse HEAD^{tree})"
           export AGENTPASS_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID"
           export AGENTPASS_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
