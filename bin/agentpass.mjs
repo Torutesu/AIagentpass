@@ -50,6 +50,8 @@ function usage() {
   console.log(`AgentPass 0.18.0
 
 Commands:
+  start [--project DIR] [--client auto|claude-code|cursor]
+                    connect the current coding project in one guided flow
   install --manifest FILE --signature FILE --public-key FILE
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
@@ -340,7 +342,30 @@ async function continueNativeSetup() {
   console.log(JSON.stringify(publicSetupResult(result), null, 2));
 }
 
-async function setupNativeBridgeUnsafe() {
+function detectSetupClient(project) {
+  if (fs.existsSync(path.join(project, ".cursor")) || fs.existsSync(path.join(project, ".cursor", "mcp.json"))) return "cursor";
+  return "claude-code";
+}
+
+function installedSetupTeamId() {
+  try {
+    const receipt = readInstalledReleaseReceipt();
+    return receipt.team_id;
+  } catch (error) {
+    if (error?.code === "INSTALLED_RECEIPT_MISSING" || error?.code === "INSTALLED_RECEIPT_ROOT_UNSAFE") return undefined;
+    throw error;
+  }
+}
+
+function startUsageError() {
+  return new Error("Usage: agentpass start [--project DIR] [--client auto|claude-code|cursor]");
+}
+
+async function setupNativeBridgeUnsafe({ autoStart = false, startOptions = {} } = {}) {
+  if (autoStart) {
+    if (process.platform !== "darwin") throw new Error("AgentPass guided setup is supported only on macOS");
+    if (process.getuid?.() === 0) throw new Error("Run AgentPass as the interactive user, not root");
+  }
   if (args[0] === "status") {
     if (args.length !== 1) throw new Error("Usage: agentpass setup status");
     const result = readHeadlessOnboarding();
@@ -348,13 +373,14 @@ async function setupNativeBridgeUnsafe() {
     if (!result.ok) process.exitCode = 1;
     return;
   }
-  if (args[0] === "continue") return continueNativeSetup();
+  if (!autoStart && args[0] === "continue") return continueNativeSetup();
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const allowed = new Set(["--client", "--project", "--team-id"]);
   const flags = new Map();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (autoStart && argument === "--json") continue;
     if (argument === "--execute") continue;
     if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
       throw new Error("Usage: agentpass setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]");
@@ -362,17 +388,23 @@ async function setupNativeBridgeUnsafe() {
     flags.set(argument, args[index + 1]);
     index += 1;
   }
-  const clientName = flags.get("--client") ?? "claude-code";
-  const teamId = flags.get("--team-id");
-  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) throw new Error("setup requires --team-id with the pinned 10-character Apple Team ID");
-  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const project = path.resolve(startOptions.project ?? flags.get("--project") ?? process.cwd());
+  const requestedClient = startOptions.client ?? flags.get("--client");
+  const clientName = requestedClient === "auto" || requestedClient === undefined ? detectSetupClient(project) : requestedClient;
+  if (!["claude-code", "cursor"].includes(clientName)) throw new Error("client must be claude-code or cursor");
+  const teamId = flags.get("--team-id") ?? (autoStart ? installedSetupTeamId() : undefined);
+  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) {
+    if (autoStart) throw new Error("AgentPass is not installed as a verified macOS package yet. Install the signed package, then run `agentpass start` again.");
+    throw new Error("setup requires --team-id with the pinned 10-character Apple Team ID");
+  }
   const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
   const config = loadConfig();
   const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
   const integration = integrationPlan({ client: clientName, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer });
   const preview = installIntegration(integration);
   const initialExecuteCommand = ["agentpass", "setup", "--client", clientName, "--team-id", teamId, "--project", project, "--execute"].map(shellWord).join(" ");
-  if (!args.includes("--execute")) {
+  const execute = autoStart || args.includes("--execute");
+  if (!execute) {
     console.log(JSON.stringify({ version: 1, dryRun: true, native: application, integration: preview, next: ["agentpass setup status", initialExecuteCommand] }, null, 2));
     return;
   }
@@ -389,11 +421,34 @@ async function setupNativeBridgeUnsafe() {
     record("local_config_initialized");
     record("native_bridge_selected");
     if (application.serviceStatus === "enabled") record("service_registered");
-    console.log(JSON.stringify({ version: 1, dryRun: false, configured: true, native: application, integration: installed, setup_journal: journal.status(), next }, null, 2));
+    const result = { version: 1, dryRun: false, configured: true, native: application, integration: installed, setup_journal: journal.status(), next };
+    if (autoStart && !startOptions.json) {
+      console.log("AgentPass is connected to this project.");
+      console.log(`Project: ${project}`);
+      console.log(`Coding agent: ${clientName === "cursor" ? "Cursor" : "Claude Code"}`);
+      console.log("Next: run `agentpass setup continue --execute` to finish the browser approval.");
+      console.log("Your project files and credentials are not sent to AgentPass during setup.");
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
   } catch (error) {
     saveConfig(config);
     throw error;
   }
+}
+
+async function startAgentPass() {
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--json") continue;
+    if (!["--project", "--client"].includes(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw startUsageError();
+    flags.set(argument, args[++index]);
+  }
+  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const client = flags.get("--client") ?? "auto";
+  if (!["auto", "claude-code", "cursor"].includes(client)) throw startUsageError();
+  return setupNativeBridgeUnsafe({ autoStart: true, startOptions: { project, client, json: args.includes("--json") } });
 }
 
 async function setupNativeBridge() {
@@ -1415,6 +1470,7 @@ export function normalizeNativeControlRefreshResponse(value) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
   if (command === undefined || command === "--help" || command === "-h") usage();
+  else if (command === "start") await startAgentPass();
   else if (command === "launch") await launchAgent();
   else if (command === "close") await closeAgent();
   else if (command === "install") installProduction();

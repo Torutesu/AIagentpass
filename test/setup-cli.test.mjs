@@ -32,3 +32,13 @@ test("setup continuation failures are machine-readable and do not echo diagnosti
   assert.equal(JSON.stringify(document).includes(home), false);
   assert.equal(JSON.stringify(document).includes("secret"), false);
 });
+
+test("guided start is discoverable and rejects unsupported manual flags", () => {
+  const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /start \[--project DIR\] \[--client auto\|claude-code\|cursor\]/);
+
+  const result = spawnSync(process.execPath, [cli, "start", "--team-id", "APPLETEAM1"], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage: agentpass start/);
+});

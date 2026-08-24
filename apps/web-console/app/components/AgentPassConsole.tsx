@@ -1021,10 +1021,10 @@ function installGuidance(status: LiveHandoffStatus): InstallGuidance {
     case "delivered":
       return { state: "delivered", tone: "green", label: "受け渡し済み", title: "セットアップ情報をMacへ渡しました", copy: "Mac側のセットアップ完了を待っています。招待情報をコピーしたり、もう一度発行したりする必要はありません。" };
     case "failed":
-      return { state: "failed", tone: "red", label: "接続できません", title: "Macヘルパーへ自動接続できませんでした", copy: "CLIを終了して、管理者から案内されたセットアップコマンドを新しく実行してください。期限切れの接続は再利用できません。" };
+      return { state: "failed", tone: "red", label: "接続できません", title: "Macヘルパーへ自動接続できませんでした", copy: "CLIを終了して、プロジェクトフォルダで `agentpass start` をもう一度実行してください。期限切れの接続は再利用できません。" };
     case "none":
     default:
-      return { state: "not-detected", tone: "amber", label: "未接続", title: "Macヘルパーの接続を待っています", copy: "署名済みAgentPassパッケージをMacへインストールし、管理者から案内されたセットアップコマンドを実行すると自動で接続されます。" };
+      return { state: "not-detected", tone: "amber", label: "未接続", title: "Macヘルパーの接続を待っています", copy: "署名済みAgentPassパッケージをMacへインストールし、プロジェクトフォルダで `agentpass start` を実行すると自動で接続されます。" };
   }
 }
 
@@ -1046,7 +1046,7 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
       </div>
       {guidance.state === "not-detected" ? <ol className="row-list" aria-label="Macセットアップの手順">
         <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">1</span><div><p className="row-title">署名済みAgentPassパッケージをインストール</p><p className="row-description">管理者が指定した配布元のパッケージだけを使用してください。</p></div></div></li>
-        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">セットアップコマンドを実行</p><p className="row-description">管理者から案内されたコマンドをそのまま実行します。候補ID、指紋、招待JSONを自分で入力する必要はありません。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">プロジェクトで `agentpass start` を実行</p><p className="row-description">プロジェクト、Claude Code/Cursor、署名済みインストール情報を自動判定します。候補ID、Team ID、招待JSON、MCP設定を自分で入力する必要はありません。</p></div></div></li>
         <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">3</span><div><p className="row-title">この画面で接続を確認</p><p className="row-description">接続されると、公開preflightが自動で表示されます。</p></div></div></li>
       </ol> : null}
       {guidance.state === "failed" ? <details className="advanced-enrollment">

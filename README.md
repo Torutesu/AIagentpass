@@ -68,6 +68,24 @@ Password managers are designed around human approval. Coding agents need unatten
 
 ## Quick start
 
+### Vibe-coding / agent-coding users
+
+Once the signed AgentPass package is installed, the normal setup is one command
+from the project you want your coding agent to work on:
+
+```sh
+cd your-project
+agentpass start
+```
+
+AgentPass detects the project and Claude Code/Cursor, reads the Team ID from the
+verified installation receipt, and applies only the project-scoped MCP
+integration. The browser handoff then asks you to sign in and approve the
+device once. You do not need to copy a Team ID, edit an MCP JSON file, or paste
+credentials. Use `agentpass start --client cursor` when auto-detection should be
+overridden. The lower-level `agentpass setup ...` flow remains available for
+release operators and scripted environments.
+
 ```sh
 npm install
 npm link
