@@ -327,6 +327,7 @@ BEGIN
     'agentpass_prune_human_identity_assertion_replays(integer)',
     'agentpass_advance_authority_generation(uuid,timestamptz)',
     'agentpass_request_device_refresh(uuid,uuid,uuid,bigint,text,bytea,timestamptz)',
+    'agentpass_record_device_bundle_ack(uuid,uuid,bigint,integer,bigint,text,text,text,timestamptz,bytea)',
     'agentpass_agent_signing_capability_reserve(uuid,uuid,uuid,uuid,bytea,uuid,uuid,bytea,text,text,boolean,integer,bigint)',
     'agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)',
     'agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)',
