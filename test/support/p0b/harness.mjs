@@ -559,11 +559,24 @@ export function redactP0BDiagnostic(value, secrets = []) {
 
 async function createTrustedCaBundle(directory, files, certificates = []) {
   const contents = [];
-  for (const file of files) contents.push(await fsp.readFile(file, "utf8"));
-  for (const certificate of certificates.filter(Boolean)) contents.push(certificate);
+  for (const file of files) {
+    processDiagnosticStage("trusted_ca_read");
+    contents.push(await fsp.readFile(file, "utf8"));
+  }
+  for (const certificate of certificates.filter(Boolean)) {
+    processDiagnosticStage("trusted_ca_append");
+    contents.push(certificate);
+  }
   const bundle = path.join(directory, "trusted-ca-bundle.pem");
+  processDiagnosticStage("trusted_ca_write");
   await fsp.writeFile(bundle, `${contents.join("\n")}\n`, { mode: 0o600, flag: "wx" });
   return bundle;
+}
+
+function processDiagnosticStage(stage) {
+  if (process.env.P0B_DIAGNOSTIC_ERRORS === "1" && /^[a-z][a-z0-9_]{1,31}$/u.test(stage)) {
+    process.stdout.write(`P0B_DIAGNOSTIC_PROCESS_STAGE stage=${stage}\n`);
+  }
 }
 
 async function dropDisposableDatabase(baseOptions, databaseName) {
