@@ -1078,7 +1078,9 @@ async function insertRevocationInTransaction(tx, values) {
 }
 
 async function assertActiveMember(tx, organizationId, memberId) {
-  const result = await tx.query(`SELECT member_id FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR SHARE`, [organizationId, memberId]);
+  // memberships is SELECT-only for the online role; the organization
+  // advisory lock serializes this check with reviewed membership mutations.
+  const result = await tx.query(`SELECT member_id FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active'`, [organizationId, memberId]);
   if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_MEMBER_NOT_ACTIVE", "revocation actor is not an active organization member");
 }
 
