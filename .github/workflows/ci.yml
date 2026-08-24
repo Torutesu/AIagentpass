@@ -5,6 +5,10 @@ on:
     branches: [main, codex/agent-platform]
   pull_request:
 
+concurrency:
+  group: agentpass-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   actions: read
