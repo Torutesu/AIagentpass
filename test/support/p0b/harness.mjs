@@ -428,7 +428,6 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "1",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
       P0B_LIVE_BROWSER: "1",
-      ...(env.P0B_DIAGNOSTIC_ERRORS === "1" ? { P0B_DIAGNOSTIC_ERRORS: "1" } : {}),
       P0B_CONTROL_BUNDLE_PRIVATE_KEY_PATH: files.controlBundlePrivateKey,
       P0B_CAPABILITY_PRIVATE_KEY_PATH: files.capabilityPrivateKey,
       P0B_AUDIT_ANCHOR_PRIVATE_KEY_PATH: files.auditAnchorPrivateKey,
@@ -508,12 +507,7 @@ function emitP0BStage(stage) {
   // Stage names are fixed, secret-free diagnostics. Emit them for every
   // harness invocation so the isolated live-browser supervisor can recover a
   // precise stop point even when the child environment is filtered upstream.
-  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) {
-    process.stderr.write(`P0B_STAGE_${stage}_START\n`);
-    if (process.env.P0B_DIAGNOSTIC_ERRORS === "1") {
-      process.stdout.write(`P0B_DIAGNOSTIC_PROCESS_STAGE stage=${stage.toLowerCase()}\n`);
-    }
-  }
+  if (/^[A-Z][A-Z0-9_]{1,47}$/u.test(stage)) process.stderr.write(`P0B_STAGE_${stage}_START\n`);
 }
 
 export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
@@ -559,24 +553,11 @@ export function redactP0BDiagnostic(value, secrets = []) {
 
 async function createTrustedCaBundle(directory, files, certificates = []) {
   const contents = [];
-  for (const file of files) {
-    processDiagnosticStage("trusted_ca_read");
-    contents.push(await fsp.readFile(file, "utf8"));
-  }
-  for (const certificate of certificates.filter(Boolean)) {
-    processDiagnosticStage("trusted_ca_append");
-    contents.push(certificate);
-  }
+  for (const file of files) contents.push(await fsp.readFile(file, "utf8"));
+  for (const certificate of certificates.filter(Boolean)) contents.push(certificate);
   const bundle = path.join(directory, "trusted-ca-bundle.pem");
-  processDiagnosticStage("trusted_ca_write");
   await fsp.writeFile(bundle, `${contents.join("\n")}\n`, { mode: 0o600, flag: "wx" });
   return bundle;
-}
-
-function processDiagnosticStage(stage) {
-  if (process.env.P0B_DIAGNOSTIC_ERRORS === "1" && /^[a-z][a-z0-9_]{1,31}$/u.test(stage)) {
-    process.stdout.write(`P0B_DIAGNOSTIC_PROCESS_STAGE stage=${stage}\n`);
-  }
 }
 
 async function dropDisposableDatabase(baseOptions, databaseName) {

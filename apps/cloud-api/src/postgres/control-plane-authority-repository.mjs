@@ -376,23 +376,16 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const values = normalizeAuthorityAdvanceInput(input, now);
     const nonceCodec = requireRefreshNonceCodec(refreshNonceCodec);
     return databaseOperation(() => transaction(client, async (tx) => {
-      let diagnosticStage = "organization_advisory_lock";
-      try {
       // This is the repository-wide organization lock. The migration helper
       // takes its own compatible generation lock as well; keeping this lock
       // first makes reductions and bundle snapshots share one ordering point.
       await lockOrganization(tx, values.organizationId);
-      diagnosticStage = "organization_row_lock";
       await lockOrganizationRow(tx, values.organizationId);
       let revocation;
       if (values.reduction !== undefined) {
-        diagnosticStage = "revocation_actor";
         await assertActiveMember(tx, values.organizationId, values.reduction.createdBy);
-        diagnosticStage = "revocation_target";
         await assertRevocationTarget(tx, values.reduction);
-        diagnosticStage = "revocation_insert";
         revocation = await insertRevocationInTransaction(tx, values.reduction);
-        diagnosticStage = "revocation_lifecycle";
         await onRevocation?.({ tx, revocation });
         if (revocation.replayed === true) {
           const current = await tx.query(`SELECT generation
@@ -409,12 +402,10 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
           });
         }
       }
-      diagnosticStage = "generation";
       const generationResult = await tx.query(`SELECT organization_id,generation
         FROM agentpass_advance_authority_generation($1::uuid,$2::timestamptz)`, [values.organizationId, values.issuedAt]);
       if (rowCount(generationResult) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "authority generation advance did not return a row");
       const generation = positiveInteger(generationResult.rows[0].generation, "generation");
-      diagnosticStage = "devices";
       const devices = await tx.query(`SELECT id
         FROM devices
         WHERE organization_id=$1
@@ -422,7 +413,6 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         FOR UPDATE`, [values.organizationId]);
       const enqueued = [];
       for (const row of devices.rows ?? []) {
-        diagnosticStage = "refresh_enqueue";
         const deviceId = uuid(row.id, "device_id");
         const outboxId = refreshOutboxIdForDevice(values, deviceId);
         const derived = nonceCodec.derive({
@@ -448,13 +438,6 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         }));
       }
       return Object.freeze({ organization_id: values.organizationId, generation, devices: Object.freeze(enqueued), ...(revocation === undefined ? {} : { revocation }) });
-      } catch (error) {
-        if (process.env.P0B_DIAGNOSTIC_ERRORS === "1") {
-          const sqlState = typeof error?.code === "string" && /^[0-9A-Z]{2,5}$/u.test(error.code) ? `_${error.code.toLowerCase()}` : "";
-          throw new ControlPlaneAuthorityRepositoryError(`ERR_DB_STAGE_${diagnosticStage.toUpperCase()}${sqlState}`, "control-plane authority storage is unavailable");
-        }
-        throw error;
-      }
     }));
   }
 

@@ -24,7 +24,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
 }, async (t) => {
   let fixture;
   let harness;
-  processDiagnostic("harness_start");
   try {
     harness = await startP0BHarness({
       waitTimeoutMs: 30_000,
@@ -41,7 +40,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   }
   t.after(() => harness.close());
   assert.ok(fixture, "the PostgreSQL bootstrap fixture must be available");
-  processDiagnostic("session_start");
 
   const origin = new URL(harness.consoleUrl).origin;
   const session = await requestJson(new URL("/api/auth/session", origin), {
@@ -62,7 +60,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.match(session.body.csrf_token, /^[A-Za-z0-9_-]{43}$/u);
   const cookie = sessionCookie(session.headers);
 
-  processDiagnostic("cloud_read_start");
   const directBefore = await requestJson(new URL(`/v1/organizations/${fixture.organizationId}/devices`, harness.cloudUrl), {
     method: "GET",
     caFile: harness.caCert,
@@ -77,7 +74,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.equal(beforeDevice.observed_generation, null);
   assert.notEqual(beforeDevice.refresh_state, "applied");
 
-  processDiagnostic("device_poll_start");
   const pollPath = `/v1/organizations/${fixture.organizationId}/devices/${fixture.deviceId}/refresh?after_generation=1&wait_ms=0`;
   const poll = await deviceRequest(harness.cloudUrl, {
     method: "GET",
@@ -93,7 +89,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.equal(hint.device_id, fixture.deviceId);
   assert.equal(hint.authority_generation, fixture.generation);
 
-  processDiagnostic("bundle_start");
   const bundlePath = `/v1/organizations/${fixture.organizationId}/bundles/${fixture.deviceId}`;
   const bundleResponse = await deviceRequest(harness.cloudUrl, {
     method: "GET",
@@ -118,22 +113,14 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   });
   const ackBody = Buffer.from(JSON.stringify(ack));
   const ackPath = `/v1/organizations/${fixture.organizationId}/bundles/${fixture.deviceId}/acknowledgements`;
-  processDiagnostic("ack_start");
-  let accepted;
-  try {
-    accepted = await deviceRequest(harness.cloudUrl, {
-      method: "POST",
-      path: ackPath,
-      body: ackBody,
-      deviceId: fixture.deviceId,
-      privateKey: fixture.deviceKeys.privateKey,
-      nonce: "p0b-live-ack-abcdefghijklmnopqrstuvwxyz-0001"
-    }, harness.caCert);
-  } catch {
-    processDiagnostic("ack_transport_error");
-    throw new Error("P0-B ACK transport failed");
-  }
-  processDiagnostic(`ack_response_${accepted.status}`);
+  const accepted = await deviceRequest(harness.cloudUrl, {
+    method: "POST",
+    path: ackPath,
+    body: ackBody,
+    deviceId: fixture.deviceId,
+    privateKey: fixture.deviceKeys.privateKey,
+    nonce: "p0b-live-ack-abcdefghijklmnopqrstuvwxyz-0001"
+  }, harness.caCert);
   assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
   assert.deepEqual(
     { accepted: accepted.body.accepted, duplicate: accepted.body.duplicate, refresh_state: accepted.body.refresh_state },
@@ -141,7 +128,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   );
   assert.equal(accepted.body.observed_generation, fixture.generation);
 
-  processDiagnostic("duplicate_start");
   const duplicate = await deviceRequest(harness.cloudUrl, {
     method: "POST",
     path: ackPath,
@@ -153,7 +139,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.equal(duplicate.status, 202, JSON.stringify(duplicate.body));
   assert.equal(duplicate.body.duplicate, true);
 
-  processDiagnostic("conflict_start");
   const conflictAck = signAcknowledgement({
     privateKey: fixture.deviceKeys.privateKey,
     organizationId: fixture.organizationId,
@@ -176,7 +161,6 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
   assert.equal(conflict.body.error.code, "ack_conflict");
 
-  processDiagnostic("final_read_start");
   const after = await consoleRead(harness, cookie, "devices");
   assert.equal(after.status, 200, JSON.stringify(after.body));
   const afterDevice = findDevice(after.body, fixture.deviceId);
@@ -184,14 +168,7 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   assert.equal(afterDevice.observed_generation, fixture.generation);
   assert.equal(afterDevice.refresh_state, "applied");
   assert.equal(typeof afterDevice.last_ack_at, "string");
-  processDiagnostic("complete");
 });
-
-function processDiagnostic(stage) {
-  if (/^[a-z][a-z0-9_]{1,31}$/u.test(stage)) {
-    process.stdout.write(`P0B_DIAGNOSTIC_PROCESS_STAGE stage=${stage}\n`);
-  }
-}
 
 async function seedDatabase(pool, organizationId, { refreshNonceKeyId, refreshNonceKey }) {
   const ids = {
