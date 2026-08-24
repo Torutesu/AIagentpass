@@ -119,14 +119,20 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
   const ackBody = Buffer.from(JSON.stringify(ack));
   const ackPath = `/v1/organizations/${fixture.organizationId}/bundles/${fixture.deviceId}/acknowledgements`;
   processDiagnostic("ack_start");
-  const accepted = await deviceRequest(harness.cloudUrl, {
-    method: "POST",
-    path: ackPath,
-    body: ackBody,
-    deviceId: fixture.deviceId,
-    privateKey: fixture.deviceKeys.privateKey,
-    nonce: "p0b-live-ack-abcdefghijklmnopqrstuvwxyz-0001"
-  }, harness.caCert);
+  let accepted;
+  try {
+    accepted = await deviceRequest(harness.cloudUrl, {
+      method: "POST",
+      path: ackPath,
+      body: ackBody,
+      deviceId: fixture.deviceId,
+      privateKey: fixture.deviceKeys.privateKey,
+      nonce: "p0b-live-ack-abcdefghijklmnopqrstuvwxyz-0001"
+    }, harness.caCert);
+  } catch {
+    processDiagnostic("ack_transport_error");
+    throw new Error("P0-B ACK transport failed");
+  }
   processDiagnostic(`ack_response_${accepted.status}`);
   assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
   assert.deepEqual(
