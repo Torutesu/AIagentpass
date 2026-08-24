@@ -29,6 +29,12 @@ This is an Early Alpha for macOS + Git SSH signing. Try it with a test repositor
 
 Product Hunt recommends 1270x760 gallery artwork and requires at least two images before the gallery is viewable. These source images are intentionally text-free so the captions remain readable in Product Hunt's UI.
 
+## Demo video
+
+`videos/agentpass-product-hunt/renders/agentpass-product-hunt_2026-08-24_18-06-19.mp4` is a 30-second silent Product Hunt demo. It follows one concrete scene: an AI agent asks to push, the unsafe broad-key path is rejected, and AgentPass grants one repository/branch/operation-scoped capability that expires in 10 minutes.
+
+The terminal and policy card are marketing visualizations, not screenshots of a live hosted Console. Keep that distinction explicit in the launch copy.
+
 ## Launch checklist
 
 - Use a personal Product Hunt account with a complete profile.
