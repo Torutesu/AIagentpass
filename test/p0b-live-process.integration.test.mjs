@@ -127,6 +127,7 @@ test("P0-B live processes: Console BFF read and signed Device API ACK share Post
     privateKey: fixture.deviceKeys.privateKey,
     nonce: "p0b-live-ack-abcdefghijklmnopqrstuvwxyz-0001"
   }, harness.caCert);
+  processDiagnostic(`ack_response_${accepted.status}`);
   assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
   assert.deepEqual(
     { accepted: accepted.body.accepted, duplicate: accepted.body.duplicate, refresh_state: accepted.body.refresh_state },
