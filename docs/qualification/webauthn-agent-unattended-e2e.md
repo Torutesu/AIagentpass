@@ -110,3 +110,25 @@ failure cases. The runner validates every check and binding, rejects local or
 simulated identities, rechecks adapter bytes, and writes the canonical result
 with `O_EXCL`. A deterministic fixture or the existing route-harness report
 cannot satisfy this adapter contract.
+
+## GitHub Actions repository variables
+
+The protected workflows read the following repository-level **Variables**.
+They must be populated from the deployed environment and protected runner;
+never use placeholders or values derived from a local checkout.
+
+| Variable | Source of truth |
+| --- | --- |
+| `AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID` | Stable identity of the protected external qualification runner |
+| `AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_MODULE` | Absolute path to the deployed-runner adapter module |
+| `AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_SHA256` | SHA-256 of that adapter file, measured on the protected runner |
+| `AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST` | Digest of the deployed WebAuthn/Console environment under test |
+| `AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN` | Exact HTTPS origin served by that deployment |
+| `AGENTPASS_WEBAUTHN_EXPECTED_RP_ID` | WebAuthn RP ID configured by that deployment |
+| `AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256` | SHA-256 of the immutable release artifact used by the canonical CI run |
+
+The CI run supplies source commit/tree, run IDs, attempt, and job IDs itself.
+The dedicated browser job fails closed before executing when any required
+variable is absent, and the promotion workflow additionally requires the
+signed aggregate, deployment, staging, hardware, and operator evidence
+described in the release qualification matrix.
