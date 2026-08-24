@@ -4,6 +4,11 @@ Status: active implementation plan; not a production-readiness claim
 Baseline: `codex/agent-platform` after the Platform Session authorization wave
 Date: 2026-08-15
 
+Related proposed product expansion: [AgentPass Small Software Cloud — Product
+and Implementation Specification](SMALL_SOFTWARE_CLOUD_SPEC.md). That document
+defines the future `agentpass publish` product and does not supersede the
+production gates in this roadmap.
+
 The ordered, issue-level execution backlog for this roadmap is maintained in
 [`EXECUTION_PLAN.md`](./EXECUTION_PLAN.md).
 
