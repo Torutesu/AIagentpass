@@ -1138,11 +1138,11 @@ async function lockOrganization(tx, organizationId) {
 }
 
 async function lockOrganizationRow(tx, organizationId) {
-  // The online role is intentionally SELECT-only on organizations. A shared
-  // row lock still prevents concurrent organization updates while allowing
-  // the SECURITY DEFINER authority-generation function to upgrade the lock
-  // for the mutation it owns.
-  const result = await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [organizationId]);
+  // PostgreSQL row-locking clauses require UPDATE privilege, which the online
+  // role must not receive on organizations. The advisory lock above provides
+  // the repository-wide ordering point; the SECURITY DEFINER generation
+  // function takes the authoritative row lock for authority mutations.
+  const result = await tx.query("SELECT id FROM organizations WHERE id=$1", [organizationId]);
   if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "organization was not found");
 }
 
