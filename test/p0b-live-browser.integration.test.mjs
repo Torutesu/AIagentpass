@@ -331,23 +331,23 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       return withScenarioPage(open, getPage, [role, role === "admin" ? { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" } : {}], async (page) => {
         markPhase("after_open");
       let revokeStatus = null;
+      let revokeStatusText = "none";
+      let revokeErrorCode = "none";
       const observeRevokeResponse = (response) => {
         try {
           const url = new URL(response.url());
           if (url.pathname === "/api/console" && url.searchParams.get("operation") === "revoke-device") {
             revokeStatus = response.status();
             if (revokeStatus >= 500) {
-              let statusText = "none";
               try {
                 const candidate = response.statusText();
-                if (typeof candidate === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(candidate)) statusText = candidate;
+                if (typeof candidate === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(candidate)) revokeStatusText = candidate;
               } catch {}
-              process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_META status=${revokeStatus} status_text=${statusText}\n`);
-              const headers = response.headers();
-              const headerCode = headers["x-agentpass-error-code"];
-              if (typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(headerCode)) {
-                process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_CODE code=${headerCode}\n`);
-              }
+              try {
+                const headers = response.headers();
+                const headerCode = headers["x-agentpass-error-code"];
+                if (typeof headerCode === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(headerCode)) revokeErrorCode = headerCode;
+              } catch {}
             }
           }
         } catch {}
@@ -368,6 +368,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       try { await boundedUiOperation(page, () => device.getByRole("button", { name: "停止" }).waitFor({ state: "hidden", timeout: UI_ASSERTION_TIMEOUT_MS })); }
       catch {
         process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"}\n`);
+        process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_META status=${Number.isInteger(revokeStatus) ? revokeStatus : "none"} status_text=${revokeStatusText}\n`);
+        process.stderr.write(`P0B_DIAGNOSTIC_FINAL_REVOKE_CODE code=${revokeErrorCode}\n`);
         assert.fail(role === "admin" ? "P0B_SAFE_ADMIN_FINAL_STOP_STILL_ACTIVE_FAILED" : "P0B_SAFE_OWNER_FINAL_STOP_STILL_ACTIVE_FAILED");
       }
       try { await boundedUiOperation(page, () => device.getByText("停止", { exact: true }).waitFor({ state: "visible", timeout: UI_ASSERTION_TIMEOUT_MS })); }
