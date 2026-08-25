@@ -21,8 +21,8 @@ function selectProtocolVersion(requested) {
   return SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0];
 }
 
-export function createMcpServer({ commandRunner = createCliRunner() } = {}) {
-  const callTool = createToolHandler(commandRunner);
+export function createMcpServer({ commandRunner = createCliRunner(), smallSoftwareSurface = undefined } = {}) {
+  const callTool = createToolHandler(commandRunner, { smallSoftwareSurface });
   let initialized = false;
   let negotiated = false;
 

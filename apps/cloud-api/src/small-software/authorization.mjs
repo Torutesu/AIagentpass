@@ -35,13 +35,18 @@ export function createSmallSoftwareAuthorizationService({ repository, clock, uui
   return Object.freeze({
     getRole: (input) => getRole(input),
     authorizeRoute: (input) => authorizeRoute(input),
+    authorize: (input) => authorizeRoute(input),
     grantAccess: (input) => grantAccess(input),
+    createAccessRule: (input) => grantAccess(input),
     invite: (input) => invite(input),
+    createInvitation: (input) => invite(input),
     acceptInvitation: (input) => acceptInvitation(input),
     revokeAccess: (input) => revokeAccess(input),
     revokeInvitation: (input) => revokeInvitation(input),
     createShareLink: (input) => createShareLink(input),
+    createShare: (input) => createShareLink(input),
     revokeShareLink: (input) => revokeShareLink(input),
+    revokeShare: (input) => revokeShareLink(input),
   });
 
   async function getRole(input = {}) {
@@ -49,7 +54,7 @@ export function createSmallSoftwareAuthorizationService({ repository, clock, uui
     const app = await application(request);
     if (app.lifecycle_state && !["active", "private_preview"].includes(app.lifecycle_state)) return null;
     const rules = await accessRules(request);
-    return effectiveRole(app, rules, request.member_id, request.organization_id);
+    return effectiveRole(app, rules, request.member_id, time.now());
   }
 
   async function authorizeRoute(input = {}) {
@@ -68,10 +73,11 @@ export function createSmallSoftwareAuthorizationService({ repository, clock, uui
     const requiredRole = ACTION_MINIMUM[request.action] ?? "viewer";
     if (!request.member_id) {
       if (!share?.public_access) return denied(SMALL_SOFTWARE_ERROR_CODES.AUTHENTICATION_REQUIRED, "session_required");
+      if (requiredRole !== "viewer") return denied(SMALL_SOFTWARE_ERROR_CODES.FORBIDDEN, "anonymous_read_only");
       return Object.freeze({ allowed: true, anonymous: true, role: "viewer", required_role: requiredRole, organization_id: request.organization_id, app_id: request.app_id, route: request.route, ...(share ? { share_id: share.share_id } : {}) });
     }
     const rules = await accessRules(request);
-    const role = effectiveRole(app, rules, request.member_id, request.organization_id);
+    const role = effectiveRole(app, rules, request.member_id, time.now());
     if (!role || ROLE_RANK[role] < ROLE_RANK[requiredRole]) return denied(SMALL_SOFTWARE_ERROR_CODES.FORBIDDEN, "insufficient_role");
     return Object.freeze({ allowed: true, anonymous: false, role, required_role: requiredRole, organization_id: request.organization_id, app_id: request.app_id, member_id: request.member_id, route: request.route, ...(share ? { share_id: share.share_id } : {}) });
   }
@@ -176,8 +182,9 @@ export function createSmallSoftwareAuthorizationService({ repository, clock, uui
     const shareId = ids.randomUUID();
     const created = time.now();
     const expiresAt = new Date(Date.parse(created) + seconds * 1000).toISOString();
+    if (input.public_access !== undefined && typeof input.public_access !== "boolean") fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "public_access");
     const value = await callRepo("saveShare", { share_id: shareId, organization_id: request.organization_id, app_id: request.app_id, route: request.route, state: "active", public_access: input.public_access !== false, created_by_member_id: request.actor_member_id, created_at: created, expires_at: expiresAt });
-    const result = shareProjection(value ?? { share_id: shareId, organization_id: request.organization_id, app_id: request.app_id, route: request.route, state: "active", public_access: input.public_access !== false, created_at: created, expires_at: expiresAt });
+    const result = shareProjection(value ?? { share_id: shareId, organization_id: request.organization_id, app_id: request.app_id, route: request.route, state: "active", public_access: input.public_access !== false, created_at: created, expires_at: expiresAt }, origin);
     return commit(request, digest, result, "share");
   }
 
@@ -241,6 +248,7 @@ function normalizeMutation(input, fields) {
     else if (typeof input[field] !== "string" || input[field].length === 0 || input[field].length > 256 || /[\u0000-\u001f\u007f]/u.test(input[field])) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, field);
   }
   if (input.lifetime_seconds !== undefined && (!Number.isSafeInteger(input.lifetime_seconds) || input.lifetime_seconds < 1 || input.lifetime_seconds > MAX_LIFETIME_SECONDS)) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "lifetime_seconds");
+  if (input.expires_at !== undefined && (typeof input.expires_at !== "string" || !Number.isFinite(Date.parse(input.expires_at)))) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "expires_at");
   return value;
 }
 function normalizeRouteRequest(input) {
@@ -248,7 +256,7 @@ function normalizeRouteRequest(input) {
   rejectSecrets(input);
   const value = { ...input, organization_id: uuid(input.organization_id), app_id: uuid(input.app_id) };
   if (input.member_id !== undefined) value.member_id = uuid(input.member_id);
-  if (typeof input.route !== "string" || !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,255}$/u.test(input.route)) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "route");
+  if (typeof input.route !== "string" || !/^(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,255}|[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$/u.test(input.route)) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "route");
   const action = input.action ?? "read";
   if (typeof action !== "string" || !ACTION_MINIMUM[action]) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "action");
   if (input.share_id !== undefined) value.share_id = uuid(input.share_id);
@@ -269,8 +277,10 @@ function expired(value, now = undefined) { return value !== undefined && value !
 function requestDigest(operation, request, extra) { return canonicalDigest({ operation, organization_id: request.organization_id, app_id: request.app_id, actor_member_id: request.actor_member_id, idempotency_key: request.idempotency_key, ...extra }); }
 function projection(value, request, role) { return Object.freeze({ access_rule_id: value?.id, organization_id: request.organization_id, app_id: request.app_id, member_id: request.member_id, role, state: "active" }); }
 function invitationProjection(value, request, role) { return Object.freeze({ invitation_id: value.invitation_id ?? value.id, organization_id: request.organization_id, app_id: request.app_id, member_id: request.member_id, role, state: "pending", ...(value.expires_at ? { expires_at: value.expires_at } : {}) }); }
-function shareProjection(value) { return Object.freeze({ share_id: value.share_id ?? value.id, organization_id: value.organization_id, app_id: value.app_id, route: value.route, state: value.state, public_access: value.public_access === true, created_at: value.created_at, expires_at: value.expires_at, share_url: `${value.origin ?? "https://share.agentpass.app"}/share/${value.share_id ?? value.id}` }); }
+function shareProjection(value, shareOrigin = "https://share.agentpass.app") { return Object.freeze({ share_id: value.share_id ?? value.id, organization_id: value.organization_id, app_id: value.app_id, route: value.route, state: value.state, public_access: value.public_access === true, created_at: value.created_at, expires_at: value.expires_at, share_url: `${shareOrigin}/share/${value.share_id ?? value.id}` }); }
 function denied(code, reason) { return Object.freeze({ allowed: false, code, reason }); }
 
 export const SMALL_SOFTWARE_APP_ROLES = ROLES;
 export const SMALL_SOFTWARE_ROUTE_ACTIONS = Object.freeze(Object.keys(ACTION_MINIMUM));
+export const createSmallSoftwareAccessService = createSmallSoftwareAuthorizationService;
+export const createSmallSoftwareAuthService = createSmallSoftwareAuthorizationService;
