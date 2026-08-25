@@ -34,6 +34,7 @@ type InitialStatusOutcome = "pending" | "session_required" | "success" | "other"
 type InitialStatusGuard = {
   startedAt: number;
   outcome: InitialStatusOutcome;
+  status?: PublicStatus;
   waiters: Set<(outcome: InitialStatusOutcome) => void>;
 };
 
@@ -218,11 +219,19 @@ export function HostedOnboarding() {
           setScreen(guidance.kind === "terminal" ? "terminal" : "error");
         });
       } else {
-        // A successful status token lives only in the original client
-        // closure; a remount must perform its own status read before a
-        // mutation so it never borrows authority from another instance.
+        // Reuse only the validated public state. The CSRF token remains in
+        // the original client closure and is never placed on Window/history.
+        // A remounted instance can obtain fresh mutation authority through
+        // the existing explicit retry/status path if it needs to mutate.
+        if (existingGuard.status !== undefined) {
+          queueMicrotask(() => {
+            setStatus(existingGuard.status!);
+            setDeviceHandoffReady(false);
+            setScreen(existingGuard.status!.state === "no_membership" ? "recovery" : "flow");
+          });
+        }
       }
-      if (existingGuard.outcome !== "success" && existingGuard.outcome !== "other") return;
+      return;
     }
     const guard = browserWindow === null ? undefined : {
       startedAt: Date.now(),
@@ -240,6 +249,7 @@ export function HostedOnboarding() {
           : result.error instanceof HostedBootstrapClientError && result.error.serverCode === "bootstrap_session_required"
             ? "session_required"
             : "other";
+        if (result.ok) guard.status = result.status;
         documentRoot?.setAttribute(initialStatusDomMarker, guard.outcome);
         if (guard.outcome === "session_required" || guard.outcome === "other") {
           if (browserWindow !== null) {
