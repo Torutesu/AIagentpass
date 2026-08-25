@@ -1,0 +1,16 @@
+BEGIN;
+DO $$ DECLARE t text; BEGIN FOREACH t IN ARRAY ARRAY['small_software_apps','small_software_releases','small_software_publish_plans','small_software_approvals','small_software_deployments','small_software_routes','small_software_access_rules','small_software_egress_rules','small_software_provider_operations','small_software_lifecycle_jobs'] LOOP EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',t); EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',t); EXECUTE format('CREATE POLICY %I ON public.%I FOR SELECT USING (organization_id = public.agentpass_current_organization_id())',t||'_tenant_select',t); EXECUTE format('CREATE POLICY %I ON public.%I FOR ALL TO agentpass_migrator USING (true) WITH CHECK (true)',t||'_migrator_authority',t); END LOOP; END $$;
+REVOKE ALL ON TABLE public.small_software_apps,public.small_software_releases,public.small_software_publish_plans,public.small_software_approvals,public.small_software_deployments,public.small_software_routes,public.small_software_access_rules,public.small_software_egress_rules,public.small_software_provider_operations,public.small_software_lifecycle_jobs FROM PUBLIC,agentpass_app,agentpass_signer,agentpass_backup;
+GRANT SELECT ON TABLE public.small_software_apps,public.small_software_releases,public.small_software_publish_plans,public.small_software_approvals,public.small_software_deployments,public.small_software_routes,public.small_software_access_rules,public.small_software_egress_rules TO agentpass_app;
+GRANT SELECT ON TABLE public.small_software_apps,public.small_software_releases,public.small_software_publish_plans,public.small_software_approvals,public.small_software_deployments,public.small_software_routes,public.small_software_access_rules,public.small_software_egress_rules,public.small_software_provider_operations,public.small_software_lifecycle_jobs TO agentpass_maintenance;
+ALTER TABLE public.small_software_apps OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_releases OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_publish_plans OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_approvals OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_deployments OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_routes OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_access_rules OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_egress_rules OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_provider_operations OWNER TO agentpass_migrator;
+ALTER TABLE public.small_software_lifecycle_jobs OWNER TO agentpass_migrator;
+COMMIT;
