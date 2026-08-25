@@ -1049,7 +1049,7 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
       </div>
       {guidance.state === "not-detected" ? <ol className="row-list" aria-label="Macセットアップの手順">
         <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">1</span><div><p className="row-title">署名済みAgentPassパッケージをインストール</p><p className="row-description">管理者が指定した配布元のパッケージだけを使用してください。</p></div></div></li>
-        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">プロジェクトで `agentpass start` を実行</p><p className="row-description">プロジェクト、Claude Code/Cursor、署名済みインストール情報を自動判定します。候補ID、Team ID、招待JSON、MCP設定を自分で入力する必要はありません。</p></div></div></li>
+        <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">2</span><div><p className="row-title">管理者から案内されたセットアップコマンドを実行</p><p className="row-description">プロジェクトで `agentpass start` を実行すると、Claude Code/Cursor、署名済みインストール情報を自動判定します。候補ID、指紋、招待JSONを自分で入力する必要はありません。Team IDとMCP設定も検査済み情報から引き継ぎます。</p></div></div></li>
         <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">3</span><div><p className="row-title">この画面で接続を確認</p><p className="row-description">接続されると、公開preflightが自動で表示されます。</p></div></div></li>
       </ol> : null}
       {guidance.state === "failed" ? <details className="advanced-enrollment">

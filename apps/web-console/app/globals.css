@@ -1406,7 +1406,7 @@ a:focus-visible {
 
 .tag.amber {
   background: var(--amber-soft);
-  color: var(--amber);
+  color: #754708;
 }
 
 .tag.red {

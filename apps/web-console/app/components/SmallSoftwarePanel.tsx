@@ -31,15 +31,15 @@ export function SmallSoftwarePanel() {
         <span className="tag amber">NOT PROVEN</span>
       </section>
 
-      <div className="small-software-steps" aria-label="Small Software Cloudの流れ">
+      <ol className="small-software-steps" aria-label="Small Software Cloudの流れ">
         {steps.map(([number, title, copy]) => (
-          <article className="small-software-step" key={number}>
+          <li className="small-software-step" key={number}>
             <span className="small-software-step-number">{number}</span>
             <h3>{title}</h3>
             <p>{copy}</p>
-          </article>
+          </li>
         ))}
-      </div>
+      </ol>
 
       <section className="small-software-command-panel" aria-labelledby="small-software-command-heading">
         <div className="section-heading-row"><div><span className="section-kicker">CLI WORKFLOW</span><h2 className="section-heading" id="small-software-command-heading">まずは計画を確認する</h2></div><span className="section-note">副作用なし</span></div>

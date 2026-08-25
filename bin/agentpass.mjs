@@ -38,6 +38,7 @@ import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.
 import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
 import { createAgentLifecycleLaunchDescriptor, launchAgentLifecycleWithHandoff, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
+import { smallSoftwareCommand } from "../lib/small-software-cli.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -122,6 +123,10 @@ Commands:
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
+  small-software inspect|bundle|prepare [--path DIR] [--manifest FILE]
+                    inspect a Small Software project without mutation
+  small-software publish --path DIR --plan-only
+                    emit a provider-free publish plan; live publish is gated
   session start     issue a short-lived agent session token
   revoke            immediately deny all operations (native mode invalidates protected sessions)
   restore           re-enable operations after revocation
@@ -1426,6 +1431,12 @@ async function closeAgent() {
   console.log(JSON.stringify(decoded, null, 2));
 }
 
+function smallSoftwareManage() {
+  const action = args.shift();
+  if (!["inspect", "bundle", "prepare", "publish"].includes(action)) throw new Error("Usage: agentpass small-software inspect|bundle|prepare|publish");
+  console.log(JSON.stringify(smallSoftwareCommand(action, args), null, 2));
+}
+
 function launchContractFailure(error) {
   if (!(error instanceof AgentLaunchContractError)) return false;
   // Keep the public unavailable response stable while refusing the invalid
@@ -1492,6 +1503,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") await pushCheck();
+  else if (command === "small-software") smallSoftwareManage();
   else if (command === "session" && args[0] === "start") await sessionStart();
   else if (command === "revoke") await revoke();
   else if (command === "restore") restore();
