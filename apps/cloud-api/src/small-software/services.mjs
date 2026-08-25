@@ -1,11 +1,13 @@
 import { SmallSoftwareError, SMALL_SOFTWARE_ERROR_CODES } from "./errors.mjs";
-import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency, isRegisteredHostedDependency } from "./interfaces.mjs";
+import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency } from "./interfaces.mjs";
 
 const fail = (code, cause) => { throw new SmallSoftwareError(code, cause ? { cause } : {}); };
+const hostedDependencies = new WeakSet();
+const registerHostedDependency = (value) => { hostedDependencies.add(value); return value; };
 
 export const createSmallSoftwareService = ({ profile = "hosted", repository, provider, clock, uuid } = {}) => {
   if (profile !== "hosted" && profile !== "test") fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
-  if (profile === "hosted" && ([repository, provider, clock, uuid].some(isTestOnlyDependency) || [repository, provider, clock, uuid].some((dependency) => !isRegisteredHostedDependency(dependency)))) {
+  if (profile === "hosted" && ([repository, provider, clock, uuid].some(isTestOnlyDependency) || [repository, provider, clock, uuid].some((dependency) => !hostedDependencies.has(dependency)))) {
     fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
   }
   const repo = smallSoftwareRepository(repository);
@@ -44,3 +46,5 @@ export const createSmallSoftwareService = ({ profile = "hosted", repository, pro
     }
   });
 };
+
+export const createHostedSmallSoftwareService = (dependencies = {}) => { Object.values(dependencies).forEach(registerHostedDependency); return createSmallSoftwareService({ ...dependencies, profile: "hosted" }); };
