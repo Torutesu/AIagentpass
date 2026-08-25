@@ -1,11 +1,11 @@
 import { SmallSoftwareError, SMALL_SOFTWARE_ERROR_CODES } from "./errors.mjs";
-import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency, HOSTED_ADAPTER_BRAND } from "./interfaces.mjs";
+import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency, isRegisteredHostedDependency } from "./interfaces.mjs";
 
 const fail = (code, cause) => { throw new SmallSoftwareError(code, cause ? { cause } : {}); };
 
 export const createSmallSoftwareService = ({ profile = "hosted", repository, provider, clock, uuid } = {}) => {
   if (profile !== "hosted" && profile !== "test") fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
-  if (profile === "hosted" && ([repository, provider, clock, uuid].some(isTestOnlyDependency) || [repository, provider, clock, uuid].some((dependency) => dependency?.[HOSTED_ADAPTER_BRAND] !== true))) {
+  if (profile === "hosted" && ([repository, provider, clock, uuid].some(isTestOnlyDependency) || [repository, provider, clock, uuid].some((dependency) => !isRegisteredHostedDependency(dependency)))) {
     fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
   }
   const repo = smallSoftwareRepository(repository);
