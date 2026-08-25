@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass-platform-auth-qualification",
+  "status": "passed",
+  "qualified": true,
+  "reason": null,
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "run_id": "123456789",
+  "job_id": "987654321",
+  "started_at": "2026-08-20T00:00:00.000Z",
+  "completed_at": "2026-08-20T00:05:00.000Z",
+  "deployment_digests": {
+    "primary": "1111111111111111111111111111111111111111111111111111111111111111",
+    "secondary": "9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "instances": [
+    {
+      "name": "primary",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deployment_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "scenarios": [
+        { "scenario": "static_config", "status": "passed", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222" },
+        { "scenario": "mtls_peer_binding", "status": "passed", "evidence_sha256": "3333333333333333333333333333333333333333333333333333333333333333" },
+        { "scenario": "workload_identity_binding", "status": "passed", "evidence_sha256": "4444444444444444444444444444444444444444444444444444444444444444" },
+        { "scenario": "webauthn_consumption", "status": "passed", "evidence_sha256": "5555555555555555555555555555555555555555555555555555555555555555" },
+        { "scenario": "http_contract", "status": "passed", "evidence_sha256": "6666666666666666666666666666666666666666666666666666666666666666" },
+        { "scenario": "rotation", "status": "passed", "evidence_sha256": "8bade4a81bd34db8070b2224bd396f64a41b9580bb7d9c028dfc03236bfba447", "evidence": { "schema_version": 1, "kind": "agentpass-platform-auth-qualification-scenario", "scenario": "rotation", "status": "passed", "instance": "primary", "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "deployment_digest": "1111111111111111111111111111111111111111111111111111111111111111", "run_id": "123456789", "job_id": "987654321", "started_at": "2026-08-20T00:00:00.000Z", "completed_at": "2026-08-20T00:05:00.000Z", "checks": [{ "check_id": "old_identifier_rejected", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "new_identifier_accepted", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "in_flight_operations_drained", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "rotation_state_durable", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "binding_integrity", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }] } },
+        { "scenario": "resilience", "status": "passed", "evidence_sha256": "5fd3db2c3e3c62ffdaf7b8e37fc246b400d88a641c4f8859d60588b51330dff7", "evidence": { "schema_version": 1, "kind": "agentpass-platform-auth-qualification-scenario", "scenario": "resilience", "status": "passed", "instance": "primary", "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "deployment_digest": "1111111111111111111111111111111111111111111111111111111111111111", "run_id": "123456789", "job_id": "987654321", "started_at": "2026-08-20T00:00:00.000Z", "completed_at": "2026-08-20T00:05:00.000Z", "checks": [{ "check_id": "response_loss_reconciled", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "restart_state_recovered", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "provider_outage_fail_closed", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "database_failover_reconciled", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "duplicate_operation_prevented", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }] } }
+      ]
+    },
+    {
+      "name": "secondary",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deployment_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+      "scenarios": [
+        { "scenario": "static_config", "status": "passed", "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        { "scenario": "mtls_peer_binding", "status": "passed", "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        { "scenario": "workload_identity_binding", "status": "passed", "evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+        { "scenario": "webauthn_consumption", "status": "passed", "evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" },
+        { "scenario": "http_contract", "status": "passed", "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+        { "scenario": "rotation", "status": "passed", "evidence_sha256": "5d9f19c79e0090f25dd4a23eb0a4d308612938c59375f0e911724cc1c2292a5f", "evidence": { "schema_version": 1, "kind": "agentpass-platform-auth-qualification-scenario", "scenario": "rotation", "status": "passed", "instance": "secondary", "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "deployment_digest": "9999999999999999999999999999999999999999999999999999999999999999", "run_id": "123456789", "job_id": "987654321", "started_at": "2026-08-20T00:00:00.000Z", "completed_at": "2026-08-20T00:05:00.000Z", "checks": [{ "check_id": "old_identifier_rejected", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "new_identifier_accepted", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "in_flight_operations_drained", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "rotation_state_durable", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "binding_integrity", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }] } },
+        { "scenario": "resilience", "status": "passed", "evidence_sha256": "d535692c49aeaeba3ddb037d864c216b250307bb7157f04219c2c45793f9b9d0", "evidence": { "schema_version": 1, "kind": "agentpass-platform-auth-qualification-scenario", "scenario": "resilience", "status": "passed", "instance": "secondary", "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "deployment_digest": "9999999999999999999999999999999999999999999999999999999999999999", "run_id": "123456789", "job_id": "987654321", "started_at": "2026-08-20T00:00:00.000Z", "completed_at": "2026-08-20T00:05:00.000Z", "checks": [{ "check_id": "response_loss_reconciled", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "restart_state_recovered", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "provider_outage_fail_closed", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "database_failover_reconciled", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }, { "check_id": "duplicate_operation_prevented", "status": "passed", "expected": { "type": "boolean", "value": true }, "result": { "type": "boolean", "value": true } }] } }
+      ]
+    }
+  ]
+}

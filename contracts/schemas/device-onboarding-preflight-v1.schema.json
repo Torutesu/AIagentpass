@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-onboarding-preflight-v1.schema.json",
+  "title": "Browser-led device onboarding preflight v1",
+  "description": "The four-field public preflight imported from the locally verified installation. It contains no credential, URL, authority, policy, capability, or caller-selected identity.",
+  "$comment": "Public-only preflight metadata; never persist a credential or authority-bearing value.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 4,
+  "required": ["version", "platform", "candidate_id", "device_key_fingerprint"],
+  "properties": {
+    "version": { "const": 1 },
+    "platform": { "const": "macos" },
+    "candidate_id": { "$ref": "#/$defs/candidateId" },
+    "device_key_fingerprint": { "$ref": "#/$defs/deviceKeyFingerprint" }
+  },
+  "$defs": {
+    "candidateId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "deviceKeyFingerprint": { "type": "string", "minLength": 50, "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" }
+  }
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from "../lib/driver-runtime.mjs";
+
+await runGateDriver({
+  gate: "revoke-emergency-stop",
+  tests: ["revoke-denied", "emergency-stop-denied"],
+  scenario: "revoke-emergency-stop"
+});

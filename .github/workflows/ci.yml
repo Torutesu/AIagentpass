@@ -2,15 +2,520 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/agent-platform]
   pull_request:
+
+concurrency:
+  group: agentpass-ci-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  test:
-    runs-on: macos-latest
+  postgres-authority-16:
+    name: PostgreSQL ${{ matrix.postgres-version }} authority qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["16"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run PostgreSQL authority qualification action
+        uses: ./.github/actions/postgres-authority-qualification
+        with:
+          postgres-version: ${{ matrix.postgres-version }}
+
+  postgres-authority-17:
+    name: PostgreSQL ${{ matrix.postgres-version }} authority qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["17"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run PostgreSQL authority qualification action
+        uses: ./.github/actions/postgres-authority-qualification
+        with:
+          postgres-version: ${{ matrix.postgres-version }}
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: agentpass-integration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      postgres16:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: agentpass-w15-integration
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Migrate shared PostgreSQL integration database once
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { Pool } from "pg";
+          import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          const client = await pool.connect();
+          try {
+            const roles = (await readFile("./scripts/postgres/roles.sql", "utf8"))
+              .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+              .trim();
+            await client.query(roles);
+            await createMigrationRunner({ client, applicationVersion: "postgres-integration-preflight" }).run();
+            await client.query(roles);
+          } catch (error) {
+            const cause = error?.cause;
+            console.error(JSON.stringify({
+              code: error?.code ?? "ERR_UNKNOWN",
+              database_code: cause?.code ?? null,
+              constraint: cause?.constraint ?? null,
+              routine: cause?.routine ?? null
+            }));
+            process.exitCode = 1;
+          } finally {
+            client.release();
+            await pool.end();
+          }
+          NODE
+      - name: Run real PostgreSQL authority and signed-session E2E
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/organization-integration.test.mjs
+          apps/cloud-api/test/postgres/h1-3-membership-authority.integration.test.mjs
+          apps/cloud-api/test/postgres/h2-1-passkey-clone-quarantine.integration.test.mjs
+          apps/cloud-api/test/postgres/capability-authority-repository.test.mjs
+          apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs
+          apps/cloud-api/test/postgres/signed-console-replay-integration.test.mjs
+          apps/cloud-api/test/postgres/signed-session-bootstrap-integration.test.mjs
+          apps/cloud-api/test/postgres/audit-pagination-integration.test.mjs
+          apps/cloud-api/test/postgres/audit-export-snapshot-reader.integration.test.mjs
+          apps/cloud-api/test/postgres/schema-identity.integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-issuance-integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-human-http-qualification.integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-signing-capability-reservation.integration.test.mjs
+          apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
+      - name: Run release PostgreSQL qualification suites with no skipped live tests
+        shell: bash
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_QUALIFICATION_CANDIDATE_ID: ci-${{ github.sha }}
+          AGENTPASS_QUALIFICATION_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_QUALIFICATION_EVIDENCE: ${{ github.workspace }}/qualification-evidence/native-device-and-grant-batch.json
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$(dirname "$AGENTPASS_QUALIFICATION_EVIDENCE")"
+          tap="$RUNNER_TEMP/agentpass-qualification.tap"
+          export AGENTPASS_QUALIFICATION_TAP="$tap"
+          status=0
+          node --test --test-concurrency=1 --test-reporter=tap \
+            apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs \
+            apps/cloud-api/test/postgres/qualification-grant-batch-repository.test.mjs \
+            >"$tap" 2>&1 || status=$?
+          cat "$tap"
+          (( status == 0 )) || exit "$status"
+          if grep -Eq '(^|[[:space:]])# (SKIP|TODO)([[:space:]]|$)|^Bail out!' "$tap"; then
+            echo "release PostgreSQL qualification must not contain skipped live tests" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFile, writeFile } from "node:fs/promises";
+          import { Pool } from "pg";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
+
+          const tap = await readFile(process.env.AGENTPASS_QUALIFICATION_TAP);
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          try {
+            const result = await pool.query(`
+              SELECT current_setting('server_version') AS server_version,
+                     (SELECT max(version)::int FROM schema_migrations) AS schema_version,
+                     to_regclass('public.qualification_grant_batches') AS batches,
+                     to_regclass('public.qualification_grant_batch_steps') AS steps
+          `);
+          const row = result.rows[0];
+          const relationName = (value) => typeof value === "string" ? value.replace(/^public\./u, "") : value;
+          if (Number(row.schema_version) !== POSTGRES_SCHEMA_HEAD.version
+            || relationName(row.batches) !== "qualification_grant_batches"
+            || relationName(row.steps) !== "qualification_grant_batch_steps") {
+            console.error(JSON.stringify({ schema_version: row.schema_version, batches: row.batches, steps: row.steps, expected_head: POSTGRES_SCHEMA_HEAD.version }));
+            throw new Error("qualification database schema binding failed");
+          }
+            const evidence = {
+              schema_version: 1,
+              candidate_id: process.env.AGENTPASS_QUALIFICATION_CANDIDATE_ID,
+              source_commit: process.env.AGENTPASS_QUALIFICATION_SOURCE_COMMIT,
+              database: { server_version: row.server_version, schema_head: row.schema_version },
+              suites: [
+                "apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs",
+                "apps/cloud-api/test/postgres/qualification-grant-batch-repository.test.mjs"
+              ],
+              skipped_tests: 0,
+              tap_sha256: createHash("sha256").update(tap).digest("hex"),
+              status: "passed"
+            };
+            await writeFile(process.env.AGENTPASS_QUALIFICATION_EVIDENCE, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+          } finally {
+            await pool.end();
+          }
+          NODE
+          test "$(stat -c '%a' "$AGENTPASS_QUALIFICATION_EVIDENCE")" = 600
+      - name: Retain release PostgreSQL qualification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-postgres-qualification-${{ github.sha }}
+          path: qualification-evidence/native-device-and-grant-batch.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Prepare Hosted account qualification evidence directory
+        run: |
+          install -d -m 0700 "$GITHUB_WORKSPACE/hosted-account-evidence"
+      - name: Qualify Hosted account authority, restart, and process-loss convergence on PostgreSQL 17
+        shell: bash
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_HOSTED_ACCOUNT_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_HOSTED_ACCOUNT_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_HOSTED_ACCOUNT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          set -euo pipefail
+          umask 077
+          tap="$GITHUB_WORKSPACE/hosted-account-evidence/hosted-account.tap"
+          evidence="$GITHUB_WORKSPACE/hosted-account-evidence/hosted-account.json"
+          status=0
+          node --test --test-concurrency=1 --test-reporter=tap \
+            apps/cloud-api/test/postgres/human-session-ceiling.integration.test.mjs \
+            apps/cloud-api/test/postgres/human-session-epochs-integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-identity-atomic-completion.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-first-organization-atomic.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-bootstrap-status-csrf.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-webauthn-process-loss.integration.test.mjs \
+            >"$tap" 2>&1 || status=$?
+          cat "$tap"
+          (( status == 0 )) || exit "$status"
+          AGENTPASS_HOSTED_ACCOUNT_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_HOSTED_ACCOUNT_POSTGRES_VERSION
+          node scripts/postgres/hosted-account-qualification-evidence.mjs write "$evidence" "$tap"
+          node scripts/postgres/hosted-account-qualification-evidence.mjs verify "$evidence" "$GITHUB_SHA"
+          rm "$tap"
+      - name: Retain verified source-bound Hosted account evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosted-account-postgres17-${{ github.sha }}
+          path: hosted-account-evidence/hosted-account.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Prepare Platform authorization qualification evidence and isolated role database
+        env:
+          PGPASSWORD: agentpass-integration
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/platform-authorization-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/platform-authorization-evidence"
+          createdb --host=127.0.0.1 --port=5432 --username=postgres agentpass_platform_roles
+      - name: Qualify Platform authorization concurrency and failure convergence on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_TEST_POSTGRES_ADMIN_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs
+          apps/cloud-api/test/postgres/platform-authorization-failure-qualification.integration.test.mjs
+      - name: Qualify Platform authority least privilege on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/agentpass_platform_roles
+        run: node --test apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs
+      - name: Create and verify source-bound Platform authorization evidence
+        env:
+          AGENTPASS_PLATFORM_AUTH_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_PLATFORM_AUTH_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_PLATFORM_AUTH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          AGENTPASS_PLATFORM_AUTH_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_PLATFORM_AUTH_POSTGRES_VERSION
+          node scripts/postgres/platform-authorization-qualification-evidence.mjs write "$GITHUB_WORKSPACE/platform-authorization-evidence/platform-authorization.json"
+          node scripts/postgres/platform-authorization-qualification-evidence.mjs verify "$GITHUB_WORKSPACE/platform-authorization-evidence/platform-authorization.json" "$GITHUB_SHA"
+      - name: Retain verified Platform authorization evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: platform-authorization-postgres17-${{ github.sha }}
+          path: platform-authorization-evidence/platform-authorization.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Run real PostgreSQL refresh race, ACK, and nonce-rotation tests
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: npm run test:postgres:g4
+      - name: Prepare C1.5 provider-operation evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/c1-provider-operation-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/c1-provider-operation-evidence"
+      - name: Qualify C1.4 provider-operation maintenance and races on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/provider-operation-query-indexes.integration.test.mjs
+          apps/cloud-api/test/postgres/provider-operation-repository.integration.test.mjs
+      - name: Create and independently verify source-bound C1.5 evidence
+        env:
+          AGENTPASS_C1_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_C1_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_C1_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          AGENTPASS_C1_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_C1_POSTGRES_VERSION
+          node scripts/postgres/provider-operation-qualification-evidence.mjs write "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json"
+          node scripts/postgres/provider-operation-qualification-evidence.mjs verify "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json" "$GITHUB_SHA"
+      - name: Secret-scan C1.5 retained evidence
+        run: node scripts/release/ci-preflight.mjs secret-scan "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json" >/dev/null
+      - name: Retain verified source-bound C1.5 provider-operation evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c1-provider-operation-${{ github.sha }}
+          path: c1-provider-operation-evidence/provider-operation.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Prepare isolated PostgreSQL 16 least-privilege database
+        env:
+          PGPASSWORD: agentpass-w15-integration
+        run: createdb --host=127.0.0.1 --port=5433 --username=postgres agentpass_roles
+      - name: Qualify PostgreSQL 16 least-privilege roles and migration boundary
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/agentpass_roles
+        run: node --test apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs
+      - name: Prepare isolated PostgreSQL 16 owner-recovery upgrade database
+        env:
+          PGPASSWORD: agentpass-w15-integration
+        run: createdb --host=127.0.0.1 --port=5433 --username=postgres agentpass_w15_upgrade
+      - name: Bootstrap PostgreSQL 16 migration roles for W1.5
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5433"
+          PGUSER: postgres
+          PGPASSWORD: agentpass-w15-integration
+          PGDATABASE: postgres
+        run: psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file scripts/postgres/roles.sql
+      - name: Migrate and reconcile PostgreSQL 16 W1.5 database
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { Pool } from "pg";
+          import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          const client = await pool.connect();
+          try {
+            await createMigrationRunner({ client, applicationVersion: "postgres-w15-preflight" }).run();
+            const roles = (await readFile("./scripts/postgres/roles.sql", "utf8"))
+              .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+              .trim();
+            await client.query(roles);
+          } finally {
+            client.release();
+            await pool.end();
+          }
+          NODE
+      - name: Prepare W1.5 evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/w15-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/w15-evidence"
+      - name: Qualify W1.5 delivery convergence and races on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+          AGENTPASS_W15_EVIDENCE_OUTPUT: ${{ github.workspace }}/w15-evidence/owner-recovery-race-matrix.json
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/h1-3-membership-authority.integration.test.mjs
+          apps/cloud-api/test/postgres/h2-1-passkey-clone-quarantine.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-provider-acceptance.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-provider-confirmation.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-outbox-race-matrix.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-process-loss-qualification.integration.test.mjs
+      - name: Qualify composed HTTPS provider and retention-confirmation races on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+        run: npm run test:postgres:w15:composed
+      - name: Qualify schema 34 to 35 delivery-binding upgrade on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/agentpass_w15_upgrade
+        run: node --test apps/cloud-api/test/postgres/owner-recovery-delivery-binding-upgrade.integration.test.mjs
+      - name: Independently verify W1.5 evidence before upload
+        run: node scripts/owner-recovery/verify-w15-evidence.mjs "$GITHUB_WORKSPACE/w15-evidence/owner-recovery-race-matrix.json"
+      - name: Secret-scan W1.5 retained evidence
+        run: node scripts/release/ci-preflight.mjs secret-scan "$GITHUB_WORKSPACE/w15-evidence/owner-recovery-race-matrix.json" >/dev/null
+      - name: Retain verified secret-free W1.5 evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w15-owner-recovery-${{ github.sha }}
+          path: w15-evidence/owner-recovery-race-matrix.json
+          if-no-files-found: error
+          retention-days: 30
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web-console/package-lock.json
+      - run: npm ci --prefix apps/web-console
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web-console
+      - name: Run WebAuthn, role, device-state, wake, and revoke browser E2E (real browser required)
+        env:
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "83"
+          AGENTPASS_BROWSER_E2E_RESULT_PATH: ${{ github.workspace }}/apps/web-console/e2e/test-results/browser-e2e-result.json
+        run: npm run e2e
+        working-directory: apps/web-console
+      - name: Verify and bind browser E2E evidence before upload
+        env:
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "83"
+        run: |
+          set -euo pipefail
+          source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
+          bound_path="$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.bound.json"
+          rm -f "$bound_path"
+          node scripts/release/ci-preflight.mjs browser-e2e \
+            "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.json" \
+            "$bound_path" "$GITHUB_SHA" "$source_tree" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" \
+            "$AGENTPASS_EXPECTED_BROWSER_E2E_TESTS"
+          mv "$bound_path" "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.json"
+      - name: Run dedicated WebAuthn unattended qualification (external bindings required)
+        # Pull requests and the OSS Early Alpha branch prove the real-browser
+        # suite above. Production WebAuthn qualification remains a separate
+        # protected gate on main and in external-qualification-runners.yml.
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_MODE: external
+          AGENTPASS_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_QUALIFICATION_ARTIFACT_SHA256: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256 }}
+          AGENTPASS_QUALIFICATION_EVIDENCE_PATH: ${{ github.workspace }}/apps/web-console/e2e/test-results/webauthn-agent-unattended-qualification.json
+          AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256 }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST }}
+          AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN: ${{ vars.AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN }}
+          AGENTPASS_WEBAUTHN_EXPECTED_RP_ID: ${{ vars.AGENTPASS_WEBAUTHN_EXPECTED_RP_ID }}
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID:?protected WebAuthn qualification runner binding is required}"
+          : "${AGENTPASS_QUALIFICATION_RUNNER_ID:?protected WebAuthn qualification runner binding is required}"
+          : "${AGENTPASS_QUALIFICATION_ARTIFACT_SHA256:?protected WebAuthn qualification artifact binding is required}"
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST:?protected WebAuthn deployment binding is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN:?protected WebAuthn origin binding is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_RP_ID:?protected WebAuthn RP ID binding is required}"
+          export AGENTPASS_SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+          export AGENTPASS_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_QUALIFICATION_JOB_ID="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "browser-e2e") | .id' | head -n 1)"
+          [[ "$AGENTPASS_QUALIFICATION_JOB_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "browser-e2e job binding is invalid" >&2; exit 1; }
+          rm -f "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH"
+          npx playwright test e2e/webauthn-agent-unattended-qualification.spec.ts --reporter=json > "$RUNNER_TEMP/webauthn-qualification-playwright.json"
+          node --input-type=module - "$RUNNER_TEMP/webauthn-qualification-playwright.json" "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH" <<'NODE'
+          import fs from 'node:fs';
+          const [reportPath, evidencePath] = process.argv.slice(2);
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          const tests = [];
+          const walk = (suite) => { for (const spec of suite?.specs ?? []) for (const test of spec.tests ?? []) for (const result of test.results ?? []) tests.push(result.status); for (const child of suite?.suites ?? []) walk(child); };
+          for (const suite of report.suites ?? []) walk(suite);
+          if (tests.length !== 1 || tests[0] !== 'passed') throw new Error('dedicated WebAuthn qualification did not execute exactly one passing test');
+          if (!fs.existsSync(evidencePath)) throw new Error('webauthn-agent-unattended-qualification.evidence.json is missing');
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+          const execution = evidence.execution;
+          if (evidence.status !== 'passed' || evidence.qualified !== true || execution?.kind !== 'external_runner' || execution?.real_execution !== true || execution.run_id !== process.env.AGENTPASS_QUALIFICATION_RUN_ID || execution.job_id !== process.env.AGENTPASS_QUALIFICATION_JOB_ID || execution.run_attempt !== process.env.AGENTPASS_QUALIFICATION_RUN_ATTEMPT || execution.source_commit !== process.env.GITHUB_SHA || execution.source_tree !== process.env.AGENTPASS_SOURCE_TREE || execution.artifact_sha256 !== process.env.AGENTPASS_QUALIFICATION_ARTIFACT_SHA256) throw new Error('WebAuthn qualification evidence is not bound to the external run');
+          NODE
+          node ../../scripts/release/archive-secret-scan.mjs "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+        working-directory: apps/web-console
+      - name: Retain typed WebAuthn qualification evidence
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-webauthn-qualification-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/web-console/e2e/test-results/webauthn-agent-unattended-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reject sensitive browser artifacts
+        if: always()
+        env:
+          AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
+        run: node --test test/p0b-artifact-security.test.mjs
+      - name: Retain typed browser E2E result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-e2e-result-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/web-console/e2e/test-results/browser-e2e-result.json
+          if-no-files-found: error
+          retention-days: 30
+  p0b-live-process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -21,12 +526,73 @@ jobs:
             package-lock.json
             apps/web-console/package-lock.json
       - run: npm ci
-      - run: npm test
       - run: npm ci --prefix apps/web-console
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web-console
+      - name: Prepare P0-B evidence and artifact directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
+          chmod 0700 "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
+      - name: Run live trusted-TLS PostgreSQL, Cloud, Console, and signed-ACK qualification
+        env:
+          P0B_QUALIFICATION_OUTPUT: ${{ github.workspace }}/apps/web-console/e2e/test-results/p0b-qualification.json
+        run: npm run test:p0b:live
+      - name: Verify source-bound P0-B qualification report
+        run: node scripts/p0b/qualification/verify.mjs "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/p0b-qualification.json"
+      - name: Reject sensitive P0-B evidence and browser artifacts
+        if: always()
+        env:
+          AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
+        run: node --test test/p0b-artifact-security.test.mjs
+      - name: Retain verified secret-free P0-B qualification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p0b-qualification-${{ github.sha }}
+          path: apps/web-console/e2e/test-results/p0b-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/web-console/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix apps/web-console
+      - run: npm run contracts:validate
+      - run: npm run contracts:validate:platform
+      - run: npm run contracts:validate:hosted-identity-bootstrap
+      - run: npm run test:w16
+      - run: npm test
+      - name: Run release boundary, dry-run, and signed-artifact verifier tests
+        run: node --test scripts/release/*.test.mjs
       - run: npm test --prefix apps/web-console
       - run: npm run lint --prefix apps/web-console
       - run: npm audit --prefix apps/web-console --audit-level=high
-      - run: npm run test:native
-      - run: npm run test:native-app
+      - name: Run bounded native unit tests
+        timeout-minutes: 30
+        env:
+          NATIVE_TEST_TIMEOUT_MS: 1500000
+        run: npm run test:native
+      - name: Run bounded native app bundle tests
+        timeout-minutes: 10
+        run: npm run test:native-app
+      - name: Run bounded installer preservation tests
+        timeout-minutes: 5
+        run: npm run test:native-installer-preservation
+      - name: Run bounded native durability model
+        timeout-minutes: 10
+        run: npm run test:native-durability-model
       - run: npm run release:validate
+      - run: npm run release:workflow-validate
+      - run: node --test scripts/release/sign-deployment-trust.test.mjs scripts/release/validate-promotion-workflow.test.mjs
       - run: npm run lint

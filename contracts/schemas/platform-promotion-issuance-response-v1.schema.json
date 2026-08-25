@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-promotion-issuance-response-v1.schema.json",
+  "title": "AgentPass platform promotion issuance response v1",
+  "description": "Strict public response. Claim tokens, private approval evidence, platform principal identities, provider responses, and diagnostics are never returned.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "promotion"],
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["promotion_id", "deployment_id", "environment", "candidate_id", "promotion_evidence", "replayed"],
+      "properties": {
+        "promotion_id": { "type": "string", "format": "uuid" },
+        "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+        "environment": { "type": "string", "enum": ["staging", "production"] },
+        "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" },
+        "promotion_evidence": { "$ref": "promotion-evidence-v3.schema.json" },
+        "replayed": { "type": "boolean" }
+      }
+    }
+  }
+}

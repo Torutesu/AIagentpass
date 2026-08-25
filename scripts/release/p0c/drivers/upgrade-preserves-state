@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from "../lib/driver-runtime.mjs";
+
+await runGateDriver({
+  gate: "upgrade-preserves-state",
+  tests: ["upgrade-preserves-state"],
+  scenario: "upgrade-preserves-state"
+});

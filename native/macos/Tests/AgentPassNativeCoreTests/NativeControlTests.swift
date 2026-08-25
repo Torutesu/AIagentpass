@@ -137,6 +137,36 @@ private struct ControlFixture {
     #expect(verifiedCapability.sequence == 9)
 }
 
+@Test func nativeCapabilityRequiresEveryObservedRemoteBeforeAtomicConsume() throws {
+    let pem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAeKxHAljpDZC+IgnnVZlnDl+YYgZRWY9JjUMuWDCBrJE=\n-----END PUBLIC KEY-----\n"
+    let publicKey = try NativeControlBundleV2Trust(publicKeyPEM: pem).publicKey
+    let capability = Data(#"{"version":1,"capability_id":"44444444-4444-4444-8444-444444444444","nonce":"Naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","issuer":"agentpass-cloud","key_id":"control-v2","audience":{"agent_id":"33333333-3333-4333-8333-333333333333","device_id":"22222222-2222-4222-8222-222222222222"},"scope":{"operations":["git.commit.sign"],"repositories":["/work/project"],"branches":{"allow":["feature/*"],"deny":["main"]},"remotes":{"allow":["git@github.com:org/repo.git"]}},"not_before":"2026-08-12T00:00:00.000Z","expires_at":"2026-08-12T00:00:30.000Z","sequence":9,"signature":"q+v8SCoR0W/t3zSBy88adYEh6Kf2DbXHgA2iF43xG8JashVFeSbMm7hy8GsF9EJaMk/LNNzmkZQ0M3dWS/L+BQ=="}"#.utf8)
+    let verifier = try NativeCapabilityVerifier(
+        trust: NativeCapabilityTrust(publicKey: publicKey, issuer: "agentpass-cloud", keyID: "control-v2"))
+    let options = NativeCapabilityVerificationOptions(
+        nowMilliseconds: 1_786_492_801_000,
+        audience: NativeCapabilityAudience(
+            agentID: "33333333-3333-4333-8333-333333333333",
+            deviceID: "22222222-2222-4222-8222-222222222222"))
+
+    #expect(throws: NativeControlBundleV2Error.self) {
+        _ = try verifier.verifyAndConsume(
+            capability, options: options, operation: "git.commit.sign",
+            repository: "/work/project", branch: "feature/native",
+            remotes: ["git@github.com:org/repo.git", "git@evil.example:stolen/repo.git"])
+    }
+    _ = try verifier.verifyAndConsume(
+        capability, options: options, operation: "git.commit.sign",
+        repository: "/work/project", branch: "feature/native",
+        remotes: ["git@github.com:org/repo.git"])
+    #expect(throws: NativeControlBundleV2Error.self) {
+        _ = try verifier.verifyAndConsume(
+            capability, options: options, operation: "git.commit.sign",
+            repository: "/work/project", branch: "feature/native",
+            remotes: ["git@github.com:org/repo.git"])
+    }
+}
+
 @Test func nativeControlV2RejectsDuplicateFieldsAndPersistsCapabilityReplayAcrossRestart() throws {
     let duplicate = Data(#"{"format_epoch":2,"format_epoch":2}"#.utf8)
     #expect(throws: NativeControlBundleV2Error.self) { try NativeControlBundleV2Codec.parse(duplicate, nowMilliseconds: 1_786_492_800_000) }
@@ -177,4 +207,64 @@ private struct ControlFixture {
     let completed = try NativeControlBundleV2Manager(trust: trust, statePath: state, nowMilliseconds: 1_786_492_801_000)
     #expect(completed.status(nowMilliseconds: 1_786_492_801_000).operational)
     #expect(completed.status(nowMilliseconds: 1_786_492_801_000).sequence == 7)
+}
+
+@Test func nativeControlV2DeniesImmediatelyAtBundleExpiryEvenWithinOfflineTTL() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let organizationID = "11111111-1111-4111-8111-111111111111"
+    let deviceID = "22222222-2222-4222-8222-222222222222"
+    let agentID = "33333333-3333-4333-8333-333333333333"
+    let signingKey = Curve25519.Signing.PrivateKey()
+    let trust = NativeControlBundleV2Trust(
+        publicKey: signingKey.publicKey,
+        issuer: "agentpass-cloud",
+        keyID: "control-v2",
+        audience: .init(organizationID: organizationID, deviceID: deviceID)
+    )
+    let unsigned: [String: Any] = [
+        "format_epoch": 2,
+        "issuer": "agentpass-cloud",
+        "organization_id": organizationID,
+        "device_id": deviceID,
+        "audience": ["organization_id": organizationID, "device_id": deviceID],
+        "issued_at": "2026-08-13T00:00:00.000Z",
+        "expires_at": "2026-08-13T00:01:00.000Z",
+        "sequence": 1,
+        "policy_scope": [
+            "operations": ["git.commit.sign"],
+            "repositories": ["/work/project"],
+            "branches": ["allow": ["feature/*"]],
+            "remotes": ["allow": ["git@github.com:org/repo.git"]]
+        ],
+        "global_revoked": false,
+        "revoked_devices": [],
+        "revoked_agents": [],
+        "revoked_capabilities": [],
+        "offline_ttl_ms": 600_000,
+        "key_id": "control-v2"
+    ]
+    let bundle = try NativeControlBundleV2Codec.issue(
+        unsignedJSON: JSONSerialization.data(withJSONObject: unsigned, options: [.sortedKeys, .withoutEscapingSlashes]),
+        signingKey: signingKey,
+        nowMilliseconds: 1_786_579_200_000
+    )
+    let manager = try NativeControlBundleV2Manager(trust: trust, statePath: root.appendingPathComponent("control-v2.json").path)
+    _ = try manager.apply(bundleData: bundle, nowMilliseconds: 1_786_579_259_999)
+    try manager.validateControl(agentID: agentID, nowMilliseconds: 1_786_579_259_999)
+    #expect(throws: AgentPassNativeError.self) {
+        try manager.validateControl(agentID: agentID, nowMilliseconds: 1_786_579_260_000)
+    }
+
+    let failingState = root.appendingPathComponent("unwritable-control-state")
+    let failingManager = try NativeControlBundleV2Manager(trust: trust, statePath: failingState.path)
+    try FileManager.default.createDirectory(at: failingState, withIntermediateDirectories: false)
+    #expect(throws: (any Error).self) {
+        try failingManager.apply(bundleData: bundle, nowMilliseconds: 1_786_579_259_999)
+    }
+    #expect(failingManager.status(nowMilliseconds: 1_786_579_259_999).operational == false)
+    #expect(throws: AgentPassNativeError.self) {
+        try failingManager.validateControl(agentID: agentID, nowMilliseconds: 1_786_579_259_999)
+    }
 }

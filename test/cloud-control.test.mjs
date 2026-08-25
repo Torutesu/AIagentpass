@@ -76,7 +76,7 @@ function response(value, init = {}) {
 test("signs the exact GET path and empty body, so replay, path, and body substitution fail", async () => {
   let captured;
   const current = bundle();
-  const c = client({ fetchImpl: async (url, init) => { captured = { url, init }; return response({ bundle: current, request_id: crypto.randomUUID() }); } });
+  const c = client({ fetchImpl: async (url, init) => { captured = { url, init }; return response({ bundle: current, desired_generation: 1, request_id: crypto.randomUUID() }); } });
   assert.equal((await c.fetchBundle()).sequence, 1);
   assert.equal(captured.init.method, "GET");
   assert.equal(captured.init.redirect, "error");

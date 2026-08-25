@@ -10,6 +10,32 @@ if (!output || process.argv.slice(2).length !== 1) throw new Error('Usage: gener
 const root = resolve(process.env.AGENTPASS_REPOSITORY_ROOT || process.cwd());
 const gitText = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim();
 const gitBytes = (args) => execFileSync('git', args, { cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+const gitBlobBatch = (objectIds) => {
+  if (!Array.isArray(objectIds) || objectIds.length === 0) return new Map();
+  const output = execFileSync('git', ['cat-file', '--batch'], {
+    cwd: root,
+    input: Buffer.from(`${objectIds.join('\n')}\n`),
+    encoding: 'buffer',
+    maxBuffer: 256 * 1024 * 1024
+  });
+  const blobs = new Map();
+  let offset = 0;
+  for (const objectId of objectIds) {
+    const headerEnd = output.indexOf(0x0a, offset);
+    if (headerEnd < 0) throw new Error('Git blob batch response is truncated');
+    const header = output.subarray(offset, headerEnd).toString('utf8').split(' ');
+    if (header.length !== 3 || header[0] !== objectId || header[1] !== 'blob' || !/^\d+$/.test(header[2])) throw new Error('Git blob batch response is invalid');
+    const size = Number(header[2]);
+    if (!Number.isSafeInteger(size) || size < 0 || offset + 1 + size + 1 > output.length) throw new Error('Git blob batch size is invalid');
+    const dataStart = headerEnd + 1;
+    const dataEnd = dataStart + size;
+    if (output[dataEnd] !== 0x0a) throw new Error('Git blob batch record is unterminated');
+    blobs.set(objectId, output.subarray(dataStart, dataEnd));
+    offset = dataEnd + 1;
+  }
+  if (offset !== output.length) throw new Error('Git blob batch response has trailing bytes');
+  return blobs;
+};
 const commandText = (command, args) => execFileSync(command, args, { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const spdxID = (prefix, identity) => `SPDXRef-${prefix}-${sha256(identity).slice(0, 20)}`;
@@ -26,7 +52,16 @@ const pkg = JSON.parse(pkgBytes.toString('utf8'));
 const lock = JSON.parse(lockBytes.toString('utf8'));
 if (typeof pkg.name !== 'string' || typeof pkg.version !== 'string' || typeof lock !== 'object' || lock === null) throw new Error('invalid committed package metadata');
 
-const tracked = gitBytes(['ls-tree', '-r', '-z', '--name-only', commit]).toString('utf8').split('\0').filter(Boolean);
+const treeEntries = gitBytes(['ls-tree', '-r', '-z', '--format=%(objectname)%x00%(path)%x00', commit]).toString('utf8').split('\0').filter(Boolean);
+if (treeEntries.length < 2 || treeEntries.length % 2 !== 0) throw new Error('committed Git tree inventory is malformed');
+const trackedObjects = new Map();
+for (let index = 0; index < treeEntries.length; index += 2) {
+  const objectId = treeEntries[index];
+  const filePath = treeEntries[index + 1];
+  if (!/^[0-9a-f]{40}$/.test(objectId) || !filePath || trackedObjects.has(filePath)) throw new Error('committed Git tree entry is invalid');
+  trackedObjects.set(filePath, objectId);
+}
+const tracked = [...trackedObjects.keys()];
 const swiftInputs = tracked.filter((path) =>
   path === 'native/macos/Package.swift' ||
   path === 'native/macos/Package.resolved' ||
@@ -35,8 +70,11 @@ const swiftInputs = tracked.filter((path) =>
 if (!swiftInputs.includes('native/macos/Package.swift') || !swiftInputs.some((path) => path.endsWith('.swift'))) throw new Error('committed Swift build inputs are missing');
 
 const sourcePaths = ['package.json', 'package-lock.json', ...swiftInputs].sort();
+const sourceBlobs = gitBlobBatch(sourcePaths.map((path) => trackedObjects.get(path)));
 const files = sourcePaths.map((path) => {
-  const bytes = path === 'package.json' ? pkgBytes : path === 'package-lock.json' ? lockBytes : gitBytes(['show', `${commit}:${path}`]);
+  const objectId = trackedObjects.get(path);
+  const bytes = sourceBlobs.get(objectId);
+  if (!bytes) throw new Error(`committed source blob is missing: ${path}`);
   return {
     fileName: path,
     SPDXID: spdxID('File', path),

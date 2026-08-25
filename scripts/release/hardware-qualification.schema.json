@@ -1,24 +1,237 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentpass.dev/schemas/hardware-qualification-v1.json",
-  "title": "AgentPass hardware qualification result",
+  "$id": "https://agentpass.dev/schemas/hardware-qualification-v2.json",
+  "title": "AgentPass physical hardware qualification result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "artifact_sha256", "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "started_at", "completed_at", "operator", "qualified", "tests"],
+  "required": [
+    "schema_version", "source_commit", "source_tree", "dependency_lock_sha256", "release_manifest_sha256", "artifact_name", "artifact_sha256",
+    "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "team_id",
+    "nested_code_identities", "notarization", "cloud_image_digest", "database_migration_manifest_sha256", "signer_key_versions",
+    "browser_versions", "started_at", "completed_at", "operator", "operator_key_fingerprint", "qualified", "tests", "gates"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "schema_version": { "const": 2 },
+    "source_commit": { "$ref": "#/$defs/sha1" },
+    "source_tree": { "$ref": "#/$defs/sha1" },
+    "dependency_lock_sha256": { "$ref": "#/$defs/digest" },
+    "release_manifest_sha256": { "$ref": "#/$defs/digest" },
+    "artifact_name": { "$ref": "#/$defs/safe_name" },
+    "artifact_sha256": { "$ref": "#/$defs/digest" },
     "architecture": { "enum": ["arm64", "x86_64"] },
     "hardware_class": { "enum": ["apple_silicon", "intel_t2", "intel_without_t2"] },
-    "model_identifier": { "type": "string", "minLength": 1 },
+    "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
     "macos_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
-    "macos_build": { "type": "string", "minLength": 1 },
-    "secure_enclave": { "const": true },
+    "macos_build": { "type": "string", "pattern": "^[A-Za-z0-9]{3,32}$" },
+    "secure_enclave": { "type": "boolean" },
+    "team_id": { "$ref": "#/$defs/team_id" },
+    "nested_code_identities": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/code_identity" } },
+    "notarization": { "$ref": "#/$defs/notarization" },
+    "cloud_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "database_migration_manifest_sha256": { "$ref": "#/$defs/digest" },
+    "signer_key_versions": { "$ref": "#/$defs/version_list" },
+    "browser_versions": { "$ref": "#/$defs/version_list" },
     "started_at": { "type": "string", "format": "date-time" },
     "completed_at": { "type": "string", "format": "date-time" },
-    "operator": { "type": "string", "minLength": 1 },
+    "operator": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$" },
+    "operator_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
     "qualified": { "type": "boolean" },
-    "tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/test" } }
+    "tests": { "$ref": "#/$defs/result_list" },
+    "gates": { "$ref": "#/$defs/result_list" },
+    "n3e_qualification_suite_evidence": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/n3e_suite_evidence_binding" }
+      ]
+    }
   },
-  "$defs": { "test": { "type": "object", "additionalProperties": false, "required": ["name", "status"], "properties": { "name": { "type": "string", "minLength": 1 }, "status": { "enum": ["passed", "failed", "skipped"] }, "reason": { "type": "string" }, "evidence": { "type": "string" } } } }
+  "allOf": [
+    {
+      "if": {
+        "required": ["qualified"],
+        "properties": { "qualified": { "const": true } }
+      },
+      "then": {
+        "required": ["n3e_qualification_suite_evidence"],
+        "properties": {
+          "n3e_qualification_suite_evidence": { "$ref": "#/$defs/n3e_suite_evidence_binding" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "safe_name": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]*$" },
+    "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+    "code_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bundle_id", "team_id", "code_directory_hash"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+        "bundle_id": { "type": "string", "pattern": "^[A-Za-z0-9.-]+$" },
+        "team_id": { "$ref": "#/$defs/team_id" },
+        "code_directory_hash": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+      }
+    },
+    "notarization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "submission_ids", "evidence"],
+      "properties": {
+        "status": { "enum": ["not_verified", "accepted_stapled"] },
+        "submission_ids": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/release_evidence" } }
+      }
+    },
+    "release_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "bytes", "sha256"],
+      "properties": {
+        "kind": { "enum": ["notarytool_result", "stapler_result"] },
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "version_list": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$" },
+          "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$" }
+        }
+      }
+    },
+    "result_list": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/result" }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "evidence"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,127}$" },
+        "status": { "enum": ["passed", "failed", "skipped"] },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 1024 },
+        "evidence": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/test_evidence" } }
+      }
+    },
+    "test_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "bytes", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "n3e_suite_evidence_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "record", "record_sha256"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "record_sha256": { "$ref": "#/$defs/digest" },
+        "record": { "$ref": "#/$defs/n3e_suite_evidence_record" }
+      }
+    },
+    "n3e_suite_evidence_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_sha256", "candidate_checkpoint_sha256", "completed_at", "kind", "lane_class",
+        "release_trust_sha256", "schema_version", "source_commit", "started_at", "steps",
+        "suite_input_sha256", "team_id", "teardown_proof_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "agentpass-n3e-qualification-suite-evidence" },
+        "suite_input_sha256": { "$ref": "#/$defs/digest" },
+        "release_trust_sha256": { "$ref": "#/$defs/digest" },
+        "candidate_checkpoint_sha256": { "$ref": "#/$defs/digest" },
+        "source_commit": { "$ref": "#/$defs/sha1" },
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "team_id": { "$ref": "#/$defs/team_id" },
+        "lane_class": { "enum": ["apple_silicon", "intel_t2"] },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "teardown_proof_sha256": { "$ref": "#/$defs/digest" },
+        "steps": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "prefixItems": [
+            { "$ref": "#/$defs/n3e_unarmed_step" },
+            { "$ref": "#/$defs/n3e_pre_cloud_step" },
+            { "$ref": "#/$defs/n3e_post_cloud_step" },
+            { "$ref": "#/$defs/n3e_post_activation_step" },
+            { "$ref": "#/$defs/n3e_post_audit_step" },
+            { "$ref": "#/$defs/n3e_audit_fsync_step" },
+            { "$ref": "#/$defs/n3e_transport_step" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "n3e_step_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_sha256", "kind", "phase", "scenario", "status"],
+      "properties": {
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "kind": { "const": "scenario" },
+        "phase": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "scenario": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "status": { "const": "passed" }
+      }
+    },
+    "n3e_unarmed_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_sha256", "kind", "phase", "scenario", "status"],
+      "properties": {
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "kind": { "const": "unarmed-control" },
+        "phase": { "type": "null" },
+        "scenario": { "type": "null" },
+        "status": { "const": "passed" }
+      }
+    },
+    "n3e_pre_cloud_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "pre-cloud" }, "scenario": { "const": "pre-cloud-kill" } }
+    },
+    "n3e_post_cloud_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "post-cloud-pre-local" }, "scenario": { "const": "post-cloud-pre-local-kill" } }
+    },
+    "n3e_post_activation_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "post-activation-pre-audit" }, "scenario": { "const": "post-activation-pre-audit-kill" } }
+    },
+    "n3e_post_audit_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "post-audit-pre-reply" }, "scenario": { "const": "post-audit-pre-reply-loss" } }
+    },
+    "n3e_audit_fsync_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "audit-fsync" }, "scenario": { "const": "audit-fsync-failure" } }
+    },
+    "n3e_transport_step": {
+      "$ref": "#/$defs/n3e_step_base",
+      "properties": { "phase": { "const": "transport-reply" }, "scenario": { "const": "transport-reply-loss" } }
+    }
+  }
 }

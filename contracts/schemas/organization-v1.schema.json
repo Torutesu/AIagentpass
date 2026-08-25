@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/organization-v1.schema.json",
+  "title": "AgentPass organization public read model v1",
+  "description": "Tenant-bound public organization projection. The contract version is fixed by this v1 schema identifier; version is the persisted optimistic-concurrency revision and is therefore a bounded positive integer rather than a schema discriminator.",
+  "$comment": "The organization_id is the authoritative tenant binding. The authenticated human session and actor authorization are transport/session context and are intentionally not copied into this public read model.",
+  "x-agentpass-binding": {
+    "contract_version": 1,
+    "tenant_binding": { "path": "organization_id", "source": "read-model" },
+    "actor_binding": { "source": "authenticated human session", "in_payload": false }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "required": ["organization_id", "name", "version", "created_at", "updated_at"],
+  "properties": {
+    "organization_id": { "$ref": "#/$defs/canonicalUuid" },
+    "name": { "$ref": "#/$defs/publicName" },
+    "version": { "$ref": "#/$defs/resourceVersion" },
+    "created_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "updated_at": { "$ref": "#/$defs/canonicalTimestamp" }
+  },
+  "$defs": {
+    "canonicalUuid": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "resourceVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "publicName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+    }
+  }
+}

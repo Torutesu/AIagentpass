@@ -1,0 +1,691 @@
+name: AgentPass PostgreSQL authority qualification
+description: Run the source-bound PostgreSQL authority qualification for one major version
+inputs:
+  postgres-version:
+    description: PostgreSQL major version
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Start fresh TLS PostgreSQL ${{ inputs.postgres-version }}
+      shell: bash
+      env:
+        POSTGRES_MAJOR: ${{ inputs.postgres-version }}
+        N1_POSTGRES_PASSWORD: agentpass-n1-admin-${{ inputs.postgres-version }}
+        N1_CONTAINER_NAME: agentpass-n1-postgres-${{ inputs.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        tls_dir="$RUNNER_TEMP/agentpass-n1-tls-${POSTGRES_MAJOR}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        evidence_dir="$RUNNER_TEMP/agentpass-n1-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${POSTGRES_MAJOR}"
+        install -d -m 0700 "$tls_dir" "$evidence_dir"
+        openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+          -subj "/CN=agentpass-n1-postgres" \
+          -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+          -addext "basicConstraints=critical,CA:true" \
+          -addext "keyUsage=critical,keyCertSign,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth" \
+          -keyout "$tls_dir/server.key" -out "$tls_dir/server.crt"
+        chmod 0600 "$tls_dir/server.key"
+        chmod 0644 "$tls_dir/server.crt"
+        docker run --detach --name "$N1_CONTAINER_NAME" --publish 5432:5432 \
+          --env POSTGRES_PASSWORD="$N1_POSTGRES_PASSWORD" "postgres:${POSTGRES_MAJOR}"
+        ready=0
+        for attempt in $(seq 1 60); do
+          if docker exec "$N1_CONTAINER_NAME" pg_isready --username=postgres --dbname=postgres >/dev/null 2>&1; then
+            sleep 1
+            if docker exec "$N1_CONTAINER_NAME" pg_isready --username=postgres --dbname=postgres >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+          fi
+          sleep 1
+        done
+        [[ "$ready" == 1 ]] || { docker logs "$N1_CONTAINER_NAME"; exit 1; }
+        docker cp "$tls_dir/server.crt" "$N1_CONTAINER_NAME:/tmp/agentpass-n1-server.crt"
+        docker cp "$tls_dir/server.key" "$N1_CONTAINER_NAME:/tmp/agentpass-n1-server.key"
+        docker exec "$N1_CONTAINER_NAME" sh -ceu '
+          install -o postgres -g postgres -m 0644 /tmp/agentpass-n1-server.crt /var/lib/postgresql/server.crt
+          install -o postgres -g postgres -m 0600 /tmp/agentpass-n1-server.key /var/lib/postgresql/server.key
+        '
+        docker exec "$N1_CONTAINER_NAME" psql --username=postgres --dbname=postgres --command="ALTER SYSTEM SET ssl = 'on'"
+        docker exec "$N1_CONTAINER_NAME" psql --username=postgres --dbname=postgres --command="ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'"
+        docker exec "$N1_CONTAINER_NAME" psql --username=postgres --dbname=postgres --command="ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'"
+        docker restart "$N1_CONTAINER_NAME" >/dev/null
+        ready=0
+        for attempt in $(seq 1 60); do
+          if docker exec "$N1_CONTAINER_NAME" pg_isready --username=postgres --dbname=postgres >/dev/null 2>&1; then
+            sleep 1
+            if docker exec "$N1_CONTAINER_NAME" pg_isready --username=postgres --dbname=postgres >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+          fi
+          sleep 1
+        done
+        [[ "$ready" == 1 ]] || { docker logs "$N1_CONTAINER_NAME"; exit 1; }
+        postgres_image_id="$(docker inspect --format '{{.Image}}' "$N1_CONTAINER_NAME")"
+        [[ "$postgres_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid PostgreSQL image ID" >&2; exit 1; }
+        printf 'N1_POSTGRES_MAJOR=%s\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_POSTGRES_IMAGE_ID=%s\n' "$postgres_image_id" >> "$GITHUB_ENV"
+        printf 'N1_CONTAINER_NAME=%s\n' "$N1_CONTAINER_NAME" >> "$GITHUB_ENV"
+        printf 'N1_DATABASE_URL=postgresql://postgres:%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$N1_POSTGRES_PASSWORD" >> "$GITHUB_ENV"
+        printf 'N1_ADMIN_DATABASE_URL=postgresql://postgres:%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$N1_POSTGRES_PASSWORD" >> "$GITHUB_ENV"
+        printf 'N1_APP_DATABASE_URL=postgresql://agentpass_app:n1-app-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_SIGNER_DATABASE_URL=postgresql://agentpass_signer:n1-signer-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_MAINTENANCE_DATABASE_URL=postgresql://agentpass_maintenance:n1-maintenance-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_MIGRATION_DATABASE_URL=postgresql://agentpass_migrator:n1-migrator-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_BACKUP_DATABASE_URL=postgresql://agentpass_backup:n1-backup-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_PRIVILEGE_DATABASE_URL=postgresql://agentpass_migrator:n1-migrator-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+        printf 'N1_PGSSLROOTCERT=%s/server.crt\n' "$tls_dir" >> "$GITHUB_ENV"
+        printf 'PGSSLROOTCERT=%s/server.crt\n' "$tls_dir" >> "$GITHUB_ENV"
+        printf 'NODE_EXTRA_CA_CERTS=%s/server.crt\n' "$tls_dir" >> "$GITHUB_ENV"
+        printf 'N1_EVIDENCE_DIR=%s\n' "$evidence_dir" >> "$GITHUB_ENV"
+    - name: Bootstrap database roles before migrations
+      shell: bash
+      env:
+        PGHOST: 127.0.0.1
+        PGPORT: "5432"
+        PGUSER: postgres
+        PGPASSWORD: agentpass-n1-admin-${{ inputs.postgres-version }}
+        PGDATABASE: postgres
+        PGSSLMODE: verify-full
+        PGSSLROOTCERT: ${{ runner.temp }}/agentpass-n1-tls-${{ inputs.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}/server.crt
+      run: psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file scripts/postgres/roles.sql
+    - name: Provision ephemeral CI role authentication
+      shell: bash
+      env:
+        PGHOST: 127.0.0.1
+        PGPORT: "5432"
+        PGUSER: postgres
+        PGPASSWORD: agentpass-n1-admin-${{ inputs.postgres-version }}
+        PGDATABASE: postgres
+        PGSSLMODE: verify-full
+        PGSSLROOTCERT: ${{ runner.temp }}/agentpass-n1-tls-${{ inputs.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}/server.crt
+      run: >-
+        psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1
+        --command="ALTER ROLE agentpass_app PASSWORD 'n1-app-${{ inputs.postgres-version }}'; ALTER ROLE agentpass_signer PASSWORD 'n1-signer-${{ inputs.postgres-version }}'; ALTER ROLE agentpass_migrator PASSWORD 'n1-migrator-${{ inputs.postgres-version }}'; ALTER ROLE agentpass_backup PASSWORD 'n1-backup-${{ inputs.postgres-version }}'; ALTER ROLE agentpass_maintenance PASSWORD 'n1-maintenance-${{ inputs.postgres-version }}';"
+    - name: Run fresh migrations through current head
+      shell: bash
+      run: |
+        set -euo pipefail
+        N1_DATABASE_URL="$N1_MIGRATION_DATABASE_URL" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import path from "node:path";
+        import { Client } from "pg";
+        import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+        import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
+
+        const client = new Client({ connectionString: process.env.N1_DATABASE_URL });
+        await client.connect();
+        try {
+          const preflight = await client.query("SELECT to_regclass('public.schema_migrations') AS schema_migrations, to_regclass('public.organizations') AS organizations");
+          assert.equal(preflight.rows[0].schema_migrations, null, "N1 requires a fresh database");
+          assert.equal(preflight.rows[0].organizations, null, "N1 requires a fresh database");
+          const result = await createMigrationRunner({
+            client,
+            applicationVersion: `ci-n1-postgres-${process.env.N1_POSTGRES_MAJOR}`,
+          }).run();
+          assert.equal(result.currentVersion, POSTGRES_SCHEMA_HEAD.version);
+          const history = await client.query("SELECT version::int AS version, checksum FROM public.schema_migrations ORDER BY version");
+          assert.equal(history.rowCount, POSTGRES_SCHEMA_HEAD.migration_count);
+          assert.deepEqual(history.rows.map(({ version }) => Number(version)), Array.from({ length: POSTGRES_SCHEMA_HEAD.migration_count }, (_, index) => index + 1));
+          const attempts = await client.query("SELECT version FROM public.schema_migration_attempts WHERE status IN ('running', 'failed')");
+          assert.equal(attempts.rowCount, 0);
+          const server = await client.query(`SELECT current_setting('server_version') AS server_version,
+            current_setting('server_version_num')::integer AS server_version_num,
+            ssl, version AS tls_version, cipher, bits
+            FROM pg_stat_ssl WHERE pid = pg_backend_pid()`);
+          assert.equal(server.rowCount, 1);
+          assert.equal(server.rows[0].ssl, true, "N1 migration connection must use TLS");
+          assert.equal(Math.trunc(Number(server.rows[0].server_version_num) / 10000), Number(process.env.N1_POSTGRES_MAJOR));
+          const writeEvidence = (name, value) => fs.writeFileSync(
+            path.join(process.env.N1_EVIDENCE_DIR, name),
+            `${JSON.stringify(value)}\n`,
+            { mode: 0o600 },
+          );
+          writeEvidence("migration-history.json", { head: POSTGRES_SCHEMA_HEAD.version, rows: history.rows });
+          writeEvidence("postgres-server.json", server.rows[0]);
+        } finally {
+          await client.end();
+        }
+        NODE
+    - name: Reconcile database roles after migrations
+      shell: bash
+      env:
+        PGHOST: 127.0.0.1
+        PGPORT: "5432"
+        PGUSER: postgres
+        PGPASSWORD: agentpass-n1-admin-${{ inputs.postgres-version }}
+        PGDATABASE: postgres
+        PGSSLMODE: verify-full
+        PGSSLROOTCERT: ${{ runner.temp }}/agentpass-n1-tls-${{ inputs.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}/server.crt
+      run: psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file scripts/postgres/roles.sql
+    - name: Run PostgreSQL privilege checker
+      shell: bash
+      run: |
+        set -euo pipefail
+        AGENTPASS_DATABASE_URL="$N1_PRIVILEGE_DATABASE_URL" \
+        AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT="$N1_EVIDENCE_DIR/privilege-matrix.json" \
+        PGSSLROOTCERT="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/role-privilege-check.mjs | tee "$N1_EVIDENCE_DIR/privilege-check.txt"
+    - name: Verify actual service-role login boundaries
+      shell: bash
+      run: |
+        set -euo pipefail
+        node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import path from "node:path";
+        import { Client } from "pg";
+        import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
+
+        const roles = [
+          ["agentpass_app", process.env.N1_APP_DATABASE_URL],
+          ["agentpass_signer", process.env.N1_SIGNER_DATABASE_URL],
+          ["agentpass_migrator", process.env.N1_MIGRATION_DATABASE_URL],
+          ["agentpass_backup", process.env.N1_BACKUP_DATABASE_URL],
+          ["agentpass_maintenance", process.env.N1_MAINTENANCE_DATABASE_URL],
+        ];
+        const report = { ok: true, roles: [] };
+        for (const [expected, connectionString] of roles) {
+          const client = new Client({ connectionString });
+          await client.connect();
+          try {
+            const principal = await client.query("SELECT session_user,current_user");
+            assert.equal(principal.rows[0].session_user, expected);
+            assert.equal(principal.rows[0].current_user, expected);
+            report.roles.push(expected);
+            if (expected === "agentpass_app" || expected === "agentpass_backup") {
+              await client.query("SELECT count(*) FROM public.organizations");
+            }
+            if (expected === "agentpass_migrator") {
+              const head = await client.query("SELECT max(version)::int AS version FROM public.schema_migrations");
+              assert.equal(head.rows[0].version, POSTGRES_SCHEMA_HEAD.version);
+            }
+            if (expected === "agentpass_signer") {
+              const allowed = await client.query(`SELECT has_function_privilege(
+                current_user,'public.agentpass_managed_signer_lifecycle_snapshot(text)','EXECUTE') AS allowed`);
+              assert.equal(allowed.rows[0].allowed, true);
+            }
+            if (expected === "agentpass_maintenance") {
+              const allowed = await client.query(`SELECT has_function_privilege(
+                current_user,'public.agentpass_agent_signing_capability_recover_expired(integer)','EXECUTE') AS allowed`);
+              assert.equal(allowed.rows[0].allowed, true);
+            }
+            const denied = expected === "agentpass_app"
+              ? "CREATE SCHEMA agentpass_n1_app_denied"
+              : expected === "agentpass_signer"
+                ? "SELECT count(*) FROM public.organizations"
+                : expected === "agentpass_backup"
+                  ? "UPDATE public.organizations SET name=name"
+                  : expected === "agentpass_maintenance"
+                    ? "SELECT count(*) FROM public.organizations"
+                    : "SET ROLE postgres";
+            await assert.rejects(client.query(denied), (error) => ["42501", "0LP01"].includes(error?.code));
+          } finally {
+            await client.end();
+          }
+        }
+        assert.deepEqual(report.roles, roles.map(([name]) => name));
+        fs.writeFileSync(path.join(process.env.N1_EVIDENCE_DIR, "role-login-boundaries.json"), `${JSON.stringify(report)}\n`, { mode: 0o600 });
+        NODE
+    - name: Qualify seeded 47-to-51 and 48-to-51 upgrades
+      shell: bash
+      run: |
+        set -euo pipefail
+        AGENTPASS_N1_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+        AGENTPASS_N1_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+        AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/n1-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-upgrades.json"
+        N1_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-upgrades.json" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+
+        const report = JSON.parse(fs.readFileSync(process.env.N1_UPGRADE_REPORT, "utf8"));
+        assert.equal(report.qualification, "postgres-upgrade");
+        assert.equal(report.name, "N1");
+        assert.equal(report.target_version, 51);
+        assert.equal(report.migration_role, "agentpass_migrator");
+        assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[47, 51], [48, 51]]);
+        for (const scenario of report.scenarios) {
+          assert.equal(scenario.seeded_authority_row_count, 9);
+          assert.equal(scenario.history.targetVersion, 51);
+          assert.equal(scenario.history.historyRows, 51);
+          assert.deepEqual(
+            scenario.history.appliedUpgradeVersions,
+            scenario.from_version === 47 ? [48, 49, 50, 51] : [49, 50, 51]
+          );
+        }
+        NODE
+    - name: Qualify seeded 51-to-52 upgrade
+      shell: bash
+      run: |
+        set -euo pipefail
+        AGENTPASS_N2_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+        AGENTPASS_N2_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+        AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/n2-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-n2-upgrade.json"
+        N2_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-n2-upgrade.json" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+
+        const report = JSON.parse(fs.readFileSync(process.env.N2_UPGRADE_REPORT, "utf8"));
+        assert.equal(report.qualification, "postgres-upgrade");
+        assert.equal(report.report_schema_version, 1);
+        assert.equal(report.name, "N2");
+        assert.equal(report.source_version, 51);
+        assert.equal(report.target_version, 52);
+        assert.equal(report.migration_role, "agentpass_migrator");
+        assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[51, 52]]);
+        const scenario = report.scenarios[0];
+        assert.equal(scenario.seeded_legacy_row_count, 4);
+        assert.equal(scenario.legacy_preservation.exact, true);
+        assert.match(scenario.legacy_preservation.snapshot_sha256, /^[0-9a-f]{64}$/u);
+        assert.equal(scenario.history.historyRows, 52);
+        assert.deepEqual(scenario.history.appliedUpgradeVersions, [52]);
+        NODE
+    - name: Qualify seeded 52-to-53 upgrade
+      shell: bash
+      run: |
+        set -euo pipefail
+        AGENTPASS_N3_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+        AGENTPASS_N3_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+        AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/n3-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-n3-upgrade.json"
+        N3_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-n3-upgrade.json" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+
+        const report = JSON.parse(fs.readFileSync(process.env.N3_UPGRADE_REPORT, "utf8"));
+        assert.equal(report.qualification, "postgres-upgrade");
+        assert.equal(report.report_schema_version, 1);
+        assert.equal(report.name, "N3");
+        assert.equal(report.source_version, 52);
+        assert.equal(report.target_version, 53);
+        assert.equal(report.migration_role, "agentpass_migrator");
+        assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[52, 53]]);
+        const scenario = report.scenarios[0];
+        assert.equal(scenario.seeded_legacy_row_count, 5);
+        assert.equal(scenario.seeded_platform_authority_row_count, 4);
+        assert.equal(scenario.legacy_preservation.exact, true);
+        assert.equal(scenario.platform_authority_preservation.exact, true);
+        assert.equal(scenario.history.historyRows, 53);
+        assert.deepEqual(scenario.history.appliedUpgradeVersions, [53]);
+        NODE
+    - name: Qualify PostgreSQL authority boundaries 0048 through 0055
+      shell: bash
+      run: |
+        set -euo pipefail
+        export AGENTPASS_TEST_DATABASE_URL="$N1_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_URL="$N1_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT"
+        export AGENTPASS_TEST_APP_DATABASE_URL="$N1_APP_DATABASE_URL"
+        export AGENTPASS_TEST_SIGNER_DATABASE_URL="$N1_SIGNER_DATABASE_URL"
+        export AGENTPASS_TEST_BACKUP_DATABASE_URL="$N1_BACKUP_DATABASE_URL"
+        export AGENTPASS_TEST_MIGRATION_DATABASE_URL="$N1_MIGRATION_DATABASE_URL"
+        run_qualification() {
+          local label="$1"
+          shift
+          local output="$N1_EVIDENCE_DIR/qualification-${label}.tap"
+          local status=0
+          node --test --test-concurrency=1 --test-reporter=tap "$@" >"$output" 2>&1 || status=$?
+          cat "$output"
+          if (( status != 0 )); then
+            return "$status"
+          fi
+          if grep -Eq '(^|[[:space:]])# (SKIP|TODO)([[:space:]]|$)|^Bail out!' "$output"; then
+            echo "unexpected incomplete qualification: $label" >&2
+            return 1
+          fi
+          grep -Eq '^1\.\.[1-9][0-9]*$' "$output"
+        }
+        run_qualification 0048 \
+          apps/cloud-api/test/postgres/platform-promotion-authority-boundary-migration.test.mjs \
+          apps/cloud-api/test/postgres/platform-promotion-authority-qualification.integration.test.mjs
+        provider_operation_tests=(
+          apps/cloud-api/test/postgres/provider-operation-repository.test.mjs
+          apps/cloud-api/test/postgres/provider-operation-repository.integration.test.mjs
+        )
+        if [[ "$N1_POSTGRES_MAJOR" == "17" ]]; then
+          provider_operation_tests+=(apps/cloud-api/test/postgres/provider-operation-query-indexes.integration.test.mjs)
+        fi
+        run_qualification 0049 "${provider_operation_tests[@]}"
+        run_qualification 0050 \
+          apps/cloud-api/test/postgres/provider-operation-maintenance-repository.test.mjs
+        run_qualification 0051 \
+          apps/cloud-api/test/postgres/managed-signer-authority-boundary-migration.test.mjs \
+          apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority-migration.test.mjs \
+          apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs \
+          apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs \
+          apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority.integration.test.mjs \
+          apps/cloud-api/test/postgres/managed-signer-s13-multi-instance.integration.test.mjs
+        run_qualification 0052 \
+          apps/cloud-api/test/postgres/platform-operator-authority-migration.test.mjs \
+          apps/cloud-api/test/postgres/platform-operator-authority.integration.test.mjs \
+          apps/cloud-api/test/postgres/platform-operator-assignment-repository.test.mjs \
+          apps/cloud-api/test/platform-operator-authorizer.test.mjs
+        run_qualification 0053 \
+          apps/cloud-api/test/postgres/platform-session-authority-migration.test.mjs \
+          test/platform-session-contract.test.mjs
+        run_qualification 0054 \
+          apps/cloud-api/test/postgres/platform-authorization-migration.test.mjs \
+          apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs
+        run_qualification 0055 \
+          apps/cloud-api/test/postgres/n5-upgrade-qualification.test.mjs \
+          apps/cloud-api/test/postgres/platform-session-bootstrap-migration.test.mjs \
+          apps/cloud-api/test/postgres/platform-session-bootstrap-repository.test.mjs \
+          apps/cloud-api/test/postgres/platform-session-bootstrap.integration.test.mjs
+        AGENTPASS_N4_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+        AGENTPASS_N4_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+        AGENTPASS_N4_AUTHORITY_TAP="$N1_EVIDENCE_DIR/qualification-0054.tap" \
+        AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/n4-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-n4-upgrade.json"
+        AGENTPASS_N5_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+        AGENTPASS_N5_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+        AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+          node scripts/postgres/n5-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-n5-upgrade.json"
+        N4_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-n4-upgrade.json" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+
+        const report = JSON.parse(fs.readFileSync(process.env.N4_UPGRADE_REPORT, "utf8"));
+        assert.equal(report.qualification, "postgres-upgrade");
+        assert.equal(report.report_schema_version, 1);
+        assert.equal(report.name, "N4");
+        assert.equal(report.source_version, 53);
+        assert.equal(report.target_version, 54);
+        assert.equal(report.migration_name, "0054_platform_authorization.sql");
+        assert.equal(report.migration_role, "agentpass_migrator");
+        assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[53, 54]]);
+        const scenario = report.scenarios[0];
+        assert.equal(scenario.seeded_legacy_row_count, 6);
+        assert.equal(scenario.seeded_platform_authority_row_count, 6);
+        assert.equal(scenario.seeded_platform_credential_row_count, 1);
+        assert.equal(scenario.seeded_platform_session_row_count, 1);
+        assert.equal(scenario.legacy_preservation.exact, true);
+        assert.equal(scenario.platform_authority_preservation.exact, true);
+        assert.equal(scenario.platform_credential_preservation.exact, true);
+        assert.equal(scenario.platform_session_upgrade.immutable_binding_exact, true);
+        assert.equal(scenario.platform_session_upgrade.invalidated_for_request_binding, true);
+        assert.equal(scenario.history.historyRows, 54);
+        assert.deepEqual(scenario.history.appliedUpgradeVersions, [54]);
+        assert.equal(report.authority_test_evidence.present, true);
+        assert.equal(report.authority_test_evidence.label, "0054");
+        assert.ok(report.authority_test_evidence.tests >= 1);
+        NODE
+        N5_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-n5-upgrade.json" node --input-type=module <<'NODE'
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+
+        const report = JSON.parse(fs.readFileSync(process.env.N5_UPGRADE_REPORT, "utf8"));
+        assert.equal(report.qualification, "postgres-upgrade");
+        assert.equal(report.report_schema_version, 1);
+        assert.equal(report.name, "N5");
+        assert.equal(report.source_version, 54);
+        assert.equal(report.target_version, 55);
+        assert.equal(report.migration_name, "0055_platform_session_bootstrap.sql");
+        assert.equal(report.migration_role, "agentpass_migrator");
+        assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[0, 55], [54, 55]]);
+        for (const scenario of report.scenarios) {
+          assert.equal(scenario.history.historyRows, 55);
+          assert.deepEqual(scenario.history.appliedUpgradeVersions, [55]);
+          assert.equal(scenario.history.status, "clean");
+        }
+        NODE
+    - name: Run P2 real-service PostgreSQL qualification gate
+      shell: bash
+      run: |
+        set -euo pipefail
+        export AGENTPASS_TEST_DATABASE_URL="$N1_ADMIN_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_URL="$N1_ADMIN_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL"
+        export AGENTPASS_TEST_APP_DATABASE_URL="$N1_APP_DATABASE_URL"
+        export AGENTPASS_TEST_MAINTENANCE_DATABASE_URL="$N1_MAINTENANCE_DATABASE_URL"
+        export AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT"
+        export AGENTPASS_TEST_ADMIN_ROLE="postgres"
+        export AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"
+        export AGENTPASS_QUALIFICATION_SOURCE_COMMIT="$GITHUB_SHA"
+        export AGENTPASS_QUALIFICATION_CANDIDATE_ID="ci-${GITHUB_SHA}"
+        export AGENTPASS_QUALIFICATION_POSTGRES_IMAGE_ID="$N1_POSTGRES_IMAGE_ID"
+        tap="$N1_EVIDENCE_DIR/qualification-real-service.tap"
+        status=0
+        node --test --test-concurrency=1 --test-reporter=tap \
+          scripts/postgres/p2-qualification-contract.test.mjs \
+          scripts/postgres/device-audit-postgres-qualification.integration.test.mjs \
+          scripts/postgres/organization-authority-postgres-qualification.integration.test.mjs \
+          apps/cloud-api/test/postgres/native-device-audit-upload.integration.test.mjs \
+          apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs >"$tap" 2>&1 || status=$?
+        cat "$tap"
+        if (( status != 0 )); then exit "$status"; fi
+        if grep -Eq '(^|[[:space:]])# (SKIP|TODO)([[:space:]]|$)|^Bail out!' "$tap"; then
+          echo "real-service PostgreSQL qualification must not contain skipped tests" >&2
+          exit 1
+        fi
+        grep -Eq '^1\.\.[1-9][0-9]*$' "$tap"
+        node scripts/postgres/postgres-qualification-evidence.mjs write \
+          "$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json" "$tap"
+        node scripts/postgres/postgres-qualification-evidence.mjs verify \
+          "$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json" "$GITHUB_SHA"
+    - name: Create and verify source-SHA-bound N1 evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        node --input-type=module <<'NODE'
+        import crypto from "node:crypto";
+        import fs from "node:fs";
+        import path from "node:path";
+        import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
+
+        const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+        const read = (file) => fs.readFileSync(file);
+        const sourceCommit = process.env.GITHUB_SHA;
+        if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) throw new Error("GITHUB_SHA is not a full source SHA");
+        const qualificationFiles = ["0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055"].map((label) => path.join(process.env.N1_EVIDENCE_DIR, `qualification-${label}.tap`));
+        const qualifications = Object.fromEntries(qualificationFiles.map((file) => {
+          const output = read(file);
+          const text = output.toString("utf8");
+          if (/(^|[\t\r\n ])# (?:SKIP|TODO)([\t\r\n ]|$)|^Bail out!/mu.test(text)) {
+            throw new Error(`unexpected incomplete qualification in ${file}`);
+          }
+          const tests = [...text.matchAll(/^ok\s+/gmu)].length;
+          if (tests < 1) throw new Error(`qualification has no passing tests: ${file}`);
+          return [path.basename(file).slice("qualification-".length, -".tap".length), { tests, tap_sha256: sha256(output) }];
+        }));
+        const privilegeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "privilege-check.txt")).toString("utf8").trim();
+        if (!/^ok evidence=[0-9a-f]{64}$/u.test(privilegeOutput)) throw new Error("privilege checker did not return a closed success result");
+        const privilegeMatrixOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "privilege-matrix.json"));
+        const privilegeMatrix = JSON.parse(privilegeMatrixOutput.toString("utf8"));
+        if (privilegeMatrix.ok !== true || privilegeMatrix.current_user !== "agentpass_migrator") {
+          throw new Error("privilege matrix evidence is invalid");
+        }
+        const upgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-upgrades.json"));
+        const upgradeReport = JSON.parse(upgradeOutput.toString("utf8"));
+        if (upgradeReport.target_version !== 51
+          || JSON.stringify(upgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[47, 51], [48, 51]])) {
+          throw new Error("seeded upgrade qualification report is incomplete");
+        }
+        const n2UpgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-n2-upgrade.json"));
+        const n2UpgradeReport = JSON.parse(n2UpgradeOutput.toString("utf8"));
+        if (n2UpgradeReport.target_version !== 52
+          || JSON.stringify(n2UpgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[51, 52]])
+          || n2UpgradeReport.scenarios[0]?.seeded_legacy_row_count !== 4
+          || n2UpgradeReport.scenarios[0]?.legacy_preservation?.exact !== true) {
+          throw new Error("N2 seeded upgrade qualification report is incomplete");
+        }
+        const n3UpgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-n3-upgrade.json"));
+        const n3UpgradeReport = JSON.parse(n3UpgradeOutput.toString("utf8"));
+        if (n3UpgradeReport.target_version !== 53
+          || JSON.stringify(n3UpgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[52, 53]])
+          || n3UpgradeReport.scenarios[0]?.seeded_legacy_row_count !== 5
+          || n3UpgradeReport.scenarios[0]?.seeded_platform_authority_row_count !== 4
+          || n3UpgradeReport.scenarios[0]?.platform_authority_preservation?.exact !== true) {
+          throw new Error("N3 seeded upgrade qualification report is incomplete");
+        }
+        const n4UpgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-n4-upgrade.json"));
+        const n4UpgradeReport = JSON.parse(n4UpgradeOutput.toString("utf8"));
+        if (n4UpgradeReport.source_version !== 53
+          || n4UpgradeReport.target_version !== 54
+          || n4UpgradeReport.migration_name !== "0054_platform_authorization.sql"
+          || JSON.stringify(n4UpgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[53, 54]])
+          || n4UpgradeReport.scenarios[0]?.seeded_platform_credential_row_count !== 1
+          || n4UpgradeReport.scenarios[0]?.seeded_platform_session_row_count !== 1
+          || n4UpgradeReport.scenarios[0]?.platform_credential_preservation?.exact !== true
+          || n4UpgradeReport.scenarios[0]?.platform_session_upgrade?.immutable_binding_exact !== true
+          || n4UpgradeReport.authority_test_evidence?.present !== true
+          || n4UpgradeReport.authority_test_evidence?.label !== "0054") {
+          throw new Error("N4 seeded upgrade qualification report is incomplete");
+        }
+        const n5UpgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-n5-upgrade.json"));
+        const n5UpgradeReport = JSON.parse(n5UpgradeOutput.toString("utf8"));
+        if (n5UpgradeReport.source_version !== 54
+          || n5UpgradeReport.target_version !== 55
+          || n5UpgradeReport.migration_name !== "0055_platform_session_bootstrap.sql"
+          || JSON.stringify(n5UpgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[0, 55], [54, 55]])
+          || n5UpgradeReport.scenarios.some(({ history }) => history?.status !== "clean" || history?.historyRows !== 55 || JSON.stringify(history?.appliedUpgradeVersions) !== JSON.stringify([55]))) {
+          throw new Error("N5 migration qualification report is incomplete");
+        }
+        const migrationFiles = fs.readdirSync("contracts/postgres").filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/u.test(name)).sort();
+        const migrationDigest = crypto.createHash("sha256");
+        for (const name of migrationFiles) migrationDigest.update(name).update("\0").update(read(path.join("contracts/postgres", name))).update("\0");
+        const migrationHistoryOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "migration-history.json"));
+        const migrationHistory = JSON.parse(migrationHistoryOutput.toString("utf8"));
+        if (migrationHistory.head !== POSTGRES_SCHEMA_HEAD.version || migrationHistory.rows.length !== POSTGRES_SCHEMA_HEAD.migration_count) throw new Error("fresh migration history evidence is incomplete");
+        const serverOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "postgres-server.json"));
+        const server = JSON.parse(serverOutput.toString("utf8"));
+        if (server.ssl !== true || Math.trunc(Number(server.server_version_num) / 10000) !== Number(process.env.N1_POSTGRES_MAJOR)) {
+          throw new Error("PostgreSQL server/TLS evidence is invalid");
+        }
+        const roleLoginOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "role-login-boundaries.json"));
+        const roleLogins = JSON.parse(roleLoginOutput.toString("utf8"));
+        if (roleLogins.ok !== true || JSON.stringify(roleLogins.roles) !== JSON.stringify([
+          "agentpass_app", "agentpass_signer", "agentpass_migrator", "agentpass_backup", "agentpass_maintenance",
+        ])) throw new Error("actual database role login evidence is invalid");
+        const report = {
+          schema_version: 1,
+          kind: "agentpass.postgres.n1.qualification",
+          source_commit: sourceCommit,
+          postgres_major: process.env.N1_POSTGRES_MAJOR,
+          fresh_database: true,
+          migration_head: POSTGRES_SCHEMA_HEAD.version,
+          migration_history_count: POSTGRES_SCHEMA_HEAD.migration_count,
+          migration_sources_sha256: migrationDigest.digest("hex"),
+          migration_history_sha256: sha256(migrationHistoryOutput),
+          postgres_server: {
+            server_version: server.server_version,
+            server_version_num: server.server_version_num,
+            tls_version: server.tls_version,
+            cipher: server.cipher,
+            bits: server.bits,
+            evidence_sha256: sha256(serverOutput),
+          },
+          postgres_image_id: process.env.N1_POSTGRES_IMAGE_ID,
+          roles_applied_after_migrations: true,
+          role_logins: { ok: true, evidence_sha256: sha256(roleLoginOutput) },
+          privilege_checker: {
+            ok: true,
+            output_sha256: sha256(Buffer.from(privilegeOutput, "utf8")),
+            matrix_sha256: sha256(privilegeMatrixOutput),
+          },
+          seeded_upgrades: {
+            ok: true,
+            paths: [[47, 51], [48, 51], [51, 52], [52, 53], [53, 54], [54, 55]],
+            n1_report_sha256: sha256(upgradeOutput),
+            n2_report_sha256: sha256(n2UpgradeOutput),
+            n3_report_sha256: sha256(n3UpgradeOutput),
+            n4_report_sha256: sha256(n4UpgradeOutput),
+            n5_report_sha256: sha256(n5UpgradeOutput),
+          },
+          qualifications,
+          unexpected_skips: 0,
+        };
+        const artifactPath = path.join(process.env.N1_EVIDENCE_DIR, `postgres-n1-${process.env.N1_POSTGRES_MAJOR}-${sourceCommit}.json`);
+        const canonical = `${JSON.stringify(report)}\n`;
+        fs.writeFileSync(artifactPath, canonical, { mode: 0o600 });
+        if (fs.readFileSync(artifactPath, "utf8") !== canonical) throw new Error("N1 evidence was not written canonically");
+        const reread = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+        if (reread.source_commit !== sourceCommit || reread.migration_head !== POSTGRES_SCHEMA_HEAD.version || reread.unexpected_skips !== 0) throw new Error("N1 evidence source binding failed");
+        console.log(`verified source-bound N1 evidence sha256=${sha256(Buffer.from(canonical, "utf8"))}`);
+        NODE
+    - name: Independently verify source-SHA-bound N1 evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        artifact="$N1_EVIDENCE_DIR/postgres-n1-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json"
+        real_artifact="$N1_EVIDENCE_DIR/postgres-real-service-${N1_POSTGRES_MAJOR}-${GITHUB_SHA}.json"
+        [[ -f "$artifact" && ! -L "$artifact" ]] || { echo "N1 evidence artifact is missing or symlinked" >&2; exit 1; }
+        [[ -f "$real_artifact" && ! -L "$real_artifact" ]] || { echo "real-service PostgreSQL evidence artifact is missing or symlinked" >&2; exit 1; }
+        [[ "$(stat -c '%a' "$artifact")" == 600 ]] || { echo "N1 evidence artifact permissions are too broad" >&2; exit 1; }
+        [[ "$(stat -c '%a' "$real_artifact")" == 600 ]] || { echo "real-service PostgreSQL evidence permissions are too broad" >&2; exit 1; }
+        jq -e \
+          --arg source "$GITHUB_SHA" \
+          --argjson migration_head "$(node --input-type=module -e 'import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs"; console.log(POSTGRES_SCHEMA_HEAD.version)')" \
+          '(.kind == "agentpass.postgres.real-service.qualification") and
+          (.candidate_id | type == "string") and
+          (.source_commit == $source) and
+          (.schema.head == $migration_head) and
+          (.schema.migration_count == $migration_head) and
+          (.service.ssl == true) and
+          ((.service.roles | length) == 5) and
+          (.service.role_assertions == [
+            {connection: "admin", expected_role: "postgres", session_user: "postgres", current_user: "postgres", ssl: true},
+            {connection: "app", expected_role: "agentpass_app", session_user: "agentpass_app", current_user: "agentpass_app", ssl: true},
+            {connection: "maintenance", expected_role: "agentpass_maintenance", session_user: "agentpass_maintenance", current_user: "agentpass_maintenance", ssl: true}
+          ]) and
+          (.service.tenant_authority == {
+            relation: "platform_device_audit_tenant_context",
+            security_definer_functions: 3,
+            app_can_select_relation: false
+          }) and
+          (.service.forced_rls_relations == 3) and
+          (.service.device_audit_triggers == 2) and
+          (.skipped_tests == 0) and
+          (.status == "passed") and
+          (.suites.tap.tests > 0) and
+          (.suites.tap.tap_sha256 | test("^[0-9a-f]{64}$"))' "$real_artifact" >/dev/null
+        jq -e \
+          --arg source "$GITHUB_SHA" \
+          --arg major "$N1_POSTGRES_MAJOR" \
+          --argjson migration_head "$(node --input-type=module -e 'import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs"; console.log(POSTGRES_SCHEMA_HEAD.version)')" \
+          '(.schema_version == 1) and
+           (.kind == "agentpass.postgres.n1.qualification") and
+           (.source_commit == $source) and
+           (.postgres_major == $major) and
+           (.fresh_database == true) and
+           (.migration_head == $migration_head) and
+           (.migration_history_count == $migration_head) and
+           (.migration_history_sha256 | test("^[0-9a-f]{64}$")) and
+           (.postgres_server.server_version_num | tonumber / 10000 | floor == ($major | tonumber)) and
+           (.postgres_server.tls_version | type == "string") and
+           (.postgres_server.cipher | type == "string") and
+           (.postgres_server.evidence_sha256 | test("^[0-9a-f]{64}$")) and
+           (.postgres_image_id | test("^sha256:[0-9a-f]{64}$")) and
+           (.roles_applied_after_migrations == true) and
+           (.role_logins.ok == true) and
+           (.role_logins.evidence_sha256 | test("^[0-9a-f]{64}$")) and
+           (.privilege_checker.ok == true) and
+           (.privilege_checker.matrix_sha256 | test("^[0-9a-f]{64}$")) and
+           (.seeded_upgrades.ok == true) and
+           (.seeded_upgrades.paths == [[47, 51], [48, 51], [51, 52], [52, 53], [53, 54], [54, 55]]) and
+           (.seeded_upgrades.n1_report_sha256 | test("^[0-9a-f]{64}$")) and
+           (.seeded_upgrades.n2_report_sha256 | test("^[0-9a-f]{64}$")) and
+           (.seeded_upgrades.n3_report_sha256 | test("^[0-9a-f]{64}$")) and
+           (.seeded_upgrades.n4_report_sha256 | test("^[0-9a-f]{64}$")) and
+           (.seeded_upgrades.n5_report_sha256 | test("^[0-9a-f]{64}$")) and
+           ((.qualifications | keys | sort) == ["0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055"]) and
+           (.unexpected_skips == 0)' "$artifact" >/dev/null
+    - name: Retain source-SHA-bound N1 PostgreSQL evidence
+      if: success()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: postgres-n1-${{ inputs.postgres-version }}-${{ github.sha }}
+        path: ${{ runner.temp }}/agentpass-n1-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.postgres-version }}/
+        if-no-files-found: error
+        retention-days: 30
+    - name: Remove N1 PostgreSQL container
+      if: always()
+      shell: bash
+      env:
+        N1_CONTAINER_NAME: agentpass-n1-postgres-${{ inputs.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+      run: docker rm --force "$N1_CONTAINER_NAME" >/dev/null 2>&1 || true

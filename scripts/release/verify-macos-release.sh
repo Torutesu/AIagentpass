@@ -20,9 +20,23 @@ PUBLIC_KEY="$STAGED_DIR/release-public.pem"
 node "$SCRIPT_DIR/verify-release.mjs" "$MANIFEST" "$SIGNATURE" "$PUBLIC_KEY" "$EXPECTED_FINGERPRINT" >/dev/null
 [[ "$(node -e 'process.stdout.write(require(process.argv[1]).evidence?.notarization?.status || "")' "$MANIFEST")" == "accepted_stapled" ]] || { echo "Manifest does not claim an explicitly accepted and stapled release" >&2; exit 1; }
 ARTIFACT_DIR="$(dirname "$MANIFEST")"
+CONTROLLER_ARCHIVE_NAME="$(node -e 'const m=require(process.argv[1]); const a=m.artifacts.filter(x=>x.role==="external_qualification_controller" && x.media_type==="application/octet-stream"); if(a.length!==1) process.exit(1); process.stdout.write(a[0].name)' "$MANIFEST")" || { echo "Manifest must contain exactly one external qualification controller archive" >&2; exit 1; }
+CONTROLLER_IDENTITY_NAME="$(node -e 'const m=require(process.argv[1]); const d=m.external_qualification_controller?.identity_document; if(!d || typeof d.name!=="string") process.exit(1); process.stdout.write(d.name)' "$MANIFEST")" || { echo "Manifest lacks the controller identity document" >&2; exit 1; }
+CONTROLLER_PARENT="$TEMP_DIR/controller"
+/bin/mkdir -m 0700 "$CONTROLLER_PARENT"
+CONTROLLER_APP="$CONTROLLER_PARENT/AgentPassQualificationController.app"
+node "$SCRIPT_DIR/n3e/verify-controller-archive.mjs" "$ARTIFACT_DIR/$CONTROLLER_ARCHIVE_NAME" "$CONTROLLER_APP" >/dev/null
+node "$SCRIPT_DIR/n3e/controller-identity-contract.mjs" collect "$ARTIFACT_DIR/$CONTROLLER_ARCHIVE_NAME" "$CONTROLLER_APP" "$EXPECTED_TEAM_ID" "$CONTROLLER_PARENT/recollected-identity.json" >/dev/null
+/usr/bin/cmp -s "$ARTIFACT_DIR/$CONTROLLER_IDENTITY_NAME" "$CONTROLLER_PARENT/recollected-identity.json" || { echo "Extracted controller identity differs from the signed manifest binding" >&2; exit 1; }
+/usr/bin/xcrun stapler validate "$CONTROLLER_APP"
+/usr/sbin/spctl --assess --type execute --verbose=4 "$CONTROLLER_APP"
+/usr/bin/codesign --verify --strict --verbose=4 "$CONTROLLER_APP"
 PKG_NAME="$(node -e 'const m=require(process.argv[1]); const a=m.artifacts.filter(x=>x.role==="product" && x.name.endsWith("-macos-universal.pkg") && x.media_type==="application/vnd.apple.installer+xml"); if(a.length!==1) process.exit(1); process.stdout.write(a[0].name)' "$MANIFEST")" || { echo "Manifest must contain exactly one macOS universal installer package" >&2; exit 1; }
 PACKAGE="$ARTIFACT_DIR/$PKG_NAME"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+SOURCE_COMMIT="$(node -e 'const m=require(process.argv[1]); if(!/^[0-9a-f]{40}$/.test(m.source?.commit||"")) process.exit(1); process.stdout.write(m.source.commit)' "$MANIFEST")" || { echo "Release manifest source commit is unavailable for native XPC contract verification" >&2; exit 1; }
+SOURCE_TREE="$(node -e 'const m=require(process.argv[1]); if(!/^[0-9a-f]{40}$/.test(m.source?.tree||"")) process.exit(1); process.stdout.write(m.source.tree)' "$MANIFEST")" || { echo "Release manifest source tree is unavailable for native XPC contract verification" >&2; exit 1; }
+node "$SCRIPT_DIR/native-xpc-contract-gate.mjs" "$ROOT_DIR" "$SOURCE_COMMIT" "$SOURCE_TREE" >/dev/null
 "$ROOT_DIR/native/macos/scripts/verify-installer-package.sh" "$PACKAGE" "$EXPECTED_TEAM_ID"
 /usr/bin/xcrun stapler validate "$PACKAGE"
 /usr/sbin/spctl --assess --type install --verbose=4 "$PACKAGE"
@@ -33,17 +47,30 @@ CLIENT="$APP/Contents/Library/HelperTools/AgentPassNativeClient.app"
 [[ -d "$APP" && -d "$SERVICE" && -d "$CLIENT" ]] || { echo "Expected nested AgentPass app layout is missing" >&2; exit 1; }
 if find "$APP" -type l -print -quit | grep -q .; then echo "Release app contains a symlink" >&2; exit 1; fi
 if find "$APP" -type f \( -perm -002 -o -perm -020 \) -print -quit | grep -q .; then echo "Release app contains group/world-writable files" >&2; exit 1; fi
-for item in "$SERVICE" "$CLIENT" "$APP"; do /usr/bin/codesign --verify --strict --verbose=4 "$item"; done
+MANAGER_BINARY="$APP/Contents/MacOS/agentpass-native-manager"
+ONBOARDING_BINARY="$APP/Contents/MacOS/agentpass-onboarding"
+for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$ONBOARDING_BINARY" "$APP"; do /usr/bin/codesign --verify --strict --verbose=4 "$item"; done
 identifier() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}'; }
 SERVICE_BINARY="$SERVICE/Contents/MacOS/agentpass-native-service"
 CLIENT_BINARY="$CLIENT/Contents/MacOS/agentpass-native-client"
-MANAGER_BINARY="$APP/Contents/MacOS/agentpass-native-manager"
-[[ "$(identifier "$SERVICE")" == "dev.agentpass.native-service" && "$(identifier "$CLIENT")" == "dev.agentpass.native-client" && "$(identifier "$MANAGER_BINARY")" == "dev.agentpass" && "$(identifier "$APP")" == "dev.agentpass" ]] || { echo "Release signing identifier mismatch" >&2; exit 1; }
-for binary in "$SERVICE_BINARY" "$CLIENT_BINARY" "$MANAGER_BINARY"; do
+ATOMIC_RENAME_BINARY="$APP/Contents/Library/HelperTools/agentpass-atomic-rename"
+GIT_SIGNING_BINARY="$APP/Contents/Resources/bin/agentpass-git-sign"
+GIT_SESSION_SIGNING_BINARY="$APP/Contents/Resources/bin/agentpass-git-session-sign"
+GIT_SIGNING_XPC_BINARY="$APP/Contents/Resources/bin/agentpass-git-sign-xpc"
+[[ "$(identifier "$SERVICE")" == "dev.agentpass.native-service" && "$(identifier "$CLIENT")" == "dev.agentpass.native-client" && "$(identifier "$ATOMIC_RENAME_BINARY")" == "dev.agentpass.atomic-rename" && "$(identifier "$MANAGER_BINARY")" == "dev.agentpass.native-manager" && "$(identifier "$ONBOARDING_BINARY")" == "dev.agentpass" && "$(identifier "$APP")" == "dev.agentpass" ]] || { echo "Release signing identifier mismatch" >&2; exit 1; }
+for helper in "$GIT_SIGNING_BINARY|dev.agentpass.git-sign" "$GIT_SESSION_SIGNING_BINARY|dev.agentpass.git-session-sign" "$GIT_SIGNING_XPC_BINARY|dev.agentpass.git-sign-xpc"; do
+  IFS='|' read -r item expected_identifier <<< "$helper"
+  [[ -f "$item" && ! -L "$item" && -x "$item" ]] || { echo "Release Git helper is missing or unsafe: $item" >&2; exit 1; }
+  [[ "$(identifier "$item")" == "$expected_identifier" ]] || { echo "Release Git helper identifier mismatch: $item" >&2; exit 1; }
+done
+for binary in "$SERVICE_BINARY" "$CLIENT_BINARY" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY" "$ONBOARDING_BINARY"; do
   [[ "$(/usr/bin/lipo -archs "$binary")" == *arm64* && "$(/usr/bin/lipo -archs "$binary")" == *x86_64* ]] || { echo "Universal slices missing from $binary" >&2; exit 1; }
 done
+for binary in "$GIT_SIGNING_BINARY" "$GIT_SESSION_SIGNING_BINARY" "$GIT_SIGNING_XPC_BINARY"; do
+  [[ "$(/usr/bin/lipo -archs "$binary")" == *arm64* && "$(/usr/bin/lipo -archs "$binary")" == *x86_64* ]] || { echo "Universal slices missing from Git helper: $binary" >&2; exit 1; }
+done
 team_identifier() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}'; }
-for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$APP"; do
+for item in "$SERVICE" "$CLIENT" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY" "$ONBOARDING_BINARY" "$APP"; do
   [[ "$(team_identifier "$item")" == "$EXPECTED_TEAM_ID" ]] || { echo "TeamIdentifier mismatch on $item" >&2; exit 1; }
 done
 TEAM_ID="$EXPECTED_TEAM_ID"
@@ -53,7 +80,9 @@ verify_requirement() {
 }
 verify_requirement "$SERVICE" dev.agentpass.native-service
 verify_requirement "$CLIENT" dev.agentpass.native-client
-verify_requirement "$MANAGER_BINARY" dev.agentpass
+verify_requirement "$ATOMIC_RENAME_BINARY" dev.agentpass.atomic-rename
+verify_requirement "$MANAGER_BINARY" dev.agentpass.native-manager
+verify_requirement "$ONBOARDING_BINARY" dev.agentpass
 verify_requirement "$APP" dev.agentpass
 for helper in "$SERVICE" "$CLIENT"; do [[ -f "$helper/Contents/embedded.provisionprofile" && ! -L "$helper/Contents/embedded.provisionprofile" ]] || { echo "Helper provisioning profile missing" >&2; exit 1; }; done
 /usr/bin/security cms -D -i "$SERVICE/Contents/embedded.provisionprofile" >"$TEMP_DIR/service-profile.plist"
@@ -78,12 +107,22 @@ verify_no_dangerous_entitlements() {
 verify_helper_entitlements "$SERVICE" "${PREFIX}.dev.agentpass.service-keys" service
 verify_helper_entitlements "$CLIENT" "${PREFIX}.dev.agentpass.approval-keys" client
 verify_no_dangerous_entitlements "$MANAGER_BINARY" manager
+verify_no_dangerous_entitlements "$ONBOARDING_BINARY" onboarding
 verify_no_dangerous_entitlements "$APP" outer
-for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$APP"; do
+for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$ONBOARDING_BINARY" "$GIT_SIGNING_BINARY" "$GIT_SESSION_SIGNING_BINARY" "$GIT_SIGNING_XPC_BINARY" "$APP"; do
   details="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1)"
   grep -q '^Runtime Version=' <<<"$details" || { echo "Hardened Runtime missing on $item" >&2; exit 1; }
   grep -q '^Timestamp=' <<<"$details" || { echo "Secure timestamp missing on $item" >&2; exit 1; }
 done
+if [[ -n "${AGENTPASS_DISTRIBUTION_EVIDENCE:-}" || -n "${AGENTPASS_DISTRIBUTION_INVENTORY:-}" || -n "${AGENTPASS_DISTRIBUTION_EVIDENCE_ROOT:-}" || -n "${AGENTPASS_DISTRIBUTION_VERIFICATION:-}" ]]; then
+  : "${AGENTPASS_DISTRIBUTION_EVIDENCE:?distribution evidence is required when macOS evidence verification is enabled}"
+  : "${AGENTPASS_DISTRIBUTION_INVENTORY:?distribution inventory is required when macOS evidence verification is enabled}"
+  : "${AGENTPASS_DISTRIBUTION_EVIDENCE_ROOT:?distribution evidence root is required when macOS evidence verification is enabled}"
+  : "${AGENTPASS_DISTRIBUTION_VERIFICATION:?independent distribution verification is required when macOS evidence verification is enabled}"
+  node "$ROOT_DIR/scripts/ops/verify-macos-release-evidence.mjs" \
+    "$AGENTPASS_DISTRIBUTION_EVIDENCE" "$AGENTPASS_DISTRIBUTION_INVENTORY" "$ARTIFACT_DIR" \
+    "$AGENTPASS_DISTRIBUTION_EVIDENCE_ROOT" "$AGENTPASS_DISTRIBUTION_VERIFICATION" "$TEAM_ID" >/dev/null
+fi
 # The accepted ticket and Gatekeeper assessment above were performed on the
 # staged, manifest-bound installer package. The nested app is independently
 # checked for its Developer ID requirements and hardened runtime here.

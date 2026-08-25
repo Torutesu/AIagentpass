@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/schemas/negative-probe-manifest-v1.json",
+  "title": "AgentPass negative identity and entitlement probe manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "release", "service", "client", "probes"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "agentpass.negative-identity-probe-manifest" },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "artifact_sha256", "release_manifest_sha256", "team_id", "wrong_team_id"],
+      "properties": {
+        "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "release_manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+        "wrong_team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "designated_requirement"],
+      "properties": {
+        "bundle_id": { "const": "dev.agentpass.native-service" },
+        "designated_requirement": { "type": "string", "minLength": 1 }
+      }
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "designated_requirement", "required_entitlements"],
+      "properties": {
+        "bundle_id": { "const": "dev.agentpass.native-client" },
+        "designated_requirement": { "type": "string", "minLength": 1 },
+        "required_entitlements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["keychain-access-groups"],
+          "properties": {
+            "keychain-access-groups": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "string", "minLength": 1 } }
+          }
+        }
+      }
+    },
+    "probes": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "relative_path", "bundle_id", "signature_kind", "team_id_expectation", "designated_requirement_expectation", "entitlement_expectation", "authorization_expectation"],
+        "properties": {
+          "role": { "enum": ["approved", "missing-entitlement", "wrong-team", "ad-hoc"] },
+          "relative_path": { "type": "string", "pattern": "^probes/[a-z0-9-]+\\.app$" },
+          "bundle_id": { "const": "dev.agentpass.native-client" },
+          "signature_kind": { "enum": ["developer-id", "ad-hoc"] },
+          "team_id_expectation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "value"],
+            "properties": {
+              "mode": { "enum": ["exact", "absent"] },
+              "value": { "type": ["string", "null"] }
+            }
+          },
+          "designated_requirement_expectation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "value"],
+            "properties": {
+              "mode": { "enum": ["exact", "not-release"] },
+              "value": { "type": ["string", "null"] }
+            }
+          },
+          "entitlement_expectation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "values"],
+            "properties": {
+              "mode": { "const": "exact" },
+              "values": { "type": "object", "additionalProperties": false }
+            }
+          },
+          "authorization_expectation": { "enum": ["allowlisted-methods-only", "deny-before-signing"] }
+        }
+      }
+    }
+  }
+}

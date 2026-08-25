@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/audit-export-response-v1.schema.json",
+  "title": "AgentPass audit export response v1",
+  "description": "Exact immutable committed audit export returned by creation and retrieval. Request, claim, idempotency, provider, and private signer fields are excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 9,
+  "required": ["organization_id", "export_id", "environment", "chain", "range", "payload_digest", "payload", "audit_anchor", "validity"],
+  "properties": {
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "export_id": { "$ref": "#/$defs/uuid" },
+    "environment": { "enum": ["staging", "production"] },
+    "chain": { "enum": ["admin", "cloud_agent", "device"] },
+    "range": { "$ref": "#/$defs/range" },
+    "payload_digest": { "$ref": "#/$defs/sha256" },
+    "payload": { "$ref": "https://agentpass.dev/contracts/audit-export-payload-v1.schema.json" },
+    "audit_anchor": { "$ref": "https://agentpass.dev/contracts/audit-anchor-v1.schema.json" },
+    "validity": { "enum": ["active", "expired"] }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["from_audit_position", "to_audit_position", "previous_root_digest", "root_digest", "record_count"],
+      "properties": {
+        "from_audit_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "to_audit_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "previous_root_digest": { "$ref": "#/$defs/sha256" },
+        "root_digest": { "$ref": "#/$defs/sha256" },
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    }
+  }
+}

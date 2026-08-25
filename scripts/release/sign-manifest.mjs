@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
+import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
+import { verifyManifestDeclaredAssets } from './roundtrip-release-assets.mjs';
 
 const [manifestArg, privateKeyArg, signatureArg] = process.argv.slice(2);
 if (!manifestArg || !privateKeyArg || !signatureArg || process.argv.slice(2).length !== 3) throw new Error('Usage: sign-manifest.mjs MANIFEST PRIVATE-KEY SIGNATURE');
@@ -23,8 +26,29 @@ const readRegular = (value, maximum, requirePrivate) => {
 const manifest = readRegular(manifestArg, 16 * 1024 * 1024, false);
 let parsedManifest;
 try { parsedManifest = JSON.parse(manifest.toString('utf8')); } catch { throw new Error('release manifest is not valid UTF-8 JSON'); }
-const expectedTopLevel = ['artifacts', 'evidence', 'generated_at', 'product', 'schema_version', 'source', 'version'];
-if (JSON.stringify(Object.keys(parsedManifest).sort()) !== JSON.stringify(expectedTopLevel) || parsedManifest.schema_version !== 2 || parsedManifest.product !== 'AgentPass' || !manifest.equals(Buffer.from(`${JSON.stringify(parsedManifest, null, 2)}\n`, 'utf8'))) throw new Error('refusing to sign a noncanonical or unsupported release manifest');
+const expectedTopLevel = ['artifacts', 'candidate_id', 'evidence', 'external_qualification_controller', 'generated_at', 'product', 'schema_version', 'source', 'version'];
+if (JSON.stringify(Object.keys(parsedManifest).sort()) !== JSON.stringify(expectedTopLevel) || parsedManifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || parsedManifest.product !== 'AgentPass' || !manifest.equals(Buffer.from(`${JSON.stringify(parsedManifest, null, 2)}\n`, 'utf8'))) throw new Error('refusing to sign a noncanonical or unsupported release manifest');
+const exactKeys = (value, keys, label) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has missing or unknown fields`);
+};
+const external = parsedManifest.external_qualification_controller;
+const productArtifacts = Array.isArray(parsedManifest.artifacts) ? parsedManifest.artifacts.filter((item) => item?.role === 'product') : [];
+if (productArtifacts.length !== 1 || typeof productArtifacts[0].name !== 'string' || !productArtifacts[0].name.endsWith('.pkg') || !/^[0-9a-f]{64}$/.test(productArtifacts[0].sha256)) throw new Error('release manifest requires exactly one product PKG artifact');
+assertReleaseCandidateIdMatchesProduct(parsedManifest.candidate_id, productArtifacts[0].sha256);
+exactKeys(external, ['identity_document', 'identity', 'notarization'], 'external qualification controller');
+exactKeys(external.identity_document, ['name', 'bytes', 'sha256'], 'controller identity document');
+exactKeys(external.notarization, ['status', 'submission_ids', 'evidence'], 'controller notarization');
+const identity = validateExternalQualificationControllerIdentity(external.identity);
+if (typeof external.identity_document.name !== 'string' || external.identity_document.name !== basename(external.identity_document.name) || !/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(external.identity_document.name) || !Number.isSafeInteger(external.identity_document.bytes) || external.identity_document.bytes <= 0 || !/^[0-9a-f]{64}$/.test(external.identity_document.sha256)) throw new Error('controller identity document binding is invalid');
+const identityDocumentBytes = readRegular(join(dirname(resolve(manifestArg)), external.identity_document.name), 1024 * 1024, false);
+if (identityDocumentBytes.length !== external.identity_document.bytes || crypto.createHash('sha256').update(identityDocumentBytes).digest('hex') !== external.identity_document.sha256) throw new Error('controller identity document digest mismatch');
+const documentIdentity = parseCanonicalExternalQualificationControllerIdentity(identityDocumentBytes);
+if (JSON.stringify(documentIdentity) !== JSON.stringify(identity)) throw new Error('embedded controller identity differs from its document');
+const controllerArtifacts = Array.isArray(parsedManifest.artifacts) ? parsedManifest.artifacts.filter((item) => item?.role === 'external_qualification_controller') : [];
+if (controllerArtifacts.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || controllerArtifacts[0].bytes !== identity.archive_bytes || controllerArtifacts[0].sha256 !== identity.archive_sha256) throw new Error('controller identity does not bind the declared external archive');
+if (external.notarization.status !== 'accepted_stapled' || !Array.isArray(external.notarization.submission_ids) || external.notarization.submission_ids.length === 0 || !Array.isArray(external.notarization.evidence) || external.notarization.evidence.length !== 2) throw new Error('controller notarization binding is incomplete');
+for (const item of external.notarization.evidence) exactKeys(item, ['kind', 'name', 'bytes', 'sha256'], 'controller notarization evidence item');
+verifyManifestDeclaredAssets(parsedManifest, dirname(resolve(manifestArg)));
 const privateBytes = readRegular(privateKeyArg, 16 * 1024, true);
 let key;
 try { key = crypto.createPrivateKey(privateBytes); }

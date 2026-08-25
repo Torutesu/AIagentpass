@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
+import { resolve, join } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import { executePhysicalScenario, parseJSONOutput, readProtectedFile, requireCommandSuccess, runFixedCommand, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
+
+const GATE = 'offline-expiry';
+const TESTS = Object.freeze(['offline-expiry-denied']);
+const APP_PATH = '/Applications/AgentPass.app';
+const SERVICE_LABEL = 'dev.agentpass.native-service';
+const SIGNING_REQUEST_PATH = '/private/var/db/agentpass-qualification/signing-request.json';
+const NETWORKSETUP = '/usr/sbin/networksetup';
+const NETWORK_ARGS = Object.freeze(['-setnetworkserviceenabled', 'Wi-Fi']);
+const STATUS_KEYS = Object.freeze(['configured', 'device_auth_public_key', 'device_revoked', 'expired', 'format_epoch', 'global_revoked', 'refresh_configured', 'refresh_consecutive_failures', 'refresh_generation', 'refresh_in_flight', 'refresh_last_attempt_at', 'refresh_last_error', 'refresh_last_success_at', 'refresh_next_attempt_at', 'refresh_sequence', 'refresh_source_url', 'refresh_state', 'revoked_agents', 'revoked_capabilities', 'sequence', 'operational']);
+const exactKeys = (value, keys, label) => { if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has missing or unknown fields`); };
+const requireRoot = (getUid = process.getuid) => { if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root'); };
+const outer = (result, label, allowFailure = false) => {
+  const bytes = requireCommandSuccess(result, label);
+  const value = parseJSONOutput(bytes, label);
+  exactKeys(value, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`);
+  if (value.ok !== true) { if (allowFailure && typeof value.error === 'string' && value.stdout_base64 === null) return null; throw new Error(`${label} failed ambiguously`); }
+  if (value.error !== null || typeof value.stdout_base64 !== 'string') throw new Error(`${label} envelope is invalid`);
+  const decoded = Buffer.from(value.stdout_base64, 'base64'); if (decoded.length === 0 || decoded.toString('base64') !== value.stdout_base64) throw new Error(`${label} payload is invalid`);
+  return decoded;
+};
+const validateStatus = (value, label, expiredAllowed = false) => {
+  exactKeys(value, STATUS_KEYS, `${label} status`);
+  if (value.configured !== true || value.format_epoch !== 2 || value.global_revoked !== false || value.device_revoked !== false || !Number.isSafeInteger(value.sequence) || value.sequence < 1 || !Number.isSafeInteger(value.refresh_generation) || value.refresh_generation < 1 || value.refresh_in_flight !== false || value.refresh_configured !== true || !['idle', 'acknowledged'].includes(value.refresh_state) || value.refresh_consecutive_failures !== 0 || !Array.isArray(value.revoked_agents) || !Array.isArray(value.revoked_capabilities) || (!expiredAllowed && (value.operational !== true || value.expired !== false))) throw new Error(`${label} status is invalid`);
+  return value;
+};
+const status = (result, label, expiredAllowed = false) => validateStatus(parseJSONOutput(outer(result, label), label), label, expiredAllowed);
+const refresh = (result, label) => { const value = parseJSONOutput(outer(result, label), label); exactKeys(value, [...STATUS_KEYS, 'refreshed'], `${label} status`); if (value.refreshed !== true) throw new Error(`${label} did not complete`); const { refreshed: _marker, ...body } = value; return validateStatus(body, label); };
+const sign = async (runPinned, entry, request, production, runCommand, label) => {
+  const result = await runPinned(entry, ['--service', SERVICE_LABEL, 'sign'], { production, runCommand, input: request });
+  try {
+    const decoded = outer(result, label);
+    if (decoded.length === 0) throw new Error(`${label} returned an empty signature`);
+    return true;
+  } catch (error) {
+    if (result?.ok === false) return false;
+    throw error;
+  }
+};
+const readRequest = (production) => readProtectedFile(SIGNING_REQUEST_PATH, { maximum: 12 * 1024 * 1024, production }).bytes;
+const fixedNetworkControl = async (enabled, runCommand) => { const result = await runCommand(NETWORKSETUP, [...NETWORK_ARGS, enabled ? 'on' : 'off'], { cwd: '/' }); requireCommandSuccess(result, `network ${enabled ? 'restore' : 'disable'}`); };
+const waitForRealExpiry = async ({ observe, clock = () => Date.now(), waitFn = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)), maxWaitMs = 8 * 60 * 60 * 1000, pollMs = 1000 } = {}) => {
+  if (typeof observe !== 'function' || typeof clock !== 'function' || typeof waitFn !== 'function' || !Number.isSafeInteger(maxWaitMs) || maxWaitMs <= 0 || !Number.isSafeInteger(pollMs) || pollMs <= 0) throw new Error('expiry wait contract is invalid');
+  const deadline = clock() + maxWaitMs;
+  for (;;) { const current = await observe(); if (current.expired === true && current.operational === false) return current; if (clock() >= deadline) throw new Error('control did not expire at its real expiry boundary'); await waitFn(pollMs); }
+};
+
+export const performOfflineExpiry = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, signingRequest, networkControl, clock, waitFn, maxWaitMs, pollMs } = {}) => {
+  requireRoot(getUid);
+  if (machine.applicationPath !== APP_PATH || machine.serviceLabel !== SERVICE_LABEL || machine.executables.native_client?.path === undefined) throw new Error('scenario config identity is not fixed');
+  const request = signingRequest ?? readRequest(production); if (!Buffer.isBuffer(request) || request.length === 0) throw new Error('signing request is unavailable');
+  const controlNetwork = networkControl ?? ((enabled) => fixedNetworkControl(enabled, runCommand));
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const baseline = status(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-status'], { production, runCommand }), 'baseline control status');
+    if (!await sign(runPinned, machine.executables.native_client, request, production, runCommand, 'baseline signing operation')) throw new Error('baseline signing operation was not allowed');
+    const refreshed = refresh(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-refresh'], { production, runCommand }), 'online control refresh');
+    if (refreshed.sequence !== baseline.sequence || refreshed.refresh_sequence !== baseline.sequence || refreshed.refresh_generation < baseline.refresh_generation) throw new Error('offline grant was not bounded to the converged control');
+
+    let expired;
+    try {
+      await controlNetwork(false);
+      expired = await waitForRealExpiry({ clock, waitFn, maxWaitMs, pollMs, observe: async () => status(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-status'], { production, runCommand }), 'offline expiry observation', true) });
+      if (await sign(runPinned, machine.executables.native_client, request, production, runCommand, 'expired signing operation')) throw new Error('expired offline grant still permitted signing');
+    } finally {
+      await controlNetwork(true);
+    }
+    if (!expired || expired.expired !== true || expired.operational !== false) throw new Error('offline expiry boundary was not observed');
+    const recovered = refresh(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-refresh'], { production, runCommand }), 'recovery control refresh');
+    if (recovered.sequence !== baseline.sequence || recovered.refresh_sequence !== baseline.sequence || recovered.operational !== true || recovered.expired !== false || recovered.refresh_generation < baseline.refresh_generation) throw new Error('control recovery widened or changed the bound policy');
+    if (!await sign(runPinned, machine.executables.native_client, request, production, runCommand, 'recovered signing operation')) throw new Error('control did not recover after network restoration');
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: APP_PATH } });
+};
+
+export const executeOfflineExpiry = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performOfflineExpiry(context) });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performOfflineExpiry(context) });

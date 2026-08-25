@@ -1,0 +1,5 @@
+{
+  "key_id": "possession-receipt-v1",
+  "algorithm": "ed25519",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=\n-----END PUBLIC KEY-----\n"
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/bundle-ack-v1.schema.json",
+  "title": "Control bundle acknowledgement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "type", "organization_id", "device_id", "device_key_epoch", "format_epoch", "sequence", "statement_hash", "result", "observed_at", "nonce", "signature_algorithm", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.bundle-ack" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "device_key_epoch": { "$ref": "#/$defs/safeInteger" },
+    "format_epoch": { "const": 2 },
+    "sequence": { "$ref": "#/$defs/safeInteger" },
+    "statement_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "result": { "enum": ["applied", "blocked"] },
+    "reason_code": {
+      "enum": [
+        "bundle_expired",
+        "bundle_not_yet_valid",
+        "bundle_signature_invalid",
+        "bundle_signer_untrusted",
+        "bundle_audience_mismatch",
+        "bundle_sequence_rollback",
+        "bundle_sequence_conflict",
+        "bundle_storage_failed",
+        "device_revoked",
+        "emergency_stop",
+        "internal_error"
+      ]
+    },
+    "observed_at": { "$ref": "#/$defs/timestamp" },
+    "nonce": { "$ref": "#/$defs/nonce" },
+    "signature_algorithm": { "const": "p256-sha256" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "allOf": [
+    { "if": { "required": ["result"], "properties": { "result": { "const": "blocked" } } }, "then": { "required": ["reason_code"] } },
+    { "if": { "required": ["result"], "properties": { "result": { "const": "applied" } } }, "then": { "not": { "required": ["reason_code"] } } }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "safeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 22,
+      "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$"
+    }
+  }
+}

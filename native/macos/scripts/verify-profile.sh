@@ -24,10 +24,16 @@ if read_plist :Entitlements:keychain-access-groups:1 >/dev/null; then
   echo "$ROLE profile authorizes unexpected additional keychain groups" >&2
   exit 1
 fi
-if [[ "$(read_plist :Entitlements:get-task-allow || true)" == "true" ]]; then
+if read_plist :Entitlements:get-task-allow >/dev/null; then
   echo "$ROLE profile enables get-task-allow" >&2
   exit 1
 fi
+for forbidden in com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables; do
+  if read_plist ":Entitlements:$forbidden" >/dev/null; then
+    echo "$ROLE profile enables forbidden entitlement: $forbidden" >&2
+    exit 1
+  fi
+done
 [[ "$(read_plist :ProvisionsAllDevices)" == "true" ]] || { echo "$ROLE profile is not a Developer ID distribution profile" >&2; exit 1; }
 EXPIRATION="$(read_plist :ExpirationDate)"
 /usr/bin/ruby -rtime -e 'abort "expired" unless Time.parse(ARGV[0]) > Time.now' "$EXPIRATION" || { echo "$ROLE profile is expired" >&2; exit 1; }

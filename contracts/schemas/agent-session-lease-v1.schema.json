@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-session-lease-v1.schema.json",
+  "title": "AgentPass process-bound agent session lease v1",
+  "description": "A bounded local session record containing only public correlation and binding digests.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 19,
+  "required": [
+    "version",
+    "type",
+    "session_id",
+    "grant_id",
+    "organization_id",
+    "device_id",
+    "agent_id",
+    "agent_kind",
+    "adapter_id",
+    "adapter_version",
+    "process_binding_sha256",
+    "ancestry_binding_sha256",
+    "worktree_binding_sha256",
+    "max_signatures",
+    "used_signatures",
+    "not_before",
+    "expires_at",
+    "control_sequence",
+    "authority_generation"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.agent-session-lease" },
+    "session_id": { "$ref": "#/$defs/uuid" },
+    "grant_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "agent_id": { "$ref": "#/$defs/uuid" },
+    "agent_kind": { "enum": ["claude-code", "cursor"] },
+    "adapter_id": { "$ref": "#/$defs/uuid" },
+    "adapter_version": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "process_binding_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "ancestry_binding_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "worktree_binding_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "max_signatures": { "$ref": "#/$defs/signatureBudget" },
+    "used_signatures": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "not_before": { "$ref": "#/$defs/canonicalTimestamp" },
+    "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "control_sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256Hex": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signatureBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    }
+  }
+}

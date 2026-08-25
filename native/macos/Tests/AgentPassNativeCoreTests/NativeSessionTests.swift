@@ -12,6 +12,36 @@ private func sessionPolicy(required: Bool = true, ttl: Int = 300) throws -> Data
     ], options: [.sortedKeys])
 }
 
+private func multiAgentSessionPolicy() throws -> Data {
+    try JSONSerialization.data(withJSONObject: [
+        "agents": [["id": sessionAgentID], ["id": "22222222-2222-4222-8222-222222222222"]],
+        "session": ["required": true, "ttl_seconds": 300]
+    ], options: [.sortedKeys])
+}
+
+@Test func nativeSessionTargetedRevocationDoesNotAffectAnotherAgent() throws {
+    let otherAgentID = "22222222-2222-4222-8222-222222222222"
+    let approvalKey = P256.Signing.PrivateKey()
+    let publicKey = try SSHSIG.authorizedKey(publicKeyX963: approvalKey.publicKey.x963Representation)
+    let manager = try NativeSessionManager(policyData: multiAgentSessionPolicy(), approvalPublicKey: publicKey)
+    let now: Int64 = 1_800_000_000_000
+    func issue(_ agentID: String) throws -> NativeIssuedSession {
+        let challenge = try manager.beginSession(agentID: agentID, requestedTTLSeconds: 300, nowMilliseconds: now)
+        return try manager.completeSession(challengeData: challenge, signature: approvalKey.signature(for: challenge).rawRepresentation, nowMilliseconds: now + 1)
+    }
+    let target = try issue(sessionAgentID)
+    let other = try issue(otherAgentID)
+    let targetPending = try manager.beginSession(agentID: sessionAgentID, requestedTTLSeconds: 300, nowMilliseconds: now + 1)
+    let otherPending = try manager.beginSession(agentID: otherAgentID, requestedTTLSeconds: 300, nowMilliseconds: now + 1)
+    let revoked = try manager.revoke(agentID: sessionAgentID)
+    #expect(revoked.revokedSessions == 1)
+    #expect(throws: AgentPassNativeError.self) { try manager.validateSession(token: target.token, agentID: sessionAgentID, nowMilliseconds: now + 2) }
+    try manager.validateSession(token: other.token, agentID: otherAgentID, nowMilliseconds: now + 2)
+    #expect(throws: AgentPassNativeError.self) { try manager.completeSession(challengeData: targetPending, signature: approvalKey.signature(for: targetPending).rawRepresentation, nowMilliseconds: now + 2) }
+    _ = try manager.completeSession(challengeData: otherPending, signature: approvalKey.signature(for: otherPending).rawRepresentation, nowMilliseconds: now + 2)
+    #expect(throws: AgentPassNativeError.self) { _ = try manager.revoke(agentID: "unknown") }
+}
+
 @Test func nativeSessionRequiresSignedOneTimeApprovalAndBindsAgent() throws {
     let approvalKey = P256.Signing.PrivateKey()
     let publicKey = try SSHSIG.authorizedKey(publicKeyX963: approvalKey.publicKey.x963Representation)

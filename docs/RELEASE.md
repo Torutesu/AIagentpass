@@ -31,17 +31,29 @@ native/macos/scripts/build-app.sh --universal --output-dir "$PWD/dist" \
   --identity 'Developer ID Application: …' --team-id APPLETEAM1 \
   --app-identifier-prefix APPLETEAM1 \
   --service-profile /protected/service.provisionprofile \
-  --client-profile /protected/client.provisionprofile
+  --client-profile /protected/client.provisionprofile \
+  --agent-profile /protected/agent.provisionprofile \
+  --qualification-client-profile /protected/qualification-client.provisionprofile
+```
+
+`--universal` is a closed cross-hardware build: every executable, including
+`agentpass-git-sign`, `agentpass-git-session-sign`, and `agentpass-git-sign-xpc`,
+must contain exactly the `arm64` and `x86_64` slices. The app assembly fails
+closed if any slice is missing or duplicated.
+
+```sh
+export AGENTPASS_TEAM_ID=APPLETEAM1
 native/macos/scripts/build-installer.sh \
   --app "$PWD/dist/AgentPass.app" \
   --output "$PWD/dist/AgentPass-v0.18.0-macos-universal.pkg" \
   --identity 'Developer ID Installer: …'
+AGENTPASS_TEAM_ID=APPLETEAM1 \
 AGENTPASS_NOTARY_KEY_ID=… \
 AGENTPASS_NOTARY_ISSUER_ID=… \
 AGENTPASS_NOTARY_PRIVATE_KEY_PATH=/protected/AuthKey.p8 \
 scripts/release/notarize-installer.sh \
-  dist/AgentPass-v0.18.0-macos-universal.pkg \
-  dist/notarytool-result.json dist/stapler-result.txt
+  "$PWD/dist/AgentPass-v0.18.0-macos-universal.pkg" \
+  "$PWD/dist/notarytool-result.json" "$PWD/dist/stapler-result.txt"
 node scripts/release/generate-sbom.mjs dist/AgentPass-v0.18.0.spdx.json
 node scripts/release/generate-manifest.mjs \
   dist/AgentPass-v0.18.0.release-manifest.json \
@@ -91,6 +103,24 @@ state. A fresh install creates only the root-owned mode-`0700` state directory;
 it does not invent configuration or lifecycle records. An unsafe existing tree
 causes installation to fail closed instead of being repaired or replaced.
 
+### Install freshness and rollback policy
+
+The signed manifest version is copied into the root-owned installed-release
+receipt as `release_version` (receipt schema version 2). Before invoking
+`/usr/sbin/installer`, the CLI reads that receipt and applies this policy:
+
+- a missing receipt permits the first install;
+- a strictly newer release permits an upgrade;
+- an exact same-version artifact and manifest permit an idempotent repair;
+- an older release is rejected, even when its signature, notarization, and
+  checksums are valid;
+- a different artifact or manifest with the same version is rejected.
+
+There is no implicit rollback switch. A rollback requires a separately designed,
+audited authorization flow; operators must not bypass this check by invoking the
+system installer directly. An unreadable, unsafe, or pre-versioned receipt also
+fails closed, because the installed release version cannot be proven.
+
 For a production macOS artifact, run the macOS verifier with an independently
 distributed release-key fingerprint and Apple Team ID:
 
@@ -113,12 +143,12 @@ directory. Changing an original
 release path after staging therefore cannot change the bytes later executed or
 assessed.
 
-The macOS verifier checks the outer app, manager executable, service helper, and
-approval client independently. Each must have the expected identifier, pinned
+The macOS verifier checks the outer app, native onboarding executable, manager
+executable, service helper, and approval client independently. Each must have the expected identifier, pinned
 TeamIdentifier, hardened runtime, secure timestamp, and a Developer ID
 designated requirement bound to that Team ID. The service and client signed
 entitlements must each contain exactly their own expected keychain access group.
-The manager and outer app must have no keychain group. Every component rejects
+The onboarding executable, manager, and outer app must have no keychain group. Every component rejects
 `get-task-allow` and disabled library validation. The helper provisioning
 profiles are separately CMS-verified, and their identifiers and sole keychain
 groups must agree with the signed code. The verifier also requires a trusted
@@ -164,25 +194,35 @@ An unqualified template can be schema-checked without credentials:
 node scripts/release/validate-hardware-qualification.mjs RESULT.json
 ```
 
-A report with `qualified: true` is rejected unless all required and
-architecture-specific tests passed, every passing test binds a
-`sha256:<64-hex>` evidence digest, the exact candidate artifact matches the
-report, and a detached Ed25519 operator signature verifies under an independently
+A report with `qualified: true` is rejected unless all required physical tests
+and gates passed, every passing result binds an existing evidence file by size
+and SHA-256, and the exact candidate PKG is bound by the signed release manifest.
+The report also binds source, dependency lock, Team ID, every code identity,
+notarization, Cloud image, database migrations, signer-key versions, browser
+versions, and a detached Ed25519 operator signature under an independently
 pinned operator-key fingerprint:
 
 ```sh
 node scripts/release/validate-hardware-qualification.mjs \
-  RESULT.json ARTIFACT RESULT.sig OPERATOR.public.pem \
-  'SHA256:PINNED_OPERATOR_KEY_FINGERPRINT'
+  RESULT.json \
+  AgentPass-v0.18.0-macos-universal.pkg \
+  AgentPass-0.18.0.release-manifest.json \
+  AgentPass-0.18.0.release-manifest.sig \
+  RELEASE.public.pem \
+  'SHA256:PINNED_RELEASE_KEY_FINGERPRINT' \
+  RESULT.sig OPERATOR.public.pem \
+  'SHA256:PINNED_OPERATOR_KEY_FINGERPRINT' \
+  QUALIFICATION-EVIDENCE-DIRECTORY
 ```
 
-The detached signature is over the exact canonical report bytes and is encoded
-as one base64 line. Apple Silicon and Intel T2 reports must be signed by approved
+Both detached signatures are over exact canonical bytes and are encoded as one
+base64 line. Evidence names are basenames only; symlinks, hard links, missing
+files, size changes, and digest substitutions fail closed. Apple Silicon and Intel T2 reports must be signed by approved
 operators and must name the same candidate artifact SHA-256 before promotion.
 Intel hardware without T2 cannot qualify. Operator-key enrollment, revocation,
-and the requirement for both architecture reports are external protected-release
-policy gates; a fingerprint supplied by an untrusted artifact is not a trust
-root.
+and the aggregate two-report verifier remain protected-release gates; a
+fingerprint supplied by an untrusted artifact is not a trust root. A single
+qualified report therefore does not authorize publication by itself.
 
 ## Workflow and promotion rule
 
@@ -193,15 +233,24 @@ application signing, installer signing, manifest signing, and App Store Connect
 notary credentials. There is no `pull_request`, `pull_request_target`, tag-push,
 or untrusted-ref path into that job.
 
+The signing job also generates a migration manifest from the exact committed Git
+objects and a canonical `release-attestation.json` binding `package-lock.json`,
+the migration digest, immutable Cloud image digest, signer key versions, Team ID,
+and all six nested code identities. Both files are included in the signed
+manifest and candidate artifact.
+
 The signing job uploads a private workflow artifact only after notarytool
 returns `Accepted`, stapling succeeds, `stapler validate` succeeds, Gatekeeper
 accepts the installer, and the post-staple package bytes are included in the
-signed manifest. A separate `production-release` job receives no signing or
-notary secrets. It downloads those exact bytes, repeats manifest, package,
-ticket, Gatekeeper, code-signing, entitlement, profile, and source checks, then
-creates a draft GitHub Release. It uploads an explicit manifest-bound file list
-and makes the draft public only after every upload succeeds. Existing releases
-are never overwritten.
+signed manifest. It has no GitHub Release publication job. The candidate must
+subsequently pass `.github/workflows/p0c-hardware-qualification.yml` on both
+protected hardware classes. A separate protected, secret-free promotion workflow
+repeats manifest, package, ticket, Gatekeeper, code-signing, entitlement, report,
+operator-policy, and aggregate-summary checks before creating the public release.
+It publishes both signed hardware reports, operator public keys, the approved
+operator policy, aggregate summary, evidence archives, and qualification
+checksums alongside the manifest-bound candidate files. Existing releases are
+never overwritten.
 
 Production promotion remains fail closed until all of these are available and
 independently checked:
@@ -212,3 +261,40 @@ independently checked:
 4. signed-manifest verification using the pinned release key;
 5. macOS-specific designated-requirement, entitlement, Gatekeeper, and ticket
    verification.
+
+## Promotion stop conditions
+
+The promotion decision is `STOP` if any condition below is true. These are
+operator stop conditions in addition to the workflow's machine checks:
+
+- the candidate, release manifest, source commit/tree, package, image, SBOM,
+  migration set, or qualification evidence does not bind byte-for-byte;
+- the canonical CI run is not a completed successful `main` run with exactly
+  the six required lanes (`postgres-authority-16`, `postgres-authority-17`,
+  `postgres-integration`, `browser-e2e`, `p0b-live-process`, `test`), or any
+  lane is missing, duplicated, extra, skipped, failed, or `not_proven`;
+- release, KMS, Platform Auth, hardware, or promotion evidence is missing,
+  stale, non-canonical, not source/tree/run/job bound, or contains a secret;
+- any of the eight managed signing purposes is missing, shared, disabled,
+  stale, wrong-purpose, wrong-key-version, backed by local/file material, or
+  fails its readiness canary or drain;
+- Platform Auth cannot prove the platform principal, authenticated mTLS peer,
+  deployment-owned workload identity, and consumed operation-bound recent
+  WebAuthn proof; `404`/`503` is not a degraded success;
+- PostgreSQL cutover, role separation, TLS identity, migration checksum,
+  backup/PITR restore, HA/failover, or authority comparison is not evidenced;
+- a promotion is `reserved`, `uncertain`, or `rejected`, or an operator cannot
+  reconcile it from the durable ledger and exact provider receipt without a
+  blind retry or rebuild;
+- Developer ID signing, notarization acceptance, stapling, Gatekeeper, or both
+  physical Apple silicon and Intel/T2 reports are absent for the same PKG
+  digest;
+- Claude Code/Cursor E2E, staging canary/rollback/recovery drills, or required
+  alert/revocation measurements are absent;
+- an independent security review has an unresolved critical/high (or agreed
+  P0/P1) finding, or the required retest is missing.
+
+Do not waive a stop condition in a release ticket. Record the failed condition,
+candidate digest, stable reason code, owner, and replacement evidence. The
+[incident and revoke runbook](INCIDENT_AND_REVOKE_RUNBOOK.md) governs active
+incidents, uncertain operations, and rollback containment.

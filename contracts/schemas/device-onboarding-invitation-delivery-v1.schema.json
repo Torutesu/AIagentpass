@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-onboarding-invitation-delivery-v1.schema.json",
+  "title": "Browser-led device onboarding invitation delivery envelope v1",
+  "description": "A one-shot loopback POST envelope. The credential-bearing invitation is transient memory-only transport material; correlation_id and nonce are not authority and no reusable secret may appear in argv, environment, URL, browser storage, setup journal, or configuration.",
+  "$comment": "Credential is accepted only in this one-shot in-memory body and must be cleared after consume; never persist or place in URL/argv/environment.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "required": ["version", "type", "correlation_id", "nonce", "invitation"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.browser-onboarding.invitation" },
+    "correlation_id": { "$ref": "#/$defs/base64url32" },
+    "nonce": { "$ref": "#/$defs/base64url32" },
+    "invitation": { "$ref": "#/$defs/invitation" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "candidateId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "sourceCommit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+    "teamId": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" },
+    "deviceKeyFingerprint": { "type": "string", "minLength": 50, "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "canonicalTimestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "base64url32": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "credential": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$", "description": "One-shot credential; memory-only delivery, never URL/argv/environment/storage." },
+    "receiptVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "required": ["key_id", "algorithm", "public_key"],
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+        "algorithm": { "enum": ["ed25519", "p256-sha256"] },
+        "public_key": { "type": "string", "minLength": 80, "maxLength": 8192, "pattern": "^-----BEGIN PUBLIC KEY-----[\\s\\S]+-----END PUBLIC KEY-----\\n?$", "not": { "pattern": "PRIVATE KEY|SECRET|secret" } }
+      }
+    },
+    "candidateBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 10,
+      "required": ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"],
+      "properties": {
+        "version": { "const": 1 },
+        "enrollment_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "candidate_id": { "$ref": "#/$defs/candidateId" },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "source_commit": { "$ref": "#/$defs/sourceCommit" },
+        "team_id": { "$ref": "#/$defs/teamId" },
+        "device_key_fingerprint": { "$ref": "#/$defs/deviceKeyFingerprint" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" }
+      }
+    },
+    "challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"],
+      "properties": {
+        "challenge_id": { "$ref": "#/$defs/uuid" },
+        "nonce": { "$ref": "#/$defs/base64url32" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "candidate_id": { "$ref": "#/$defs/candidateId" },
+        "device_key_fingerprint": { "$ref": "#/$defs/deviceKeyFingerprint" }
+      }
+    },
+    "invitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 15,
+      "required": ["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "endpoint", "possession_receipt_verification"],
+      "properties": {
+        "version": { "const": 2 },
+        "proof_version": { "const": 2 },
+        "enrollment_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
+        "platform": { "const": "macos" },
+        "candidate_binding": { "$ref": "#/$defs/candidateBinding" },
+        "challenge_id": { "$ref": "#/$defs/uuid" },
+        "nonce": { "$ref": "#/$defs/base64url32" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "challenge": { "$ref": "#/$defs/challenge" },
+        "credential": { "$ref": "#/$defs/credential" },
+        "endpoint": { "type": "string", "pattern": "^/v1/enrollments/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "possession_receipt_verification": { "$ref": "#/$defs/receiptVerification" }
+      }
+    }
+  }
+}

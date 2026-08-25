@@ -1,0 +1,29 @@
+{
+  "events": [
+    {
+      "organization_id": "22222222-2222-4222-8222-222222222222",
+      "device_id": "33333333-3333-4333-8333-333333333333",
+      "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "event": {
+        "version": 1,
+        "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "operation": "git.commit.sign",
+        "decision": "allow",
+        "reason": "allowed",
+        "policy_sequence": 7,
+        "capability_sequence": 11,
+        "repository": "/work/project",
+        "branch": "feature/activity",
+        "remote": "git@example.test:project.git",
+        "payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "device_timestamp": "2026-08-12T00:00:00.000Z",
+        "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "received_at": "2026-08-12T00:00:01.000Z"
+    }
+  ],
+  "next_cursor": "AQIDBAUGBwgJCgsMDQ4PEA"
+}

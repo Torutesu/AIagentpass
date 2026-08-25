@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "state": "action_required",
+  "ok": false,
+  "generated_at": "2026-08-12T00:00:00.000Z",
+  "mode": "evaluation",
+  "checks": [
+    {
+      "id": "config.local",
+      "state": "action_required",
+      "severity": "info",
+      "summary": "AgentPass local policy is not initialized",
+      "remediation": "Run `agentpass init` in the intended repository."
+    }
+  ],
+  "summary": {
+    "healthy": 0,
+    "action_required": 1,
+    "degraded": 0,
+    "blocked": 0
+  },
+  "host": {
+    "platform": "darwin",
+    "architecture": "arm64"
+  }
+}

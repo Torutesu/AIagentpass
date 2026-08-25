@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/docs/qualification/external-qualification-evidence-v1.schema.json",
+  "title": "AgentPass external qualification evidence",
+  "description": "Strict, redacted aggregate evidence. A local/static result cannot satisfy an external gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "status",
+    "qualified",
+    "reason",
+    "release",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "agentpass-external-qualification" },
+    "status": { "enum": ["passed", "failed", "not_run"] },
+    "qualified": { "type": "boolean" },
+    "reason": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "gate_failed",
+        "external_runner_unavailable",
+        "evidence_incomplete",
+        "invalid_source_binding",
+        "invalid_run_binding",
+        "invalid_artifact_binding",
+        "static_only",
+        "secret_scan_failed"
+      ]
+    },
+    "release": { "$ref": "#/$defs/releaseBinding" },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "github_actions",
+        "postgresql",
+        "kms",
+        "webauthn",
+        "macos_hardware"
+      ],
+      "properties": {
+        "github_actions": {
+          "allOf": [
+            { "$ref": "#/$defs/gate" },
+            { "type": "object", "properties": { "required_checks": { "const": ["canonical_push_run", "exact_six_lanes", "source_sha_binding", "artifact_inventory_binding"] } } }
+          ]
+        },
+        "postgresql": {
+          "allOf": [
+            { "$ref": "#/$defs/gate" },
+            { "type": "object", "properties": { "required_checks": { "const": ["postgresql_16_version", "postgresql_17_version", "migration_contract", "role_rls_boundary", "concurrency_rollback"] } } }
+          ]
+        },
+        "kms": {
+          "allOf": [
+            { "$ref": "#/$defs/gate" },
+            { "type": "object", "properties": { "required_checks": { "const": ["provider_identity", "key_version_binding", "iam_matrix", "rotation_disable", "response_loss_reconciliation", "canary_sign_verify"] } } }
+          ]
+        },
+        "webauthn": {
+          "allOf": [
+            { "$ref": "#/$defs/gate" },
+            { "type": "object", "properties": { "required_checks": { "const": ["authenticator_origin_rp", "durable_one_time_consumption", "replay_rejection", "stale_context_rejection", "outage_fail_closed"] } } }
+          ]
+        },
+        "macos_hardware": {
+          "allOf": [
+            { "$ref": "#/$defs/gate" },
+            { "type": "object", "properties": { "required_checks": { "const": ["apple_silicon_signed_notarized", "intel_t2_signed_notarized", "secure_enclave_identity", "negative_identity_entitlement", "lifecycle_recovery"] } } }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": {
+        "type": "object",
+        "properties": {
+          "qualified": { "const": true },
+          "reason": { "const": null },
+          "gates": {
+            "type": "object",
+            "properties": {
+              "github_actions": { "$ref": "#/$defs/passedGate" },
+              "postgresql": { "$ref": "#/$defs/passedGate" },
+              "kms": { "$ref": "#/$defs/passedGate" },
+              "webauthn": { "$ref": "#/$defs/passedGate" },
+              "macos_hardware": { "$ref": "#/$defs/passedGate" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": {
+        "type": "object",
+        "properties": {
+          "qualified": { "const": false },
+          "reason": { "type": "string", "not": { "const": null } }
+        },
+        "anyOf": [
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "github_actions": { "type": "object", "properties": { "status": { "const": "failed" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "postgresql": { "type": "object", "properties": { "status": { "const": "failed" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "kms": { "type": "object", "properties": { "status": { "const": "failed" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "webauthn": { "type": "object", "properties": { "status": { "const": "failed" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "macos_hardware": { "type": "object", "properties": { "status": { "const": "failed" } } } } } } }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "not_run" } } },
+      "then": {
+        "type": "object",
+        "properties": {
+          "qualified": { "const": false },
+          "reason": { "type": "string", "not": { "const": null } }
+        },
+        "anyOf": [
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "github_actions": { "type": "object", "properties": { "status": { "const": "not_run" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "postgresql": { "type": "object", "properties": { "status": { "const": "not_run" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "kms": { "type": "object", "properties": { "status": { "const": "not_run" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "webauthn": { "type": "object", "properties": { "status": { "const": "not_run" } } } } } } },
+          { "type": "object", "properties": { "gates": { "type": "object", "properties": { "macos_hardware": { "type": "object", "properties": { "status": { "const": "not_run" } } } } } } }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "positiveId": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "releaseBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "source_commit", "source_tree", "artifact_sha256", "ci_run_id", "ci_run_attempt"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        "source_commit": { "$ref": "#/$defs/sha" },
+        "source_tree": { "$ref": "#/$defs/sha" },
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "ci_run_id": { "$ref": "#/$defs/positiveId" },
+        "ci_run_attempt": { "$ref": "#/$defs/positiveId" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "real_execution",
+        "runner_id",
+        "run_id",
+        "job_id",
+        "run_attempt",
+        "source_commit",
+        "source_tree",
+        "artifact_sha256",
+        "started_at",
+        "completed_at",
+        "environment"
+      ],
+      "properties": {
+        "kind": { "const": "external_runner" },
+        "real_execution": { "const": true },
+        "runner_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+          "not": { "pattern": "(^|[._:/ -])(local|static|unit|mock|fixture|fake|simulator|emulator|test|macos-latest)($|[._:/ -])" }
+        },
+        "run_id": { "$ref": "#/$defs/positiveId" },
+        "job_id": { "$ref": "#/$defs/positiveId" },
+        "run_attempt": { "$ref": "#/$defs/positiveId" },
+        "source_commit": { "$ref": "#/$defs/sha" },
+        "source_tree": { "$ref": "#/$defs/sha" },
+        "artifact_sha256": { "$ref": "#/$defs/digest" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "identity"],
+          "properties": {
+            "kind": { "enum": ["github_actions", "postgresql", "managed_kms", "platform_auth", "webauthn", "macos_hardware"] },
+            "identity": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,255}$",
+              "not": { "pattern": "(^|[._:/ -])(local|static|unit|mock|fixture|fake|simulator|emulator|test|macos-latest)($|[._:/ -])" }
+            }
+          }
+        }
+      }
+    },
+    "typedValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": { "type": { "const": "boolean" }, "value": { "type": "boolean" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": { "type": { "const": "integer" }, "value": { "type": "integer" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": { "type": { "const": "string" }, "value": { "type": "string", "maxLength": 256 } }
+        }
+      ]
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_id", "status", "expected", "observed", "evidence_sha256"],
+      "properties": {
+        "check_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "status": { "enum": ["passed", "failed"] },
+        "expected": { "$ref": "#/$defs/typedValue" },
+        "observed": { "$ref": "#/$defs/typedValue" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "qualified", "reason", "execution", "required_checks", "checks"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "not_run"] },
+        "qualified": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "execution": { "oneOf": [{ "$ref": "#/$defs/execution" }, { "type": "null" }] },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+        },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "passed" } } },
+          "then": {
+            "type": "object",
+            "properties": {
+              "qualified": { "const": true },
+              "reason": { "const": null },
+              "execution": { "$ref": "#/$defs/execution" },
+              "checks": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "object", "properties": { "status": { "const": "passed" } } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "failed" } } },
+          "then": {
+            "type": "object",
+            "properties": {
+              "qualified": { "const": false },
+              "reason": { "type": "string", "minLength": 1 },
+              "execution": { "$ref": "#/$defs/execution" },
+              "checks": {
+                "type": "array",
+                "minItems": 1,
+                "contains": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "const": "failed" } }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "not_run" } } },
+          "then": {
+            "type": "object",
+            "properties": {
+              "qualified": { "const": false },
+              "reason": { "type": "string", "minLength": 1 },
+              "execution": { "type": "null" },
+              "checks": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "passedGate": {
+      "allOf": [
+        { "$ref": "#/$defs/gate" },
+        { "type": "object", "properties": { "status": { "const": "passed" }, "qualified": { "const": true } } }
+      ]
+    }
+  }
+}

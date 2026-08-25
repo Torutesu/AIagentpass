@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/owner-recovery-v1.schema.json",
+  "title": "AgentPass threshold owner recovery v1",
+  "description": "Secret-free public recovery metadata. Raw exchange values, session tokens, WebAuthn challenges, assertions, and notification destinations are never part of the durable DTO.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "request_id", "organization_id", "subject_member_id", "state", "threshold", "approved_owner_count", "expires_at", "version", "created_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "threshold-owner-recovery" },
+    "request_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "subject_member_id": { "$ref": "#/$defs/uuid" },
+    "state": { "enum": ["pending", "approved", "delayed", "session_issued", "credential_enrolled", "activated", "cancelled", "expired", "failed"] },
+    "threshold": { "type": "integer", "minimum": 2, "maximum": 32 },
+    "approved_owner_count": { "type": "integer", "minimum": 0, "maximum": 32 },
+    "approved_at": { "type": ["string", "null"], "format": "date-time" },
+    "delay_until": { "type": ["string", "null"], "format": "date-time" },
+    "session_issued_at": { "type": ["string", "null"], "format": "date-time" },
+    "credential_enrolled_at": { "type": ["string", "null"], "format": "date-time" },
+    "activated_at": { "type": ["string", "null"], "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "terminal_reason": { "type": ["string", "null"], "maxLength": 128 },
+    "version": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+  }
+}

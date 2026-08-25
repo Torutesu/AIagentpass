@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-session-revoke-request-v1.schema.json",
+  "title": "AgentPass platform session empty revoke request v1",
+  "description": "The self-revoke endpoint has no JSON request body. Its target is identified exclusively by the HttpOnly platform-session cookie and the matching CSRF header; bearer, session identifiers, authority identifiers, and assertion material are never accepted in JSON.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 0,
+  "maxProperties": 0,
+  "properties": {},
+  "required": []
+}

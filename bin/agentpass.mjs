@@ -11,23 +11,71 @@ import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verify
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
 import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
-import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
+import { installIntegration, integrationPlan, integrationRemovalPlan, removeIntegration } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
+import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
+import { runProductionDoctor } from "../lib/platform-doctor.mjs";
+import { inspectNativeApplication } from "../lib/platform-setup.mjs";
+import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs";
+import { createNativeDeviceEnrollmentRunner } from "../lib/native-device-enrollment-runner.mjs";
+import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
+import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { createDeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
+import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
+import { assertFixedResumeDescriptorOptions, parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
+import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
+import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
+import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
+import { prepareSetupPreflight, publicSetupPreflightFailure, serializeSetupPreflightHandoff } from "../lib/setup-preflight.mjs";
+import { readInstalledReleaseReceipt, verifyInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
+import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
+import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
+import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
+import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
+import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-launch-contract.mjs";
+import { createAgentLifecycleLaunchDescriptor, launchAgentLifecycleWithHandoff, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
+import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
+import { smallSoftwareCommand } from "../lib/small-software-cli.mjs";
 
 const [, , command, ...args] = process.argv;
+
+function shellWord(value) {
+  const word = String(value);
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", `'"'"'`)}'`;
+}
 
 function usage() {
   console.log(`AgentPass 0.18.0
 
 Commands:
+  start [--project DIR] [--client auto|claude-code|cursor]
+                    connect the current coding project in one guided flow
+  install --manifest FILE --signature FILE --public-key FILE
+          --fingerprint SHA256:PIN --team-id TEAMID [--execute]
+                    verify and optionally install the production macOS package
+  setup status
+  setup prepare --json
+                    emit a public, candidate-bound local setup handoff
+  setup continue [--execute]
+  setup continue --execute --browser --console-url HTTPS_URL --enrollment-url HTTPS_URL
+  setup continue --execute --enrollment-url HTTPS_URL --enrollment-stdin
+                    advance exactly one verified, crash-resumable setup state
+  setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
+                    configure the native bridge and project MCP integration
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
-  status            show policy and revocation status
+  launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  close --session-id UUID [--operation-id UUID] [--reason completed|cancelled|client_shutdown]
+                    close a running Host session through the signed native control service
+  status            show legacy local policy and revocation status
   check             evaluate the current repository
-  doctor            check local prerequisites
+  doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
+                    diagnose production installation without changing state
+  uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]
+                    remove integrations/app registration while preserving all protected state
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
   broker stop       stop the macOS LaunchAgent
@@ -70,11 +118,17 @@ Commands:
   integrate CLIENT  preview Claude Code or Cursor MCP setup
   integrate CLIENT --install [--project DIR]
                     install project-scoped MCP setup without replacing other servers
+  integrate CLIENT --remove [--execute] [--project DIR]
+                    remove only the matching AgentPass MCP entry (dry run by default)
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
+  small-software inspect|bundle|prepare [--path DIR] [--manifest FILE]
+                    inspect a Small Software project without mutation
+  small-software publish --path DIR --plan-only
+                    emit a provider-free publish plan; live publish is gated
   session start     issue a short-lived agent session token
-  revoke            immediately deny all operations
+  revoke            immediately deny all operations (native mode invalidates protected sessions)
   restore           re-enable operations after revocation
   git-sign [args]   send a signing request to the broker
   audit [--verify]  print or verify audit logs and checkpoints
@@ -112,6 +166,370 @@ function git(gitArgs, optional = false) {
     throw new Error(result.stderr.trim() || `git ${gitArgs.join(" ")} failed`);
   }
   return result.stdout.trim();
+}
+
+function strictInstallFlags() {
+  const values = new Map();
+  const allowed = new Set(["--manifest", "--signature", "--public-key", "--fingerprint", "--team-id"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--execute") continue;
+    if (!allowed.has(argument) || values.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass install --manifest FILE --signature FILE --public-key FILE --fingerprint SHA256:PIN --team-id TEAMID [--execute]");
+    }
+    values.set(argument, args[index + 1]);
+    index += 1;
+  }
+  for (const flag of allowed) if (!values.has(flag)) throw new Error(`Install requires ${flag}`);
+  return values;
+}
+
+function installProduction() {
+  const flags = strictInstallFlags();
+  const inputs = prepareProductionInstall({
+    manifest: path.resolve(flags.get("--manifest")),
+    signature: path.resolve(flags.get("--signature")),
+    publicKey: path.resolve(flags.get("--public-key")),
+    fingerprint: flags.get("--fingerprint"),
+    teamId: flags.get("--team-id")
+  });
+  const verifier = fileURLToPath(new URL("../scripts/release/verify-macos-release.sh", import.meta.url));
+  const stager = fileURLToPath(new URL("../scripts/release/stage-release.mjs", import.meta.url));
+  const staged = stageProductionInstall(inputs, stager);
+  try {
+    const plan = verifyProductionInstall(staged, verifier);
+    const publicPlan = { ...plan, package: path.join(path.dirname(inputs.manifest), path.basename(plan.package)), stagingDirectory: undefined };
+    if (!args.includes("--execute")) {
+      console.log(JSON.stringify({ ...publicPlan, installed: false, dryRun: true, next: "rerun this command as root with --execute" }, null, 2));
+      return;
+    }
+    const installed = executeProductionInstall(plan);
+    console.log(JSON.stringify({ ...publicPlan, installed: installed.installed, installerOutput: installed.installerOutput, dryRun: false }, null, 2));
+  } finally {
+    removeStagedProductionInstall(staged.stagingDirectory);
+  }
+}
+
+async function continueNativeSetup() {
+  const flags = parseSetupContinueOptions(args.slice(1));
+  const journal = loadSetupJournal();
+  if (!flags.execute) {
+    console.log(JSON.stringify(publicSetupResult(await createSetupOrchestrator({ journal }).preview()), null, 2));
+    return;
+  }
+  if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
+  if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
+  const config = loadConfig();
+  const state = journal.status().state;
+  const enrollmentRequested = flags.browser || flags.enrollmentStdin;
+  let enrollmentResumeStore;
+  let enrollmentResumeRecord;
+  if (state === "service_keys_activated") {
+    enrollmentResumeStore = createDeviceOnboardingResumeStore(path.join(defaultConfigDir, "device-onboarding-resume.json"));
+    try { enrollmentResumeRecord = enrollmentResumeStore.read(); }
+    catch (error) { if (error?.code !== "NOT_INITIALIZED") throw error; }
+    if (enrollmentResumeRecord?.state === "failed") throw Object.assign(new Error("The durable device enrollment record is terminal and requires operator reconciliation"), { code: "DEVICE_ENROLLMENT_RESUME_FAILED" });
+    assertFixedResumeDescriptorOptions(flags, enrollmentResumeRecord?.recovery_descriptor);
+    if (!enrollmentRequested && !enrollmentResumeRecord?.recovery_descriptor) {
+      throw new Error("At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path");
+    }
+  } else if (enrollmentRequested) {
+    throw new Error("Browser and stdin enrollment options are accepted only at service_keys_activated");
+  }
+  const enrollmentMode = state === "service_keys_activated" && (enrollmentRequested || Boolean(enrollmentResumeRecord?.recovery_descriptor));
+  const enrollmentBaseUrl = flags.enrollmentUrl === undefined
+    ? enrollmentResumeRecord?.recovery_descriptor?.api_base_url
+    : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
+  const consoleBaseUrl = flags.consoleUrl === undefined ? undefined : normalizeConsoleBaseUrl(flags.consoleUrl);
+  const teamId = config.native_broker?.team_id;
+  if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
+  const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+  if (config.native_broker?.client !== application.client || config.native_broker?.manager !== application.manager || config.native_broker?.mach_service !== "dev.agentpass.native-service") throw new Error("Native bridge configuration does not match the verified AgentPass application");
+  const enrollmentRunner = enrollmentMode ? createNativeDeviceEnrollmentRunner({ servicePath: application.service }) : undefined;
+  let enrollmentInvitation;
+  if (flags.enrollmentStdin) enrollmentInvitation = await readSetupEnrollmentInvitationStdin({ enrollmentUrl: enrollmentBaseUrl });
+  if (flags.browser) {
+    const receipt = readInstalledReleaseReceipt();
+    const preflight = await prepareSetupPreflight({
+      readInstalledReleaseReceipt: () => receipt,
+      verifyInstalledRelease: () => verifyInstalledReleaseReceipt(),
+      nativeRunner: enrollmentRunner
+    });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.once("SIGINT", abort);
+    process.once("SIGTERM", abort);
+    try {
+      enrollmentInvitation = await connectSetupInBrowser({
+        consoleBaseUrl,
+        cloudBaseUrl: enrollmentBaseUrl,
+        preflight,
+        signal: controller.signal
+      });
+    } finally {
+      process.removeListener("SIGINT", abort);
+      process.removeListener("SIGTERM", abort);
+    }
+  }
+  const registerService = (context) => {
+    let inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+    if (inspected.serviceStatus !== "enabled") {
+      const result = spawnSync(inspected.manager, ["register"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+      if (result.status !== 0) throw Object.assign(new Error("Native service registration failed"), { code: "SERVICE_REGISTRATION_FAILED" });
+      inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+    }
+    if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Approve AgentPass in System Settings, then continue setup"), { code: "SERVICE_APPROVAL_REQUIRED" });
+    return { evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "completed", proof: { service: "dev.agentpass.native-service", status: "enabled" } } };
+  };
+  let runner;
+  const nativeHandlers = () => {
+    runner ??= createNativeBootstrapRunner({
+      clientPath: application.client,
+      servicePath: application.service
+    });
+    return createNativeSetupHandlers({ runner });
+  };
+  const handlers = {
+    verify_app: (context) => ({ evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { application: application.application, verification: "developer_id_gatekeeper_team_pinned" } } }),
+    initialize_local_config: (context) => {
+      if (config.version !== 4) throw Object.assign(new Error("Local configuration version is not supported"), { code: "CONFIG_VERSION_MISMATCH" });
+      return { evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { directory: defaultConfigDir, config_version: 4 } } };
+    },
+    select_native_bridge: (context) => ({ evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { bridge: "production_native", client: application.client, manager: application.manager } } }),
+    register_service: registerService,
+    start_bootstrap: (context) => nativeHandlers().start_bootstrap(context),
+    enroll_approval_key: (context) => nativeHandlers().enroll_approval_key(context),
+    activate_service_keys: (context) => nativeHandlers().activate_service_keys(context)
+  };
+  const onboarding = config.setup_onboarding;
+  const verifyCurrentCommit = () => {
+    if (!onboarding?.server?.env?.AGENTPASS_PROJECT_DIR) throw Object.assign(new Error("Setup onboarding project is unavailable"), { code: "ONBOARDING_PROJECT_MISSING" });
+    const project = onboarding.server.env.AGENTPASS_PROJECT_DIR;
+    const commit = git(["-C", project, "rev-parse", "--verify", "HEAD^{commit}"]);
+    const verified = spawnSync("git", ["-C", project, "verify-commit", commit], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+    if (verified.status !== 0) throw Object.assign(new Error("Current Git commit is not cryptographically verified"), { code: "TEST_COMMIT_NOT_VERIFIED" });
+    return { commit, verification: TEST_COMMIT_VERIFICATION_MARKER };
+  };
+  if (journal.status().state === "device_enrolled") handlers.connect_editor = createEditorConnectedHandler({ onboarding });
+  if (journal.status().state === "editor_connected") handlers.verify_test_commit = createTestCommitVerifiedHandler({ verifierResult: verifyCurrentCommit() });
+  if (journal.status().state === "test_commit_verified") handlers.complete_setup = createCompleteSetupHandler({ priorVerificationProof: verifyCurrentCommit() });
+  if (enrollmentInvitation || enrollmentResumeRecord?.recovery_descriptor) {
+    nativeHandlers();
+    handlers.enroll_device = createDeviceEnrollmentSetupHandler({
+      runner: enrollmentRunner,
+      provisionControl: (input) => runner.provisionControl(input),
+      restartService: async () => {
+        const environment = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+        const unregister = spawnSync(application.manager, ["unregister"], { encoding: "utf8", env: environment });
+        if (unregister.status !== 0 && !/not.registered|not found|does not exist/i.test(`${unregister.stdout ?? ""}\n${unregister.stderr ?? ""}`)) throw Object.assign(new Error("Native service unregister failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
+        const register = spawnSync(application.manager, ["register"], { encoding: "utf8", env: environment });
+        if (register.status !== 0) throw Object.assign(new Error("Native service registration failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
+        const inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+        if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Native service requires approval after control provisioning"), { code: "SERVICE_APPROVAL_REQUIRED" });
+        let response;
+        try {
+          const brokerResponse = await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
+          response = JSON.parse(Buffer.from(brokerResponse.stdout_base64, "base64").toString("utf8"));
+        } catch {
+          throw Object.assign(new Error("Native control refresh response is unavailable"), { code: "SERVICE_RESTART_FAILED" });
+        }
+        try { return normalizeNativeControlRefreshResponse(response); }
+        catch { throw Object.assign(new Error("Native control refresh response is invalid"), { code: "SERVICE_RESTART_FAILED" }); }
+      },
+      invitation: enrollmentInvitation,
+      baseUrl: enrollmentBaseUrl,
+      resumeStore: enrollmentResumeStore,
+      loadConfig,
+      saveConfig
+    });
+  }
+  const result = await createSetupOrchestrator({ journal, handlers }).execute();
+  console.log(JSON.stringify(publicSetupResult(result), null, 2));
+}
+
+function detectSetupClient(project) {
+  if (fs.existsSync(path.join(project, ".cursor")) || fs.existsSync(path.join(project, ".cursor", "mcp.json"))) return "cursor";
+  return "claude-code";
+}
+
+function installedSetupTeamId() {
+  try {
+    const receipt = readInstalledReleaseReceipt();
+    return receipt.team_id;
+  } catch (error) {
+    if (error?.code === "INSTALLED_RECEIPT_MISSING" || error?.code === "INSTALLED_RECEIPT_ROOT_UNSAFE") return undefined;
+    throw error;
+  }
+}
+
+function startUsageError() {
+  return new Error("Usage: agentpass start [--project DIR] [--client auto|claude-code|cursor]");
+}
+
+async function setupNativeBridgeUnsafe({ autoStart = false, startOptions = {} } = {}) {
+  if (autoStart) {
+    if (process.platform !== "darwin") throw new Error("AgentPass guided setup is supported only on macOS");
+    if (process.getuid?.() === 0) throw new Error("Run AgentPass as the interactive user, not root");
+  }
+  if (args[0] === "status") {
+    if (args.length !== 1) throw new Error("Usage: agentpass setup status");
+    const result = readHeadlessOnboarding();
+    console.log(JSON.stringify(result.ok ? result.status : result.error, null, 2));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+  if (!autoStart && args[0] === "continue") return continueNativeSetup();
+  if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
+  if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
+  const allowed = new Set(["--client", "--project", "--team-id"]);
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (autoStart && argument === "--json") continue;
+    if (argument === "--execute") continue;
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]");
+    }
+    flags.set(argument, args[index + 1]);
+    index += 1;
+  }
+  const project = path.resolve(startOptions.project ?? flags.get("--project") ?? process.cwd());
+  const requestedClient = startOptions.client ?? flags.get("--client");
+  const clientName = requestedClient === "auto" || requestedClient === undefined ? detectSetupClient(project) : requestedClient;
+  if (!["claude-code", "cursor"].includes(clientName)) throw new Error("client must be claude-code or cursor");
+  const teamId = flags.get("--team-id") ?? (autoStart ? installedSetupTeamId() : undefined);
+  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) {
+    if (autoStart) throw new Error("AgentPass is not installed as a verified macOS package yet. Install the signed package, then run `agentpass start` again.");
+    throw new Error("setup requires --team-id with the pinned 10-character Apple Team ID");
+  }
+  const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+  const config = loadConfig();
+  const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
+  const integration = integrationPlan({ client: clientName, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer });
+  const preview = installIntegration(integration);
+  const initialExecuteCommand = ["agentpass", "setup", "--client", clientName, "--team-id", teamId, "--project", project, "--execute"].map(shellWord).join(" ");
+  const execute = autoStart || args.includes("--execute");
+  if (!execute) {
+    console.log(JSON.stringify({ version: 1, dryRun: true, native: application, integration: preview, next: ["agentpass setup status", initialExecuteCommand] }, null, 2));
+    return;
+  }
+  const next = ["agentpass setup status", "agentpass setup continue --execute"];
+  const configured = { ...config, native_broker: { ...application.nativeBroker, team_id: teamId }, setup_onboarding: integration };
+  saveConfig(configured);
+  try {
+    const installed = installIntegration(integration, { dryRun: false });
+    const journal = createSetupJournal();
+    const record = (target) => {
+      if (SETUP_STATES.indexOf(journal.status().state) < SETUP_STATES.indexOf(target)) journal.transition(target);
+    };
+    record("app_verified");
+    record("local_config_initialized");
+    record("native_bridge_selected");
+    if (application.serviceStatus === "enabled") record("service_registered");
+    const result = { version: 1, dryRun: false, configured: true, native: application, integration: installed, setup_journal: journal.status(), next };
+    if (autoStart && !startOptions.json) {
+      console.log("AgentPass is connected to this project.");
+      console.log(`Project: ${project}`);
+      console.log(`Coding agent: ${clientName === "cursor" ? "Cursor" : "Claude Code"}`);
+      console.log("Next: run `agentpass setup continue --execute` to finish the browser approval.");
+      console.log("Your project files and credentials are not sent to AgentPass during setup.");
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } catch (error) {
+    saveConfig(config);
+    throw error;
+  }
+}
+
+async function startAgentPass() {
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--json") continue;
+    if (!["--project", "--client"].includes(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw startUsageError();
+    flags.set(argument, args[++index]);
+  }
+  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const client = flags.get("--client") ?? "auto";
+  if (!["auto", "claude-code", "cursor"].includes(client)) throw startUsageError();
+  return setupNativeBridgeUnsafe({ autoStart: true, startOptions: { project, client, json: args.includes("--json") } });
+}
+
+async function setupNativeBridge() {
+  if (args[0] === "prepare") return setupPrepare();
+  try {
+    return await setupNativeBridgeUnsafe();
+  } catch (error) {
+    const current = readHeadlessOnboarding();
+    const status = current.ok && current.status.initialized ? current.status : undefined;
+    console.log(JSON.stringify(publicSetupFailure(error, status), null, 2));
+    process.exitCode = 1;
+  }
+}
+
+async function setupPrepare() {
+  if (args.length !== 2 || args[0] !== "prepare" || args[1] !== "--json") {
+    throw new Error("Usage: agentpass setup prepare --json");
+  }
+  try {
+    // The receipt is the only durable public release identity retained after
+    // the signed installer has completed. Re-read it through the protected
+    // root on both sides of preflight, and independently inspect the current
+    // app bundle before asking the native service for its public P-256 key.
+    const receipt = readInstalledReleaseReceipt();
+    const application = inspectNativeApplication(undefined, { expectedTeamId: receipt.team_id });
+    const nativeRunner = createNativeDeviceEnrollmentRunner({ servicePath: application.service });
+    const handoff = await prepareSetupPreflight({
+      readInstalledReleaseReceipt: () => receipt,
+      verifyInstalledRelease: () => verifyInstalledReleaseReceipt(),
+      nativeRunner
+    });
+    process.stdout.write(serializeSetupPreflightHandoff(handoff));
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify(publicSetupPreflightFailure(error))}\n`);
+    process.exitCode = 1;
+  }
+}
+
+async function uninstallProduction() {
+  const allowed = new Set(["--project", "--team-id", "--confirm"]); const flags = new Map(); const switches = new Set();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (["--execute", "--system", "--purge-user-state"].includes(argument)) {
+      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system] | agentpass uninstall --purge-user-state [--confirm PURGE_USER_STATE] [--execute]");
+      switches.add(argument); continue;
+    }
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system] | agentpass uninstall --purge-user-state [--confirm PURGE_USER_STATE] [--execute]");
+    flags.set(argument, args[++index]);
+  }
+  if (switches.has("--purge-user-state")) {
+    if (switches.has("--system") || flags.has("--project") || flags.has("--team-id")) throw new Error("--purge-user-state cannot be combined with system uninstall options");
+    const execute = switches.has("--execute");
+    const config = execute ? loadConfig() : null;
+    const result = await runUserStatePurge({ execute, confirm: flags.get("--confirm"), native: config?.native_broker, agentId: config?.default_agent_id, requestNative: brokerRequest });
+    if (!switches.has("--execute")) {
+      console.log(JSON.stringify({ ...result, next: "agentpass uninstall --purge-user-state --confirm PURGE_USER_STATE --execute" }, null, 2));
+      return;
+    }
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (flags.has("--confirm")) throw new Error("--confirm is valid only with --purge-user-state");
+  const system = switches.has("--system");
+  const configuredTeamId = system ? undefined : loadConfig().native_broker?.team_id;
+  const teamId = flags.get("--team-id") ?? configuredTeamId;
+  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) throw new Error("uninstall requires the pinned 10-character Apple Team ID");
+  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
+  const integrations = system ? [] : ["claude-code", "cursor"].map((client) => ({ client, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer }));
+  const plan = planProductionUninstall({ integrations, includeUser: !system, expectedTeamId: teamId });
+  if (!switches.has("--execute")) {
+    console.log(JSON.stringify({ ...plan, next: system ? "rerun as root with --system --execute" : "rerun with --execute; then run the reported system command" }, null, 2));
+    return;
+  }
+  const result = executeProductionUninstall(plan, { execute: true, scope: system ? "system" : "user", includeUser: !system, expectedTeamId: teamId });
+  console.log(JSON.stringify({ ...result, system_removal_required: !system && plan.requiresRoot, system_command: !system && plan.requiresRoot ? `sudo agentpass uninstall --system --team-id ${teamId} --execute` : null }, null, 2));
 }
 
 function init() {
@@ -237,13 +655,16 @@ function status() {
   }, null, 2));
 }
 
-function revoke() {
+async function revoke() {
   const config = loadConfig();
-  if (config.native_broker?.enabled) throw new Error("User-state revoke does not control the native service; use `agentpass native revoke-sessions`");
-  const state = loadState();
-  saveState({ ...state, revoked: true, generation: (state.generation ?? 0) + 1, revoked_at: new Date().toISOString() });
-  audit({ operation: "control.revoke", decision: "allow", generation: state.generation + 1 }, defaultConfigDir);
-  console.log("All AgentPass operations revoked.");
+  const result = await revokeOperations({
+    config,
+    configDir: defaultConfigDir,
+    loadState,
+    saveState,
+    audit,
+  });
+  console.log(JSON.stringify(result, null, 2));
 }
 
 function restore() {
@@ -256,28 +677,34 @@ function restore() {
   console.log("AgentPass operations restored.");
 }
 
-function doctor() {
-  const checks = [
-    { name: "node", ok: Number(process.versions.node.split(".")[0]) >= 20, detail: process.versions.node },
-    { name: "platform", ok: process.platform === "darwin", detail: `${process.platform}/${process.arch}` },
-    { name: "git", ok: Boolean(spawnSync("git", ["--version"], { encoding: "utf8" }).stdout), detail: git(["--version"], true) },
-    { name: "ssh-keygen", ok: fs.existsSync("/usr/bin/ssh-keygen"), detail: "/usr/bin/ssh-keygen" },
-    { name: "config", ok: fs.existsSync(path.join(defaultConfigDir, "config.json")), detail: defaultConfigDir },
-    { name: "broker-socket", ok: fs.existsSync(socketPath()), detail: socketPath() }
-  ];
-  if (fs.existsSync(path.join(defaultConfigDir, "config.json"))) {
-    try {
-      const config = loadConfig();
-      if (config.control) {
-        const bundle = loadControlBundle(config, defaultConfigDir);
-        checks.push({ name: "remote-control", ok: true, detail: `sequence=${bundle.sequence} expires=${bundle.expires_at}` });
-      }
-    } catch (error) {
-      checks.push({ name: "remote-control", ok: false, detail: error.message });
+async function doctor() {
+  const allowed = new Set(["--client", "--project", "--team-id"]);
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--verbose") continue;
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]");
     }
+    flags.set(argument, args[index + 1]);
+    index += 1;
   }
-  console.log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
-  if (!checks.every((check) => check.ok)) process.exitCode = 1;
+  const expectedTeamId = flags.get("--team-id") ?? process.env.AGENTPASS_RELEASE_TEAM_ID;
+  if (expectedTeamId !== undefined && !/^[A-Z0-9]{10}$/.test(expectedTeamId)) throw new Error("Doctor Team ID must contain 10 uppercase letters or digits");
+  const report = await runProductionDoctor({
+    client: flags.get("--client"),
+    projectDir: flags.has("--project") ? path.resolve(flags.get("--project")) : undefined,
+    expectedTeamId,
+    verbose: args.includes("--verbose")
+  }, {
+    nativeStatus: async (native) => {
+      const health = await brokerRequest({ operation: "ping" }, { native, timeoutMs: 10_000 });
+      const auditResult = await brokerRequest({ operation: "native.audit.status" }, { native, timeoutMs: 30_000 });
+      return { health, audit: JSON.parse(Buffer.from(auditResult.stdout_base64, "base64").toString("utf8")) };
+    }
+  });
+  console.log(JSON.stringify(report, null, 2));
+  if (!report.ok) process.exitCode = 1;
 }
 
 function setupMacos() {
@@ -788,24 +1215,34 @@ function integrateAgent() {
   let projectValue = process.cwd();
   let projectSet = false;
   let install = false;
+  let remove = false;
+  let execute = false;
   for (let index = 1; index < args.length; index += 1) {
     if (args[index] === "--install" && !install) install = true;
+    else if (args[index] === "--remove" && !remove) remove = true;
+    else if (args[index] === "--execute" && !execute) execute = true;
     else if (args[index] === "--project" && !projectSet && args[index + 1] && !args[index + 1].startsWith("--")) { projectValue = args[++index]; projectSet = true; }
-    else throw new Error("Usage: agentpass integrate claude-code|cursor [--install] [--project DIR]");
+    else throw new Error("Usage: agentpass integrate claude-code|cursor [--install | --remove [--execute]] [--project DIR]");
   }
+  if (install && remove) throw new Error("Integration install and removal are mutually exclusive");
+  if (execute && !remove) throw new Error("--execute is only valid with --remove");
   const projectDir = path.resolve(projectValue);
   if (!fs.statSync(projectDir).isDirectory()) throw new Error("Integration project must be a directory");
   const mcpServerPath = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
-  const plan = integrationPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath });
-  const result = installIntegration(plan, { dryRun: !install });
+  const plan = remove
+    ? integrationRemovalPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath })
+    : integrationPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath });
+  const result = remove ? removeIntegration(plan, { dryRun: !execute }) : installIntegration(plan, { dryRun: !install });
   console.log(JSON.stringify({
     version: result.version,
     client: result.client,
     target: result.target,
     changed: result.changed,
-    installed: result.installed,
-    configuration: { mcpServers: { [result.server_name]: result.server } },
-    next_steps: [
+    installed: result.installed ?? false,
+    removed: result.removed ?? false,
+    configuration: remove ? undefined : { mcpServers: { [result.server_name]: result.server } },
+    protected_state_preserved: remove ? true : undefined,
+    next_steps: remove && !execute ? ["Review the dry-run output, then rerun with `--remove --execute`."] : remove ? ["The AgentPass MCP entry was removed; protected native state and keys were not changed."] : [
       "Start an AgentPass session and export AGENTPASS_SESSION for the agent process.",
       "Configure this repository to use agentpass-git-sign as Git's SSH signing program.",
       "Ask the agent to run agentpass_check before committing."
@@ -954,12 +1391,107 @@ function xmlEscape(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
-try {
-  if (command === "init") init();
+async function launchAgent() {
+  // Normalize the public launch vector before reaching the lifecycle boundary.
+  // The lifecycle function can only use the fixed signed Host and an already
+  // inherited FD3 handoff; it cannot synthesize authority from CLI state.
+  const normalized = parseAgentLaunchArgs([command, ...args]);
+  let descriptor;
+  try { descriptor = createAgentLifecycleLaunchDescriptor(normalized); } catch { descriptor = null; }
+  const result = await launchAgentLifecycleWithHandoff(descriptor, { platform: process.platform });
+  console.log(JSON.stringify(result));
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+async function closeAgent() {
+  const sessionID = requiredFlag("--session-id");
+  const operationID = args.includes("--operation-id") ? requiredFlag("--operation-id") : crypto.randomUUID();
+  const reason = args.includes("--reason") ? requiredFlag("--reason") : "client_shutdown";
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  if (!uuid.test(sessionID) || !uuid.test(operationID) || !["completed", "cancelled", "client_shutdown"].includes(reason)) {
+    throw new Error("close requires canonical UUIDs and a supported close reason");
+  }
+  const config = loadConfig();
+  if (config.native_broker?.enabled !== true) throw new Error("Native broker is not configured");
+  let result;
+  try {
+    result = await brokerRequest({ operation: "native.host.close", session_id: sessionID, operation_id: operationID, reason }, { native: config.native_broker, timeoutMs: 30_000 });
+  } catch (error) {
+    // The service ledger can converge a response-loss retry only when the
+    // caller reuses the exact operation ID.  Surface that non-secret UUID so
+    // a human or supervising agent can retry without accidentally creating a
+    // second close operation.
+    if (/timed out/u.test(error?.message ?? "")) {
+      throw new Error(`Native control close timed out; retry with --operation-id ${operationID}`);
+    }
+    throw error;
+  }
+  const decoded = JSON.parse(Buffer.from(result.stdout_base64 ?? "", "base64").toString("utf8"));
+  if (!decoded || decoded.status !== "closed" || decoded.operation_id !== operationID || decoded.session_id !== sessionID) throw new Error("Native control service returned an invalid close receipt");
+  console.log(JSON.stringify(decoded, null, 2));
+}
+
+function smallSoftwareManage() {
+  const action = args.shift();
+  if (!["inspect", "bundle", "prepare", "publish"].includes(action)) throw new Error("Usage: agentpass small-software inspect|bundle|prepare|publish");
+  console.log(JSON.stringify(smallSoftwareCommand(action, args), null, 2));
+}
+
+function launchContractFailure(error) {
+  if (!(error instanceof AgentLaunchContractError)) return false;
+  // Keep the public unavailable response stable while refusing the invalid
+  // vector. Contract details never cross this boundary, so selectors and
+  // their values cannot become part of CLI output or process diagnostics.
+  void error;
+  console.log(JSON.stringify(unavailableAgentLifecycle("launch")));
+  process.exitCode = 1;
+  return true;
+}
+
+const NATIVE_CONTROL_REFRESH_RESPONSE_KEYS = new Set([
+  "status", "control_refreshed", "control_ack", "refresh_generation", "refresh_sequence", "control_statement_hash"
+]);
+const NATIVE_CONTROL_ACK_KEYS = new Set(["acknowledgement", "server_accepted", "observed_generation", "refresh_state"]);
+const HASH = /^[0-9a-f]{64}$/u;
+
+/**
+ * Decode the closed management response before it reaches onboarding. The
+ * native service is trusted only for transport; this boundary re-validates
+ * the public schema, canonical ACK, binding, and applied result.
+ */
+export function normalizeNativeControlRefreshResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.size || Object.keys(value).some((key) => !NATIVE_CONTROL_REFRESH_RESPONSE_KEYS.has(key))) throw new Error("Native control refresh response is not a closed public schema");
+  if (value.status !== "enabled" || value.control_refreshed !== true || !value.control_ack || typeof value.control_ack !== "object" || Array.isArray(value.control_ack)) throw new Error("Native control refresh response is not enabled");
+  const ackEvidence = value.control_ack;
+  if (Object.keys(ackEvidence).length !== NATIVE_CONTROL_ACK_KEYS.size || Object.keys(ackEvidence).some((key) => !NATIVE_CONTROL_ACK_KEYS.has(key))) throw new Error("Native control ACK evidence is not a closed public schema");
+  if (ackEvidence.server_accepted !== true || ackEvidence.refresh_state !== "applied" || !Number.isSafeInteger(ackEvidence.observed_generation) || ackEvidence.observed_generation < 1) throw new Error("Native control ACK was not accepted as applied");
+  let acknowledgement;
+  try { acknowledgement = normalizeOnboardingControlAcknowledgement(ackEvidence.acknowledgement); }
+  catch { throw new Error("Native control ACK acknowledgement is invalid"); }
+  if (acknowledgement.result !== "applied" || !Number.isSafeInteger(value.refresh_generation) || value.refresh_generation < 1 || value.refresh_generation !== ackEvidence.observed_generation || !Number.isSafeInteger(value.refresh_sequence) || value.refresh_sequence < 1 || value.refresh_sequence !== acknowledgement.sequence || typeof value.control_statement_hash !== "string" || !HASH.test(value.control_statement_hash) || value.control_statement_hash !== acknowledgement.statement_hash) throw new Error("Native control ACK evidence binding is invalid");
+  return Object.freeze({
+    status: "enabled",
+    control_refreshed: true,
+    control_ack: Object.freeze({ acknowledgement, server_accepted: true, observed_generation: ackEvidence.observed_generation, refresh_state: "applied" }),
+    refresh_generation: value.refresh_generation,
+    refresh_sequence: value.refresh_sequence,
+    control_statement_hash: value.control_statement_hash
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
+  if (command === undefined || command === "--help" || command === "-h") usage();
+  else if (command === "start") await startAgentPass();
+  else if (command === "launch") await launchAgent();
+  else if (command === "close") await closeAgent();
+  else if (command === "install") installProduction();
+  else if (command === "setup") await setupNativeBridge();
+  else if (command === "uninstall") await uninstallProduction();
+  else if (command === "init") init();
   else if (command === "migrate") migrate();
   else if (command === "check") check();
   else if (command === "status") status();
-  else if (command === "doctor") doctor();
+  else if (command === "doctor") await doctor();
   else if (command === "broker" && args[0] === "ping") await brokerPing();
   else if (command === "broker" && args[0] === "install") brokerInstall();
   else if (command === "broker" && args[0] === "stop") brokerStop();
@@ -971,14 +1503,20 @@ try {
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") await pushCheck();
+  else if (command === "small-software") smallSoftwareManage();
   else if (command === "session" && args[0] === "start") await sessionStart();
-  else if (command === "revoke") revoke();
+  else if (command === "revoke") await revoke();
   else if (command === "restore") restore();
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);
   else if (command === "audit") await auditCommand();
-  else usage();
+  else {
+    console.error("agentpass: unknown command");
+    process.exitCode = 2;
+  }
 } catch (error) {
-  console.error(`agentpass: ${error.message}`);
-  process.exitCode = 1;
+  if (!launchContractFailure(error)) {
+    console.error(`agentpass: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

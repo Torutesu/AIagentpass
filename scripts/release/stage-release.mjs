@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 
 const [destinationInput, manifestInput, signatureInput, publicKeyInput] = process.argv.slice(2);
 if (!destinationInput || !manifestInput || !signatureInput || !publicKeyInput || process.argv.slice(2).length !== 4) {
@@ -52,10 +53,15 @@ try { manifest = JSON.parse(fs.readFileSync(join(destination, manifestName), 'ut
 
 const safeName = (name) => typeof name === 'string' && /^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(name) && name === basename(name);
 const declared = [];
-if (!Array.isArray(manifest?.artifacts) || !Array.isArray(manifest?.evidence?.notarization?.evidence)) throw new Error('staged release manifest cannot enumerate release files');
+if (manifest?.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || !Array.isArray(manifest?.artifacts) || !Array.isArray(manifest?.evidence?.notarization?.evidence) || !Array.isArray(manifest?.external_qualification_controller?.notarization?.evidence)) throw new Error('staged release manifest cannot enumerate release files');
+const products = manifest.artifacts.filter((item) => item?.role === 'product');
+if (products.length !== 1 || typeof products[0].name !== 'string' || !products[0].name.endsWith('.pkg')) throw new Error('staged release manifest requires exactly one product PKG artifact');
+assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, products[0].sha256);
 for (const item of manifest.artifacts) declared.push(item?.name);
 declared.push(manifest?.evidence?.checksums?.name);
 for (const item of manifest.evidence.notarization.evidence) declared.push(item?.name);
+declared.push(manifest.external_qualification_controller?.identity_document?.name);
+for (const item of manifest.external_qualification_controller.notarization.evidence) declared.push(item?.name);
 const reserved = new Set([manifestName, 'release-manifest.sig', 'release-public.pem']);
 const unique = new Set();
 for (const name of declared) {

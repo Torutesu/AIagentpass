@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/cursor-agent-runtime-manifest-v1.schema.json",
+  "title": "AgentPass signed Cursor Agent runtime manifest v1",
+  "description": "A release-authorized, closed-tree manifest for the root-materialized Cursor Agent runtime. The detached trust root is provisioned independently; implementations additionally require byte-for-byte canonical JSON followed by exactly one LF, lexicographically sorted unique paths, an executable node entry, a non-executable index.js entry, and aggregate file/byte limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["core", "signature"],
+  "properties": {
+    "core": { "$ref": "#/$defs/core" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "runtime_id", "runtime_version", "release_digest", "materialization_epoch", "files"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "runtime_id": { "const": "cursor-agent" },
+        "runtime_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "release_digest": { "$ref": "#/$defs/releaseDigest" },
+        "materialization_epoch": { "$ref": "#/$defs/positiveSafeInteger" },
+        "files": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/file" },
+          "allOf": [
+            { "contains": { "type": "object", "required": ["relative_path", "executable"], "properties": { "relative_path": { "const": "node" }, "executable": { "const": true } } }, "minContains": 1, "maxContains": 1 },
+            { "contains": { "type": "object", "required": ["relative_path", "executable"], "properties": { "relative_path": { "const": "index.js" }, "executable": { "const": false } } }, "minContains": 1, "maxContains": 1 }
+          ]
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "size", "executable"],
+      "properties": {
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "executable": { "type": "boolean" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "domain", "key_id", "signature_base64url"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "domain": { "const": "AgentPass-Cursor-Agent-Runtime-Manifest-v1\u0000" },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "signature_base64url": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$"
+        }
+      }
+    },
+    "releaseDigest": {
+      "type": "string",
+      "minLength": 71,
+      "maxLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

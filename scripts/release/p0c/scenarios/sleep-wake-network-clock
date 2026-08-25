@@ -1,0 +1,426 @@
+#!/usr/bin/env node
+import crypto from "node:crypto";
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { withVerifiedCandidateCheckpoint } from "../lib/candidate-checkpoint.mjs";
+import {
+  canonicalJSON,
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from "../lib/scenario-runtime.mjs";
+
+const GATE = "sleep-wake-network-clock";
+const TESTS = Object.freeze(["sleep-wake-recovery", "network-clock-failure"]);
+const PMSET = "/usr/bin/pmset";
+const IFCONFIG = "/sbin/ifconfig";
+const CURL = "/usr/bin/curl";
+const DATE = "/bin/date";
+const PERL = "/usr/bin/perl";
+const SYSCTL = "/usr/sbin/sysctl";
+const IFACE = "en0";
+const AGENT_ID = "00000000-0000-4000-8000-000000000001";
+const MARKER = "sleep-wake-network-clock.json";
+const DIGEST = /^[0-9a-f]{64}$/u;
+const COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM = /^[A-Z0-9]{10}$/u;
+const exact = (v, keys, label) => {
+  if (!v || typeof v !== "object" || Array.isArray(v))
+    throw Error(`${label} invalid`);
+  const a = Object.keys(v).sort(),
+    b = [...keys].sort();
+  if (a.length !== b.length || a.some((x, i) => x !== b[i]))
+    throw Error(`${label} fields invalid`);
+};
+const hash = (b) => crypto.createHash("sha256").update(b).digest("hex");
+const root = (uid = process.getuid) => {
+  if (typeof uid !== "function" || uid() !== 0)
+    throw Error("physical scenario requires root");
+};
+const bytes = (r) =>
+  Buffer.concat([r?.stdout ?? Buffer.alloc(0), r?.stderr ?? Buffer.alloc(0)]);
+const controlValidity = (result, label) => {
+  const envelope = parseJSONOutput(requireCommandSuccess(result, label), label);
+  exact(
+    envelope,
+    ["error", "ok", "public_key", "stdout_base64", "version"],
+    `${label} envelope`,
+  );
+  if (
+    envelope.ok !== true ||
+    envelope.error !== null ||
+    typeof envelope.stdout_base64 !== "string"
+  )
+    throw Error(`${label} failed`);
+  const value = parseJSONOutput(
+    Buffer.from(envelope.stdout_base64, "base64"),
+    `${label} payload`,
+  );
+  exact(value, ["valid"], `${label} payload`);
+  if (typeof value.valid !== "boolean")
+    throw Error(`${label} validity is invalid`);
+  return value.valid;
+};
+const mpath = (dir) => resolve(join(dir, MARKER));
+const readMarker = (path, production, fsImpl = fs) => {
+  let s;
+  try {
+    s = readProtectedFile(path, { maximum: 64 * 1024, production });
+  } catch (e) {
+    if (e.message === "protected file is unavailable") return null;
+    throw Error("sleep/wake marker is unsafe");
+  }
+  let v;
+  try {
+    v = JSON.parse(s.bytes);
+  } catch {
+    throw Error("sleep/wake marker invalid");
+  }
+  if (!s.bytes.equals(canonicalJSON(v)))
+    throw Error("sleep/wake marker is not canonical");
+  exact(
+    v,
+    [
+      "artifact_sha256",
+      "boot_identity",
+      "control_sha256",
+      "created_wall_ms",
+      "monotonic_ns",
+      "phase",
+      "schema_version",
+      "source_commit",
+      "team_id",
+      "wall_ms",
+    ],
+    "sleep/wake marker",
+  );
+  if (
+    v.schema_version !== 1 ||
+    v.phase !== "sleep-requested" ||
+    !DIGEST.test(v.artifact_sha256) ||
+    !COMMIT.test(v.source_commit) ||
+    !TEAM.test(v.team_id) ||
+    !/^[0-9]+:[0-9]+$/u.test(v.boot_identity) ||
+    !Number.isSafeInteger(v.wall_ms) ||
+    !Number.isSafeInteger(v.created_wall_ms) ||
+    !/^[0-9]+$/u.test(v.monotonic_ns) ||
+    !DIGEST.test(v.control_sha256)
+  )
+    throw Error("sleep/wake marker contents invalid");
+  return v;
+};
+const writeMarker = (path, v, fsImpl = fs) => {
+  const tmp = `${path}.${process.pid}.tmp`,
+    d = fsImpl.openSync(
+      tmp,
+      fsImpl.constants.O_WRONLY |
+        fsImpl.constants.O_CREAT |
+        fsImpl.constants.O_EXCL |
+        fsImpl.constants.O_NOFOLLOW,
+      0o600,
+    );
+  try {
+    fsImpl.writeFileSync(d, canonicalJSON(v));
+    fsImpl.fsyncSync(d);
+  } finally {
+    fsImpl.closeSync(d);
+  }
+  fsImpl.renameSync(tmp, path);
+  const p = fsImpl.openSync(
+    resolve(path, ".."),
+    fsImpl.constants.O_RDONLY |
+      (fsImpl.constants.O_DIRECTORY ?? 0) |
+      fsImpl.constants.O_NOFOLLOW,
+  );
+  try {
+    fsImpl.fsyncSync(p);
+  } finally {
+    fsImpl.closeSync(p);
+  }
+};
+const text = (r, label) => requireCommandSuccess(r, label).toString().trim();
+const integer = (s, label) => {
+  if (!/^\d+$/u.test(s)) throw Error(`${label} invalid`);
+  const n = Number(s);
+  if (!Number.isSafeInteger(n)) throw Error(`${label} out of range`);
+  return n;
+};
+export const classifyClockEffect = ({
+  beforeWallMs,
+  afterWallMs,
+  beforeMonotonicNs,
+  afterMonotonicNs,
+}) => {
+  if (!Number.isSafeInteger(beforeWallMs) || !Number.isSafeInteger(afterWallMs))
+    throw Error("clock samples invalid");
+  let a, b;
+  try {
+    a = BigInt(beforeMonotonicNs);
+    b = BigInt(afterMonotonicNs);
+  } catch {
+    throw Error("clock samples invalid");
+  }
+  const mono = Number(b - a) / 1e6;
+  if (mono <= 0) throw Error("monotonic clock did not advance");
+  const wall = afterWallMs - beforeWallMs;
+  return {
+    wall_delta_ms: wall,
+    monotonic_delta_ms: mono,
+    wall_clock_effect:
+      wall < -5000 ? "rollback" : wall > mono + 5000 ? "forward" : "consistent",
+  };
+};
+const clocks = async (run) => {
+  const wall =
+    integer(
+      text(await run(DATE, ["+%s"], { cwd: "/" }), "wall clock"),
+      "wall clock",
+    ) * 1000;
+  const mono = text(
+    await run(
+      PERL,
+      [
+        "-MTime::HiRes",
+        "-e",
+        'printf "%.0f\\n",Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC)*1000000000',
+      ],
+      { cwd: "/" },
+    ),
+    "monotonic clock",
+  );
+  if (!/^\d+$/.test(mono) || BigInt(mono) <= 0n)
+    throw Error("monotonic clock invalid");
+  return { wall, mono };
+};
+const boot = async (run) => {
+  const m = /^\{\s*sec\s*=\s*([0-9]+)\s*,\s*usec\s*=\s*([0-9]+)/u.exec(
+    text(
+      await run(SYSCTL, ["-n", "kern.boottime"], { cwd: "/" }),
+      "boot identity",
+    ),
+  );
+  if (!m) throw Error("boot identity not observable");
+  return `${m[1]}:${m[2]}`;
+};
+const control = async (runPinned, machine, runCommand, production) => {
+  const r = await runPinned(
+    machine.executables.native_client,
+    ["--service", machine.serviceLabel, "control-status"],
+    { production, runCommand },
+  );
+  const o = parseJSONOutput(
+    requireCommandSuccess(r, "control status"),
+    "control status",
+  );
+  exact(
+    o,
+    ["error", "ok", "public_key", "stdout_base64", "version"],
+    "control envelope",
+  );
+  if (o.ok !== true) throw Error("control status failed");
+  const v = parseJSONOutput(
+    Buffer.from(o.stdout_base64, "base64"),
+    "control status payload",
+  );
+  return { value: v, sha256: hash(canonicalJSON(v)) };
+};
+export const performSleepWakeNetworkClock = async ({
+  release,
+  machine,
+  production = true,
+  runCommand = runFixedCommand,
+  runPinned = runPinnedExecutable,
+  getUid = process.getuid,
+  withCheckpoint = withVerifiedCandidateCheckpoint,
+  fileSystem = fs,
+  marker = mpath(machine.checkpointDirectory),
+} = {}) => {
+  root(getUid);
+  return withCheckpoint(
+    join(machine.checkpointDirectory, "candidate-checkpoint.json"),
+    async () => {
+      const old = readMarker(marker, production, fileSystem);
+      // Validate an existing marker before touching machine-specific boot
+      // identity. A tampered checkpoint must fail closed deterministically,
+      // even when the host cannot expose boot identity (for example in a
+      // restricted test runner).
+      const b = await boot(runCommand);
+      if (!old) {
+        const c = await clocks(runCommand),
+          s = await control(runPinned, machine, runCommand, production);
+        writeMarker(
+          marker,
+          {
+            schema_version: 1,
+            phase: "sleep-requested",
+            artifact_sha256: release.artifactSha256,
+            source_commit: release.sourceCommit,
+            team_id: release.teamId,
+            boot_identity: b,
+            wall_ms: c.wall,
+            monotonic_ns: c.mono,
+            created_wall_ms: c.wall,
+            control_sha256: s.sha256,
+          },
+          fileSystem,
+        );
+        requireCommandSuccess(
+          await runCommand(PMSET, ["sleepnow"], { cwd: "/" }),
+          "sleep request",
+        );
+        throw Error("sleep/wake qualification pending; rerun after wake");
+      }
+      if (
+        old.artifact_sha256 !== release.artifactSha256 ||
+        old.source_commit !== release.sourceCommit ||
+        old.team_id !== release.teamId ||
+        old.boot_identity !== b
+      )
+        throw Error("sleep/wake marker release binding mismatch");
+      if (
+        !/\bSleep\b/iu.test(
+          text(
+            await runCommand(PMSET, ["-g", "log"], { cwd: "/" }),
+            "sleep/wake log",
+          ),
+        ) ||
+        !/\bWake\b/iu.test(
+          text(
+            await runCommand(PMSET, ["-g", "log"], { cwd: "/" }),
+            "sleep/wake log",
+          ),
+        )
+      )
+        throw Error("real sleep/wake was not observed");
+      const c = await clocks(runCommand);
+      classifyClockEffect({
+        beforeWallMs: old.wall_ms,
+        afterWallMs: c.wall,
+        beforeMonotonicNs: old.monotonic_ns,
+        afterMonotonicNs: c.mono,
+      });
+      const s = await control(runPinned, machine, runCommand, production);
+      if (
+        s.value.control_operational !== true ||
+        s.value.control_expired === true
+      )
+        throw Error("control state did not recover");
+      let down = false;
+      try {
+        requireCommandSuccess(
+          await runCommand(IFCONFIG, [IFACE, "down"], { cwd: "/" }),
+          "network disable",
+        );
+        down = true;
+        const outage = await runCommand(
+          CURL,
+          [
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "5",
+            machine.cloudProbeURL,
+          ],
+          { cwd: "/" },
+        );
+        if (outage.ok === true) throw Error("network outage was not observed");
+        requireCommandSuccess(
+          await runCommand(IFCONFIG, [IFACE, "up"], { cwd: "/" }),
+          "network restore",
+        );
+        down = false;
+        requireCommandSuccess(
+          await runCommand(
+            CURL,
+            [
+              "--fail",
+              "--silent",
+              "--show-error",
+              "--connect-timeout",
+              "10",
+              "--max-time",
+              "15",
+              machine.cloudProbeURL,
+            ],
+            { cwd: "/" },
+          ),
+          "network recovery",
+        );
+      } finally {
+        if (down)
+          requireCommandSuccess(
+            await runCommand(IFCONFIG, [IFACE, "up"], { cwd: "/" }),
+            "network emergency restore",
+          );
+      }
+      const stale = await runPinned(
+        machine.executables.native_client,
+        ["--service", machine.serviceLabel, "control-validate"],
+        {
+          production,
+          runCommand,
+          input: Buffer.from(JSON.stringify({ agent_id: AGENT_ID }) + "\n"),
+        },
+      );
+      if (
+        bytes(stale).length === 0 ||
+        controlValidity(stale, "stale authority validation") !== false
+      )
+        throw Error("stale authority was accepted");
+      requireCommandSuccess(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", machine.serviceLabel, "control-refresh"],
+          { production, runCommand },
+        ),
+        "authority refresh",
+      );
+      const valid = await runPinned(
+        machine.executables.native_client,
+        ["--service", machine.serviceLabel, "control-validate"],
+        {
+          production,
+          runCommand,
+          input: Buffer.from(JSON.stringify({ agent_id: AGENT_ID }) + "\n"),
+        },
+      );
+      if (controlValidity(valid, "recovered authority validation") !== true)
+        throw Error("valid authority did not recover");
+      fileSystem.unlinkSync(marker);
+      return TESTS;
+    },
+    {
+      production,
+      expected: {
+        artifactSha256: release.artifactSha256,
+        sourceCommit: release.sourceCommit,
+        teamId: release.teamId,
+        applicationPath: machine.applicationPath,
+      },
+    },
+  );
+};
+export const executeSleepWakeNetworkClock = (options) =>
+  executePhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    ...options,
+    execute: (c) => performSleepWakeNetworkClock(c),
+  });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+)
+  await runPhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    execute: (c) => performSleepWakeNetworkClock(c),
+  });

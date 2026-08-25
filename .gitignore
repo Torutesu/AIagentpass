@@ -3,3 +3,6 @@ node_modules/
 .agentpass/
 coverage/
 native/macos/.build/
+apps/web-console/e2e/test-results/
+apps/web-console/playwright-report/
+/signing-key.pem

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/deployment-attestation-trust-v1.schema.json",
+  "title": "AgentPass root-signed deployment-attestation trust manifest v1",
+  "description": "A canonical root-signed allow-list for deployment attestation keys, including lifecycle and validity bounds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "keys", "signature_algorithm", "signer_key_fingerprint", "signature"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "type": { "const": "agentpass.deployment-attestation-trust" },
+    "keys": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/key" } },
+    "signature_algorithm": { "const": "ed25519" },
+    "signer_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+  },
+  "$defs": {
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "key_id", "key_version", "fingerprint", "status", "not_before", "not_after"],
+      "properties": {
+        "environment": { "enum": ["staging", "production"] },
+        "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+        "key_version": { "type": "integer", "minimum": 1 },
+        "fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+        "status": { "enum": ["active", "revoked"] },
+        "not_before": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+        "not_after": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+      }
+    }
+  }
+}

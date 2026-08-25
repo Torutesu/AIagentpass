@@ -1,0 +1,157 @@
+#!/usr/bin/env node
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { resolve, join } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import {
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from '../lib/scenario-runtime.mjs';
+
+const GATE = 'claude-code-unattended-sign';
+const TESTS = Object.freeze(['claude-code-unattended-sign']);
+const GIT = '/usr/bin/git';
+const SIGNER = '/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-sign';
+const RELAY_REQUEST = '/private/var/db/agentpass-qualification/relay-request.json';
+const RELAY_RESPONSE = '/private/var/db/agentpass-qualification/device-response.json';
+const MARKER = 'p0c-claude-code-unattended-sign.marker';
+const MARKER_CONTENT = 'agentpass:p0c:claude-code:unattended-sign:v1\n';
+const AUTHOR = 'AgentPass P0-C Claude Code';
+const EMAIL = 'claude-code@agentpass.invalid';
+const COMMIT_MESSAGE = 'P0-C: unattended Claude Code signing';
+const PROMPT = `In the fixed qualification repository, create exactly one file named ${MARKER} with exactly this UTF-8 content: ${JSON.stringify(MARKER_CONTENT)}. Do not create, modify, delete, or configure anything else. Then create exactly one Git commit with message ${JSON.stringify(COMMIT_MESSAGE)}. Do not ask for confirmation, use a browser, invoke a human-authentication flow, or report success unless the commit command exits successfully.`;
+const AGENT_ARGS = Object.freeze(['-p', PROMPT, '--dangerously-skip-permissions']);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const DIGEST = /^[0-9a-f]{64}$/u;
+const COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM = /^[A-Z0-9]{10}$/u;
+
+const exactKeys = (value, keys, label) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} is invalid`);
+  const actual = Object.keys(value).sort(); const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has unexpected fields`);
+};
+const requireRoot = (getUid) => { if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root'); };
+const successful = (result) => requireCommandSuccess(result, 'physical command');
+const text = (bytes) => Buffer.from(bytes ?? Buffer.alloc(0)).toString('utf8');
+const digest = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+
+const protectedRepository = (repository, fileSystem, production) => {
+  if (typeof repository !== 'string' || !repository.startsWith('/') || resolve(repository) !== repository || repository === '/' || repository.split('/').filter(Boolean).length < 3) throw new Error('qualification repository path is not fixed');
+  const stat = fileSystem.lstatSync(repository, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.nlink < 2n || (stat.mode & 0o022n) !== 0n || (production && stat.uid !== 0n)) throw new Error('qualification repository is unsafe');
+  if (fileSystem.realpathSync(repository) !== repository) throw new Error('qualification repository resolves through a substitution');
+  return Object.freeze({ dev: stat.dev, ino: stat.ino, mode: stat.mode, uid: stat.uid, gid: stat.gid });
+};
+const sameRepository = (before, repository, fileSystem) => {
+  const stat = fileSystem.lstatSync(repository, { bigint: true });
+  if (stat.dev !== before.dev || stat.ino !== before.ino || stat.mode !== before.mode || stat.uid !== before.uid || stat.gid !== before.gid || stat.isSymbolicLink()) throw new Error('qualification repository changed during scenario');
+};
+
+const readRelayRequest = (path, fileSystem = fs, production = true) => {
+  const snapshot = readProtectedFile(path, { maximum: 32 * 1024, production });
+  let value; try { value = JSON.parse(snapshot.bytes.toString('utf8')); } catch { throw new Error('relay request is invalid'); }
+  exactKeys(value, ['agent_id', 'agent_kind', 'artifact_sha256', 'batch_id', 'candidate_checkpoint_sha256', 'candidate_sha256', 'device_id', 'expires_at', 'kind', 'organization_id', 'release_trust_sha256', 'request_id', 'requested_ttl_seconds', 'schema_version', 'source_commit', 'team_id'], 'relay request');
+  if (value.schema_version !== 1 || value.kind !== 'agentpass-n3e-qualification-relay-claim-request' || value.agent_kind !== 'claude-code' || !UUID.test(value.agent_id) || !UUID.test(value.batch_id) || !UUID.test(value.device_id) || !UUID.test(value.organization_id) || !UUID.test(value.request_id) || !DIGEST.test(value.artifact_sha256) || !DIGEST.test(value.candidate_sha256) || !DIGEST.test(value.candidate_checkpoint_sha256) || !DIGEST.test(value.release_trust_sha256) || !COMMIT.test(value.source_commit) || !TEAM.test(value.team_id) || !Number.isInteger(value.requested_ttl_seconds) || value.requested_ttl_seconds < 60 || value.requested_ttl_seconds > 3600 || typeof value.expires_at !== 'string') throw new Error('relay request binding is invalid');
+  return Object.freeze(value);
+};
+
+const removeStaleResponse = (fileSystem = fs, production = true) => {
+  let stat; try { stat = fileSystem.lstatSync(RELAY_RESPONSE, { bigint: true }); } catch (error) { if (error?.code === 'ENOENT') return; throw new Error('qualification response is unavailable'); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || (stat.mode & 0o077n) !== 0n || (production && stat.uid !== 0n)) throw new Error('qualification response is unsafe');
+  fileSystem.unlinkSync(RELAY_RESPONSE);
+};
+
+const responseDigest = (fileSystem = fs, production = true) => digest(readProtectedFile(RELAY_RESPONSE, { maximum: 512 * 1024, production }).bytes);
+const nativeEnvelope = (result, label) => {
+  const value = parseJSONOutput(successful(result), label); exactKeys(value, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`);
+  if (value.ok !== true) throw new Error(`${label} failed`);
+  return value;
+};
+const git = async (runCommand, args, label, options = {}) => successful(await runCommand(GIT, ['-C', ...args], { cwd: '/', ...options }));
+const gitText = async (runCommand, args, label) => text(await git(runCommand, args, label));
+
+const prepareRepository = async ({ repository, runCommand, author, publicKey, production }) => {
+  await git(runCommand, [repository, 'init', '--initial-branch=main'], 'repository initialization');
+  await git(runCommand, [repository, 'clean', '-ffdxx'], 'repository cleanup');
+  await git(runCommand, [repository, 'read-tree', '--empty'], 'repository index cleanup');
+  await git(runCommand, [repository, 'config', '--local', 'user.name', author], 'author configuration');
+  await git(runCommand, [repository, 'config', '--local', 'user.email', EMAIL], 'email configuration');
+  await git(runCommand, [repository, 'config', '--local', 'gpg.format', 'ssh'], 'AgentPass signing format');
+  await git(runCommand, [repository, 'config', '--local', 'commit.gpgsign', 'true'], 'AgentPass commit signing');
+  await git(runCommand, [repository, 'config', '--local', 'user.signingkey', publicKey], 'AgentPass public signing key');
+  await git(runCommand, [repository, 'config', '--local', 'gpg.ssh.program', SIGNER], 'AgentPass signing program');
+  if (production) await git(runCommand, [repository, 'config', '--local', '--unset-all', 'remote.origin.url'], 'remote removal').catch(() => undefined);
+};
+
+const requireConfig = async (runCommand, repository, key, expected, optional = false) => {
+  const result = await runCommand(GIT, ['-C', repository, 'config', '--local', '--get', key], { cwd: '/' });
+  if (!result?.ok) { if (optional) return; throw new Error(`required Git configuration is missing: ${key}`); }
+  if (text(result.stdout).trim() !== expected) throw new Error(`Git configuration was substituted: ${key}`);
+};
+
+const verifyCommit = async ({ runCommand, repository, publicKey }) => {
+  const top = (await gitText(runCommand, [repository, 'rev-parse', '--show-toplevel'], 'repository root')).trim();
+  const gitDir = (await gitText(runCommand, [repository, 'rev-parse', '--git-dir'], 'repository git directory')).trim();
+  if (top !== repository || !gitDir.startsWith(`${repository}/`) || gitDir.includes('..')) throw new Error('agent escaped the fixed repository');
+  if ((await gitText(runCommand, [repository, 'status', '--porcelain=v1', '--untracked-files=all'], 'working tree status')) !== '') throw new Error('working tree is not clean');
+  if ((await gitText(runCommand, [repository, 'remote'], 'remote inspection')).trim() !== '') throw new Error('unexpected remote was configured');
+  await requireConfig(runCommand, repository, 'gpg.format', 'ssh');
+  await requireConfig(runCommand, repository, 'commit.gpgsign', 'true');
+  await requireConfig(runCommand, repository, 'gpg.ssh.program', SIGNER);
+  await requireConfig(runCommand, repository, 'user.signingkey', publicKey);
+  await requireConfig(runCommand, repository, 'user.name', AUTHOR);
+  await requireConfig(runCommand, repository, 'user.email', EMAIL);
+  await requireConfig(runCommand, repository, 'gpg.program', '', true);
+  const head = (await gitText(runCommand, [repository, 'rev-parse', '--verify', 'HEAD'], 'commit identity')).trim();
+  if (!COMMIT.test(head)) throw new Error('commit identity is invalid');
+  const verify = await git(runCommand, [repository, 'verify-commit', '--raw', head], 'commit signature verification');
+  const verificationOutput = `${text(verify)}${text(verify.stderr)}`;
+  if (!/GOOD|Good|ssh signature/u.test(verificationOutput)) throw new Error('commit signature was not independently verified');
+  const details = (await gitText(runCommand, [repository, 'show', '-s', '--format=%H%n%P%n%an%n%ae%n%T%n%s', head], 'commit details')).split('\n');
+  if (details.length < 6 || details[0] !== head || details[1] !== '' || details[2] !== AUTHOR || details[3] !== EMAIL || !/^[0-9a-f]{40,64}$/u.test(details[4]) || details[5] !== COMMIT_MESSAGE) throw new Error('wrong commit metadata');
+  const names = (await gitText(runCommand, [repository, 'ls-tree', '-r', '--name-only', head], 'commit tree')).split('\n').filter(Boolean);
+  if (names.length !== 1 || names[0] !== MARKER) throw new Error('commit tree contains unexpected files');
+  if (await gitText(runCommand, [repository, 'show', `${head}:${MARKER}`,], 'commit marker') !== MARKER_CONTENT) throw new Error('commit marker content is wrong');
+  if (publicKey && !publicKey.startsWith('ssh-') && !publicKey.startsWith('ecdsa-')) throw new Error('AgentPass public key is invalid');
+  return head;
+};
+
+export const performClaudeCodeUnattendedSign = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, fileSystem = fs, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, readRequest = () => readRelayRequest(RELAY_REQUEST, fileSystem, production), readResponseDigest = () => responseDigest(fileSystem, production), pinSigner = () => readProtectedFile(SIGNER, { maximum: 16 * 1024 * 1024, executable: true, production }) } = {}) => {
+  requireRoot(getUid);
+  if (machine.applicationPath !== '/Applications/AgentPass.app' || machine.serviceLabel !== 'dev.agentpass.native-service' || machine.testRepository !== resolve(machine.testRepository)) throw new Error('scenario configuration identity is not fixed');
+  if (machine.executables.claude_code?.path === undefined || machine.executables.qualification_grant_client?.path !== '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client') throw new Error('Claude Code executable binding is missing');
+  const repositoryIdentity = protectedRepository(machine.testRepository, fileSystem, production);
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const request = readRequest();
+    if (request.candidate_sha256 !== release.artifactSha256 || request.source_commit !== release.sourceCommit || request.artifact_sha256 !== release.artifactSha256 || request.team_id !== release.teamId) throw new Error('relay request is bound to another release');
+    const signerBefore = pinSigner();
+    removeStaleResponse(fileSystem, production);
+    nativeEnvelope(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, 'ping'], { production, runCommand }), 'AgentPass service health');
+    const keyEnvelope = nativeEnvelope(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, 'public-key'], { production, runCommand }), 'AgentPass public key');
+    if (typeof keyEnvelope.public_key !== 'string' || keyEnvelope.public_key.includes('PRIVATE') || keyEnvelope.public_key.length > 4096) throw new Error('AgentPass public key is unavailable');
+    const claim = await runPinned(machine.executables.qualification_grant_client, [], { production, runCommand });
+    successful(claim);
+    const claimedResponseDigest = readResponseDigest();
+    if (!DIGEST.test(claimedResponseDigest)) throw new Error('AgentPass grant response was not published');
+    await prepareRepository({ repository: machine.testRepository, runCommand, author: AUTHOR, publicKey: keyEnvelope.public_key, production });
+    const signerAfter = pinSigner();
+    if (signerBefore.sha256 !== signerAfter.sha256) throw new Error('AgentPass signing executable changed during setup');
+    const agent = await runPinned(machine.executables.claude_code, AGENT_ARGS, { production, runCommand, cwd: machine.testRepository, env: { AGENTPASS_P0C_AGENT_KIND: 'claude-code', AGENTPASS_P0C_REPOSITORY_SHA256: digest(Buffer.from(machine.testRepository)) } });
+    successful(agent);
+    const head = await verifyCommit({ runCommand, repository: machine.testRepository, publicKey: keyEnvelope.public_key });
+    sameRepository(repositoryIdentity, machine.testRepository, fileSystem);
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: '/Applications/AgentPass.app' } });
+};
+
+export const executeClaudeCodeUnattendedSign = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performClaudeCodeUnattendedSign(context) });
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performClaudeCodeUnattendedSign(context) });

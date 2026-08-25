@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "type": "agentpass.deployment-attestation-trust",
+  "keys": [
+    {
+      "environment": "staging",
+      "key_id": "deployment-attestation-staging-v1",
+      "key_version": 1,
+      "fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "status": "active",
+      "not_before": "2026-01-01T00:00:00.000Z",
+      "not_after": "2027-01-01T00:00:00.000Z"
+    }
+  ],
+  "signature_algorithm": "ed25519",
+  "signer_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

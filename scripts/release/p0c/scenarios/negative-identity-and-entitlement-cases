@@ -1,0 +1,221 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import {
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from '../lib/scenario-runtime.mjs';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+
+const GATE = 'negative-identity-and-entitlement-cases';
+const TESTS = Object.freeze(['unrelated-process-denied']);
+const ROLES = Object.freeze(['approved', 'missing-entitlement', 'wrong-team', 'ad-hoc']);
+const MANIFEST_PATH = '/opt/agentpass/p0c/negative-probe-manifest.json';
+const RELEASE_MANIFEST_PATH = '/opt/agentpass/p0c/release-manifest.json';
+const PROBE_ROOT = '/opt/agentpass/p0c/negative-probes';
+const PROBE_EXECUTABLE = 'Contents/MacOS/agentpass-negative-xpc-probe';
+const DIGEST = /^[0-9a-f]{64}$/u;
+const COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM_ID = /^[A-Z0-9]{10}$/u;
+
+const exactKeys = (value, keys, label) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has missing or unknown fields`);
+};
+
+const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const requireRoot = (getUid = process.getuid) => { if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root'); };
+const canonicalString = (value) => {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalString(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalString(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+};
+const canonicalManifestBytes = (value) => Buffer.from(`${canonicalString(value)}\n`, 'utf8');
+const TEAM_PATTERN = /^[A-Z0-9]{10}$/u;
+const SHA_PATTERN = /^[0-9a-f]{64}$/u;
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
+const REQUIREMENT = (bundleID, teamID) => `anchor apple generic and identifier "${bundleID}" and certificate leaf[subject.OU] = "${teamID}"`;
+
+const validateManifest = (value) => {
+  exactKeys(value, ['schema_version', 'kind', 'release', 'service', 'client', 'probes'], 'negative probe manifest');
+  if (value.schema_version !== 1 || value.kind !== 'agentpass.negative-identity-probe-manifest') throw new Error('negative probe manifest identity is invalid');
+  exactKeys(value.release, ['artifact_sha256', 'release_manifest_sha256', 'source_commit', 'team_id', 'wrong_team_id'], 'negative probe release');
+  if (!SHA_PATTERN.test(value.release.artifact_sha256) || !SHA_PATTERN.test(value.release.release_manifest_sha256) || !COMMIT_PATTERN.test(value.release.source_commit) || !TEAM_PATTERN.test(value.release.team_id) || !TEAM_PATTERN.test(value.release.wrong_team_id) || value.release.team_id === value.release.wrong_team_id) throw new Error('negative probe release binding is invalid');
+  exactKeys(value.service, ['bundle_id', 'designated_requirement'], 'negative probe service');
+  exactKeys(value.client, ['bundle_id', 'designated_requirement', 'required_entitlements'], 'negative probe client');
+  if (value.service.bundle_id !== 'dev.agentpass.native-service' || value.service.designated_requirement !== REQUIREMENT(value.service.bundle_id, value.release.team_id) || value.client.bundle_id !== 'dev.agentpass.native-client' || value.client.designated_requirement !== REQUIREMENT(value.client.bundle_id, value.release.team_id)) throw new Error('negative probe fixed identity binding is invalid');
+  exactKeys(value.client.required_entitlements, ['keychain-access-groups'], 'negative probe client entitlements');
+  if (JSON.stringify(value.client.required_entitlements) !== JSON.stringify({ 'keychain-access-groups': [`${value.release.team_id}.dev.agentpass.approval-keys`] })) throw new Error('negative probe client entitlement binding is invalid');
+  if (!Array.isArray(value.probes) || value.probes.length !== ROLES.length) throw new Error('negative probe role inventory is invalid');
+  const seen = new Set();
+  value.probes.forEach((probe, index) => {
+    const role = ROLES[index];
+    exactKeys(probe, ['authorization_expectation', 'bundle_id', 'designated_requirement_expectation', 'entitlement_expectation', 'relative_path', 'role', 'signature_kind', 'team_id_expectation'], `negative probe ${role}`);
+    if (probe.role !== role || seen.has(role) || probe.relative_path !== `probes/${role}-client.app` || probe.bundle_id !== value.client.bundle_id) throw new Error('negative probe role order or path is invalid');
+    seen.add(role);
+    const expectedTeam = role === 'wrong-team' ? value.release.wrong_team_id : value.release.team_id;
+    const expectedEntitlements = role === 'approved' ? value.client.required_entitlements : role === 'wrong-team' ? { 'keychain-access-groups': [`${expectedTeam}.dev.agentpass.approval-keys`] } : {};
+    const expectedSignature = role === 'ad-hoc' ? 'ad-hoc' : 'developer-id';
+    const expectedAuthorization = role === 'approved' ? 'allowlisted-methods-only' : 'deny-before-signing';
+    exactKeys(probe.team_id_expectation, ['mode', 'value'], `negative probe ${role} Team ID expectation`);
+    exactKeys(probe.designated_requirement_expectation, ['mode', 'value'], `negative probe ${role} designated requirement expectation`);
+    exactKeys(probe.entitlement_expectation, ['mode', 'values'], `negative probe ${role} entitlement expectation`);
+    exactKeys(probe.entitlement_expectation.values, Object.keys(expectedEntitlements), `negative probe ${role} entitlement values`);
+    if (probe.signature_kind !== expectedSignature || probe.authorization_expectation !== expectedAuthorization || probe.entitlement_expectation.mode !== 'exact' || JSON.stringify(probe.entitlement_expectation.values) !== JSON.stringify(expectedEntitlements)) throw new Error(`negative probe ${role} expectation is invalid`);
+    if (role === 'ad-hoc') {
+      if (probe.team_id_expectation.mode !== 'absent' || probe.team_id_expectation.value !== null || probe.designated_requirement_expectation.mode !== 'not-release' || probe.designated_requirement_expectation.value !== null) throw new Error('ad-hoc negative probe expectation is invalid');
+    } else if (probe.team_id_expectation.mode !== 'exact' || probe.team_id_expectation.value !== expectedTeam || probe.designated_requirement_expectation.mode !== 'exact' || probe.designated_requirement_expectation.value !== REQUIREMENT(probe.bundle_id, expectedTeam)) {
+      throw new Error(`negative probe ${role} identity expectation is invalid`);
+    }
+  });
+  return value;
+};
+
+const parseNegativeProbeManifest = (bytes) => {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 256 * 1024) throw new Error('negative probe manifest is unavailable');
+  let value;
+  try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('negative probe manifest is invalid JSON'); }
+  validateManifest(value);
+  if (!bytes.equals(canonicalManifestBytes(value))) throw new Error('negative probe manifest is not canonical JSON');
+  return value;
+};
+
+const verifyNegativeProbeManifest = (bytes, release) => {
+  const value = parseNegativeProbeManifest(bytes);
+  for (const key of ['artifact_sha256', 'release_manifest_sha256', 'source_commit', 'team_id']) if (value.release[key] !== release[key]) throw new Error(`negative probe manifest release mismatch: ${key}`);
+  return { manifest_sha256: sha256(canonicalManifestBytes(value)), roles: [...ROLES] };
+};
+
+const verifyNegativeProbeIdentity = (bytes, role, observation) => {
+  const value = parseNegativeProbeManifest(bytes);
+  exactKeys(observation, ['bundle_id', 'designated_requirement', 'entitlements', 'signature_kind', 'team_id'], 'probe identity observation');
+  const probe = value.probes.find((item) => item.role === role);
+  if (!probe || observation.bundle_id !== probe.bundle_id || observation.signature_kind !== probe.signature_kind || JSON.stringify(observation.entitlements) !== JSON.stringify(probe.entitlement_expectation.values)) throw new Error(`probe ${role} identity mismatch`);
+  if (probe.team_id_expectation.mode === 'absent' ? observation.team_id !== null : observation.team_id !== probe.team_id_expectation.value) throw new Error(`probe ${role} Team ID mismatch`);
+  if (probe.designated_requirement_expectation.mode === 'not-release' ? typeof observation.designated_requirement !== 'string' || observation.designated_requirement.length === 0 || observation.designated_requirement === value.client.designated_requirement : observation.designated_requirement !== probe.designated_requirement_expectation.value) throw new Error(`probe ${role} designated requirement mismatch`);
+  return { manifest_sha256: sha256(canonicalManifestBytes(value)) };
+};
+
+const secureDirectory = (input, { production }) => {
+  const path = resolve(input);
+  let current = path;
+  while (true) {
+    let stat;
+    try { stat = fs.lstatSync(current); } catch { throw new Error('negative probe directory is unavailable'); }
+    const writable = (stat.mode & 0o022) !== 0;
+    const symlink = stat.isSymbolicLink();
+    if (symlink) {
+      if (current === path || production) throw new Error('negative probe directory is unsafe');
+    } else if (!stat.isDirectory() || (current === path && writable) || (production && (writable || stat.uid !== 0))) {
+      throw new Error('negative probe directory is unsafe');
+    }
+    if (current === '/') break;
+    current = dirname(current);
+  }
+  return path;
+};
+
+const parseJSON = (bytes, label) => {
+  const value = parseJSONOutput(bytes, label);
+  if (!Buffer.from(bytes).equals(Buffer.from(`${JSON.stringify(value)}\n`, 'utf8'))) throw new Error(`${label} is not canonical JSON`);
+  return value;
+};
+
+const readReleaseManifestBinding = ({ release, releaseManifestPath, production }) => {
+  const snapshot = readProtectedFile(releaseManifestPath, { maximum: 16 * 1024 * 1024, production });
+  const releaseManifestSha256 = sha256(snapshot.bytes);
+  if (release.releaseManifestSha256 !== undefined && releaseManifestSha256 !== release.releaseManifestSha256) throw new Error('release manifest digest is not bound to the negative probe manifest');
+  let manifest;
+  try { manifest = JSON.parse(snapshot.bytes.toString('utf8')); } catch { throw new Error('release manifest is invalid'); }
+  if (manifest?.source?.commit !== release.sourceCommit || !Array.isArray(manifest?.artifacts)) throw new Error('release manifest source binding is invalid');
+  const product = manifest.artifacts.find((item) => item?.role === 'product');
+  if (!product || product.sha256 !== release.artifactSha256) throw new Error('release manifest product binding is invalid');
+  return releaseManifestSha256;
+};
+
+const readManifest = ({ release, manifestPath, releaseManifestPath, production }) => {
+  const snapshot = readProtectedFile(manifestPath, { maximum: 256 * 1024, production });
+  const parsed = parseNegativeProbeManifest(snapshot.bytes);
+  const releaseManifestSha256 = readReleaseManifestBinding({ release, releaseManifestPath, production });
+  const manifestRelease = {
+    artifact_sha256: release.artifactSha256,
+    release_manifest_sha256: releaseManifestSha256,
+    source_commit: release.sourceCommit,
+    team_id: release.teamId,
+  };
+  const verified = verifyNegativeProbeManifest(snapshot.bytes, manifestRelease);
+  if (verified.manifest_sha256 !== sha256(snapshot.bytes)) throw new Error('negative probe manifest digest mismatch');
+  return { bytes: snapshot.bytes, value: parsed, manifestSha256: verified.manifest_sha256, releaseManifestSha256 };
+};
+
+const probeEntry = (root, probe, { production }) => {
+  if (basename(probe.relative_path) !== `${probe.role}-client.app`) throw new Error('negative probe role path is not canonical');
+  const appPath = resolve(root, probe.relative_path);
+  const executable = resolve(appPath, PROBE_EXECUTABLE);
+  const child = relative(root, executable);
+  if (child.startsWith('..') || child.includes('..' + '/')) throw new Error('negative probe executable escapes the protected root');
+  secureDirectory(appPath, { production });
+  secureDirectory(dirname(executable), { production });
+  const snapshot = readProtectedFile(executable, { maximum: 64 * 1024 * 1024, executable: true, production });
+  return { path: snapshot.path, sha256: snapshot.sha256 };
+};
+
+const validateProbeRoot = (root, { production }) => {
+  const path = secureDirectory(root, { production });
+  const probesPath = join(path, 'probes');
+  secureDirectory(probesPath, { production });
+  const names = fs.readdirSync(probesPath, { encoding: 'utf8' }).sort();
+  const expected = ROLES.map((role) => `${role}-client.app`).sort();
+  if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error('negative probe root has an unexpected role inventory');
+  return path;
+};
+
+const parseProbeIdentity = (result, label) => {
+  const value = parseJSON(requireCommandSuccess(result, label), label);
+  exactKeys(value, ['bundle_id', 'designated_requirement', 'entitlements', 'schema_version', 'signature_kind', 'team_id'], `${label} identity`);
+  if (value.schema_version !== 1 || typeof value.bundle_id !== 'string' || typeof value.designated_requirement !== 'string' || value.designated_requirement.length === 0 || !['developer-id', 'ad-hoc'].includes(value.signature_kind) || (value.team_id !== null && typeof value.team_id !== 'string')) throw new Error(`${label} identity is invalid`);
+  const { schema_version: _schemaVersion, ...identity } = value;
+  return identity;
+};
+
+const parseQualification = (result, label) => {
+  const value = parseJSON(requireCommandSuccess(result, label), label);
+  exactKeys(value, ['operation', 'outcome', 'schema_version', 'service_protocol_version'], `${label} qualification`);
+  if (value.schema_version !== 1 || value.operation !== 'qualification-health' || !['allowlisted-method-reached', 'denied-before-signing'].includes(value.outcome) || (value.service_protocol_version !== null && !Number.isInteger(value.service_protocol_version))) throw new Error(`${label} qualification is invalid`);
+  return value;
+};
+
+export const performNegativeIdentityQualification = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, manifestPath = MANIFEST_PATH, releaseManifestPath = RELEASE_MANIFEST_PATH, probeRoot = PROBE_ROOT } = {}) => {
+  requireRoot(getUid);
+  if (!DIGEST.test(release?.artifactSha256 ?? '') || !COMMIT.test(release?.sourceCommit ?? '') || !TEAM_ID.test(release?.teamId ?? '')) throw new Error('negative probe release binding is incomplete');
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const manifest = readManifest({ release, manifestPath, releaseManifestPath, production });
+    const root = validateProbeRoot(probeRoot, { production });
+    const entries = Object.fromEntries(manifest.value.probes.map((probe) => [probe.role, probeEntry(root, probe, { production })]));
+    for (const role of ROLES) {
+      const entry = entries[role];
+      const identity = parseProbeIdentity(await runPinned(entry, ['identity'], { production, runCommand }), `${role} probe`);
+      const identityResult = verifyNegativeProbeIdentity(manifest.bytes, role, identity);
+      if (identityResult.manifest_sha256 !== manifest.manifestSha256) throw new Error(`${role} identity is bound to a different manifest`);
+      const qualification = parseQualification(await runPinned(entry, ['--service', machine.serviceLabel, 'qualification'], { production, runCommand }), `${role} probe`);
+      if (role === 'approved') {
+        if (qualification.outcome !== 'allowlisted-method-reached' || qualification.service_protocol_version !== 13) throw new Error('approved probe did not reach the allow-listed harmless method');
+      } else if (qualification.outcome !== 'denied-before-signing' || qualification.service_protocol_version !== null) {
+        throw new Error(`${role} probe was not denied before signing`);
+      }
+    }
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: machine.applicationPath } });
+};
+
+export const executeNegativeIdentityQualification = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performNegativeIdentityQualification(context) });
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performNegativeIdentityQualification(context) });

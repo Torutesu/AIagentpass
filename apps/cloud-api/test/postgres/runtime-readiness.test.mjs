@@ -1,0 +1,360 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+
+import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
+import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
+
+const DATABASE_URL = "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full";
+const MIGRATION_DATABASE_URL = "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full";
+const SIGNER_DATABASE_URL = "postgresql://agentpass_signer:secret@db.example.test/agentpass?sslmode=verify-full";
+const MAINTENANCE_DATABASE_URL = "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full";
+const SECRET = Buffer.alloc(32, 0x31).toString("base64url");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
+const PLATFORM_PROMOTION_VERIFY = async (_evidence, context) => typeof context?.signer_key_fingerprint === "string";
+const DATABASE_STATE = { applied: [] };
+
+class FakePool {
+  constructor(options) {
+    this.options = options;
+    this.totalCount = 1;
+    this.idleCount = 1;
+    this.waitingCount = 0;
+    this.applied = DATABASE_STATE.applied;
+    this.ended = false;
+    this.endCalls = 0;
+    this.releaseCalls = [];
+    this.calls = [];
+  }
+
+  async connect() {
+    return this.client();
+  }
+
+  client() {
+    return {
+      query: (text, params) => this.query(text, params),
+      release: (destroy = false) => { this.releaseCalls.push(destroy); }
+    };
+  }
+
+  async query(text, params = []) {
+    this.calls.push({ text, params });
+    if (text === "SELECT 1::integer AS ready" || text === "SELECT 1 AS ready") return { rows: [{ ready: 1 }] };
+    if (text === "SELECT to_regclass($1) AS relation") {
+      return { rows: [{ relation: params[0] === "schema_migrations" ? "schema_migrations" : null }] };
+    }
+    if (text.startsWith("SELECT version, checksum FROM schema_migrations")) return { rows: this.applied };
+    if (text.startsWith("SELECT version, checksum, status, finished_at FROM schema_migration_attempts")) return { rows: [] };
+    if (text.startsWith("INSERT INTO schema_migrations")) {
+      this.applied.push({ version: Number(params[0]), checksum: params[1] });
+      return { rows: [] };
+    }
+    if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
+    if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
+    if (text.startsWith("SELECT public.agentpass_maintain_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { quarantined: 0, reconciled: 0, pruned: 0, total: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_agent_signing_capability_recover_expired")) return { rowCount: 1, rows: [{ result: { status: "ok", expired: 0, uncertain: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_health_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { version: 1, states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 0, rejected: 0, failed: 0 }, stale_started: 0, oldest_nonterminal_at: null } }] };
+    if (text.startsWith("SELECT agentpass_quarantine_expired_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ quarantined: 0 }] };
+    if (text.startsWith("WITH candidates") && text.includes("UPDATE managed_signer_provider_operations")) return { rowCount: 1, rows: [{ reconciled: 0 }] };
+    if (text.startsWith("WITH candidates") && text.includes("DELETE FROM managed_signer_signing_idempotency")) return { rowCount: 1, rows: [{ pruned: 0 }] };
+    if (text.startsWith("SELECT\n        (SELECT count(*) FROM (\n          SELECT 1 FROM managed_signer_provider_operations")) return { rowCount: 1, rows: [{ pending: "0", started: "0", accepted: "0", uncertain: "0", committed: "0", rejected: "0", failed: "0", stale_started: "0", oldest_nonterminal_at: null }] };
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("pg_advisory_xact_lock")) return { rows: [] };
+    return { rows: [] };
+  }
+
+  async end() {
+    this.endCalls += 1;
+    this.ended = true;
+  }
+}
+
+function env() {
+  return {
+    AGENTPASS_DATABASE_URL: DATABASE_URL,
+    AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
+    AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_MAINTENANCE_DATABASE_URL: MAINTENANCE_DATABASE_URL,
+    AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
+    AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x32).toString("base64url")
+  };
+}
+
+test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bounded drain", async () => {
+  const migrations = await loadSqlMigrations();
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
+  assert.equal(runtime.pool.applied.length, migrations.length);
+  assert.equal((await runtime.readiness()).code, "ready");
+  assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
+  assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
+  assert.equal(typeof runtime.agentSessionLifecycleRepository?.expireDue, "function");
+  assert.equal(typeof runtime.agentSessionLifecycleRepository?.revokeAuthority, "function");
+  assert.equal(typeof runtime.qualificationGrantBatchRepository?.issueQualificationGrantBatch, "function");
+  assert.equal(typeof runtime.qualificationGrantBatchRepository?.claimQualificationGrantBatch, "function");
+  assert.equal(typeof runtime.platformOperatorAssignmentRepository?.findActivePlatformOperatorAssignment, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.getBootstrapStatus, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.verifyBootstrapCsrf, "function");
+  assert.equal(typeof runtime.createManagedSignerKeyLifecycleRepository, "function");
+  assert.equal(runtime.createManagedSignerKeyLifecycleRepository({ purpose: "agentpass.agent-session-grant" }).purpose, "agentpass.agent-session-grant");
+  assert.equal(runtime.createProviderOperationRepository({ purpose: "agentpass.agent-session-grant", keyId: "agent-key-1", keyVersion: "1" }).purpose, "agentpass.agent-session-grant");
+  assert.equal(typeof runtime.ownerRecoveryRepository?.createRecoveryRequest, "function");
+  assert.equal(typeof runtime.ownerRecoveryRepository?.activateRecoveryInTransaction, "function");
+  assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.begin, "function");
+  assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.complete, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxRepository?.claimBatch, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxManagementRepository?.redriveDeadLetter, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxRetentionRepository?.prune, "function");
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "running");
+  assert.equal(typeof runtime.sharedControlMaintenanceWorker.runOnce, "function");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "running");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().cycles, 1);
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().consecutive_failures, 0);
+  assert.equal(typeof runtime.providerOperationMaintenanceRepository.maintainProviderOperations, "function");
+  assert.equal(typeof runtime.providerOperationMaintenanceRepository.health, "function");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "running");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().cycles, 1);
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().consecutive_failures, 0);
+  assert.equal(typeof runtime.agentSessionSigningCapabilityMaintenanceRepository.recoverExpiredReservations, "function");
+  assert.equal((await runtime.readiness()).checks.agent_session_signing_capability_maintenance.code, "ok");
+  assert.equal((await runtime.readiness()).checks.managed_signer_provider_operations.code, "ok");
+
+  let finish;
+  const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
+  runtime.beginDrain();
+  const draining = await runtime.readiness();
+  assert.equal(draining.ready, false);
+  assert.equal(draining.code, "draining");
+  assert.equal(draining.checks.drain.in_flight, 1);
+
+  const close = runtime.drain({ timeoutMs: 100 });
+  finish();
+  await inFlight;
+  const drained = await close;
+  assert.equal(drained.drained, true);
+  assert.equal(runtime.pool.ended, true);
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
+  assert.equal((await runtime.readiness()).code, "closed");
+  await runtime.close();
+});
+
+test("PostgreSQL runtime isolates migration, signer, maintenance, and application pools by exact database role", async () => {
+  const pools = [];
+  class RoleTrackingPool extends FakePool {
+    constructor(options) {
+      super(options);
+      pools.push(this);
+    }
+  }
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: RoleTrackingPool
+  });
+  assert.equal(pools.length, 4);
+  const byRole = Object.fromEntries(pools.map((pool) => [new URL(pool.options.connectionString).username, pool]));
+  assert.equal(runtime.pool, byRole.agentpass_app);
+  assert.equal(byRole.agentpass_migrator.ended, true);
+  assert.equal(byRole.agentpass_migrator.endCalls, 1);
+  assert.equal(byRole.agentpass_app.ended, false);
+  assert.equal(byRole.agentpass_signer.ended, false);
+  assert.equal(byRole.agentpass_maintenance.ended, false);
+  assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
+  assert.equal(byRole.agentpass_signer.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), true);
+  assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("managed_signer_provider_operations")), false);
+  assert.equal(byRole.agentpass_maintenance.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), true);
+  assert.equal(byRole.agentpass_app.calls.some(({ text }) => text.includes("agentpass_agent_signing_capability_recover_expired")), false);
+  assert.equal(byRole.agentpass_migrator.calls.some(({ text }) => text.startsWith("SELECT version, checksum FROM schema_migrations")), true);
+  await runtime.close();
+  assert.equal(byRole.agentpass_app.ended, true);
+  assert.equal(byRole.agentpass_signer.ended, true);
+  assert.equal(byRole.agentpass_maintenance.ended, true);
+});
+
+test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
+  const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; }, async lookupAcceptance() { return { accepted: false, idempotency_key: "22222222-2222-4222-8222-222222222222" }; } };
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    ownerRecoveryPublisher: publisher,
+    ownerRecoveryOutboxAutoStart: false
+  });
+  assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "idle");
+  assert.equal((await runtime.readiness()).code, "owner_recovery_outbox_worker_unavailable");
+  assert.equal(typeof runtime.ownerRecoveryOutboxWorker.runOnce, "function");
+  await runtime.close();
+  assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "closed");
+  assert.equal(runtime.pool.ended, true);
+});
+
+test("direct runtime close waits for tracked work before closing PostgreSQL", async () => {
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool });
+  let finish;
+  const active = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
+  const closing = runtime.close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.pool.ended, false);
+  finish();
+  await active;
+  const result = await closing;
+  assert.equal(result.drained, true);
+  assert.equal(runtime.pool.ended, true);
+});
+
+test("PostgreSQL runtime can leave shared-control maintenance idle for qualification", async () => {
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    sharedControlMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "idle");
+  await runtime.close();
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime can leave provider-operation maintenance idle and fails readiness closed", async () => {
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    managedSignerProviderOperationMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "idle");
+  const readiness = await runtime.readiness();
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.code, "managed_signer_provider_operations_worker_unavailable");
+  await runtime.close();
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime can leave signing-capability maintenance idle and fails readiness closed", async () => {
+  const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+    env: env(),
+    PoolClass: FakePool,
+    agentSessionSigningCapabilityMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "idle");
+  const readiness = await runtime.readiness();
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.code, "agent_session_signing_capability_maintenance_worker_unavailable");
+  await runtime.close();
+  assert.equal(runtime.agentSessionSigningCapabilityMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime preserves migration failure and closes the pool exactly once", async () => {
+  const expected = new Error("migration failure injection");
+  const pools = [];
+  class MigrationFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pools.push(this);
+    }
+
+    async query(text, params = []) {
+      if (text === "SELECT set_config('statement_timeout', $1, false)") throw expected;
+      return super.query(text, params);
+    }
+  }
+
+  await assert.rejects(
+    createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: MigrationFailurePool }),
+    (error) => error === expected
+  );
+  assert.equal(pools.length, 4);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [true], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
+});
+
+test("PostgreSQL runtime cleans started workers and pool after late construction failure", async () => {
+  const pools = [];
+  const scheduled = [];
+  const cleared = [];
+  const setTimeoutFn = (callback, delay) => {
+    const handle = Object.freeze({ callback, delay, unref() {} });
+    scheduled.push(handle);
+    return handle;
+  };
+  const clearTimeoutFn = (handle) => { cleared.push(handle); };
+  class LateFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pools.push(this);
+    }
+  }
+  const ownerRecoveryPublisher = {
+    binding: DELIVERY_BINDING,
+    async publish() { return { accepted: false, duplicate: false }; },
+    async lookupAcceptance() { return { accepted: false, idempotency_key: "unused" }; }
+  };
+
+  await assert.rejects(
+    createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+      env: env(),
+      PoolClass: LateFailurePool,
+      ownerRecoveryPublisher,
+      ownerRecoveryOutboxWorkerOptions: { setTimeoutFn, clearTimeoutFn },
+      sharedControlMaintenanceWorkerOptions: { setTimeoutFn, clearTimeoutFn },
+      refreshNonceCodec: {}
+    }),
+    (error) => error?.code === "ERR_REFRESH_NONCE_CODEC"
+  );
+
+  assert.equal(scheduled.length, 0);
+  assert.equal(cleared.length, 0);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [false], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
+});
+
+test("PostgreSQL runtime preserves start failure identity and drains already-started workers", async () => {
+  const expected = new Error("worker start failure injection");
+  const pools = [];
+  const ownerScheduled = [];
+  const ownerCleared = [];
+  const ownerSetTimeoutFn = (callback, delay) => {
+    const handle = Object.freeze({ callback, delay, unref() {} });
+    ownerScheduled.push(handle);
+    return handle;
+  };
+  const ownerClearTimeoutFn = (handle) => { ownerCleared.push(handle); };
+  const sharedSetTimeoutFn = () => { throw expected; };
+  class StartFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pools.push(this);
+    }
+  }
+  const ownerRecoveryPublisher = {
+    binding: DELIVERY_BINDING,
+    async publish() { return { accepted: false, duplicate: false }; },
+    async lookupAcceptance() { return { accepted: false, idempotency_key: "unused" }; }
+  };
+
+  await assert.rejects(
+    createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
+      env: env(),
+      PoolClass: StartFailurePool,
+      ownerRecoveryPublisher,
+      ownerRecoveryOutboxWorkerOptions: { setTimeoutFn: ownerSetTimeoutFn, clearTimeoutFn: ownerClearTimeoutFn },
+      sharedControlMaintenanceWorkerOptions: { setTimeoutFn: sharedSetTimeoutFn, clearTimeoutFn: () => {} }
+    }),
+    (error) => error === expected
+  );
+
+  assert.equal(ownerScheduled.length, 1);
+  assert.equal(ownerCleared.length, 1);
+  assert.equal(ownerCleared[0], ownerScheduled[0]);
+  assert.deepEqual(pools.map((pool) => pool.endCalls), [1, 1, 1, 1]);
+  assert.deepEqual(pools.map((pool) => pool.releaseCalls), [[], [false], [], []]);
+  assert.equal(pools.every((pool) => pool.ended), true);
+});

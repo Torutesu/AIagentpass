@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentpass.application-grant.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "kind", "grant_id", "organization_id", "app_id", "actor_id", "session_id", "operations", "issued_at", "expires_at", "signing_purpose", "key_id", "request_digest"],
+  "properties": {
+    "version": {"const": 1},
+    "kind": {"const": "agentpass.application-grant"},
+    "grant_id": {"type": "string", "format": "uuid"},
+    "organization_id": {"type": "string", "format": "uuid"},
+    "app_id": {"type": "string", "format": "uuid"},
+    "actor_id": {"type": "string", "format": "uuid"},
+    "session_id": {"type": "string", "format": "uuid"},
+    "release_id": {"type": "string", "format": "uuid"},
+    "operations": {"type": "array", "items": {"enum": ["app.preview.prepare", "app.release.request"]}, "maxItems": 64},
+    "issued_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"},
+    "expires_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"},
+    "signing_purpose": {"const": "small-software.application-grant"},
+    "key_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "request_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

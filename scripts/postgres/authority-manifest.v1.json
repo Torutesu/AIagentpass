@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/scripts/postgres/authority-manifest.v1.json",
+  "title": "AgentPass migration 0048 authority boundary object inventory",
+  "schema_version": 1,
+  "migration_version": 48,
+  "migration": "0048_platform_promotion_authority_boundary.sql",
+  "tables": [],
+  "functions": [
+    "agentpass_platform_promotion_issuance_result",
+    "agentpass_platform_promotion_statement_canonical_json",
+    "agentpass_platform_promotion_request_digest",
+    "agentpass_platform_promotion_issuance_reserve",
+    "agentpass_platform_promotion_issuance_replay",
+    "agentpass_platform_promotion_issuance_commit",
+    "agentpass_platform_promotion_issuance_uncertain",
+    "agentpass_platform_promotion_issuance_get"
+  ],
+  "triggers": [],
+  "policies": [],
+  "views": [],
+  "table_contracts": {},
+  "view_contracts": {}
+}

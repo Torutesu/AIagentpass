@@ -59,6 +59,35 @@ The native service requires a signed initial bundle when remote control is confi
 
 The implementation decision and Apple signing prerequisites are recorded in [docs/ADR-001-native-security-boundary.md](docs/ADR-001-native-security-boundary.md).
 
+## Cloud synchronization contract boundary
+
+Hosted admission and replay controls are authoritative PostgreSQL state shared by every API replica. Authenticated traffic is scoped by organization and principal; pre-authentication or malformed scopes are collapsed into fixed, domain-separated HMAC UUID buckets so an attacker cannot create an unbounded row namespace. There is no hosted process-local allowance fallback, and database failure therefore denies admission. Bucket refill time is sampled only after the row lock and cannot move backward under clock adjustment or lock contention.
+
+Replay, nonce, idempotency, and rate-limit retention is availability maintenance, not an authorization bypass. Concurrent workers select bounded expired batches with `FOR UPDATE SKIP LOCKED`, share one per-cycle deletion budget, and emit only fixed aggregate counters. A failed prune can retain denial/replay evidence longer; it cannot make an expired or replayed request valid. The reverse proxy remains responsible for independent connection-level and volumetric denial-of-service controls before application admission.
+
+Owner-recovery notification delivery is also non-authoritative. PostgreSQL owns
+the immutable provider binding, claim fence, management version, transition
+ledger, and terminal state. A timeout or process loss after a provider call is
+recorded as `uncertain` and cannot be automatically published or blindly
+redelivered. Only a linearizable exact-binding provider acceptance proof may
+confirm publication; otherwise an Owner/Admin must use a one-use,
+resource-bound WebAuthn authorization to retry or suppress the event. Neither
+notification arrival nor provider diagnostics prove recovery authority.
+
+Operational monitoring for this path is deliberately aggregate-only. Alert
+inputs and retained drill evidence use a closed fixed vocabulary and must not
+contain organization, member, request, event, destination, URL, DSN, token,
+credential, notification content, or provider diagnostics. Metrics and alert
+sink failures are non-authoritative: they may reduce observability and trigger
+fail-closed readiness or operator escalation, but they cannot commit, retry,
+suppress, confirm, or otherwise widen recovery authority.
+
+A refresh hint is untrusted delivery input even when its Cloud signature is valid. It carries no policy, capability, revocation list, signing permission, or expiry extension. Its only permitted effect is to ask the enrolled device to fetch the current ControlBundle through the independently authenticated Device API. Substitution, replay, reordering, duplicate delivery, expiry, or total notification outage therefore cannot widen authority; the installed signed ControlBundle and its expiry remain canonical.
+
+Refresh-hint signatures are Ed25519 over a versioned, domain-separated canonical statement bound to one organization, device, authority generation, short validity window, nonce, algorithm, and key ID. The device rejects unknown fields, invalid encodings, cross-device audience, generation rollback, expired/future-invalid windows, untrusted keys, and signatures over any other byte sequence.
+
+A bundle acknowledgement is evidence, not authorization. The native device signs a versioned, domain-separated canonical ACK with its non-exportable enrolled P-256 device key. The statement binds the organization, device, device-key epoch, ControlBundle format epoch, sequence, exact statement hash, applied/blocked result, stable non-secret reason code, observation time, and nonce. Cloud must verify both body/path scope and the active key epoch, consume the nonce once, and accept an exact duplicate idempotently while rejecting a conflicting result. ACK failure never makes an unverified bundle active, and ACK success never grants signing authority.
+
 ## Explicit non-goals of local mode
 
 - Preventing `git push --no-verify`; server-side branch protection is required.

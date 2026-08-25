@@ -1,0 +1,606 @@
+name: External qualification runners
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact protected source commit to qualify
+        required: true
+        type: string
+      artifact_sha256:
+        description: Exact release artifact SHA-256
+        required: true
+        type: string
+      ci_run_id:
+        description: Exact successful canonical CI workflow run ID bound to this qualification
+        required: true
+        type: string
+      ci_run_attempt:
+        description: Exact canonical CI workflow run attempt
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: external-qualification-${{ inputs.source_commit }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+env:
+  CANONICAL_REPOSITORY: Torutesu/AIagentpass
+
+jobs:
+  validate:
+    if: ${{ github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_commit: ${{ steps.validate.outputs.source_commit }}
+      source_tree: ${{ steps.validate.outputs.source_tree }}
+      artifact_sha256: ${{ steps.validate.outputs.artifact_sha256 }}
+      ci_run_id: ${{ steps.validate.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.validate.outputs.ci_run_attempt }}
+    steps:
+      - id: validate
+        name: Validate immutable source and artifact bindings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit must be an exact 40-character SHA" >&2; exit 1; }
+          [[ "$GITHUB_SHA" == "$SOURCE_COMMIT" ]] || { echo "external qualification workflow ref is not the requested source commit" >&2; exit 1; }
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "artifact_sha256 must be an exact SHA-256" >&2; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "ci_run_id must be an exact run ID" >&2; exit 1; }
+          [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "ci_run_attempt must be an exact attempt" >&2; exit 1; }
+          [[ "$CI_RUN_ID" != "$GITHUB_RUN_ID" ]] || { echo "canonical CI run must be distinct from the qualification run" >&2; exit 1; }
+          commit_file="$RUNNER_TEMP/agentpass-external-source-commit.json"
+          gh api "repos/$CANONICAL_REPOSITORY/git/commits/$SOURCE_COMMIT" > "$commit_file"
+          source_tree="$(node --input-type=module - "$commit_file" "$CANONICAL_REPOSITORY" "$SOURCE_COMMIT" <<'NODE'
+          import fs from 'node:fs';
+          import { assertGithubCommit } from './scripts/release/ci-preflight.mjs';
+          const [commitPath, repository, expectedSha] = process.argv.slice(2);
+          const binding = assertGithubCommit(JSON.parse(fs.readFileSync(commitPath, 'utf8')), { repository, expectedSha });
+          process.stdout.write(binding.tree_sha);
+          NODE
+          )"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ ]] || { echo "GitHub commit/tree binding is invalid" >&2; exit 1; }
+          ci_run_json="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID")"
+          [[ "$(jq -er '.head_sha' <<<"$ci_run_json")" == "$SOURCE_COMMIT" ]] || { echo "canonical CI source binding is invalid" >&2; exit 1; }
+          [[ "$(jq -er '.status' <<<"$ci_run_json")" == "completed" && "$(jq -er '.conclusion' <<<"$ci_run_json")" == "success" ]] || { echo "canonical CI run is not a successful terminal run" >&2; exit 1; }
+          [[ "$(jq -er '.run_attempt|tostring' <<<"$ci_run_json")" == "$CI_RUN_ATTEMPT" ]] || { echo "canonical CI attempt binding is invalid" >&2; exit 1; }
+          ci_jobs_json="$RUNNER_TEMP/agentpass-canonical-ci-jobs.json"
+          gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$ci_jobs_json"
+          ci_run_file="$RUNNER_TEMP/agentpass-canonical-ci-run.json"
+          printf '%s\n' "$ci_run_json" > "$ci_run_file"
+          node scripts/release/ci-preflight.mjs github \
+            "$ci_run_file" "$ci_jobs_json" "$SOURCE_COMMIT" "$CANONICAL_REPOSITORY" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" >/dev/null
+          printf 'source_commit=%s\n' "$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'source_tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
+          printf 'artifact_sha256=%s\n' "$ARTIFACT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'ci_run_id=%s\n' "$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'ci_run_attempt=%s\n' "$CI_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+  kms:
+    if: ${{ needs.validate.result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate
+    runs-on: [self-hosted, agentpass-kms-qualification]
+    environment: external-qualification-kms
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run and verify external KMS qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_KMS_QUALIFICATION_ENABLED: "true"
+          AGENTPASS_KMS_QUALIFICATION_EXECUTION: external
+          AGENTPASS_KMS_QUALIFICATION_REAL_EXECUTION: "true"
+          AGENTPASS_KMS_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_KMS_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_KMS_PROVIDER_ADAPTER_MODULE: ${{ vars.AGENTPASS_KMS_PROVIDER_ADAPTER_MODULE }}
+          AGENTPASS_KMS_PROVIDER_ADAPTER_SHA256: ${{ vars.AGENTPASS_KMS_PROVIDER_ADAPTER_SHA256 }}
+          AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS: ${{ vars.AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS }}
+          AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST: ${{ vars.AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST }}
+          AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTOR_PUBLIC_KEYS: ${{ vars.AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTOR_PUBLIC_KEYS }}
+          AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST }}
+          AGENTPASS_KMS_QUALIFICATION_ARTIFACT_SHA256: ${{ needs.validate.outputs.artifact_sha256 }}
+          AGENTPASS_KMS_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_KMS_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/kms-qualification.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_KMS_QUALIFICATION_RUNNER_ID:?protected KMS runner identity is required}"
+          : "${AGENTPASS_KMS_PROVIDER_ADAPTER_MODULE:?protected KMS adapter module is required}"
+          : "${AGENTPASS_KMS_PROVIDER_ADAPTER_SHA256:?protected KMS adapter digest is required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_EXPECTED_BINDINGS:?protected KMS target bindings are required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTATION_TRUST:?protected KMS identity attestor trust is required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_IDENTITY_ATTESTOR_PUBLIC_KEYS:?protected KMS identity attestor public keys are required}"
+          : "${AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST:?protected KMS deployment digest is required}"
+          [[ "$AGENTPASS_KMS_QUALIFICATION_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "artifact digest is invalid" >&2; exit 1; }
+          [[ "$AGENTPASS_KMS_QUALIFICATION_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source commit is invalid" >&2; exit 1; }
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/$AGENTPASS_KMS_QUALIFICATION_SOURCE_COMMIT" --jq '.tree.sha')"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "$AGENTPASS_KMS_QUALIFICATION_SOURCE_COMMIT" && "$checkout_tree" == "$source_tree" ]] || { echo "KMS checkout source binding is invalid" >&2; exit 1; }
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "kms") | .id' | head -n 1)"
+          [[ "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "KMS job ID is unavailable" >&2; exit 1; }
+          export AGENTPASS_KMS_QUALIFICATION_SOURCE_TREE="$source_tree"
+          export AGENTPASS_KMS_QUALIFICATION_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}"
+          export AGENTPASS_KMS_QUALIFICATION_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}"
+          export AGENTPASS_KMS_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_KMS_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_KMS_QUALIFICATION_JOB_ID="$job_id"
+          npm run qualification:kms:external
+          node scripts/release/ci-preflight.mjs kms-qualification "$AGENTPASS_KMS_QUALIFICATION_EVIDENCE_PATH" "$AGENTPASS_KMS_QUALIFICATION_SOURCE_COMMIT" "$source_tree" "$AGENTPASS_KMS_QUALIFICATION_DEPLOYMENT_DIGEST" "$GITHUB_RUN_ID" "$job_id" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$AGENTPASS_KMS_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-kms-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kms-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  platform-auth:
+    if: ${{ needs.validate.result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate
+    runs-on: [self-hosted, agentpass-platform-auth-qualification]
+    environment: external-qualification-platform-auth
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run and verify external Platform Auth qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_ENABLED: "true"
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EXECUTION: external
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_REAL_EXECUTION: "true"
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_MODULE: ${{ vars.AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_MODULE }}
+          AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_SHA256: ${{ vars.AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_SHA256 }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/platform-auth-qualification.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUNNER_ID:?protected Platform Auth runner identity is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_MODULE:?protected Platform Auth adapter module is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_PROVIDER_ADAPTER_SHA256:?protected Platform Auth adapter digest is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST:?primary deployment digest is required}"
+          : "${AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST:?secondary deployment digest is required}"
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_COMMIT" --jq '.tree.sha')"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_COMMIT" && "$checkout_tree" == "$source_tree" ]] || { echo "Platform Auth checkout source binding is invalid" >&2; exit 1; }
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "platform-auth") | .id' | head -n 1)"
+          [[ "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "Platform Auth job ID is unavailable" >&2; exit 1; }
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_TREE="$source_tree"
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}"
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}"
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID"
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export AGENTPASS_PLATFORM_AUTH_QUALIFICATION_JOB_ID="$job_id"
+          npm run qualification:platform-auth:external
+          node scripts/release/ci-preflight.mjs platform-auth-qualification "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_PATH" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SOURCE_COMMIT" "$source_tree" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_PRIMARY_DEPLOYMENT_DIGEST" "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_SECONDARY_DEPLOYMENT_DIGEST" "$GITHUB_RUN_ID" "$job_id" >/dev/null
+          node scripts/release/ci-preflight.mjs secret-scan "$AGENTPASS_PLATFORM_AUTH_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-platform-auth-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform-auth-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  webauthn:
+    if: ${{ needs.validate.result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate
+    runs-on: [self-hosted, agentpass-webauthn-qualification]
+    environment: external-qualification-webauthn
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run and verify protected production WebAuthn qualification adapter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_ENABLED: "true"
+          AGENTPASS_WEBAUTHN_QUALIFICATION_EXECUTION: external
+          AGENTPASS_WEBAUTHN_QUALIFICATION_REAL_EXECUTION: "true"
+          AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_ARTIFACT_SHA256: ${{ needs.validate.outputs.artifact_sha256 }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_CI_RUN_ID: ${{ needs.validate.outputs.ci_run_id }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_CI_RUN_ATTEMPT: ${{ needs.validate.outputs.ci_run_attempt }}
+          AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_MODULE: ${{ vars.AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_MODULE }}
+          AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_SHA256: ${{ vars.AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_SHA256 }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST: ${{ vars.AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST }}
+          AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN: ${{ vars.AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN }}
+          AGENTPASS_WEBAUTHN_EXPECTED_RP_ID: ${{ vars.AGENTPASS_WEBAUTHN_EXPECTED_RP_ID }}
+          AGENTPASS_WEBAUTHN_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/webauthn-qualification.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID:?protected WebAuthn runner identity is required}"
+          : "${AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_MODULE:?protected WebAuthn adapter module is required}"
+          : "${AGENTPASS_WEBAUTHN_PROVIDER_ADAPTER_SHA256:?protected WebAuthn adapter digest is required}"
+          : "${AGENTPASS_WEBAUTHN_QUALIFICATION_DEPLOYMENT_DIGEST:?deployed WebAuthn digest is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_ORIGIN:?deployed WebAuthn origin is required}"
+          : "${AGENTPASS_WEBAUTHN_EXPECTED_RP_ID:?deployed WebAuthn RP ID is required}"
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "webauthn") | .id' | head -n 1)"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "${{ needs.validate.outputs.source_commit }}" && "$checkout_tree" == "$source_tree" && "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "WebAuthn checkout/binding lookup failed" >&2; exit 1; }
+          export AGENTPASS_WEBAUTHN_QUALIFICATION_SOURCE_TREE="$source_tree" AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID" AGENTPASS_WEBAUTHN_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" AGENTPASS_WEBAUTHN_QUALIFICATION_JOB_ID="$job_id"
+          npm run qualification:webauthn:external
+          node scripts/release/archive-secret-scan.mjs "$AGENTPASS_WEBAUTHN_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-webauthn-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/webauthn-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-authority-16:
+    if: ${{ needs.validate.result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate
+    runs-on: [self-hosted, agentpass-postgresql-qualification-16]
+    environment: external-qualification-postgresql
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run external PostgreSQL 16 backup/PITR qualification
+        env:
+          AGENTPASS_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_16_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_16_RESTORE_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_16_PITR_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_CA_CERT_FILE: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_CA_CERT_FILE }}
+          AGENTPASS_BACKUP_PITR_RESTORE_CONFIRMATION: isolated-disposable
+          AGENTPASS_BACKUP_PITR_PITR_CONFIRMATION: isolated-disposable
+          AGENTPASS_BACKUP_PITR_RUNNER_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_RUNNER_ID }}
+          AGENTPASS_BACKUP_PITR_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT: ${{ runner.temp }}/postgres-16-backup-pitr.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_DATABASE_URL:?source PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL:?restore PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL:?PITR PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_CA_CERT_FILE:?PostgreSQL CA path is required}"
+          : "${AGENTPASS_BACKUP_PITR_RUNNER_ID:?protected PostgreSQL runner identity is required}"
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "postgres-authority-16") | .id' | head -n 1)"
+          migration_artifact_sha256="$(node scripts/qualification/postgres-c3-migration-0047.mjs artifact-digest contracts/postgres/0047_platform_promotion_issuance.sql | node --input-type=module -e 'let data=""; for await (const chunk of process.stdin) data += chunk; process.stdout.write(JSON.parse(data).artifact_sha256)')"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "${{ needs.validate.outputs.source_commit }}" && "$checkout_tree" == "$source_tree" && "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "PostgreSQL 16 checkout/binding lookup failed" >&2; exit 1; }
+          [[ "$migration_artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "PostgreSQL 16 migration artifact digest is invalid" >&2; exit 1; }
+          export AGENTPASS_BACKUP_PITR_SOURCE_TREE="$source_tree" AGENTPASS_BACKUP_PITR_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}" AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}" AGENTPASS_BACKUP_PITR_CI_JOB_ID="$job_id" AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256="$migration_artifact_sha256"
+          npm run postgres:require-live-env
+          node scripts/qualification/backup-pitr-evidence.mjs run "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" --source-commit "$AGENTPASS_BACKUP_PITR_SOURCE_COMMIT" --source-tree "$source_tree" --run-id "${{ needs.validate.outputs.ci_run_id }}" --run-attempt "${{ needs.validate.outputs.ci_run_attempt }}" --job-id "$job_id" --artifact-sha256 "$migration_artifact_sha256" >/dev/null
+          node scripts/release/archive-secret-scan.mjs "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" >/dev/null
+      - name: Run and verify external PostgreSQL 16 C3 qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ENABLED: "true"
+          AGENTPASS_POSTGRES_QUALIFICATION_EXECUTION: external
+          AGENTPASS_POSTGRES_QUALIFICATION_REAL_EXECUTION: "true"
+          AGENTPASS_POSTGRES_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_RUNNER_ID }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ENVIRONMENT_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_ENVIRONMENT_ID }}
+          AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ARTIFACT_SHA256: ${{ needs.validate.outputs.artifact_sha256 }}
+          AGENTPASS_POSTGRES_QUALIFICATION_POSTGRES_MAJOR: "16"
+          AGENTPASS_POSTGRES_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/postgres-16-qualification.json
+          AGENTPASS_TEST_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_16_DATABASE_URL }}
+          AGENTPASS_C3_REQUIRE_REAL_DATABASE: "1"
+          AGENTPASS_C3_CA_CERT_FILE: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_CA_CERT_FILE }}
+          AGENTPASS_C3_BACKUP_PITR_EVIDENCE: ${{ runner.temp }}/postgres-16-backup-pitr.json
+          AGENTPASS_C3_EXPECTED_DATABASE_NAME: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_DATABASE_NAME }}
+          AGENTPASS_C3_EXPECTED_SERVER_PORT: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_16_SERVER_PORT }}
+        run: |
+          set -euo pipefail
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "postgres-authority-16") | .id' | head -n 1)"
+          [[ "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "PostgreSQL 16 job ID lookup failed" >&2; exit 1; }
+          export AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_TREE="$source_tree" AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}" AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}" AGENTPASS_POSTGRES_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID" AGENTPASS_POSTGRES_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" AGENTPASS_POSTGRES_QUALIFICATION_JOB_ID="$job_id"
+          npm run qualification:postgres-c3:external
+          node scripts/release/archive-secret-scan.mjs "$AGENTPASS_POSTGRES_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-postgres-16-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/postgres-16-qualification.json
+            ${{ runner.temp }}/postgres-16-backup-pitr.json
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-authority-17:
+    if: ${{ needs.validate.result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate
+    runs-on: [self-hosted, agentpass-postgresql-qualification-17]
+    environment: external-qualification-postgresql
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run external PostgreSQL 17 backup/PITR qualification
+        env:
+          AGENTPASS_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_17_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_17_RESTORE_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_17_PITR_DATABASE_URL }}
+          AGENTPASS_BACKUP_PITR_CA_CERT_FILE: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_CA_CERT_FILE }}
+          AGENTPASS_BACKUP_PITR_RESTORE_CONFIRMATION: isolated-disposable
+          AGENTPASS_BACKUP_PITR_PITR_CONFIRMATION: isolated-disposable
+          AGENTPASS_BACKUP_PITR_RUNNER_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_RUNNER_ID }}
+          AGENTPASS_BACKUP_PITR_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT: ${{ runner.temp }}/postgres-17-backup-pitr.json
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_DATABASE_URL:?source PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_RESTORE_DATABASE_URL:?restore PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_PITR_DATABASE_URL:?PITR PostgreSQL URL is required}"
+          : "${AGENTPASS_BACKUP_PITR_CA_CERT_FILE:?PostgreSQL CA path is required}"
+          : "${AGENTPASS_BACKUP_PITR_RUNNER_ID:?protected PostgreSQL runner identity is required}"
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          migration_artifact_sha256="$(node scripts/qualification/postgres-c3-migration-0047.mjs artifact-digest contracts/postgres/0047_platform_promotion_issuance.sql | node --input-type=module -e 'let data=""; for await (const chunk of process.stdin) data += chunk; process.stdout.write(JSON.parse(data).artifact_sha256)')"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "${{ needs.validate.outputs.source_commit }}" && "$checkout_tree" == "$source_tree" ]] || { echo "PostgreSQL 17 checkout/source tree binding is invalid" >&2; exit 1; }
+          [[ "$migration_artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "PostgreSQL 17 migration artifact digest is invalid" >&2; exit 1; }
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "postgres-authority-17") | .id' | head -n 1)"
+          [[ "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "PostgreSQL 17 job ID lookup failed" >&2; exit 1; }
+          export AGENTPASS_BACKUP_PITR_SOURCE_TREE="$source_tree" AGENTPASS_BACKUP_PITR_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}" AGENTPASS_BACKUP_PITR_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}" AGENTPASS_BACKUP_PITR_CI_JOB_ID="$job_id" AGENTPASS_BACKUP_PITR_ARTIFACT_SHA256="$migration_artifact_sha256"
+          npm run postgres:require-live-env
+          node scripts/qualification/backup-pitr-evidence.mjs run "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" --source-commit "$AGENTPASS_BACKUP_PITR_SOURCE_COMMIT" --source-tree "$source_tree" --run-id "${{ needs.validate.outputs.ci_run_id }}" --run-attempt "${{ needs.validate.outputs.ci_run_attempt }}" --job-id "$job_id" --artifact-sha256 "$migration_artifact_sha256" >/dev/null
+          node scripts/release/archive-secret-scan.mjs "$AGENTPASS_BACKUP_PITR_EVIDENCE_OUTPUT" >/dev/null
+      - name: Run external PostgreSQL 17 qualification with protected database bindings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ENABLED: "true"
+          AGENTPASS_POSTGRES_QUALIFICATION_EXECUTION: external
+          AGENTPASS_POSTGRES_QUALIFICATION_REAL_EXECUTION: "true"
+          AGENTPASS_POSTGRES_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_RUNNER_ID }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ENVIRONMENT_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_ENVIRONMENT_ID }}
+          AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ARTIFACT_SHA256: ${{ needs.validate.outputs.artifact_sha256 }}
+          AGENTPASS_POSTGRES_QUALIFICATION_POSTGRES_MAJOR: "17"
+          AGENTPASS_POSTGRES_QUALIFICATION_EVIDENCE_PATH: ${{ runner.temp }}/postgres-17-qualification.json
+          AGENTPASS_TEST_DATABASE_URL: ${{ secrets.AGENTPASS_EXTERNAL_POSTGRES_17_DATABASE_URL }}
+          AGENTPASS_C3_REQUIRE_REAL_DATABASE: "1"
+          AGENTPASS_C3_CA_CERT_FILE: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_CA_CERT_FILE }}
+          AGENTPASS_C3_BACKUP_PITR_EVIDENCE: ${{ runner.temp }}/postgres-17-backup-pitr.json
+          AGENTPASS_C3_EXPECTED_DATABASE_NAME: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_DATABASE_NAME }}
+          AGENTPASS_C3_EXPECTED_SERVER_PORT: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_17_SERVER_PORT }}
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_C3_BACKUP_PITR_EVIDENCE:?protected PostgreSQL 17 backup/PITR evidence path is required}"
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "postgres-authority-17") | .id' | head -n 1)"
+          checkout_commit="$(git rev-parse 'HEAD^{commit}')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_commit" == "${{ needs.validate.outputs.source_commit }}" && "$checkout_tree" == "$source_tree" && "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "PostgreSQL 17 checkout/binding lookup failed" >&2; exit 1; }
+          export AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_TREE="$source_tree" AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ID="${{ needs.validate.outputs.ci_run_id }}" AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ATTEMPT="${{ needs.validate.outputs.ci_run_attempt }}" AGENTPASS_POSTGRES_QUALIFICATION_RUN_ID="$GITHUB_RUN_ID" AGENTPASS_POSTGRES_QUALIFICATION_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" AGENTPASS_POSTGRES_QUALIFICATION_JOB_ID="$job_id"
+          npm run qualification:postgres-c3:external
+          node scripts/release/archive-secret-scan.mjs "$AGENTPASS_POSTGRES_QUALIFICATION_EVIDENCE_PATH" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-postgres-17-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/postgres-17-qualification.json
+            ${{ runner.temp }}/postgres-17-backup-pitr.json
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-gate:
+    if: ${{ needs['postgres-authority-16'].result == 'success' && needs['postgres-authority-17'].result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: [validate, postgres-authority-16, postgres-authority-17]
+    runs-on: ubuntu-latest
+    environment: external-qualification-postgresql
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: external-postgres-16-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-16-child
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: external-postgres-17-qualification-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-17-child
+      - name: Reduce PostgreSQL 16/17 evidence into the release-facing gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTPASS_POSTGRES_16_EVIDENCE_PATH: ${{ runner.temp }}/postgres-16-child/postgres-16-qualification.json
+          AGENTPASS_POSTGRES_17_EVIDENCE_PATH: ${{ runner.temp }}/postgres-17-child/postgres-17-qualification.json
+          AGENTPASS_POSTGRES_16_BACKUP_PITR_EVIDENCE_PATH: ${{ runner.temp }}/postgres-16-child/postgres-16-backup-pitr.json
+          AGENTPASS_POSTGRES_17_BACKUP_PITR_EVIDENCE_PATH: ${{ runner.temp }}/postgres-17-child/postgres-17-backup-pitr.json
+          AGENTPASS_POSTGRES_GATE_EVIDENCE_PATH: ${{ runner.temp }}/postgres-gate/postgres-gate.json
+          AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          AGENTPASS_POSTGRES_QUALIFICATION_RELEASE_ARTIFACT_SHA256: ${{ needs.validate.outputs.artifact_sha256 }}
+          AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ID: ${{ needs.validate.outputs.ci_run_id }}
+          AGENTPASS_POSTGRES_QUALIFICATION_CI_RUN_ATTEMPT: ${{ needs.validate.outputs.ci_run_attempt }}
+          AGENTPASS_POSTGRES_QUALIFICATION_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_POSTGRES_QUALIFICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AGENTPASS_POSTGRES_QUALIFICATION_RUNNER_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_GATE_RUNNER_ID }}
+          AGENTPASS_POSTGRES_QUALIFICATION_ENVIRONMENT_ID: ${{ vars.AGENTPASS_EXTERNAL_POSTGRES_GATE_ENVIRONMENT_ID }}
+        run: |
+          set -euo pipefail
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/${{ needs.validate.outputs.source_commit }}" --jq '.tree.sha')"
+          job_id="$(gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs[] | select(.name == "postgres-gate") | .id' | head -n 1)"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$job_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "PostgreSQL aggregate binding lookup failed" >&2; exit 1; }
+          export AGENTPASS_POSTGRES_QUALIFICATION_SOURCE_TREE="$source_tree" AGENTPASS_POSTGRES_QUALIFICATION_JOB_ID="$job_id"
+          mkdir -p "$RUNNER_TEMP/postgres-gate" "$RUNNER_TEMP/postgres-gate/input"
+          node --input-type=module - "$AGENTPASS_POSTGRES_16_EVIDENCE_PATH" "$AGENTPASS_POSTGRES_17_EVIDENCE_PATH" "$RUNNER_TEMP/postgres-gate/input/children.bundle" <<'NODE'
+          import fs from 'node:fs';
+          const [first, second, output] = process.argv.slice(2);
+          const bytes = `${fs.readFileSync(first, 'utf8')}${fs.readFileSync(second, 'utf8')}`;
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, bytes, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          export AGENTPASS_POSTGRES_QUALIFICATION_BUNDLE_ARTIFACT_SHA256="$(node --input-type=module - "$RUNNER_TEMP/postgres-gate/input/children.bundle" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[2])).digest('hex'));
+          NODE
+          )"
+          npm run qualification:postgres-gate:aggregate
+          node scripts/release/archive-secret-scan.mjs "$RUNNER_TEMP/postgres-gate" >/dev/null
+      - name: Verify sealed PostgreSQL aggregate bundle
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/postgres-gate/postgres-gate.json"
+          test -f "$RUNNER_TEMP/postgres-gate/input/children.bundle"
+          node --input-type=module - "$RUNNER_TEMP/postgres-gate/postgres-gate.json" "$RUNNER_TEMP/postgres-gate/input/children.bundle" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const bundle = crypto.createHash('sha256').update(fs.readFileSync(process.argv[3])).digest('hex');
+          if (report.execution?.artifact_sha256 !== bundle || report.status !== 'passed' || report.qualified !== true) throw new Error('PostgreSQL aggregate is not a passed sealed bundle');
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-postgres-gate-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-gate
+          if-no-files-found: error
+          retention-days: 30
+
+  external-qualification-provenance:
+    name: external-qualification-provenance
+    if: ${{ always() && needs.validate.result == 'success' && needs.kms.result == 'success' && needs['platform-auth'].result == 'success' && needs.webauthn.result == 'success' && needs['postgres-authority-16'].result == 'success' && needs['postgres-authority-17'].result == 'success' && needs['postgres-gate'].result == 'success' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: [validate, kms, platform-auth, webauthn, postgres-authority-16, postgres-authority-17, postgres-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Download and verify every external qualification archive provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          CANONICAL_CI_RUN_ID: ${{ needs.validate.outputs.ci_run_id }}
+          CANONICAL_CI_RUN_ATTEMPT: ${{ needs.validate.outputs.ci_run_attempt }}
+          CANONICAL_REPOSITORY: Torutesu/AIagentpass
+          PROVENANCE_OUTPUT: ${{ runner.temp }}/external-qualification-provenance.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_tree="$(gh api "repos/$CANONICAL_REPOSITORY/git/commits/$SOURCE_COMMIT" --jq '.tree.sha')"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$checkout_tree" == "$source_tree" ]] || { echo "external qualification source tree binding is invalid" >&2; exit 1; }
+          run_json="$RUNNER_TEMP/external-qualification-run.json"
+          jobs_json="$RUNNER_TEMP/external-qualification-jobs.json"
+          artifacts_json="$RUNNER_TEMP/external-qualification-artifacts.json"
+          canonical_ci_run_json="$RUNNER_TEMP/canonical-ci-run.json"
+          archive_dir="$RUNNER_TEMP/external-qualification-archives"
+          mkdir -m 0700 -p "$archive_dir"
+          gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$RUN_ID" > "$run_json"
+          gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100" > "$jobs_json"
+          gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$CANONICAL_CI_RUN_ID" > "$canonical_ci_run_json"
+          artifact_inventory_ready=0
+          for attempt in $(seq 1 12); do
+            gh api "repos/$CANONICAL_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > "$artifacts_json"
+            if jq -e --arg sha "$SOURCE_COMMIT" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '
+              (.total_count == 6) and
+              ([.artifacts[].name] | sort) == [
+                ("external-kms-qualification-" + $sha + "-" + $run + "-" + $attempt),
+                ("external-platform-auth-qualification-" + $sha + "-" + $run + "-" + $attempt),
+                ("external-postgres-16-qualification-" + $sha + "-" + $run + "-" + $attempt),
+                ("external-postgres-17-qualification-" + $sha + "-" + $run + "-" + $attempt),
+                ("external-postgres-gate-" + $sha + "-" + $run + "-" + $attempt),
+                ("external-webauthn-qualification-" + $sha + "-" + $run + "-" + $attempt)
+              ]' "$artifacts_json" >/dev/null; then
+              artifact_inventory_ready=1
+              break
+            fi
+            sleep 5
+          done
+          [[ "$artifact_inventory_ready" == 1 ]] || { echo "external qualification artifact inventory did not converge to the exact source-bound set" >&2; exit 1; }
+          for prefix in \
+            external-kms-qualification \
+            external-platform-auth-qualification \
+            external-webauthn-qualification \
+            external-postgres-16-qualification \
+            external-postgres-17-qualification \
+            external-postgres-gate; do
+            name="${prefix}-${SOURCE_COMMIT}-${RUN_ID}-${RUN_ATTEMPT}"
+            artifact_id="$(jq -er --arg name "$name" '[.artifacts[] | select(.name == $name)] | if length == 1 then .[0].id else error("artifact inventory is not exact") end' "$artifacts_json")"
+            [[ "$artifact_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "invalid artifact ID for $name" >&2; exit 1; }
+            gh api --method GET --output "$archive_dir/$name.zip" "repos/$CANONICAL_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            chmod 0600 "$archive_dir/$name.zip"
+          done
+          node scripts/release/qualification/verify-external-artifact-provenance.mjs verify \
+            "$run_json" "$jobs_json" "$artifacts_json" "$canonical_ci_run_json" "$archive_dir" \
+            "$CANONICAL_REPOSITORY" "$SOURCE_COMMIT" "$source_tree" "$RUN_ID" "$RUN_ATTEMPT" \
+            "$CANONICAL_CI_RUN_ID" "$CANONICAL_CI_RUN_ATTEMPT" "$PROVENANCE_OUTPUT"
+          node scripts/release/ci-preflight.mjs secret-scan "$PROVENANCE_OUTPUT" >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: external-qualification-provenance-${{ needs.validate.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/external-qualification-provenance.json
+          if-no-files-found: error
+          retention-days: 30

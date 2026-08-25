@@ -1,17 +1,94 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "source_commit": "0000000000000000000000000000000000000000",
+  "source_tree": "0000000000000000000000000000000000000000",
+  "dependency_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "release_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "artifact_name": "AgentPass-v0.0.0-macos-universal.pkg",
   "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "architecture": "arm64",
   "hardware_class": "apple_silicon",
   "model_identifier": "REPLACE_WITH_MODEL_IDENTIFIER",
-  "macos_version": "14.0",
+  "macos_version": "26.0",
   "macos_build": "REPLACEWITHMACOSBUILD",
   "secure_enclave": true,
-  "started_at": "2026-01-01T00:00:00Z",
-  "completed_at": "2026-01-01T00:00:01Z",
+  "team_id": "TEAMID1234",
+  "nested_code_identities": [
+    {
+      "path": "AgentPass.app",
+      "bundle_id": "dev.agentpass",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    },
+    {
+      "path": "AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app",
+      "bundle_id": "dev.agentpass.native-client",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    },
+    {
+      "path": "AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app",
+      "bundle_id": "dev.agentpass.native-service",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    },
+    {
+      "path": "AgentPass.app/Contents/Library/HelperTools/agentpass-atomic-rename",
+      "bundle_id": "dev.agentpass.atomic-rename",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    },
+    {
+      "path": "AgentPass.app/Contents/MacOS/agentpass-native-manager",
+      "bundle_id": "dev.agentpass.native-manager",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    },
+    {
+      "path": "AgentPass.app/Contents/MacOS/agentpass-onboarding",
+      "bundle_id": "dev.agentpass",
+      "team_id": "TEAMID1234",
+      "code_directory_hash": "0000000000000000000000000000000000000000"
+    }
+  ],
+  "notarization": {
+    "status": "not_verified",
+    "submission_ids": [],
+    "evidence": []
+  },
+  "cloud_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "database_migration_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signer_key_versions": [
+    {
+      "name": "capability",
+      "version": "REPLACE_WITH_KEY_VERSION"
+    }
+  ],
+  "browser_versions": [
+    {
+      "name": "chromium",
+      "version": "REPLACE_WITH_BROWSER_VERSION"
+    }
+  ],
+  "started_at": "2026-01-01T00:00:00.000Z",
+  "completed_at": "2026-01-01T00:00:01.000Z",
   "operator": "REPLACE_WITH_OPERATOR_ID",
+  "operator_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "qualified": false,
   "tests": [
-    { "name": "install-and-register", "status": "skipped", "reason": "template only" }
+    {
+      "name": "template",
+      "status": "skipped",
+      "reason": "template only",
+      "evidence": []
+    }
+  ],
+  "gates": [
+    {
+      "name": "template",
+      "status": "skipped",
+      "reason": "template only",
+      "evidence": []
+    }
   ]
 }

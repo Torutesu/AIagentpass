@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from "../lib/driver-runtime.mjs";
+
+await runGateDriver({
+  gate: "policy-reduction-refresh-ack",
+  tests: ["policy-reduction-denied"],
+  scenario: "policy-reduction-refresh-ack"
+});

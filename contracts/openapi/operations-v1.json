@@ -1,0 +1,69 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgentPass Operations Readiness API",
+    "version": "1.0.0",
+    "description": "Secret-free deployment readiness identity for authenticated operators and release evidence. Operational probe credentials are server-side only."
+  },
+  "servers": [{ "url": "https://api.ai-agentpass.com" }],
+  "paths": {
+    "/health/ready": {
+      "get": {
+        "operationId": "getCloudReadiness",
+        "summary": "Read Cloud deployment readiness",
+        "security": [{ "operationalProbe": [] }],
+        "responses": {
+          "200": { "description": "Readiness is ready and deployment identity is complete", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } },
+          "404": { "description": "Probe is not authorized" },
+          "503": { "description": "Readiness is degraded or deployment identity is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } }
+        },
+        "x-agentpass-transport": { "cache-control": "no-store", "redirects": "forbidden", "set-cookie": "forbidden", "additionalProperties": false }
+      }
+    },
+    "/api/console": {
+      "get": {
+        "operationId": "getConsoleDeploymentReadiness",
+        "summary": "Read deployment readiness through the authenticated Console BFF",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "name": "resource", "in": "query", "required": true, "schema": { "const": "deployment-readiness" } }],
+        "responses": {
+          "200": { "description": "Verified readiness identity projection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConsoleReadiness" } } } },
+          "401": { "description": "Human session is missing or invalid" },
+          "503": { "description": "Cloud readiness is unavailable or degraded" }
+        },
+        "x-agentpass-transport": { "cache-control": "no-store", "redirects": "forbidden", "set-cookie": "forbidden", "browser-receives-operational-token": false, "additionalProperties": false }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "operationalProbe": { "type": "apiKey", "in": "header", "name": "AgentPass-Operational-Token", "description": "Server-to-server only; never sent to a browser." },
+      "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session" }
+    },
+    "schemas": {
+      "DeploymentIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "configured", "ready", "source_commit", "source_tree", "image_digest", "deployment_id", "revision", "schema_digest", "catalog_digest", "database_schema_digest"],
+        "properties": {
+          "version": { "const": 1 }, "configured": { "const": true }, "ready": { "const": true },
+          "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }, "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "deployment_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "revision": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "schema_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "database_schema_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      },
+      "Readiness": {
+        "type": "object", "additionalProperties": true,
+        "required": ["version", "ready", "status", "code", "deployment_identity"],
+        "properties": { "version": { "const": 1 }, "ready": { "type": "boolean" }, "status": { "type": "string" }, "code": { "type": "string" }, "deployment_identity": { "$ref": "#/components/schemas/DeploymentIdentity" } }
+      },
+      "ConsoleReadiness": {
+        "type": "object", "additionalProperties": false,
+        "required": ["version", "ready", "status", "code", "deployment_identity"],
+        "properties": { "version": { "const": 1 }, "ready": { "const": true }, "status": { "const": "ready" }, "code": { "type": "string" }, "deployment_identity": { "$ref": "#/components/schemas/DeploymentIdentity" } }
+      }
+    }
+  }
+}

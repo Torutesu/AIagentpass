@@ -36,6 +36,7 @@ import Foundation
     func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void)
     func completeSession(challenge: NSData, signature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void)
     func revokeSessions(withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func revokeSessions(agentID: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void)
     func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void)
     func applyControlBundle(bundle: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void)
     func controlStatus(withReply reply: @escaping (NSData?, NSError?) -> Void)

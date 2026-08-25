@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { brokerRequest } from "../lib/broker-client.mjs";
@@ -60,6 +62,74 @@ function signedRequest(fixtureData, overrides = {}) {
   }, fixtureData.identity.private_path);
 }
 
+class FakeBrokerServer extends EventEmitter {
+  constructor(handler, { listenError = null, invokeListenCallback = false } = {}) {
+    super();
+    this.handler = handler;
+    this.listenError = listenError;
+    this.invokeListenCallback = invokeListenCallback;
+    this.listening = false;
+    this.connections = new Set();
+    this.closeCallback = null;
+  }
+
+  listen(_socket, callback) {
+    if (this.listenError) {
+      queueMicrotask(() => this.emit("error", this.listenError));
+      return this;
+    }
+    this.listening = true;
+    queueMicrotask(() => {
+      this.emit("listening");
+      if (this.invokeListenCallback) callback?.();
+    });
+    return this;
+  }
+
+  close(callback) {
+    this.listening = false;
+    this.closeCallback = callback;
+    this.finishCloseIfIdle();
+    return this;
+  }
+
+  accept(connection) {
+    this.connections.add(connection);
+    connection.once("close", () => {
+      this.connections.delete(connection);
+      this.finishCloseIfIdle();
+    });
+    this.handler(connection);
+  }
+
+  finishCloseIfIdle() {
+    if (this.listening || this.connections.size !== 0 || !this.closeCallback) return;
+    const callback = this.closeCallback;
+    this.closeCallback = null;
+    queueMicrotask(() => {
+      this.emit("close");
+      callback();
+    });
+  }
+}
+
+class FakeBrokerConnection extends EventEmitter {
+  constructor() {
+    super();
+    this.destroyed = false;
+    this.destroyError = null;
+  }
+
+  setEncoding() {}
+  setTimeout() {}
+
+  destroy(error) {
+    this.destroyed = true;
+    this.destroyError = error;
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
 test("broker replaces caller key and signs an allowed Git payload", async () => {
   const data = fixture();
   const { configDir, key } = data;
@@ -82,6 +152,64 @@ test("broker denies a protected branch", async () => {
   const { repo, configDir } = data;
   execFileSync("git", ["-C", repo, "branch", "-m", "main"]);
   await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), configDir), /branch_denied/);
+});
+
+test("broker releases its lease after a Unix socket listen error", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "listen-error.sock");
+  const originalCreateServer = net.createServer;
+  net.createServer = (_options, handler) => new FakeBrokerServer(handler, { listenError: Object.assign(new Error("bind failed"), { code: "EADDRINUSE" }) });
+  try {
+    const server = createBroker({ socket, configDir: data.configDir });
+    const [error] = await once(server, "error");
+    assert.equal(error.code, "EADDRINUSE");
+    assert.equal(fs.existsSync(`${socket}.lock`), false);
+  } finally {
+    net.createServer = originalCreateServer;
+  }
+});
+
+test("broker cleans up the lease when socket permission hardening fails", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "chmod-error.sock");
+  const originalCreateServer = net.createServer;
+  const originalChmodSync = fs.chmodSync;
+  net.createServer = (_options, handler) => new FakeBrokerServer(handler, { invokeListenCallback: true });
+  fs.chmodSync = (target, mode) => {
+    if (target === socket && mode === 0o600) throw Object.assign(new Error("chmod failed"), { code: "EACCES" });
+    return originalChmodSync(target, mode);
+  };
+  try {
+    const server = createBroker({ socket, configDir: data.configDir });
+    const [error] = await once(server, "error");
+    assert.equal(error.code, "EACCES");
+    assert.equal(fs.existsSync(`${socket}.lock`), false);
+  } finally {
+    fs.chmodSync = originalChmodSync;
+    net.createServer = originalCreateServer;
+  }
+});
+
+test("broker shutdown destroys a connection that never completes", async () => {
+  const data = fixture();
+  const socket = path.join(data.root, "shutdown.sock");
+  const originalCreateServer = net.createServer;
+  let fakeServer;
+  net.createServer = (_options, handler) => {
+    fakeServer = new FakeBrokerServer(handler);
+    return fakeServer;
+  };
+  try {
+    const server = createBroker({ socket, configDir: data.configDir, shutdownTimeoutMs: 20 });
+    const connection = new FakeBrokerConnection();
+    fakeServer.accept(connection);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    assert.equal(connection.destroyed, true);
+    assert.equal(connection.destroyError?.message, "Broker shutdown deadline exceeded");
+  } finally {
+    net.createServer = originalCreateServer;
+  }
 });
 
 test("Unix socket client and broker exchange one bounded request", async () => {
@@ -147,6 +275,8 @@ process.stdin.on("end", () => {
   assert.equal(nativeSession.command, "session-start");
   const revokeSessions = await brokerRequest({ operation: "native.session.revoke" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(revokeSessions.command, "session-revoke");
+  const revokeAgentSessions = await brokerRequest({ operation: "native.session.revoke-agent", agent_id: "agent" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(revokeAgentSessions.command, "session-revoke-agent");
   const validateSession = await brokerRequest({ operation: "native.session.validate", agent_id: "agent", session: "token" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(validateSession.command, "session-validate");
   const applyControl = await brokerRequest({ operation: "native.control.apply", bundle: { version: 1 } }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
@@ -155,6 +285,8 @@ process.stdin.on("end", () => {
   assert.equal(controlStatus.command, "control-status");
   const validateControl = await brokerRequest({ operation: "native.control.validate", agent_id: "agent" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(validateControl.command, "control-validate");
+  const hostClose = await brokerRequest({ operation: "native.host.close", session_id: "11111111-1111-4111-8111-111111111111", operation_id: "22222222-2222-4222-8222-222222222222", reason: "client_shutdown" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(hostClose.command, "host-control-close");
   fs.chmodSync(client, 0o777);
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
 });
@@ -163,8 +295,10 @@ test("native recovery and prune bridge pins protocol 13 and dedicated management
   const clientSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeClient/main.swift"), "utf8");
   const serviceSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeService/main.swift"), "utf8");
   const protocolSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeCore/XPCProtocol.swift"), "utf8");
-  assert.match(clientSource, /command == "audit-prune-submit"/);
-  assert.match(clientSource, /command == "audit-prune-execute"/);
+  assert.match(clientSource, /"audit-prune-submit"/);
+  assert.match(clientSource, /"audit-prune-execute"/);
+  assert.match(clientSource, /"control-refresh"/);
+  assert.match(clientSource, /extendedTimeoutCommands\.contains\(command\) \? 120 : 30/);
   assert.match(clientSource, /case "audit-recovery-abort-expired":/);
   assert.match(clientSource, /case "audit-recovery-status":/);
   assert.match(clientSource, /Native service protocol 13 is required/);

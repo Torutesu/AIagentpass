@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/kms-qualification-evidence-v1.schema.json",
+  "title": "AgentPass hosted KMS qualification evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_kind", "qualification", "provider", "production", "evidence_origin", "source", "execution", "purpose_bindings", "iam_matrix", "scenario_results", "postgres_binding", "overall", "signature", "report_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "evidence_kind": {"const": "agentpass.hosted-kms-qualification"},
+    "qualification": {"const": "hosted-kms"},
+    "provider": {"enum": ["aws", "gcp"]},
+    "production": {"type": "boolean"},
+    "evidence_origin": {"enum": ["mock", "protected_external"]},
+    "source": {"$ref": "#/$defs/source"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "purpose_bindings": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"$ref": "#/$defs/purpose"}},
+    "iam_matrix": {"type": "array", "minItems": 64, "maxItems": 64, "items": {"$ref": "#/$defs/iam"}},
+    "scenario_results": {"type": "array", "minItems": 40, "maxItems": 40, "items": {"$ref": "#/$defs/scenario"}},
+    "postgres_binding": {"$ref": "#/$defs/postgres"},
+    "overall": {"$ref": "#/$defs/overall"},
+    "signature": {"$ref": "#/$defs/signature"},
+    "report_digest": {"$ref": "#/$defs/digest"}
+  },
+  "allOf": [
+    {"if": {"properties": {"production": {"const": true}}}, "then": {"properties": {"evidence_origin": {"const": "protected_external"}, "execution": {"type": "object", "properties": {"mode": {"const": "protected_external"}, "credential_source": {"enum": ["aws_workload_identity", "gcp_workload_identity"]}, "zero_skip": {"const": true}, "skip_count": {"const": 0}}}, "signature": {"type": "object", "properties": {"status": {"const": "signed"}}}}}}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"},
+    "purposeName": {"enum": ["agent_session_grant", "audit_anchor", "capability", "control_bundle", "promotion_evidence", "qualification_manifest", "refresh_hint", "possession_receipt"]},
+    "purposeValue": {"enum": ["agentpass.agent-session-grant", "agentpass.audit-anchor", "agentpass.capability", "agentpass.control-bundle", "agentpass.promotion-evidence", "agentpass.qualification-grant-batch-manifest", "agentpass.refresh-hint", "device-enrollment-possession-receipt"]},
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["source_commit", "image_digest", "config_digest"],
+      "properties": {"source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "image_digest": {"$ref": "#/$defs/digest"}, "config_digest": {"$ref": "#/$defs/digest"}}
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false, "required": ["run_id", "mode", "credential_source", "zero_skip", "skip_count", "instance_count", "started_at", "completed_at"],
+      "properties": {"run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"}, "mode": {"enum": ["mock", "protected_external"]}, "credential_source": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{2,63}$"}, "zero_skip": {"type": "boolean"}, "skip_count": {"type": "integer", "minimum": 0}, "instance_count": {"const": 2}, "started_at": {"$ref": "#/$defs/timestamp"}, "completed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "purpose": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "purpose", "provider", "registry_version", "protocol_version", "signing_version", "algorithm", "key_id", "key_resource", "key_version", "public_key_fingerprint", "lifecycle_epoch", "protection", "sign_verify"],
+      "properties": {"name": {"$ref": "#/$defs/purposeName"}, "purpose": {"$ref": "#/$defs/purposeValue"}, "provider": {"enum": ["aws", "gcp"]}, "registry_version": {"const": 1}, "protocol_version": {"type": "integer", "minimum": 1}, "signing_version": {"type": "integer", "minimum": 1}, "algorithm": {"const": "ed25519"}, "key_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"}, "key_resource": {"type": "string", "minLength": 1, "maxLength": 2048}, "key_version": {"type": "string", "pattern": "^[1-9][0-9]{0,19}$"}, "public_key_fingerprint": {"$ref": "#/$defs/fingerprint"}, "lifecycle_epoch": {"type": "integer", "minimum": 1}, "protection": {"$ref": "#/$defs/protection"}, "sign_verify": {"$ref": "#/$defs/signVerify"}}
+    },
+    "protection": {
+      "type": "object", "additionalProperties": false, "required": ["level", "non_exportable", "key_usage", "evidence_source", "evidence_digest", "observed_at"],
+      "properties": {"level": {"const": "HSM"}, "non_exportable": {"const": true}, "key_usage": {"const": "sign_verify"}, "evidence_source": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{2,63}$"}, "evidence_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "signVerify": {
+      "type": "object", "additionalProperties": false, "required": ["status", "verified", "request_digest", "signature_digest", "evidence_digest", "observed_at"],
+      "properties": {"status": {"enum": ["passed", "failed"]}, "verified": {"type": "boolean"}, "request_digest": {"$ref": "#/$defs/digest"}, "signature_digest": {"$ref": "#/$defs/digest"}, "evidence_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "iam": {
+      "type": "object", "additionalProperties": false, "required": ["requester_purpose", "target_purpose", "action", "expected", "observed", "status", "request_digest", "evidence_digest", "observed_at"],
+      "properties": {"requester_purpose": {"$ref": "#/$defs/purposeValue"}, "target_purpose": {"$ref": "#/$defs/purposeValue"}, "action": {"const": "sign"}, "expected": {"enum": ["allow", "deny"]}, "observed": {"enum": ["allow", "deny"]}, "status": {"const": "passed"}, "request_digest": {"$ref": "#/$defs/digest"}, "evidence_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "scenario": {
+      "type": "object", "additionalProperties": false, "required": ["purpose", "scenario", "status", "expected", "observed", "previous_key_version", "current_key_version", "provider_invocations", "client_retries", "replay_safe", "evidence_digest", "observed_at"],
+      "properties": {"purpose": {"$ref": "#/$defs/purposeValue"}, "scenario": {"enum": ["rotation", "disable", "outage", "throttle", "response_loss"]}, "status": {"enum": ["passed", "failed"]}, "expected": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$"}, "observed": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$"}, "previous_key_version": {"type": ["string", "null"], "pattern": "^[1-9][0-9]{0,19}$"}, "current_key_version": {"type": ["string", "null"], "pattern": "^[1-9][0-9]{0,19}$"}, "provider_invocations": {"type": "integer", "minimum": 0}, "client_retries": {"type": "integer", "minimum": 0}, "replay_safe": {"type": "boolean"}, "evidence_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "postgres": {
+      "type": "object", "additionalProperties": false, "required": ["status", "instance_count", "instances", "image_digest", "migration_head", "operation_table", "binding_scope", "contention_requests", "committed_result_count", "response_loss_reconciled", "evidence_digest", "observed_at"],
+      "properties": {"status": {"const": "passed"}, "instance_count": {"const": 2}, "instances": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["id", "source_commit", "image_digest", "config_digest", "observed_at"], "properties": {"id": {"enum": ["instance-a", "instance-b"]}, "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "image_digest": {"$ref": "#/$defs/digest"}, "config_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}}}, "image_digest": {"$ref": "#/$defs/digest"}, "migration_head": {"type": "string", "pattern": "^[0-9]{4}_[a-z0-9_]+$"}, "operation_table": {"const": "managed_signer_provider_operations"}, "binding_scope": {"const": "purpose_key_version_request_digest"}, "contention_requests": {"type": "integer", "minimum": 1}, "committed_result_count": {"type": "integer", "minimum": 1}, "response_loss_reconciled": {"const": true}, "evidence_digest": {"$ref": "#/$defs/digest"}, "observed_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "overall": {"type": "object", "additionalProperties": false, "required": ["status", "failed_checks"], "properties": {"status": {"enum": ["passed", "failed"]}, "failed_checks": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9._:-]+$"}, "uniqueItems": true}}},
+    "signature": {
+      "type": "object", "additionalProperties": false, "required": ["status", "algorithm", "domain", "key_id", "public_key_der_base64url", "public_key_fingerprint", "signature_base64url"],
+      "properties": {"status": {"enum": ["unsigned_ready", "signed"]}, "algorithm": {"const": "ed25519"}, "domain": {"const": "AgentPass-Hosted-KMS-Qualification-v1\u0000"}, "key_id": {"type": ["string", "null"]}, "public_key_der_base64url": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$"}, "public_key_fingerprint": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "signature_base64url": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$"}}
+    }
+  }
+}

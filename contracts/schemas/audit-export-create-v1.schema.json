@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/audit-export-create-v1.schema.json",
+  "title": "AgentPass audit export create request v1",
+  "description": "Exact public intent for one immutable organization audit export. Tenant, actor, range, digest, timestamps, and signer state are server-derived.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 3,
+  "required": ["export_id", "environment", "chain"],
+  "properties": {
+    "export_id": { "$ref": "#/$defs/uuid" },
+    "environment": { "enum": ["staging", "production"] },
+    "chain": { "enum": ["admin", "cloud_agent", "device"] }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+  }
+}

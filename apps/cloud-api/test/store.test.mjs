@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { CloudStoreError, VersionConflictError, auditEventHashPreimage, computeAuditEventHash, createCloudStore } from "../src/store.mjs";
+import { CloudStoreError, VersionConflictError, auditEventHashPreimage, computeAuditEventHash, createCapabilityNonce, createCloudStore } from "../src/store.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 
 const ids = {
@@ -33,6 +33,13 @@ test("store process lock rejects concurrent writers and releases on close", asyn
 
 const timestamp = "2026-08-11T01:00:00.000Z";
 const digest = "a".repeat(64);
+
+test("capability nonce generation normalizes every base64url prefix into the protocol alphabet", () => {
+  const nonce = createCapabilityNonce(() => Buffer.alloc(32, 0xff));
+  assert.match(nonce, /^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$/);
+  assert.equal(nonce.startsWith("A"), true);
+  assert.throws(() => createCapabilityNonce(() => Buffer.alloc(31)), { code: "ERR_INVALID_INPUT" });
+});
 
 async function fixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-cloud-"));
@@ -125,6 +132,39 @@ test("creates explicitly scoped tenant resources and keeps IDs unique", async (t
   await assert.rejects(() => store.getDevice({ organizationId: ids.org2, deviceId: ids.device }), { code: "ERR_NOT_FOUND" });
 });
 
+test("manual wake is idempotent and never invents authority in the file-store profile", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  await addDeviceAndAgent(store);
+
+  const input = {
+    organizationId: ids.org,
+    deviceId: ids.device,
+    principalId: "operator-1",
+    idempotencyKey: "manual-wake-0001",
+    requestedAt: "2026-08-11T01:02:00.000Z"
+  };
+  const first = await store.requestDeviceWake(input);
+  const replay = await store.requestDeviceWake({ ...input, requestedAt: "2026-08-11T01:03:00.000Z" });
+  assert.deepEqual(replay, first);
+  assert.deepEqual(first, {
+    version: 1,
+    request_id: first.request_id,
+    device_id: ids.device,
+    desired_generation: null,
+    status: "no_pending_refresh",
+    requested_at: "2026-08-11T01:02:00.000Z"
+  });
+  assert.match(first.request_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(Object.hasOwn(first, "outbox_id"), false);
+  assert.equal(Object.hasOwn(first, "nonce"), false);
+  assert.equal(Object.hasOwn(first, "bundle"), false);
+
+  const otherPrincipal = await store.requestDeviceWake({ ...input, principalId: "operator-2", requestedAt: "2026-08-11T01:04:00.000Z" });
+  assert.notEqual(otherPrincipal.request_id, first.request_id);
+  await assert.rejects(store.requestDeviceWake({ ...input, organizationId: ids.org2 }), { code: "ERR_NOT_FOUND" });
+});
+
 test("serializes mutations, deduplicates idempotency, and enforces optimistic versions", async (t) => {
   const { directory, store } = await fixture();
   t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -154,7 +194,7 @@ test("ingests append-only audit events with dedupe and recorded chain gaps", asy
   assert.equal(second.gaps.length, 1);
   assert.equal(second.gaps[0].expected_previous_hash, firstHash);
   assert.equal((await store.getAuditHealth({ organizationId: ids.org }))[0].chain_status, "gap");
-  assert.equal((await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device })).length, 2);
+  assert.equal((await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device })).events.length, 2);
 });
 
 test("rejects fabricated event hashes before changing the audit head", async (t) => {
@@ -183,7 +223,7 @@ test("rejects fabricated event hashes before changing the audit head", async (t)
     chain_status: "continuous",
     gap_count: 0
   }]);
-  assert.deepEqual(await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device }), []);
+  assert.deepEqual(await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device }), { events: [], next_cursor: null });
 });
 
 test("uses the redacted event fields as the hash preimage", () => {
@@ -271,6 +311,152 @@ test("rejects secret material, unsafe storage, and unbounded audit input", async
   const symlinkDirectory = path.join(directory, "link");
   await fs.symlink(directory, symlinkDirectory);
   await assert.rejects(() => createCloudStore({ dataDir: symlinkDirectory }), { code: "ERR_UNSAFE_PATH" });
+});
+
+test("device enrollment stores only a digest and consumes an exact bound request idempotently", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const pendingDevice = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const credential = "enrollment-credential-never-persisted";
+  const credentialDigest = crypto.createHash("sha256").update(credential).digest("hex");
+  const enrollment = await store.createDeviceEnrollment({ organizationId: ids.org, enrollmentId, deviceId: pendingDevice, label: "Build Mac 02", platform: "macos", credentialDigest, createdAt: "2026-08-12T00:00:00.000Z", expiresAt: "2026-08-12T00:15:00.000Z", idempotencyKey: "issue-device-enrollment" });
+  assert.equal(enrollment.device_id, pendingDevice);
+  assert.equal(Object.hasOwn(enrollment, "credential_digest"), false);
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const request = { enrollmentId, organizationId: ids.org, deviceId: pendingDevice, label: "Build Mac 02", platform: "macos", algorithm: "p256-sha256", publicKey, credentialDigest, completedAt: "2026-08-12T00:01:00.000Z" };
+  const completed = await store.completeDeviceEnrollment(request);
+  assert.equal(completed.status, "active");
+  assert.equal(completed.device_public_key, publicKey);
+  assert.equal(completed.key_epoch, 1);
+  assert.deepEqual(await store.completeDeviceEnrollment(request), completed);
+  await assert.rejects(() => store.completeDeviceEnrollment({ ...request, label: "substituted" }), { code: "ERR_ENROLLMENT_BINDING" });
+  const disk = await fs.readFile(path.join(directory, "cloud-store.json"), "utf8");
+  assert.equal(disk.includes(credential), false);
+  assert.equal(disk.includes(credentialDigest), true);
+  const rotated = await store.updateDevice({ organizationId: ids.org, deviceId: pendingDevice, expectedVersion: completed.version, patch: { device_public_key: crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString() }, idempotencyKey: "rotate-device-key" });
+  assert.equal(rotated.key_epoch, 2);
+});
+
+test("v2 enrollment is candidate-bound, digest-only, and stores append-only possession receipts", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  const candidate = await store.registerReleaseCandidate({
+    candidateId: "release-2026-08-13-01",
+    sourceCommit: "c".repeat(40),
+    artifactSha256: "b".repeat(64),
+    manifestSha256: "d".repeat(64),
+    teamId: "ABCDE12345",
+    createdAt: "2026-08-13T10:00:00.000Z",
+    idempotencyKey: "candidate-1"
+  });
+  assert.equal((await store.getReleaseCandidate({ candidateId: candidate.candidate_id })).artifact_sha256, "b".repeat(64));
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const fingerprint = `SHA256:${crypto.createHash("sha256").update(keys.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
+  const credential = "v2-credential-never-persisted";
+  const credentialDigest = crypto.createHash("sha256").update(credential).digest("hex");
+  const challengeNonceDigest = "e".repeat(64);
+  const enrollment = await store.createDeviceEnrollment({
+    proofVersion: 2,
+    organizationId: ids.org,
+    enrollmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    label: "Build Mac v2",
+    platform: "macos",
+    createdAt: "2026-08-13T10:00:00.000Z",
+    ttlMs: 15 * 60 * 1000,
+    idempotencyKey: "enrollment-v2-1"
+  });
+  assert.equal(enrollment.proof_version, 2);
+  assert.equal(enrollment.challenge.nonce, undefined);
+  assert.equal(enrollment.credential_digest, undefined);
+  const diskBeforeCompletion = await fs.readFile(path.join(directory, "cloud-store.json"), "utf8");
+  assert.equal(diskBeforeCompletion.includes("v2-credential-never-persisted"), false);
+  assert.equal(diskBeforeCompletion.includes("challenge_nonce"), true);
+  assert.equal(diskBeforeCompletion.includes("raw-challenge-never-accepted"), false);
+  await assert.rejects(() => store.completeDeviceEnrollment({
+    proofVersion: 2,
+    enrollmentId: enrollment.enrollment_id,
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    label: enrollment.label,
+    platform: enrollment.platform,
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    challenge: { nonce: "raw-challenge-never-accepted" },
+    deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey }
+  }), { code: "ERR_INVALID_INPUT" });
+  const controlKeys = crypto.generateKeyPairSync("ed25519");
+  const refreshKeys = crypto.generateKeyPairSync("ed25519");
+  const publicPem = (key) => key.export({ type: "spki", format: "pem" }).toString();
+  const statement = {
+    version: 1,
+    enrollment_id: enrollment.enrollment_id,
+    organization_id: ids.org,
+    device_id: enrollment.device_id,
+    candidate_id: candidate.candidate_id,
+    artifact_sha256: candidate.artifact_sha256,
+    source_commit: candidate.source_commit,
+    team_id: candidate.team_id,
+    device_key_fingerprint: fingerprint,
+    device_key_epoch: 1,
+    challenge_nonce_digest: challengeNonceDigest,
+    control: {
+      format_epoch: 2,
+      issuer: "agentpass-cloud",
+      key_id: "control-v1",
+      public_key: publicPem(controlKeys.publicKey),
+      bundle_path: `/v1/organizations/${ids.org}/bundles/${enrollment.device_id}`,
+      refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: publicPem(refreshKeys.publicKey) }
+    },
+    issued_at: "2026-08-13T10:01:00.000Z"
+  };
+  const possessionReceipt = {
+    version: 1,
+    purpose: "device-enrollment-possession-receipt",
+    key_id: "possession-receipt-v1",
+    algorithm: "p256-sha256",
+    statement,
+    statement_hash: crypto.createHash("sha256").update(canonicalJson(statement), "utf8").digest("hex"),
+    signature: Buffer.alloc(64, 7).toString("base64url")
+  };
+  const completed = await store.completeDeviceEnrollment({
+    proofVersion: 2,
+    enrollmentId: enrollment.enrollment_id,
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    label: enrollment.label,
+    platform: enrollment.platform,
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey },
+    possessionReceipt,
+    completedAt: "2026-08-13T10:02:00.000Z"
+  });
+  assert.equal(completed.status, "active");
+  const stored = await store.getDevicePossessionReceipt({ organizationId: ids.org, deviceId: enrollment.device_id });
+  assert.equal(stored.statement_hash, possessionReceipt.statement_hash);
+  assert.equal(stored.signature, possessionReceipt.signature);
+  assert.deepEqual(stored.statement, statement);
+  assert.equal((await store.listDevicePossessionReceipts({ organizationId: ids.org, deviceId: enrollment.device_id })).length, 1);
+  await assert.rejects(() => store.appendDevicePossessionReceipt({
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    receipt: { ...possessionReceipt, statement_hash: "a".repeat(64) },
+    idempotencyKey: "receipt-conflict"
+  }), { code: "ERR_RECEIPT_BINDING" });
+  await store.createOrganization({ organizationId: ids.org2, name: "Other Org", idempotencyKey: "org-2" });
+  await assert.rejects(() => store.getDevicePossessionReceipt({ organizationId: ids.org2, deviceId: enrollment.device_id }), { code: "ERR_NOT_FOUND" });
 });
 
 test("exports a clean, frozen API", async (t) => {

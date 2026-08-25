@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-audit-ingestion-response-v1.schema.json",
+  "title": "AgentPass device audit ingestion response v1",
+  "description": "The deterministic 202 result of a device audit upload. It reports accepted and idempotent duplicate event IDs, visible chain gaps, and the committed device head.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 1,
+  "required": ["ingestion"],
+  "properties": {
+    "ingestion": {
+      "oneOf": [
+        { "$ref": "#/$defs/committed_ingestion" },
+        { "$ref": "#/$defs/queued_ingestion" }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 7,
+      "required": ["gap_id", "organization_id", "device_id", "event_id", "expected_previous_hash", "received_previous_hash", "recorded_at"],
+      "properties": {
+        "gap_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "expected_previous_hash": { "$ref": "#/$defs/sha256" },
+        "received_previous_hash": { "$ref": "#/$defs/sha256" },
+        "recorded_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["last_hash", "last_event_id", "chain_status", "gap_count"],
+      "properties": {
+        "last_hash": { "$ref": "#/$defs/sha256" },
+        "last_event_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "chain_status": { "enum": ["continuous", "gap"] },
+        "gap_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "committed_ingestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["device_id", "accepted", "duplicates", "gaps", "head"],
+      "properties": {
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "accepted": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "duplicates": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "gaps": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/gap" } },
+        "head": { "$ref": "#/$defs/head" }
+      }
+    },
+    "queued_ingestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["device_id", "batch_id", "inbox_id", "state"],
+      "properties": {
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "batch_id": { "type": "string", "pattern": "^audit-[0-9a-f]{64}$" },
+        "inbox_id": { "$ref": "#/$defs/uuid" },
+        "state": { "enum": ["pending", "processing", "accepted", "uncertain", "dead_letter"] }
+      }
+    }
+  }
+}

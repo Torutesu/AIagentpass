@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-session-challenge-v1.schema.json",
+  "title": "AgentPass platform session WebAuthn challenge v1",
+  "description": "The exact public challenge response. Authority identifiers are resolved server-side and are not returned here; the raw JTI is one-use transport material and only its digest is persisted.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 13,
+  "maxProperties": 13,
+  "required": ["version", "type", "challenge_id", "challenge", "jti", "allowed_credential_ids", "operation", "rp_id", "origin", "user_verification", "issued_at", "expires_at", "one_use"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.platform-session-challenge" },
+    "challenge_id": { "$ref": "#/$defs/uuid" },
+    "challenge": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "jti": { "$ref": "#/$defs/uuid" },
+    "allowed_credential_ids": {
+      "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/credentialId" }
+    },
+    "operation": { "const": "platform.promotion.issue" },
+    "rp_id": { "$ref": "#/$defs/rpId" },
+    "origin": { "$ref": "#/$defs/origin" },
+    "user_verification": { "const": "required" },
+    "issued_at": { "$ref": "#/$defs/timestamp" },
+    "expires_at": { "$ref": "#/$defs/timestamp" },
+    "one_use": { "const": true }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "credentialId": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$" },
+    "rpId": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$" },
+    "origin": { "type": "string", "minLength": 9, "maxLength": 512, "pattern": "^https://[^/?#@]+(?::[0-9]{1,5})?$" },
+    "timestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+  }
+}

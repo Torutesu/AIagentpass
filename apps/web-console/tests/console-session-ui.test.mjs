@@ -1,0 +1,203 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
+const authorityPath = new URL("../app/session-authority.ts", import.meta.url);
+
+async function componentSource() {
+  return readFile(componentPath, "utf8");
+}
+
+function functionBody(source, name, nextName) {
+  const start = source.indexOf(`function ${name}`);
+  const end = source.indexOf(`function ${nextName}`, start);
+  assert.notEqual(start, -1, `${name} should exist`);
+  assert.notEqual(end, -1, `${nextName} should delimit ${name}`);
+  return source.slice(start, end);
+}
+
+test("all Console reads and mutations wait for one shared session bootstrap", async () => {
+  const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
+  const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
+  const bootstrapPathUses = source.match(/const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session";/g) ?? [];
+  const directConsoleFetches = source.match(/\bfetch\s*\(\s*[`"]\/api\/console/g) ?? [];
+  const wrappedConsoleFetches = source.match(/\bfetchConsole\s*\(\s*[`"]\/api\/console/g) ?? [];
+
+  assert.equal(bootstrapPathUses.length, 1, "the component should have one bootstrap endpoint declaration");
+  assert.equal(directConsoleFetches.length, 0, "Console calls must not bypass fetchConsole");
+  assert.ok(wrappedConsoleFetches.length >= 7, "all production Console paths should use fetchConsole");
+  assert.match(source, /const consoleSessionContext = createSessionAuthority<ConsoleSession>\(bootstrapConsoleSession\)/);
+  assert.match(source, /createOrganizationClient\(\{ sessionProvider: consoleSessionContext \}\)/);
+  assert.match(source, /createSecurityClient\(\{ sessionProvider: consoleSessionContext \}\)/);
+  assert.match(authority, /if \(value !== undefined\) return Promise\.resolve\(value\)/);
+  assert.match(authority, /if \(pending === undefined\)/);
+  assert.ok(wrapper.indexOf("await consoleSessionContext.get(init.signal ?? undefined)") < wrapper.indexOf("await fetch(path"), "bootstrap must finish before the Console request");
+  assert.match(authority, /return waitFor\(pending, signal\)/);
+});
+
+test("resumes the same-origin session before SIWC and falls back only for Cloud human_session_session_required", async () => {
+  const source = await componentSource();
+  const bootstrap = functionBody(source, "bootstrapConsoleSession", "supportsWebAuthn");
+  const request = functionBody(source, "requestConsoleSession", "isSessionResumeRequired");
+
+  assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
+  assert.match(bootstrap, /requestConsoleSession\(SESSION_RESUME_PATH, signal\)/);
+  assert.match(bootstrap, /isSessionResumeRequired\(resumed\.response, resumed\.payload\)/);
+  assert.ok(bootstrap.indexOf("requestConsoleSession(SESSION_RESUME_PATH, signal)") < bootstrap.indexOf("requestConsoleSession(SESSION_BOOTSTRAP_PATH, signal)"));
+  assert.match(bootstrap, /if \(!bootstrapped\.response\.ok\)/);
+  assert.match(source, /response\.status === 401/);
+  assert.match(source, /payload\.error\.code === "human_session_session_required"/);
+  assert.match(request, /credentials: "same-origin"/);
+  assert.match(request, /cache: "no-store"/);
+  assert.match(request, /redirect: "error"/);
+});
+
+test("every Console mutation carries the exact in-memory CSRF token and same-origin credentials", async () => {
+  const source = await componentSource();
+  const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
+
+  assert.match(source, /const CSRF_HEADER = "agentpass-csrf"/);
+  assert.match(wrapper, /if \(isMutationMethod\(method\)\) headers\.set\(CSRF_HEADER, session\.csrfToken\)/);
+  assert.match(wrapper, /credentials: "same-origin"/);
+  assert.match(wrapper, /cache: "no-store"/);
+  assert.match(wrapper, /redirect: "error"/);
+  assert.match(source, /fetchConsole\("\/api\/console\?operation=issue-device-enrollment", \{[\s\S]*?method: "POST"/);
+  assert.match(source, /fetchConsole\("\/api\/console\?operation=emergency-stop", \{[\s\S]*?method: "POST"/);
+  assert.match(source, /fetchConsole\(`\/api\/console\?operation=\$\{encodeURIComponent\(operation\)\}`, \{[\s\S]*?method: "POST"/);
+});
+
+test("emergency stop exposes a retryable visible failure state without weakening the mutation guard", async () => {
+  const source = await componentSource();
+  assert.match(source, /const \[stopError, setStopError\] = useState<string \| null>\(null\)/);
+  assert.match(source, /setStopError\("停止を確認できませんでした。接続と認証状態を確認し、もう一度お試しください。"\)/);
+  assert.match(source, /stopError \? <p className="form-error" role="alert" aria-live="assertive">\{stopError\}<\/p>/);
+  assert.match(source, /if \(stopPending\) return;/);
+  assert.match(source, /authenticateRecentAuth\(\{ operation: EMERGENCY_STOP_RECENT_AUTH_OPERATION/);
+});
+
+test("session material stays out of React state, browser storage, and logs", async () => {
+  const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
+  assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(source, /useState\([^\n]*(?:csrf|csrf_token|organizationId|authorization|challenge|assertion)/i);
+  assert.match(authority, /let value: T \| undefined/);
+  assert.match(authority, /let pending: Promise<T> \| undefined/);
+  assert.match(authority, /return Object\.freeze\(\{ get, replace, clear \}\)/);
+  assert.doesNotMatch(source, /enrollmentJson|secret-output|enrollmentVisible|setEnrollmentVisible/);
+  assert.doesNotMatch(source, /enrollmentStores|writeEnrollmentStore|readEnrollmentStore|allocateEnrollmentStoreId/);
+  assert.doesNotMatch(source, /<pre[^>]*>\s*\{[^}]*invitation/);
+  assert.doesNotMatch(source, /useState<Record<string, string> \| null>/);
+  assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
+  assert.doesNotMatch(source, /set(?:Csrf|CSRF|OrganizationId|Authorization)/);
+});
+
+test("enrollment credentials use only the validated live handoff and are discarded on failure", async () => {
+  const source = await componentSource();
+  const setup = functionBody(source, "SetupSurface", "AgentsSurface");
+  const handoffPost = setup.indexOf("await liveHandoff.delivery.deliver");
+  const handoffClear = setup.indexOf("liveHandoffRef.current = null;");
+
+  assert.ok(handoffClear >= 0 && handoffClear < handoffPost, "the one-shot handoff reference must be consumed before delivery");
+  assert.match(setup, /await liveHandoff\.delivery\.deliver\(invitation\)/);
+  assert.match(setup, /credentialは表示せず破棄しました/);
+  assert.doesNotMatch(setup, /set[A-Za-z]*(?:Credential|Invitation|EnrollmentVisible)/);
+  assert.doesNotMatch(setup, /navigator\.clipboard|ClipboardItem|localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(setup, /<pre|secret-output|標準入力|一度だけ表示/);
+});
+
+test("abort and unauthorized responses clear safely and permit a later retry", async () => {
+  const source = await componentSource();
+  const authority = await readFile(authorityPath, "utf8");
+  const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
+
+  assert.match(source, /function throwIfAborted\(signal\?: AbortSignal\)/);
+  assert.match(authority, /function waitFor<T>\(promise: Promise<T>, signal\?: AbortSignal\)/);
+  assert.match(authority, /const current = Promise\.resolve\(\)\.then\(loader\)/);
+  assert.match(authority, /signal\.addEventListener\("abort", onAbort, \{ once: true \}\)/);
+  assert.match(source, /signal\?\.aborted \|\| isAbortError\(error\)/);
+  assert.match(wrapper, /if \(init\.signal\?\.aborted \|\| isAbortError\(error\)\) throw abortError\(\)/);
+  assert.match(wrapper, /response\.status === 401 \|\| response\.status === 403/);
+  assert.match(wrapper, /consoleSessionContext\.clear\(session\)/);
+  assert.match(source, /function clearConsoleSessionOnUnauthorized\(error: unknown\)/);
+  assert.match(source, /error instanceof WebAuthnClientError && \(error\.status === 401 \|\| error\.status === 403\)/);
+  assert.match(source, /clearConsoleSessionOnUnauthorized\(error\);/);
+  assert.match(authority, /if \(pending === shared\) pending = undefined/);
+  assert.match(authority, /if \(expected !== undefined && value !== expected\) return/);
+  assert.match(authority, /generation \+= 1/);
+  assert.match(source, /const controller = new AbortController\(\)/);
+  assert.match(source, /return \(\) => controller\.abort\(\)/);
+});
+
+test("expired sessions replace every operational surface with a reauthentication gate", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /const \[sessionState, setSessionState\] = useState<"active" \| "expired" \| "signed-out">\("active"\)/);
+  assert.match(source, /setSessionState\("expired"\)/);
+  assert.match(source, /sessionState !== "active" \? <SessionEndedSurface reason=\{sessionState\} \/>/);
+  assert.match(source, /REAUTHENTICATION REQUIRED/);
+  assert.match(source, /window\.location\.reload\(\)/);
+  assert.match(source, /sessionState === "active" && activeView === "emergency"/);
+  assert.match(source, /CONSOLE_SESSION_ENDED_EVENT = "agentpass:session-ended"/);
+  assert.match(source, /window\.dispatchEvent\(new Event\(CONSOLE_SESSION_ENDED_EVENT\)\)/);
+  assert.match(source, /window\.addEventListener\(CONSOLE_SESSION_ENDED_EVENT, expireSession\)/);
+  assert.match(source, /summaryEpoch\.current \+= 1/);
+  assert.match(source, /capabilityEpoch\.current \+= 1/);
+  assert.match(source, /adminAuditEpoch\.current \+= 1/);
+  assert.match(source, /<SecurityPanel securityClient=\{securityClient\} onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
+});
+
+test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {
+  const source = await componentSource();
+  const logout = functionBody(source, "logoutConsoleSession", "supportsWebAuthn");
+
+  assert.match(logout, /method: "DELETE"/);
+  assert.match(logout, /\[CSRF_HEADER\]: session\.csrfToken/);
+  assert.match(logout, /credentials: "same-origin"/);
+  assert.match(logout, /payload\.session !== null/);
+  assert.match(logout, /consoleSessionContext\.clear\(session\)/);
+  assert.match(source, /endSession\("signed-out"\)/);
+  assert.match(source, /signOutPending \? "終了中…" : "サインアウト"/);
+});
+
+test("session role is strictly parsed and authority-changing controls are least-privilege", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /type ConsoleRole = "owner" \| "admin" \| "auditor" \| "viewer"/);
+  assert.match(source, /hasExactKeys\(session, \["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"\]\)/);
+  assert.match(source, /const canManage = sessionRole === "owner" \|\| sessionRole === "admin"/);
+  assert.match(source, /const canEmergencyStop = sessionRole === "owner"/);
+  assert.match(source, /if \(sessionRole !== "owner" && sessionRole !== "admin"\) throw new Error\("role denied"\)/);
+  assert.match(source, /item\.id !== "emergency" \|\| sessionRole === null \|\| canEmergencyStop/);
+  assert.match(source, /canManage && agent\.agentId/);
+  assert.match(source, /canManage && policy\.policyId/);
+  assert.match(source, /canManage && device\.deviceId/);
+  assert.doesNotMatch(source, /badge: "3"/);
+  assert.doesNotMatch(source, /useState\("\/work\/repo"\)/);
+});
+
+test("Agent launch guide exposes only bounded Claude Code and Cursor commands", async () => {
+  const source = await componentSource();
+  const guide = functionBody(source, "AgentLaunchGuide", "PoliciesSurface");
+
+  assert.match(source, /<AgentLaunchGuide \/>/);
+  assert.ok(guide.includes('claude: "agentpass launch --agent claude-code --project \\"$PWD\\" --ttl 600"'));
+  assert.ok(guide.includes('cursor: "agentpass launch --agent cursor --project \\"$PWD\\" --ttl 600"'));
+  assert.match(guide, /navigator\.clipboard\.writeText\(commands\[kind\]\)/);
+  assert.match(guide, /短期の権限/);
+  assert.match(guide, /秘密鍵や認証情報はコマンドに含まれません/);
+  assert.doesNotMatch(guide, /csrf|authorization|private[_-]?key|secret|token/i);
+});
+
+test("help modal exposes an accessible dialog and a keyboard focus trap", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /aria-controls="help-dialog"/);
+  assert.match(source, /helpModalRef/);
+  assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy"/);
+  assert.match(source, /event\.key === "Escape"/);
+  assert.match(source, /event\.key === "Tab"/);
+  assert.match(source, /previousFocusRef/);
+  assert.match(source, /if \(target\?\.isConnected\) target\.focus\(\)/);
+});

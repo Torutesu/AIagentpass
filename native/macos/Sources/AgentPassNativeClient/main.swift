@@ -108,6 +108,32 @@ guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" 
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
 let sessionApprovalKeyTag = "dev.agentpass.session-approval.v1"
+if command == "host-control-close" {
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    do {
+        guard request.count > 0, request.count <= 16 * 1024,
+              let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
+              Set(object.keys) == Set(["session_id", "operation_id", "reason"]),
+              let sessionID = object["session_id"] as? String,
+              let operationID = object["operation_id"] as? String,
+              let reasonText = object["reason"] as? String,
+              let reason = AgentPassHostXPCContract.CloseReason(rawValue: reasonText),
+              let controlRequest = AgentPassHostControlCloseRequest(sessionID: sessionID, operationID: operationID, reason: reason) else {
+            throw AgentPassNativeError.invalidConfiguration("Native Host control close request is invalid")
+        }
+        let client = NativeAgentAuthenticatedHostControlXPCClient(machServiceName: serviceName)
+        let closed = try client.close(sessionID: controlRequest.sessionID, operationID: controlRequest.operationID, reason: reason)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "status": "closed",
+            "operation_id": closed.operationID,
+            "session_id": closed.sessionID,
+            "closed_at_ms": closed.closedAtMilliseconds
+        ], options: [.sortedKeys])
+        emit(Output(ok: true, version: nil, stdout_base64: data.base64EncodedString(), public_key: nil, error: nil))
+    } catch {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription), status: 1)
+    }
+}
 if command == "approval-public-key" {
     do {
         let key = try SecureEnclaveKeyStore(applicationTag: sessionApprovalKeyTag, accessGroup: approvalKeyAccessGroup(), requiresUserPresence: true)
@@ -693,6 +719,19 @@ case "session-revoke":
         result = dataOutput(data, error: error)
         semaphore.signal()
     }
+case "session-revoke-agent":
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    guard request.count > 0, request.count <= 16 * 1024,
+          let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+          Set(object.keys) == Set(["agent_id"]),
+          let agentID = object["agent_id"] as? String,
+          !agentID.isEmpty, agentID.utf8.count <= 128 else {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native Agent session revocation request is invalid"), status: 1)
+    }
+    proxy.revokeSessions(agentID: agentID as NSString) { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
 case "session-validate":
     let request = FileHandle.standardInput.readDataToEndOfFile()
     guard request.count > 0, request.count <= 16 * 1024,
@@ -750,7 +789,17 @@ default:
     emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Unknown native client command"), status: 2)
 }
 
-let timeoutSeconds = (command == "session-start" || command == "recovery-anchor-install" || command == "audit-prune-submit" || command == "audit-prune-execute") ? 120 : 30
+// A manual control refresh may legitimately consume the complete 30-second
+// long-poll allowance before verification, durable activation, and ACK. Keep
+// the client deadline strictly outside that server-side bound.
+let extendedTimeoutCommands: Set<String> = [
+    "session-start",
+    "recovery-anchor-install",
+    "audit-prune-submit",
+    "audit-prune-execute",
+    "control-refresh"
+]
+let timeoutSeconds = extendedTimeoutCommands.contains(command) ? 120 : 30
 let timeout: DispatchTime = .now() + .seconds(timeoutSeconds)
 guard semaphore.wait(timeout: timeout) == .success, let result else {
     emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native broker request timed out"), status: 1)

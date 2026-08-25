@@ -1,0 +1,8 @@
+{
+  "name": "@agentpass/claude-code-adapter",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentpass-claude-code": "bin/agentpass-claude-code.mjs"
+  }
+}

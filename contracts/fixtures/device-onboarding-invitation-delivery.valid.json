@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "type": "agentpass.browser-onboarding.invitation",
+  "correlation_id": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s",
+  "nonce": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s",
+  "invitation": {
+    "version": 2,
+    "proof_version": 2,
+    "enrollment_id": "11111111-1111-4111-8111-111111111111",
+    "organization_id": "22222222-2222-4222-8222-222222222222",
+    "device_id": "33333333-3333-4333-8333-333333333333",
+    "label": "build-mac-01",
+    "platform": "macos",
+    "candidate_binding": {
+      "version": 1,
+      "enrollment_id": "11111111-1111-4111-8111-111111111111",
+      "organization_id": "22222222-2222-4222-8222-222222222222",
+      "device_id": "33333333-3333-4333-8333-333333333333",
+      "candidate_id": "release-2026-08-16-01",
+      "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "team_id": "ABCDE12345",
+      "device_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expires_at": "2099-01-02T03:04:05.000Z"
+    },
+    "challenge_id": "11111111-1111-4111-8111-111111111111",
+    "nonce": "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw",
+    "expires_at": "2099-01-02T03:04:05.000Z",
+    "challenge": {
+      "challenge_id": "11111111-1111-4111-8111-111111111111",
+      "nonce": "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw",
+      "expires_at": "2099-01-02T03:04:05.000Z",
+      "candidate_id": "release-2026-08-16-01",
+      "device_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "credential": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d0",
+    "endpoint": "/v1/enrollments/11111111-1111-4111-8111-111111111111",
+    "possession_receipt_verification": {
+      "key_id": "possession-receipt-v1",
+      "algorithm": "ed25519",
+      "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=\n-----END PUBLIC KEY-----\n"
+    }
+  }
+}

@@ -386,15 +386,15 @@ private extension NativeControlBundleV2Codec {
     static func rejectUnknown(_ object: [String: Any], allowed: Set<String>) throws { try nativeScopeUnknown(object, allowed) }
 }
 
-enum NativeStrictJSON {
-    static func object(from data: Data, maxBytes: Int, maxDepth: Int) throws -> [String: Any] {
+public enum NativeStrictJSON {
+    public static func object(from data: Data, maxBytes: Int, maxDepth: Int) throws -> [String: Any] {
         guard !data.isEmpty, data.count <= maxBytes, let string = String(data: data, encoding: .utf8) else { throw NativeControlBundleV2Error(.invalidJSON, "JSON is invalid UTF-8 or the size is invalid") }
         let parser = Parser(string: string, maxDepth: maxDepth)
         try parser.read()
         guard parser.isAtEnd, let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else { throw NativeControlBundleV2Error(.invalidJSON, "JSON must be an object") }
         return object
     }
-    static func data(_ object: [String: Any]) throws -> Data { guard JSONSerialization.isValidJSONObject(object) else { throw NativeControlBundleV2Error(.invalidBundle, "Value is not canonical JSON") }; return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) }
+    public static func data(_ object: [String: Any]) throws -> Data { guard JSONSerialization.isValidJSONObject(object) else { throw NativeControlBundleV2Error(.invalidBundle, "Value is not canonical JSON") }; return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) }
     private final class Parser {
         let string: String
         let maxDepth: Int
@@ -486,6 +486,11 @@ public final class NativeCapabilityVerifier: @unchecked Sendable {
     public init(trust: NativeCapabilityTrust, statePath: String? = nil) throws { self.trust = trust; self.statePath = statePath; if let statePath { try nativeCapabilityLoad(path: statePath, sequence: &durableSequence, consumed: &consumed); durableLoaded = true } }
 
     public func verify(_ data: Data, options: NativeCapabilityVerificationOptions = .init()) throws -> NativeCapability {
+        lock.lock(); defer { lock.unlock() }
+        return try verifyLocked(data, options: options)
+    }
+
+    private func verifyLocked(_ data: Data, options: NativeCapabilityVerificationOptions) throws -> NativeCapability {
         let object = try NativeStrictJSON.object(from: data, maxBytes: NativeControlBundleV2Codec.maxBytes, maxDepth: NativeControlBundleV2Codec.maxDepth)
         let capability = try NativeCapabilityCodec.parseObject(object, nowMilliseconds: options.nowMilliseconds, maxTTLMilliseconds: options.maxTTLMilliseconds)
         guard capability.issuer == trust.issuer || trust.issuer == nil else { throw NativeControlBundleV2Error(.issuerKeyMismatch, "Capability key is not trusted for this issuer") }
@@ -518,12 +523,44 @@ public final class NativeCapabilityVerifier: @unchecked Sendable {
 
     @discardableResult
     public func verifyAndConsume(_ data: Data, options: NativeCapabilityVerificationOptions = .init(), operation: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, tag: String? = nil) throws -> NativeCapability {
-        let capability = try verify(data, options: options)
-        if let operation, let repository, let branch, let remote, !policyScopeAllows(capability.scope, operation: operation, repository: repository, branch: branch, remote: remote, tag: tag) { throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request") }
         lock.lock(); defer { lock.unlock() }
+        let capability = try verifyLocked(data, options: options)
+        if let operation, let repository, let branch, let remote, !policyScopeAllows(capability.scope, operation: operation, repository: repository, branch: branch, remote: remote, tag: tag) { throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request") }
         guard !consumed.contains(capability.capabilityID) else { throw NativeControlBundleV2Error(.capabilityConsumed, "Cloud capability has already been consumed") }
         consumed.insert(capability.capabilityID)
         if let statePath { do { try nativeCapabilityPersist(path: statePath, sequence: durableSequence, consumed: consumed) } catch { consumed.remove(capability.capabilityID); throw error } }
+        return capability
+    }
+
+    /// Atomically verifies and consumes one capability against every remote
+    /// observed in the repository. This prevents an allowed `origin` from
+    /// masking an additional unapproved push/fetch authority.
+    @discardableResult
+    public func verifyAndConsume(
+        _ data: Data,
+        options: NativeCapabilityVerificationOptions = .init(),
+        operation: String,
+        repository: String,
+        branch: String,
+        remotes: [String]
+    ) throws -> NativeCapability {
+        lock.lock(); defer { lock.unlock() }
+        let capability = try verifyLocked(data, options: options)
+        guard !remotes.isEmpty,
+              remotes.allSatisfy({ policyScopeAllows(
+                capability.scope, operation: operation, repository: repository,
+                branch: branch, remote: $0
+              ) }) else {
+            throw NativeControlBundleV2Error(.invalidScope, "Capability scope denied the request")
+        }
+        guard !consumed.contains(capability.capabilityID) else {
+            throw NativeControlBundleV2Error(.capabilityConsumed, "Cloud capability has already been consumed")
+        }
+        consumed.insert(capability.capabilityID)
+        if let statePath {
+            do { try nativeCapabilityPersist(path: statePath, sequence: durableSequence, consumed: consumed) }
+            catch { consumed.remove(capability.capabilityID); throw error }
+        }
         return capability
     }
 
@@ -604,9 +641,11 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
             let state = NativeControlBundleV2SequenceState(highestSequence: highestSequence, statementHash: statementHash)
             let verified = try NativeControlBundleV2Codec.verify(bundleData, trust: trust, options: .init(nowMilliseconds: nowMilliseconds, audience: trust.audience, sequenceState: state))
             let hash = try NativeControlBundleV2Codec.statementHash(verified)
-            try nativeV2PersistMinimumEpoch(markerPath, epoch: 2)
+            do { try nativeV2PersistMinimumEpoch(markerPath, epoch: 2) }
+            catch { operational = false; throw error }
             minimumEpoch = 2; highestSequence = verified.sequence; statementHash = hash; activeV2 = verified; activeLegacy = nil
-            try persistState()
+            do { try persistState() }
+            catch { operational = false; throw error }
         } else {
             guard legacyMode else { throw NativeControlBundleV2Error(.legacyModeRequired, "Legacy control bundles require explicit legacy mode") }
             guard minimumEpoch < 2 else { throw NativeControlBundleV2Error(.legacyPermanentlyRejected, "Legacy control bundles are permanently disabled") }
@@ -614,7 +653,8 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
             guard legacy.sequence >= highestSequence else { throw NativeControlBundleV2Error(.sequenceRollback, "Legacy control bundle sequence rolled back") }
             if legacy.sequence == highestSequence, let statementHash, statementHash != legacy.statementHash { throw NativeControlBundleV2Error(.sequenceConflict, "Legacy control bundle sequence conflicts with durable evidence") }
             highestSequence = legacy.sequence; statementHash = legacy.statementHash; activeLegacy = legacy; activeV2 = nil
-            try persistState()
+            do { try persistState() }
+            catch { operational = false; throw error }
         }
         return currentStatus(nowMilliseconds: nowMilliseconds)
     }
@@ -631,7 +671,7 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
     public func validateControl(agentID: String, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws {
         lock.lock(); defer { lock.unlock() }; guard operational else { throw AgentPassNativeError.unauthorizedClient("Native remote control integrity failure") }
         if let bundle = activeV2 {
-            let expiry = try milliseconds(bundle.expiresAt); guard nowMilliseconds < expiry || nowMilliseconds < expiry + bundle.offlineTTLMilliseconds else { throw AgentPassNativeError.unauthorizedClient("offline_ttl_expired") }; guard !bundle.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !bundle.revokedDevices.contains(bundle.deviceID) else { throw AgentPassNativeError.unauthorizedClient("device_revoked") }; guard !bundle.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
+            let expiry = try milliseconds(bundle.expiresAt); guard nowMilliseconds < expiry else { throw AgentPassNativeError.unauthorizedClient("bundle_expired") }; guard !bundle.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !bundle.revokedDevices.contains(bundle.deviceID) else { throw AgentPassNativeError.unauthorizedClient("device_revoked") }; guard !bundle.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
         } else if let legacy = activeLegacy { guard nowMilliseconds < legacy.expiresAtMilliseconds else { throw AgentPassNativeError.unauthorizedClient("expired") }; guard !legacy.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !legacy.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
         } else { throw AgentPassNativeError.unauthorizedClient("Control bundle state is missing") }
     }
@@ -651,14 +691,15 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
         guard operational, !auditedUpdatePending else { throw NativeControlBundleV2Error(.invalidBundle, "A control update is already pending audit") }
         auditedUpdatePending = true
         do { try persistState() }
-        catch { auditedUpdatePending = false; throw error }
+        catch { auditedUpdatePending = false; operational = false; throw error }
     }
 
     public func completeAuditedUpdate() throws {
         lock.lock(); defer { lock.unlock() }
         guard operational, auditedUpdatePending else { throw NativeControlBundleV2Error(.invalidBundle, "No control update is pending audit") }
         auditedUpdatePending = false
-        try persistState()
+        do { try persistState() }
+        catch { operational = false; throw error }
     }
 
     public func status(nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> NativeControlBundleV2Status { lock.lock(); defer { lock.unlock() }; return currentStatus(nowMilliseconds: nowMilliseconds) }

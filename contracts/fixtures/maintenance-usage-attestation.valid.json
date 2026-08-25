@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"agentpass.maintenance.usage-attestation","attestation_id":"att-1","organization_id":"org-1","app_id":"app-1","provider_id":"sample.api","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observed_at":"2026-08-25T00:00:00.000Z","usages":[{"selector":"GET /v1/widgets","file":"/src/client.ts","line":12}]}

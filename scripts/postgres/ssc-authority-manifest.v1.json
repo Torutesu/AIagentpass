@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass.ssc-postgres-authority-manifest",
+  "domains": {
+    "small_software": {
+      "application_role": "agentpass_app",
+      "maintenance_role": "agentpass_maintenance",
+      "tables": [
+        "small_software_apps", "small_software_releases", "small_software_publish_plans",
+        "small_software_approvals", "small_software_deployments", "small_software_routes",
+        "small_software_access_rules", "small_software_egress_rules",
+        "small_software_provider_operations", "small_software_lifecycle_jobs"
+      ],
+      "function_execute": [
+        "agentpass_small_software_reserve_app",
+        "agentpass_small_software_reserve_release",
+        "agentpass_small_software_reserve_provider_operation",
+        "agentpass_small_software_approve",
+        "agentpass_small_software_reconcile_deployment",
+        "agentpass_small_software_activate_route",
+        "agentpass_small_software_suspend",
+        "agentpass_small_software_expire",
+        "agentpass_small_software_rollback",
+        "agentpass_small_software_delete_reservation"
+      ]
+    },
+    "maintenance": {
+      "application_role": "agentpass_app",
+      "maintenance_role": "agentpass_maintenance",
+      "tables": [
+        "maintenance_providers", "maintenance_provider_keys", "maintenance_advisories",
+        "maintenance_advisory_events", "maintenance_repository_installations",
+        "maintenance_repository_snapshots", "maintenance_usage_attestations",
+        "maintenance_policies", "maintenance_jobs", "maintenance_effects",
+        "maintenance_results", "maintenance_pull_requests", "maintenance_receipts",
+        "maintenance_exceptions"
+      ],
+      "function_execute": [
+        "agentpass_publish_maintenance_advisory",
+        "agentpass_supersede_maintenance_advisory",
+        "agentpass_withdraw_maintenance_advisory",
+        "agentpass_reserve_maintenance_effect",
+        "agentpass_cancel_maintenance_effect",
+        "agentpass_complete_maintenance_effect",
+        "agentpass_reconcile_maintenance_effect"
+      ]
+    }
+  },
+  "invariants": {
+    "app_direct_dml": false,
+    "maintenance_provider_customer_reads": false,
+    "tenant_rls_for_customer_relations": true,
+    "function_search_path": "pg_catalog, public",
+    "migration_head_fixture_required": true,
+    "response_loss_is_uncertain": true
+  }
+}

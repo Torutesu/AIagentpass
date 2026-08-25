@@ -196,16 +196,18 @@ export function verifyDeviceRequest(request, enrolled, options = {}) {
   }
   if (!valid) fail(AUTH_ERROR_CODES.DEVICE_AUTH_FAILED);
 
-  const replayCache = options.replayCache ?? options.replay ?? createReplayCache();
-  purgeReplayCache(replayCache, now);
-  const replayKey = `${headers["AgentPass-Device"]}:${nonce}`;
-  if (replayCache.has(replayKey)) fail(AUTH_ERROR_CODES.REPLAY_DETECTED);
-  const limit = replayCache.maxEntries ?? options.maxReplayEntries ?? DEFAULT_REPLAY_LIMIT;
-  if (!Number.isSafeInteger(limit) || limit < 1) fail(AUTH_ERROR_CODES.INVALID_REQUEST);
-  if (replayCache.size >= limit) fail(AUTH_ERROR_CODES.REPLAY_CACHE_FULL);
-  replayCache.set(replayKey, now + REPLAY_RETENTION_MS);
+  if (options.deferReplayConsumption !== true) {
+    const replayCache = options.replayCache ?? options.replay ?? createReplayCache();
+    purgeReplayCache(replayCache, now);
+    const replayKey = `${headers["AgentPass-Device"]}:${nonce}`;
+    if (replayCache.has(replayKey)) fail(AUTH_ERROR_CODES.REPLAY_DETECTED);
+    const limit = replayCache.maxEntries ?? options.maxReplayEntries ?? DEFAULT_REPLAY_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1) fail(AUTH_ERROR_CODES.INVALID_REQUEST);
+    if (replayCache.size >= limit) fail(AUTH_ERROR_CODES.REPLAY_CACHE_FULL);
+    replayCache.set(replayKey, now + REPLAY_RETENTION_MS);
+  }
 
-  return publicDevice(device, headers["AgentPass-Device"]);
+  return publicDevice(device, headers["AgentPass-Device"], options.includeAuthenticationMetadata === true);
 }
 
 /** Create the detached signature used by an AgentPass device request. */
@@ -482,10 +484,17 @@ function deviceKeyTypeAllowed(key) {
     || (key.asymmetricKeyType === "ec" && key.asymmetricKeyDetails?.namedCurve === "prime256v1");
 }
 
-function publicDevice(device, fallbackId) {
+function publicDevice(device, fallbackId, includeAuthenticationMetadata = false) {
   const result = { device_id: device.device_id ?? device.deviceId ?? device.id ?? fallbackId };
   const organizationId = device.organization_id ?? device.organizationId;
   if (organizationId !== undefined) result.organization_id = organizationId;
+  if (includeAuthenticationMetadata) {
+    const keyEpoch = device.key_epoch ?? device.keyEpoch ?? device.device_key_epoch ?? device.deviceKeyEpoch;
+    Object.defineProperties(result, {
+      authentication_public_key: { value: devicePublicKey(device), enumerable: false },
+      key_epoch: { value: keyEpoch, enumerable: false }
+    });
+  }
   return result;
 }
 

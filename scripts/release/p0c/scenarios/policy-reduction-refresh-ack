@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
+import { resolve, join } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import {
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from '../lib/scenario-runtime.mjs';
+
+const GATE = 'policy-reduction-refresh-ack';
+const TESTS = Object.freeze(['policy-reduction-denied']);
+const APP_PATH = '/Applications/AgentPass.app';
+const SERVICE_LABEL = 'dev.agentpass.native-service';
+const SIGNING_REQUEST_PATH = '/private/var/db/agentpass-qualification/signing-request.json';
+const DIGEST = /^[0-9a-f]{64}$/u;
+const STATUS_KEYS = Object.freeze([
+  'configured', 'device_auth_public_key', 'device_revoked', 'expired', 'format_epoch',
+  'global_revoked', 'refresh_configured', 'refresh_consecutive_failures', 'refresh_generation',
+  'refresh_in_flight', 'refresh_last_attempt_at', 'refresh_last_error', 'refresh_last_success_at',
+  'refresh_next_attempt_at', 'refresh_sequence', 'refresh_source_url', 'refresh_state', 'revoked_agents',
+  'revoked_capabilities', 'sequence', 'operational'
+]);
+
+const exactKeys = (value, keys, label) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has missing or unknown fields`);
+};
+const requireRoot = (getUid = process.getuid) => { if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root'); };
+const parseOuter = (result, label) => {
+  const outer = parseJSONOutput(requireCommandSuccess(result, label), label);
+  exactKeys(outer, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`);
+  if (outer.ok !== true || typeof outer.stdout_base64 !== 'string' || outer.error !== null) throw new Error(`${label} envelope is invalid`);
+  const bytes = Buffer.from(outer.stdout_base64, 'base64');
+  if (bytes.length === 0 || bytes.toString('base64') !== outer.stdout_base64) throw new Error(`${label} payload is invalid`);
+  return bytes;
+};
+const validateStatus = (status, label) => {
+  exactKeys(status, STATUS_KEYS, `${label} status`);
+  if (status.configured !== true || status.format_epoch !== 2 || status.operational !== true || status.global_revoked !== false || !Number.isSafeInteger(status.sequence) || status.sequence < 1 || !Number.isSafeInteger(status.refresh_generation) || status.refresh_generation < 1 || !Number.isSafeInteger(status.refresh_sequence) || status.refresh_sequence < 1 || status.refresh_sequence !== status.sequence || !['idle', 'acknowledged'].includes(status.refresh_state) || status.refresh_in_flight !== false || status.refresh_configured !== true || status.expired !== false || status.device_revoked !== false || !Array.isArray(status.revoked_agents) || !Array.isArray(status.revoked_capabilities) || status.refresh_consecutive_failures !== 0) throw new Error(`${label} status is not operational or converged`);
+  return status;
+};
+const parseStatus = (result, label) => validateStatus(parseJSONOutput(parseOuter(result, label), label), label);
+const parseRefreshStatus = (result, label) => {
+  const status = parseJSONOutput(parseOuter(result, label), label);
+  exactKeys(status, [...STATUS_KEYS, 'refreshed'], `${label} status`);
+  if (status.refreshed !== true) throw new Error(`${label} did not report a completed refresh`);
+  const { refreshed: _refreshed, ...withoutMarker } = status;
+  return validateStatus(withoutMarker, label);
+};
+const sign = async (runPinned, entry, request, production, runCommand, label) => {
+  const result = await runPinned(entry, ['--service', SERVICE_LABEL, 'sign'], { production, runCommand, input: request });
+  return parseOuter(result, label);
+};
+const readSigningRequest = (production) => readProtectedFile(SIGNING_REQUEST_PATH, { maximum: 12 * 1024 * 1024, production }).bytes;
+
+export const performPolicyReductionRefreshAck = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, signingRequest, probeOperation } = {}) => {
+  requireRoot(getUid);
+  if (machine.applicationPath !== APP_PATH || machine.serviceLabel !== SERVICE_LABEL || machine.executables.native_client?.path === undefined) throw new Error('scenario config identity is not fixed');
+  if (!DIGEST.test(release?.artifactSha256 ?? '')) throw new Error('release binding is incomplete');
+  const request = signingRequest ?? readSigningRequest(production);
+  if (!Buffer.isBuffer(request) || request.length === 0) throw new Error('signing request is unavailable');
+  const run = async (entry, bytes, label) => {
+    const result = await sign(runPinned, entry, bytes, production, runCommand, label);
+    if (result.length === 0) throw new Error(`${label} returned an empty signature`);
+    return result;
+  };
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const baseline = parseStatus(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-status'], { production, runCommand }), 'baseline control status');
+    await run(machine.executables.native_client, request, 'baseline signing operation');
+    if (probeOperation) {
+      if (typeof probeOperation !== 'function' || (await probeOperation({ phase: 'baseline' })) !== 'allowed') throw new Error('baseline operation was not allowed');
+    }
+
+    const refreshed = parseRefreshStatus(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-refresh'], { production, runCommand }), 'control refresh');
+    const observed = parseStatus(await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'control-status'], { production, runCommand }), 'observed control status');
+    if (refreshed.sequence <= baseline.sequence || refreshed.refresh_generation <= baseline.refresh_generation || refreshed.refresh_sequence !== refreshed.sequence || observed.sequence !== refreshed.sequence || observed.refresh_generation !== refreshed.refresh_generation || observed.refresh_sequence !== observed.sequence) throw new Error('policy refresh generation or signed ACK did not converge');
+
+    let denied = false;
+    try { await run(machine.executables.native_client, request, 'reduced-policy signing operation'); }
+    catch { denied = true; }
+    if (!denied) throw new Error('reduced policy did not deny the formerly allowed operation');
+    if (probeOperation && (await probeOperation({ phase: 'reduced' })) !== 'denied') throw new Error('reduced policy denial was not observed');
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: APP_PATH } });
+};
+
+export const executePolicyReductionRefreshAck = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performPolicyReductionRefreshAck(context) });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performPolicyReductionRefreshAck(context) });

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "capability_id": "44444444-4444-4444-8444-444444444444",
+  "nonce": "Naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "issuer": "agentpass-cloud",
+  "key_id": "capability-v1",
+  "audience": {
+    "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "device_id": "33333333-3333-4333-8333-333333333333"
+  },
+  "scope": {
+    "operations": ["git.commit.sign"],
+    "repositories": ["/work/project"],
+    "branches": {
+      "allow": ["feature/*"],
+      "deny": ["main"]
+    },
+    "remotes": {
+      "allow": ["git@github.com:example/project.git"],
+      "deny": []
+    }
+  },
+  "not_before": "2026-08-14T00:00:00.000Z",
+  "expires_at": "2026-08-14T00:05:00.000Z",
+  "sequence": 4,
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+}

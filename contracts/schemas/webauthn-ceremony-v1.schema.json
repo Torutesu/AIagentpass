@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/webauthn-ceremony-v1.schema.json",
+  "title": "AgentPass durable WebAuthn ceremony record v1",
+  "description": "Exact public projection returned by the PostgreSQL WebAuthn ceremony repository. It contains a challenge digest, never the raw challenge or browser assertion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "session_id", "member_id", "organization_id", "ceremony", "operation", "rp_id", "origin", "user_verification", "challenge_hash", "created_at", "expires_at", "status"],
+  "properties": {
+    "id": { "$ref": "#/$defs/uuid" },
+    "session_id": { "$ref": "#/$defs/uuid" },
+    "member_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "ceremony": { "const": "authentication" },
+    "operation": { "$ref": "#/$defs/operation" },
+    "rp_id": { "$ref": "#/$defs/rpId" },
+    "origin": { "$ref": "#/$defs/origin" },
+    "user_verification": { "const": "required" },
+    "challenge_hash": { "$ref": "#/$defs/sha256" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "expires_at": { "$ref": "#/$defs/timestamp" },
+    "status": { "enum": ["pending", "consuming", "consumed", "failed", "expired"] },
+    "consume_started_at": { "$ref": "#/$defs/timestamp" },
+    "consumed_at": { "$ref": "#/$defs/timestamp" },
+    "failed_at": { "$ref": "#/$defs/timestamp" }
+  },
+  "allOf": [
+    { "if": { "properties": { "status": { "const": "pending" } }, "required": ["status"] }, "then": { "not": { "anyOf": [{ "required": ["consume_started_at"] }, { "required": ["consumed_at"] }, { "required": ["failed_at"] }] } } },
+    { "if": { "properties": { "status": { "const": "consuming" } }, "required": ["status"] }, "then": { "required": ["consume_started_at"], "not": { "anyOf": [{ "required": ["consumed_at"] }, { "required": ["failed_at"] }] } } },
+    { "if": { "properties": { "status": { "const": "consumed" } }, "required": ["status"] }, "then": { "required": ["consumed_at"], "not": { "required": ["failed_at"] } } },
+    { "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] }, "then": { "required": ["consumed_at", "failed_at"] } }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "operation": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "rpId": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$" },
+    "origin": { "type": "string", "minLength": 9, "maxLength": 512, "pattern": "^https://[^/?#@]+(?::[0-9]{1,5})?$" },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "minLength": 24, "maxLength": 24, "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+  }
+}

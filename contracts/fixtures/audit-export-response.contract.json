@@ -1,0 +1,85 @@
+{
+  "organization_id": "11111111-1111-4111-8111-111111111111",
+  "export_id": "22222222-2222-4222-8222-222222222222",
+  "environment": "production",
+  "chain": "admin",
+  "range": {
+    "from_audit_position": 1,
+    "to_audit_position": 1,
+    "previous_root_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "root_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "record_count": 1
+  },
+  "payload_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "payload": {
+    "version": 1,
+    "type": "agentpass.audit-export",
+    "organization_id": "11111111-1111-4111-8111-111111111111",
+    "environment": "production",
+    "chain": "admin",
+    "range": {
+      "from_audit_position": 1,
+      "to_audit_position": 1,
+      "previous_root_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "root_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "record_count": 1
+    },
+    "entries": [
+      {
+        "version": 1,
+        "organization_id": "11111111-1111-4111-8111-111111111111",
+        "environment": "production",
+        "chain": "admin",
+        "export_position": 1,
+        "source_id": "33333333-3333-4333-8333-333333333333",
+        "source_device_id": null,
+        "source_previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_gap": null,
+        "event": {
+          "version": 2,
+          "audit_event_id": "33333333-3333-4333-8333-333333333333",
+          "organization_id": "11111111-1111-4111-8111-111111111111",
+          "actor_id": "44444444-4444-4444-8444-444444444444",
+          "action": "member.role.changed",
+          "target_type": "member",
+          "target_id": null,
+          "details": { "reason": "operator_request" },
+          "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "sequence": 1
+        }
+      }
+    ]
+  },
+  "audit_anchor": {
+    "version": 1,
+    "type": "agentpass.audit-anchor",
+    "statement": {
+      "version": 1,
+      "type": "agentpass.audit-anchor",
+      "organization_id": "11111111-1111-4111-8111-111111111111",
+      "environment": "production",
+      "chain": "admin",
+      "export_id": "22222222-2222-4222-8222-222222222222",
+      "audit_position": 1,
+      "previous_audit_position": 0,
+      "root_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "previous_root_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "export_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "record_count": 1,
+      "purpose": "agentpass.audit-anchor",
+      "protocol_version": 1,
+      "signing_version": 1,
+      "lifecycle_version": 3,
+      "key_id": "audit-anchor-production-v1",
+      "key_version": 7,
+      "issued_at": "2026-08-14T23:30:00.000Z",
+      "expires_at": "2026-08-15T00:30:00.000Z"
+    },
+    "statement_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "signature_algorithm": "ed25519",
+    "signer_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+  },
+  "validity": "active"
+}

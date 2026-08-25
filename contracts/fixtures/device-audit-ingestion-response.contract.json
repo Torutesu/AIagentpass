@@ -1,0 +1,17 @@
+{
+  "ingestion": {
+    "device_id": "33333333-3333-4333-8333-333333333333",
+    "accepted": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    ],
+    "duplicates": [],
+    "gaps": [],
+    "head": {
+      "last_hash": "c654c3f267a6e1a4faf1a4adef726712c4b0400bd5a89fa2c626797e73001ef3",
+      "last_event_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "chain_status": "continuous",
+      "gap_count": 0
+    }
+  }
+}

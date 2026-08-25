@@ -1,0 +1,343 @@
+{
+  "contract_type": "agentpass.hosted_identity_bootstrap",
+  "contract_id": "agentpass.hosted-identity-bootstrap",
+  "version": 1,
+  "status": "frozen",
+  "profile": "hosted",
+  "description": "The production Hosted path for server-verified GitHub identity, first-organization creation, mandatory initial WebAuthn registration, and subsequent human authentication/step-up.",
+  "activation": {
+    "runtime_status": "contract_frozen_implementation_pending",
+    "authority_must_not_be_enabled_until": [
+      "the bootstrap state and idempotency records are durable in PostgreSQL",
+      "the bootstrap WebAuthn ceremony is bound to the verified member and organization",
+      "the focused contract validator and the real PostgreSQL qualification are green"
+    ],
+    "prerequisite_forward_migration": "0056_identity_epoch_invalidation",
+    "planned_forward_migration": "0057_hosted_identity_bootstrap",
+    "pkce_hardening_forward_migration": "0058_hosted_oauth_pkce_envelope",
+    "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion",
+    "first_organization_forward_migration": "0060_hosted_first_organization_atomic",
+    "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification",
+    "webauthn_session_atomic_forward_migration": "0062_hosted_webauthn_session_atomic",
+    "webauthn_claim_lease_forward_migration": "0063_hosted_webauthn_claim_lease",
+    "bootstrap_status_csrf_forward_migration": "0064_hosted_bootstrap_status_csrf"
+  },
+  "authority": {
+    "identity_provider": "github",
+    "subject_format": "GitHub numeric user id returned by the server-side /user API after OAuth code exchange",
+    "subject_verification": [
+      "the browser is redirected to GitHub with a server-created state and PKCE challenge",
+      "the callback validates the one-time state and exact configured redirect URI",
+      "the server exchanges the code at GitHub; a browser-supplied access token is never accepted",
+      "the server calls GitHub /user with the exchanged token and takes only the verified numeric id",
+      "the provider subject is bound to provider=github and an immutable upstream_identities row"
+    ],
+    "server_authority": "postgresql",
+    "bootstrap_status_csrf_authority": "agentpass_hosted_identity_bootstrap_status_v2 validates the exact bootstrap cookie digest, persists or confirms the CSRF digest, and returns only state, organization_count, webauthn_required, can_create_first_organization, and expires_at; agentpass_hosted_identity_bootstrap_csrf_verify_v2 accepts only that exact digest on a nonexpired usable attempt",
+    "organization_creation_authority": "agentpass_hosted_identity_bootstrap_organization_commit_v2",
+    "web_authn_authority": "agentpass_hosted_identity_bootstrap_webauthn_claim_v2 grants a database-clock verification lease, then the existing strict WebAuthn verifier feeds agentpass_hosted_identity_bootstrap_webauthn_complete_v3, which claim-binds and atomically commits the credential, challenge, bootstrap attempt, Human Session, and digest-only response-loss receipt",
+    "forbidden_identity_sources": [
+      "ChatGPT-only ambient identity",
+      "caller-supplied GitHub subject, email, member_id, organization_id, or role",
+      "Authorization headers or generic bearer tokens",
+      "the legacy agentpass-console-identity assertion as Hosted first-sign-in authority"
+    ],
+    "forbidden_caller_authority_fields": [
+      "provider",
+      "subject",
+      "github_subject",
+      "email",
+      "member_id",
+      "organization_id",
+      "membership_id",
+      "role"
+    ]
+  },
+  "data_model_binding": {
+    "existing_tables": [
+      "upstream_identities",
+      "members",
+      "organizations",
+      "memberships",
+      "webauthn_credentials",
+      "webauthn_challenges",
+      "human_sessions"
+    ],
+    "hosted_tables": ["hosted_identity_bootstrap_completions", "hosted_identity_bootstrap_webauthn_claim_events"],
+    "existing_authority_methods": [
+      "createOrganizationWithOwner",
+      "getRegistrationUser",
+      "createCredential",
+      "createCredentialWithRecentAuth"
+    ],
+    "server_derived_values": [
+      "member_id",
+      "organization_id",
+      "membership_id",
+      "role=owner for the first membership",
+      "session_id",
+      "challenge_id",
+      "WebAuthn user handle",
+      "all timestamps and expiry values"
+    ],
+    "compatibility_note": "The current ordinary Human Session and WebAuthn registration routes require an organization-bound session. The bootstrap implementation therefore needs a separate short-lived bootstrap-session/challenge adapter that uses the same members, organizations, memberships, WebAuthn verifier, and PostgreSQL transaction authority; it must not weaken the existing routes."
+  },
+  "state_machine": {
+    "states": [
+      "oauth_started",
+      "identity_verified",
+      "organization_required",
+      "webauthn_required",
+      "ready",
+      "no_membership",
+      "completed",
+      "expired"
+    ],
+    "transitions": [
+      { "from": "oauth_started", "to": "identity_verified", "event": "github_callback_verified" },
+      { "from": "identity_verified", "to": "organization_required", "event": "new_member_or_member_with_zero_memberships" },
+      { "from": "identity_verified", "to": "webauthn_required", "event": "existing_member_with_active_membership_without_usable_credential" },
+      { "from": "identity_verified", "to": "ready", "event": "existing_member_with_active_membership_and_usable_credential" },
+      { "from": "identity_verified", "to": "no_membership", "event": "existing_member_with_membership_history_but_no_active_membership" },
+      { "from": "organization_required", "to": "webauthn_required", "event": "first_organization_committed" },
+      { "from": "webauthn_required", "to": "completed", "event": "initial_webauthn_registration_verified" },
+      { "from": "webauthn_required", "to": "ready", "event": "existing_credential_verified_or_normal_session_issued" },
+      { "from": "ready", "to": "completed", "event": "normal_human_session_issued" },
+      { "from": "no_membership", "to": "expired", "event": "bootstrap_session_expired" },
+      { "from": "oauth_started", "to": "expired", "event": "state_or_attempt_expired" },
+      { "from": "identity_verified", "to": "expired", "event": "bootstrap_session_expired" },
+      { "from": "organization_required", "to": "expired", "event": "bootstrap_session_expired" },
+      { "from": "webauthn_required", "to": "expired", "event": "bootstrap_session_expired" }
+    ],
+    "membership_decisions": {
+      "new_user": "Create one member and one immutable upstream_identities(provider=github, subject) mapping inside the server transaction; the caller cannot select either identifier.",
+      "existing_user_with_active_membership": "Do not create an organization. Resolve the active membership from PostgreSQL and continue through the normal session or WebAuthn step-up path.",
+      "existing_user_with_zero_memberships": "Allow exactly one first-organization bootstrap; this includes an existing identity row whose member has never had a membership.",
+      "existing_user_with_revoked_membership_history": "A revoked membership history is not a first organization. Return no_membership and require an invitation or the existing recovery boundary.",
+      "multiple_active_memberships": "Never choose an organization from the request. Return a server-derived organization selection state, and require a later organization-bound session.",
+      "caller_role": "Always ignored; the first membership is server-created as owner and all later roles come from PostgreSQL."
+    }
+  },
+  "routes": [
+    {
+      "id": "hosted.github.start",
+      "method": "GET",
+      "path": "/api/auth/bootstrap/github/start",
+      "authority": "public entrypoint; no identity is accepted from the request",
+      "request": {
+        "query": [],
+        "headers": ["Origin is not used as OAuth provider authority"],
+        "cookies": [],
+        "body": null
+      },
+      "response": {
+        "status": 302,
+        "redirect": "the configured GitHub authorization URL with server-generated state, PKCE challenge, exact client_id, and exact redirect_uri",
+        "set_cookie": "__Host-agentpass_github_state; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age<=600",
+        "body": null
+      },
+      "security": ["state is one-use and stored server-side as a hash", "PKCE verifier is stored server-side and never returned to the browser", "no GitHub token or subject is placed in the redirect URL"]
+    },
+    {
+      "id": "hosted.github.callback",
+      "method": "GET",
+      "path": "/api/auth/bootstrap/github/callback",
+      "authority": "server-side GitHub OAuth callback",
+      "request": {
+        "query_exact": ["code", "state"],
+        "headers": ["provider redirect; Origin may be absent"],
+        "cookies": ["__Host-agentpass_github_state"],
+        "body": null
+      },
+      "response": {
+        "success_status": 303,
+        "success_redirect": "configured HTTPS Console onboarding path with no query or fragment",
+        "set_cookie": "__Host-agentpass_bootstrap; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age<=900",
+        "body": null
+      },
+      "security": ["state, code, redirect URI, PKCE, and GitHub API response are verified server-side", "the OAuth state cookie is cleared on every terminal callback", "raw GitHub access tokens, emails, names, and raw provider responses never cross the response boundary"]
+    },
+    {
+      "id": "hosted.bootstrap.status",
+      "method": "GET",
+      "path": "/api/auth/bootstrap/status",
+      "authority": "server-side bootstrap attempt selected by opaque cookie",
+      "request": {
+        "query": [],
+        "headers": ["Origin must equal the configured HTTPS Console origin"],
+        "cookies": ["__Host-agentpass_bootstrap"],
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body_keys": ["version", "state", "webauthn_required", "can_create_first_organization", "organization_count", "csrf_token", "expires_at"]
+      },
+      "security": ["safe read may bootstrap the CSRF token; every state-changing route still requires the CSRF header", "the response contains no provider subject, member id, role, or bearer"]
+    },
+    {
+      "id": "hosted.bootstrap.organization.create",
+      "method": "POST",
+      "path": "/api/auth/bootstrap/organization",
+      "authority": "one server-authorized first-organization transaction",
+      "request": {
+        "body_exact_keys": ["name"],
+        "headers": ["Origin", "agentpass-bootstrap-csrf", "Idempotency-Key", "Content-Type: application/json"],
+        "cookies": ["__Host-agentpass_bootstrap"],
+        "forbidden_body_keys": ["provider", "subject", "github_subject", "email", "member_id", "organization_id", "membership_id", "role"]
+      },
+      "response": {
+        "first_status": 201,
+        "replay_status": 200,
+        "body_keys": ["version", "organization", "onboarding"],
+        "onboarding_state": "webauthn_required"
+      },
+      "transaction": [
+        "lock and re-read the bootstrap attempt and upstream identity",
+        "prove that the member has zero membership rows, not merely zero active rows",
+        "create organization and owner membership with createOrganizationWithOwner",
+        "persist the exact idempotency request hash and public response atomically",
+        "transition the bootstrap attempt to webauthn_required"
+      ],
+      "security": ["organization_id, member_id, membership_id, and owner role are never accepted from the caller", "concurrent same-intent requests converge to one organization", "a different name under the same key is a conflict", "a second organization is rejected after the first commit"]
+    },
+    {
+      "id": "hosted.bootstrap.webauthn.options",
+      "method": "POST",
+      "path": "/api/auth/bootstrap/webauthn/registration/options",
+      "authority": "bootstrap attempt plus server-derived member and organization",
+      "request": {
+        "body_exact_keys": [],
+        "headers": ["Origin", "agentpass-bootstrap-csrf", "Content-Type: application/json"],
+        "cookies": ["__Host-agentpass_bootstrap"]
+      },
+      "response": {
+        "status": 200,
+        "body_contract": "webauthn registration options v1",
+        "requirements": ["userVerification=required", "exact configured rp_id", "exact configured HTTPS origin", "challenge bound to bootstrap attempt, member, organization, and registration operation"]
+      }
+    },
+    {
+      "id": "hosted.bootstrap.webauthn.verify",
+      "method": "POST",
+      "path": "/api/auth/bootstrap/webauthn/registration/verify",
+      "authority": "one-use durable bootstrap WebAuthn challenge",
+      "request": {
+        "body_exact_keys": ["challenge_id", "credential"],
+        "headers": ["Origin", "agentpass-bootstrap-csrf", "Content-Type: application/json"],
+        "cookies": ["__Host-agentpass_bootstrap"],
+        "forbidden_body_keys": ["member_id", "organization_id", "role"]
+      },
+      "response": {
+        "status": 201,
+        "body_keys": ["version", "state", "session", "csrf_token"],
+        "set_cookie": "rotate to __Host-agentpass_session; clear __Host-agentpass_bootstrap"
+      },
+      "transaction": [
+        "consume the challenge exactly once",
+        "verify user presence and user verification at the configured rp_id and origin",
+        "insert the public credential bound to the server-derived member",
+        "mark onboarding complete and issue a normal Human Session",
+        "rotate bootstrap and CSRF secrets"
+      ],
+      "security": ["no normal privileged session is issued before this succeeds", "credential public key is never returned as a browser authority token", "replayed, cross-member, cross-organization, stale, or wrong-origin assertions fail closed"]
+    }
+  ],
+  "subsequent_authentication": {
+    "identity": "GitHub OAuth may establish the server-side human identity again; it never selects a member, organization, or role.",
+    "webauthn": {
+      "allowed_for": ["subsequent authentication", "operation-bound step-up", "credential registration after the first credential"],
+      "required_for": ["privileged onboarding", "sensitive organization/member/security mutations according to their existing recent-auth contracts"],
+      "binding": ["session_id", "member_id", "organization_id", "operation", "rp_id", "origin", "one-use challenge"],
+      "replay_policy": "durable consume-once challenge and credential counter/clone checks"
+    },
+    "existing_contracts": [
+      "contracts/schemas/human-session-v1.schema.json",
+      "contracts/schemas/webauthn-ceremony-v1.schema.json",
+      "apps/cloud-api/src/human-session.mjs",
+      "apps/cloud-api/src/human-auth/webauthn/registration.mjs",
+      "apps/cloud-api/src/hosted-identity/webauthn-bootstrap-service.mjs"
+    ]
+  },
+  "transport": {
+    "console_origin": "exact configured HTTPS origin; trailing slash and null are rejected",
+    "csrf": {
+      "bootstrap_header": "agentpass-bootstrap-csrf",
+      "source": "opaque token returned by bootstrap status and hashed server-side",
+      "required_on": ["organization create", "WebAuthn options", "WebAuthn verify"],
+      "constant_time_compare": true
+    },
+    "cookies": [
+      { "name": "__Host-agentpass_github_state", "purpose": "one-use OAuth state selector", "http_only": true, "secure": true, "same_site": "Lax", "path": "/", "max_age_seconds": 600 },
+      { "name": "__Host-agentpass_bootstrap", "purpose": "short-lived bootstrap attempt bearer", "http_only": true, "secure": true, "same_site": "Strict", "path": "/", "max_age_seconds": 900 },
+      { "name": "__Host-agentpass_session", "purpose": "ordinary Human Session after WebAuthn gate", "http_only": true, "secure": true, "same_site": "Strict", "path": "/" }
+    ],
+    "forbidden_headers": ["Authorization", "agentpass-console-user-id", "agentpass-member-id", "agentpass-role", "agentpass-organization-id"],
+    "cache_policy": "no-store, no-cache, and no-store-compatible response headers on all bootstrap responses"
+  },
+  "idempotency": {
+    "oauth_state": "one-use; every terminal callback consumes and clears it",
+    "bootstrap_session": "single onboarding attempt; rotate or expire after completion",
+    "organization_create": {
+      "header": "Idempotency-Key",
+      "format": "8-255 ASCII characters matching [A-Za-z0-9._~-]",
+      "scope": "verified member plus operation",
+      "same_key_same_body": "return the original public organization result without a second write",
+      "same_key_different_body": "409 bootstrap_idempotency_conflict",
+      "concurrent_same_intent": "one owner membership and one organization; all callers converge",
+      "response_loss": "retry with the same key returns the committed public result",
+      "post_success_new_key": "409 bootstrap_already_completed"
+    },
+    "webauthn_completion": {
+      "scope": "bootstrap attempt plus one-use challenge",
+      "same_verified_request": "return the committed public Human Session during a two-minute response-loss window",
+      "different_request": "409 bootstrap_already_completed",
+      "verification_claim": "a deterministic exact-response claim token is stored only as SHA-256; PostgreSQL owns a 30-second lease, increments an unforgeable generation on takeover, and fences completion or failure by both digest and generation",
+      "claim_evidence": "claimed, takeover, completed, replayed, failed, and claimed-expiry events are append-only and retain no raw browser or bearer authority",
+      "durable_material": "SHA-256 request and bearer digests only; no raw cookie, CSRF token, attestation, or public key response",
+      "application_trust_boundary": "the Hosted WebAuthn service and strict attestation verifier are trusted to submit only verified credential metadata; PostgreSQL re-derives identity, membership, epochs, session identifiers, limits, and timestamps",
+      "response_reconstruction": "session and CSRF bearer values are HMAC-SHA-256 derived from a stable 32-byte server key and the exact browser response binding, and the key must remain available for the full two-minute recovery window",
+      "legacy_upgrade_policy": "a response committed before claim leasing has no recoverable generation and is intentionally not adopted; the already-issued ordinary session remains valid, otherwise onboarding restarts",
+      "post_window": "restart GitHub OAuth or use the issued ordinary session"
+    }
+  },
+  "errors": [
+    { "code": "bootstrap_origin_not_allowed", "status": 403, "retry": "no" },
+    { "code": "bootstrap_csrf_failed", "status": 403, "retry": "refresh_status" },
+    { "code": "bootstrap_session_required", "status": 401, "retry": "restart_github_oauth" },
+    { "code": "bootstrap_session_expired", "status": 401, "retry": "restart_github_oauth" },
+    { "code": "github_oauth_state_invalid", "status": 401, "retry": "restart_github_oauth" },
+    { "code": "github_subject_unverified", "status": 401, "retry": "no" },
+    { "code": "github_provider_unavailable", "status": 503, "retry": "bounded_backoff" },
+    { "code": "bootstrap_invalid_request", "status": 400, "retry": "fix_request" },
+    { "code": "bootstrap_idempotency_required", "status": 400, "retry": "add_key" },
+    { "code": "bootstrap_idempotency_conflict", "status": 409, "retry": "new_intent" },
+    { "code": "bootstrap_already_completed", "status": 409, "retry": "use_existing_session" },
+    { "code": "bootstrap_no_membership", "status": 403, "retry": "invitation_or_recovery" },
+    { "code": "bootstrap_webauthn_required", "status": 428, "retry": "complete_registration" },
+    { "code": "bootstrap_webauthn_invalid", "status": 422, "retry": "new_challenge" },
+    { "code": "bootstrap_webauthn_replayed", "status": 409, "retry": "new_challenge" },
+    { "code": "bootstrap_unavailable", "status": 503, "retry": "bounded_backoff" }
+  ],
+  "recovery_boundary": {
+    "bootstrap": "If the bootstrap cookie is lost before completion, restart GitHub OAuth. No support or browser-supplied identifier may resume an attempt.",
+    "github_account": "GitHub account recovery is outside AgentPass; GitHub email, display name, and organization membership are never used as an authority substitute.",
+    "post_onboarding": "After a credential exists, use the existing owner recovery flow. Recovery may restore a verified human session but may not create a new first organization or silently grant a role.",
+    "forbidden": ["email-only recovery", "ChatGPT-only recovery", "support-supplied member/org/role headers", "reusing an expired or consumed OAuth state or WebAuthn challenge"]
+  },
+  "migration_compatibility": {
+    "read_policy": "During the compatibility window, resolve GitHub identities from upstream_identities and preserve the legacy members.github_subject mapping for existing rows; never silently reassign an immutable provider subject.",
+    "write_policy": "New writes are canonical provider=github upstream_identities rows in the same transaction as member/organization ownership. The legacy column is compatibility data only and is never a caller input.",
+    "schema_policy": "v1 is exact at every request boundary: unknown request fields are rejected, no field is repurposed, and no old ChatGPT/signed-console route is aliased to this flow.",
+    "forward_only_requirement": "After the identity invalidation boundary in 0056, add the bootstrap attempt, one-use OAuth state, bootstrap idempotency, and bootstrap challenge bindings through forward migration 0057, then add exact state-hash claim and an AEAD-protected PKCE envelope through forward migration 0058 before Hosted activation; do not mutate historical migration files.",
+    "rollback_policy": "Application rollback must leave the forward migration and immutable identity rows intact. A version that cannot understand this contract must fail closed and must not create an organization.",
+    "versioning": "Security or authority changes require v2 and a new contract id; documentation-only clarifications may update the validator without changing v1 semantics."
+  },
+  "audit_requirements": [
+    "identity verified or rejected with provider, subject digest, and outcome only",
+    "bootstrap attempt created, expired, or completed",
+    "first organization committed or idempotently replayed",
+    "WebAuthn challenge issued, consumed, rejected, or replayed",
+    "normal Human Session issued or denied",
+    "audit records contain no raw OAuth code, access token, subject, cookie, CSRF token, assertion, or credential public key"
+  ]
+}

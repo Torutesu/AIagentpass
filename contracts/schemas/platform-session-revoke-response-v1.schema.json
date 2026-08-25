@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-session-revoke-response-v1.schema.json",
+  "title": "AgentPass platform session self-revoke response v1",
+  "description": "Public self-revoke response. The cookie is cleared by Set-Cookie; the JSON envelope contains no bearer, session identifier, authority identifier, credential, assertion, or provider diagnostic.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "maxProperties": 1,
+  "required": ["session"],
+  "properties": { "session": { "type": "null" } }
+}

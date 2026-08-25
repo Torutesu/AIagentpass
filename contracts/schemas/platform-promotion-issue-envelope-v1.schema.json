@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-promotion-issue-envelope-v1.schema.json",
+  "title": "AgentPass Platform promotion issue response envelope v1",
+  "description": "The HTTP response envelope for issue and exact idempotent retry. The promotion member reuses the safe platform promotion result projection.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "promotion"],
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "promotion": { "$ref": "https://agentpass.dev/contracts/schemas/platform-promotion-issue-result-v1.schema.json" }
+  }
+}

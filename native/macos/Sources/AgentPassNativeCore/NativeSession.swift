@@ -44,7 +44,7 @@ public final class NativeSessionManager: NativeSessionValidating, @unchecked Sen
             case expiresAtMilliseconds = "expires_at_ms"
         }
     }
-    private struct Pending { let digest: Data; let agentID: String; let expiresAtMilliseconds: Int64; let generation: Int }
+    private struct Pending { let digest: Data; let agentID: String; let expiresAtMilliseconds: Int64; let generation: Int; let agentGeneration: Int }
     private struct Session { let agentID: String; let expiresAtMilliseconds: Int64 }
 
     private let required: Bool
@@ -54,6 +54,7 @@ public final class NativeSessionManager: NativeSessionValidating, @unchecked Sen
     private var pending: [String: Pending] = [:]
     private var sessions: [String: Session] = [:]
     private var generation = 0
+    private var agentGenerations: [String: Int] = [:]
     private let lock = NSLock()
 
     public init(policyData: Data, approvalPublicKey: String) throws {
@@ -98,7 +99,7 @@ public final class NativeSessionManager: NativeSessionValidating, @unchecked Sen
         guard pending.count < 32, pending.values.filter({ $0.agentID == agentID }).count < 4 else {
             throw AgentPassNativeError.unauthorizedClient("Native session challenge capacity exceeded")
         }
-        pending[challenge.challengeID] = Pending(digest: Data(SHA256.hash(data: data)), agentID: agentID, expiresAtMilliseconds: challenge.expiresAtMilliseconds, generation: generation)
+        pending[challenge.challengeID] = Pending(digest: Data(SHA256.hash(data: data)), agentID: agentID, expiresAtMilliseconds: challenge.expiresAtMilliseconds, generation: generation, agentGeneration: agentGenerations[agentID, default: 0])
         return data
     }
 
@@ -129,7 +130,8 @@ public final class NativeSessionManager: NativeSessionValidating, @unchecked Sen
         lock.lock()
         defer { lock.unlock() }
         purge(nowMilliseconds: nowMilliseconds)
-        guard expected.generation == generation else {
+        guard expected.generation == generation,
+              expected.agentGeneration == agentGenerations[challenge.agentID, default: 0] else {
             throw AgentPassNativeError.unauthorizedClient("Native session approval was invalidated by revocation")
         }
         guard sessions.count < 1024 else { throw AgentPassNativeError.unauthorizedClient("Native session capacity exceeded") }
@@ -166,6 +168,19 @@ public final class NativeSessionManager: NativeSessionValidating, @unchecked Sen
         pending.removeAll(keepingCapacity: false)
         generation += 1
         return NativeSessionRevocation(revokedSessions: count, generation: generation)
+    }
+
+    public func revoke(agentID: String) throws -> NativeSessionRevocation {
+        guard agentIDs.contains(agentID) else {
+            throw AgentPassNativeError.unauthorizedClient("Cannot revoke sessions for an unknown Agent")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        let before = sessions.count
+        sessions = sessions.filter { $0.value.agentID != agentID }
+        pending = pending.filter { $0.value.agentID != agentID }
+        agentGenerations[agentID, default: 0] += 1
+        return NativeSessionRevocation(revokedSessions: before - sessions.count, generation: agentGenerations[agentID, default: 0])
     }
 
     public func discardSession(token: String) {

@@ -1,0 +1,9 @@
+{
+  "name": "@agentpass/maintenance-contracts",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}

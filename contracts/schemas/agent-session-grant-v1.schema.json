@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-session-grant-v1.schema.json",
+  "title": "AgentPass agent session grant v1",
+  "description": "A Cloud-signed, bounded authorization statement for one coding-agent session.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "required": ["version", "type", "statement", "statement_hash", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.agent-session-grant" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "statement_hash": { "$ref": "#/$defs/sha256Hex" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 18,
+      "required": [
+        "version",
+        "grant_id",
+        "organization_id",
+        "device_id",
+        "agent_id",
+        "agent_kind",
+        "adapter_id",
+        "adapter_version",
+        "worktree_binding_sha256",
+        "process_binding_policy_id",
+        "scope",
+        "max_signatures",
+        "not_before",
+        "expires_at",
+        "control_sequence",
+        "authority_generation",
+        "issuer",
+        "key_id"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "grant_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "agent_kind": { "enum": ["claude-code", "cursor"] },
+        "adapter_id": { "$ref": "#/$defs/uuid" },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 32,
+          "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "worktree_binding_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "process_binding_policy_id": { "$ref": "#/$defs/safeIdentifier" },
+        "scope": { "$ref": "https://agentpass.dev/contracts/scope-v1.schema.json" },
+        "max_signatures": { "$ref": "#/$defs/signatureBudget" },
+        "not_before": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "control_sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+        "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
+        "issuer": { "const": "agentpass-cloud" },
+        "key_id": { "$ref": "#/$defs/safeIdentifier" }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256Hex": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "signatureBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "signature": {
+      "description": "Canonical unpadded base64url Ed25519 signature over UTF-8 bytes: AgentPass-Agent-Session-Grant-v1\\u0000 followed by the canonical JSON statement.",
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$"
+    }
+  }
+}

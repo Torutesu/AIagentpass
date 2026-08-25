@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/audit-export-verification-result-v1.schema.json",
+  "title": "AgentPass audit export verification result v1",
+  "description": "Strict, secret-free result of offline verification of one public audit export. Each component is independently reported and valid is true only when all four checks pass.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 6,
+  "required": ["payload_digest", "root", "anchor", "historical_key", "valid", "reason"],
+  "properties": {
+    "payload_digest": { "type": "boolean" },
+    "root": { "type": "boolean" },
+    "anchor": { "type": "boolean" },
+    "historical_key": { "type": "boolean" },
+    "valid": { "type": "boolean" },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "invalid_export",
+        "payload_digest_mismatch",
+        "root_mismatch",
+        "anchor_invalid",
+        "historical_key_unavailable"
+      ]
+    }
+  }
+}

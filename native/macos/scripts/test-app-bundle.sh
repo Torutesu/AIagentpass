@@ -5,16 +5,100 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentpass-app-test.XXXXXX")"
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 
-APP_PATH="$($SCRIPT_DIR/build-app.sh --adhoc --output-dir "$TEST_DIR/output")"
+SWIFT_CACHE_ROOT="${AGENTPASS_SWIFT_CACHE_ROOT:-$TEST_DIR/swiftpm}"
+SWIFT_MODULE_CACHE_PATH="${AGENTPASS_SWIFT_MODULE_CACHE_PATH:-${CLANG_MODULE_CACHE_PATH:-$SWIFT_CACHE_ROOT/module-cache}}"
+[[ "$SWIFT_CACHE_ROOT" == /* && "$SWIFT_MODULE_CACHE_PATH" == /* ]] || { echo "SwiftPM cache paths must be absolute" >&2; exit 1; }
+[[ ! -L "$SWIFT_CACHE_ROOT" && ! -L "$SWIFT_MODULE_CACHE_PATH" ]] || { echo "SwiftPM cache paths must not be symlinks" >&2; exit 1; }
+mkdir -m 700 -p "$SWIFT_CACHE_ROOT" "$SWIFT_MODULE_CACHE_PATH"
+[[ -d "$SWIFT_MODULE_CACHE_PATH" && -w "$SWIFT_MODULE_CACHE_PATH" ]] || { echo "Swift module cache is not writable: $SWIFT_MODULE_CACHE_PATH" >&2; exit 1; }
+export AGENTPASS_SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_PATH"
+export CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_PATH"
+export AGENTPASS_DISABLE_SWIFTPM_SANDBOX="${AGENTPASS_DISABLE_SWIFTPM_SANDBOX:-1}"
+
+APP_PATH="$($SCRIPT_DIR/build-app.sh --adhoc --universal --output-dir "$TEST_DIR/output")"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 SERVICE_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeService.app"
 CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeClient.app"
-[[ -d "$SERVICE_APP" && -d "$CLIENT_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
+AGENT_HOST_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeAgentHost.app"
+QUALIFICATION_CLIENT="$APP_PATH/Contents/Library/HelperTools/agentpass-qualification-grant-client"
+QUALIFICATION_CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/agentpass-qualification-grant-client.app"
+QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
+ATOMIC_RENAME="$APP_PATH/Contents/Library/HelperTools/agentpass-atomic-rename"
+GIT_SIGNING_HELPER="$APP_PATH/Contents/Resources/bin/agentpass-git-sign"
+GIT_SESSION_SIGNING_HELPER="$APP_PATH/Contents/Resources/bin/agentpass-git-session-sign"
+GIT_SIGNING_XPC_HELPER="$APP_PATH/Contents/Resources/bin/agentpass-git-sign-xpc"
+ONBOARDING="$APP_PATH/Contents/MacOS/agentpass-onboarding"
+RESOURCE_BIN="$APP_PATH/Contents/Resources/bin"
+[[ -d "$SERVICE_APP" && -d "$CLIENT_APP" && -d "$AGENT_HOST_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
 [[ ! -e "$APP_PATH/Contents/MacOS/agentpass-native-service" && ! -e "$APP_PATH/Contents/MacOS/agentpass-native-client" ]] || { echo "Helpers were duplicated outside their bundles" >&2; exit 1; }
-[[ ! -e "$SERVICE_APP/Contents/embedded.provisionprofile" && ! -e "$CLIENT_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc helpers unexpectedly embed profiles" >&2; exit 1; }
+[[ -x "$ATOMIC_RENAME" && ! -L "$ATOMIC_RENAME" ]] || { echo "Atomic rename helper is missing or unsafe" >&2; exit 1; }
+[[ -x "$GIT_SIGNING_HELPER" && ! -L "$GIT_SIGNING_HELPER" ]] || { echo "Git signing helper is missing or unsafe" >&2; exit 1; }
+[[ -x "$GIT_SESSION_SIGNING_HELPER" && ! -L "$GIT_SESSION_SIGNING_HELPER" ]] || { echo "Versioned session signing helper is missing or unsafe" >&2; exit 1; }
+[[ -x "$GIT_SIGNING_XPC_HELPER" && ! -L "$GIT_SIGNING_XPC_HELPER" ]] || { echo "XPC Git signing helper is missing or unsafe" >&2; exit 1; }
+[[ "$(/usr/bin/find -P "$RESOURCE_BIN" -mindepth 1 -maxdepth 1 -type f | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "3" ]] || { echo "Git helper resource directory must contain exactly three files" >&2; exit 1; }
+RESOURCE_NAMES="$(/usr/bin/find -P "$RESOURCE_BIN" -mindepth 1 -maxdepth 1 -type f -exec /usr/bin/basename {} \; | /usr/bin/sort | /usr/bin/tr '\n' ' ')"
+[[ "$RESOURCE_NAMES" == "agentpass-git-session-sign agentpass-git-sign agentpass-git-sign-xpc " ]] || { echo "Git helper resource inventory is not the exact reviewed set: $RESOURCE_NAMES" >&2; exit 1; }
+[[ "$(/usr/bin/find "$APP_PATH" -name agentpass-git-sign -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "1" ]] || { echo "Git signing helper must appear exactly once in the app bundle" >&2; exit 1; }
+[[ "$(/usr/bin/find "$APP_PATH" -name agentpass-git-session-sign -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "1" ]] || { echo "Versioned session signing helper must appear exactly once in the app bundle" >&2; exit 1; }
+[[ "$(/usr/bin/find "$APP_PATH" -name agentpass-git-sign-xpc -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "1" ]] || { echo "XPC Git signing helper must appear exactly once in the app bundle" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/MacOS/agentpass-git-sign" && ! -e "$APP_PATH/Contents/Library/HelperTools/agentpass-git-sign" ]] || { echo "Git signing helper was duplicated outside the frozen resource path" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/MacOS/agentpass-git-session-sign" && ! -e "$APP_PATH/Contents/Library/HelperTools/agentpass-git-session-sign" ]] || { echo "Versioned session signing helper was duplicated outside the frozen resource path" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/MacOS/agentpass-git-sign-xpc" && ! -e "$APP_PATH/Contents/Library/HelperTools/agentpass-git-sign-xpc" ]] || { echo "XPC Git signing helper was duplicated outside the frozen resource path" >&2; exit 1; }
+[[ -x "$QUALIFICATION_CLIENT" && ! -L "$QUALIFICATION_CLIENT" ]] || { echo "Qualification grant client is missing or unsafe" >&2; exit 1; }
+[[ -d "$QUALIFICATION_CLIENT_APP" && -x "$QUALIFICATION_CLIENT_BINARY" && ! -L "$QUALIFICATION_CLIENT_APP" && ! -L "$QUALIFICATION_CLIENT_BINARY" ]] || { echo "Qualification grant client helper bundle is missing or unsafe" >&2; exit 1; }
+grep -q '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client.app/Contents/MacOS/agentpass-qualification-grant-client' "$QUALIFICATION_CLIENT" || { echo "Qualification grant client launcher does not resolve to its signed helper app" >&2; exit 1; }
+[[ -x "$ONBOARDING" && ! -L "$ONBOARDING" ]] || { echo "Onboarding UI executable is missing or unsafe" >&2; exit 1; }
+/usr/bin/codesign --verify --deep --strict "$QUALIFICATION_CLIENT_APP"
+/usr/bin/codesign --verify --strict "$GIT_SIGNING_HELPER"
+/usr/bin/codesign --verify --strict "$GIT_SESSION_SIGNING_HELPER"
+/usr/bin/codesign --verify --strict "$GIT_SIGNING_XPC_HELPER"
+[[ "$(/usr/bin/codesign -dv --verbose=4 "$GIT_SIGNING_HELPER" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}')" == "dev.agentpass.git-sign" ]] || { echo "Git signing helper identifier mismatch" >&2; exit 1; }
+[[ "$(/usr/bin/codesign -dv --verbose=4 "$GIT_SESSION_SIGNING_HELPER" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}')" == "dev.agentpass.git-session-sign" ]] || { echo "Versioned session signing helper identifier mismatch" >&2; exit 1; }
+[[ "$(/usr/bin/codesign -dv --verbose=4 "$GIT_SIGNING_XPC_HELPER" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}')" == "dev.agentpass.git-sign-xpc" ]] || { echo "XPC Git signing helper identifier mismatch" >&2; exit 1; }
+
+require_universal_binary() {
+  local binary="$1" architectures
+  [[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || { echo "Universal executable is missing or unsafe: $binary" >&2; exit 1; }
+  architectures="$(/usr/bin/lipo -archs "$binary" 2>/dev/null)" || { echo "Unable to inspect universal executable: $binary" >&2; exit 1; }
+  case "$architectures" in
+    "arm64 x86_64"|"x86_64 arm64") ;;
+    *) echo "Executable must contain exactly arm64 and x86_64 slices: $binary ($architectures)" >&2; exit 1 ;;
+  esac
+}
+for binary in "$ONBOARDING" "$APP_PATH/Contents/MacOS/agentpass-native-manager" "$SERVICE_APP/Contents/MacOS/agentpass-native-service" "$CLIENT_APP/Contents/MacOS/agentpass-native-client" "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host" "$ATOMIC_RENAME" "$QUALIFICATION_CLIENT_BINARY" "$GIT_SIGNING_HELPER" "$GIT_SESSION_SIGNING_HELPER" "$GIT_SIGNING_XPC_HELPER"; do
+  require_universal_binary "$binary"
+done
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP_PATH/Contents/Info.plist")" == "false" ]] || { echo "Onboarding app is unexpectedly hidden" >&2; exit 1; }
+AGENTPASS_ATOMIC_RENAME_HELPER="$ATOMIC_RENAME" "$SCRIPT_DIR/test-atomic-rename.sh"
+[[ ! -e "$SERVICE_APP/Contents/embedded.provisionprofile" && ! -e "$CLIENT_APP/Contents/embedded.provisionprofile" && ! -e "$AGENT_HOST_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc helpers unexpectedly embed profiles" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SERVICE_APP/Contents/Info.plist")" == "dev.agentpass.native-service" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CLIENT_APP/Contents/Info.plist")" == "dev.agentpass.native-client" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$AGENT_HOST_APP/Contents/Info.plist")" == "dev.agentpass.agent-host" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$AGENT_HOST_APP/Contents/Info.plist")" == "agentpass-native-agent-host" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Management Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-session' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Agent session Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-host' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Host Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-host-control' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Host control Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.child-git' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Child Git Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Reserved qualification Mach service is missing" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/Library/HelperTools/AgentPassQualificationController.app" && ! -e "$APP_PATH/Contents/MacOS/agentpass-qualification-controller" ]] || { echo "Qualification controller must not be bundled" >&2; exit 1; }
+
+node - "$SCRIPT_DIR/../Resources/native-service.example.json" <<'NODE'
+const fs = require("node:fs");
+
+const [configPath] = process.argv.slice(2);
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const expectedManagementRequirement = 'anchor apple generic and identifier "dev.agentpass.native-client" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["keychain-access-groups"] = "TEAMID.dev.agentpass.approval-keys"';
+const expectedAgentRequirement = 'anchor apple generic and identifier "dev.agentpass.agent-host" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["dev.agentpass.agent-session-client"] = true';
+if (config.mach_service_name !== "dev.agentpass.native-service") throw new Error("Management Mach service example changed");
+if (config.agent_mach_service_name !== "dev.agentpass.agent-session") throw new Error("Agent Mach service example is missing or invalid");
+if (config.host_mach_service_name !== "dev.agentpass.agent-host") throw new Error("Host Mach service example is missing or invalid");
+if (config.child_mach_service_name !== "dev.agentpass.child-git") throw new Error("Child Mach service example is missing or invalid");
+if (config.client_code_signing_requirement !== expectedManagementRequirement) throw new Error("Management code-signing requirement example changed");
+if (config.agent_client_code_signing_requirement !== expectedAgentRequirement) throw new Error("Agent code-signing requirement example is missing or invalid");
+NODE
 
 extract_group() {
   local item="$1" output
@@ -22,8 +106,32 @@ extract_group() {
   /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
   /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$output"
 }
+extract_agent_entitlement() {
+  local item="$1" output
+  output="$TEST_DIR/$(basename "$item").agent-entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
+  /usr/libexec/PlistBuddy -c 'Print :dev.agentpass.agent-session-client' "$output"
+}
+extract_qualification_entitlements() {
+  local output="$TEST_DIR/qualification-client.entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$QUALIFICATION_CLIENT_APP" >"$output" 2>/dev/null
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$output")" == "ADHOC00000.dev.agentpass.qualification-grant-client" ]] || exit 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$output")" == "ADHOC00000" ]] || exit 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$output")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
+  if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:1' "$output" >/dev/null 2>&1; then exit 1; fi
+  for forbidden in get-task-allow com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables; do
+    if /usr/libexec/PlistBuddy -c "Print :$forbidden" "$output" >/dev/null 2>&1; then exit 1; fi
+  done
+}
 [[ "$(extract_group "$SERVICE_APP")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
 [[ "$(extract_group "$CLIENT_APP")" == "ADHOC00000.dev.agentpass.approval-keys" ]] || exit 1
+[[ "$(extract_agent_entitlement "$AGENT_HOST_APP")" == "true" ]] || exit 1
+extract_qualification_entitlements
+[[ ! -e "$QUALIFICATION_CLIENT_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc qualification helper unexpectedly embeds a profile" >&2; exit 1; }
+if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$TEST_DIR/$(basename "$AGENT_HOST_APP").agent-entitlements.plist" >/dev/null 2>&1; then
+  echo "Ad-hoc Agent Host unexpectedly has a keychain access group" >&2
+  exit 1
+fi
 
 STATUS_JSON="$($APP_PATH/Contents/MacOS/agentpass-native-manager status)"
 node -e '
@@ -47,8 +155,8 @@ if "$SCRIPT_DIR/build-app.sh" --adhoc --service-profile invalid --output-dir "$T
   echo "Ad-hoc build unexpectedly accepted a profile" >&2
   exit 1
 fi
-if "$SCRIPT_DIR/build-app.sh" --identity invalid --team-id ABCDE12345 --app-identifier-prefix ABCDE12345 --output-dir "$TEST_DIR/missing-profiles" >/dev/null 2>&1; then
-  echo "Production build unexpectedly accepted missing helper profiles" >&2
+if "$SCRIPT_DIR/build-app.sh" --identity invalid --team-id ABCDE12345 --app-identifier-prefix ABCDE12345 --service-profile "$TEST_DIR/fake.provisionprofile" --client-profile "$TEST_DIR/fake.provisionprofile" --output-dir "$TEST_DIR/missing-agent-profile" >/dev/null 2>&1; then
+  echo "Production build unexpectedly accepted a missing Agent profile" >&2
   exit 1
 fi
 touch "$TEST_DIR/fake.provisionprofile"

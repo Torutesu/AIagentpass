@@ -1,0 +1,32 @@
+{
+  "format_epoch": 2,
+  "issuer": "agentpass-cloud",
+  "organization_id": "22222222-2222-4222-8222-222222222222",
+  "device_id": "33333333-3333-4333-8333-333333333333",
+  "audience": {
+    "organization_id": "22222222-2222-4222-8222-222222222222",
+    "device_id": "33333333-3333-4333-8333-333333333333"
+  },
+  "issued_at": "2026-08-14T00:00:00.000Z",
+  "expires_at": "2026-08-14T01:00:00.000Z",
+  "sequence": 7,
+  "policy_scope": {
+    "operations": ["git.commit.sign"],
+    "repositories": ["/work/project"],
+    "branches": {
+      "allow": ["feature/*"],
+      "deny": ["main"]
+    },
+    "remotes": {
+      "allow": ["git@github.com:example/project.git"],
+      "deny": []
+    }
+  },
+  "global_revoked": false,
+  "revoked_devices": [],
+  "revoked_agents": [],
+  "revoked_capabilities": [],
+  "offline_ttl_ms": 3600000,
+  "key_id": "control-v2",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+}

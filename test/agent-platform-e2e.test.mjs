@@ -51,7 +51,7 @@ test("cloud policy, capability, signing, and emergency stop work end to end", as
   await store.createPolicy({ organizationId, name: "Default", scope, sequence: 1, idempotencyKey: "policy" });
   const token = generateApiToken();
   const tokenRecord = createApiTokenRecord({ token, organizationId, memberId: ownerId, role: "owner" });
-  const server = createCloudApi({ store, tokenRecords: [tokenRecord], bundleSigner: { privateKey: controlKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v2", ttlMs: 60_000, offlineTtlMs: 60_000 } });
+  const server = createCloudApi({ store, tokenRecords: [tokenRecord], verifyRecentWebAuthn: async ({ principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: Date.now() }), bundleSigner: { privateKey: controlKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v2", ttlMs: 60_000, offlineTtlMs: 60_000 } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -80,8 +80,9 @@ test("cloud policy, capability, signing, and emergency stop work end to end", as
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
       body: JSON.stringify({ agent_id: identity.id, device_id: deviceId, scope, ttl_ms: 60_000, sequence })
     });
-    assert.equal(response.status, 201);
-    return (await response.json()).capability;
+    const responseText = await response.text();
+    assert.equal(response.status, 201, responseText);
+    return JSON.parse(responseText).capability;
   }
 
   function request(capability) {
@@ -99,7 +100,7 @@ test("cloud policy, capability, signing, and emergency stop work end to end", as
 
   const stop = await fetch(`${baseUrl}/v1/organizations/${organizationId}/emergency-stop`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": "emergency-stop" },
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "idempotency-key": "emergency-stop", "AgentPass-Recent-Auth": "99999999-9999-4999-8999-999999999999" },
     body: JSON.stringify({ reason: "incident" })
   });
   assert.equal(stop.status, 201);

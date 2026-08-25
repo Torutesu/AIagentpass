@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentpass.app-manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "kind", "name", "runtime", "entrypoint"],
+  "properties": {
+    "version": {"const": 1},
+    "kind": {"const": "agentpass.app-manifest"},
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "runtime": {"const": "cloudflare-worker"},
+    "entrypoint": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$"},
+    "static_assets": {"type": "string"},
+    "data": {"type": "array", "maxItems": 64, "items": {"type": "object", "additionalProperties": false, "required": ["name", "kind"], "properties": {"name": {"type": "string", "maxLength": 128}, "kind": {"const": "isolated_sql"}, "migration_dir": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$"}}}},
+    "egress": {"type": "array", "maxItems": 64, "items": {"type": "object", "additionalProperties": false, "required": ["origin", "methods"], "properties": {"origin": {"type": "string", "pattern": "^https://[^/\\s]+/?$"}, "methods": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^[A-Z]+$"}}}}},
+    "connections": {"type": "array", "maxItems": 64, "items": {"type": "object", "additionalProperties": false, "required": ["name", "kind"], "properties": {"name": {"type": "string", "maxLength": 128}, "kind": {"type": "string", "enum": ["managed"]}}}},
+    "schedules": {"type": "array", "maxItems": 64, "items": {"type": "object", "additionalProperties": false, "required": ["name", "cron"], "properties": {"name": {"type": "string", "maxLength": 128}, "cron": {"type": "string", "maxLength": 128}}}},
+    "health_path": {"type": "string", "pattern": "^/"}
+  }
+}

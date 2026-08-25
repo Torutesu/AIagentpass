@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/platform-auth-qualification-v1.schema.json",
+  "title": "AgentPass Platform Auth qualification evidence v1",
+  "description": "Secret-free, source-bound qualification evidence for two independent Platform Auth deployments.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "status", "qualified", "reason", "started_at", "completed_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "agentpass-platform-auth-qualification" },
+    "status": { "enum": ["not_run", "passed", "failed"] },
+    "qualified": { "type": "boolean" },
+    "reason": { "type": ["string", "null"], "enum": ["provider_not_configured", "qualification_dependencies_missing", "invalid_source_binding", "invalid_deployment_binding", "invalid_run_binding", "probe_failed", "scenario_failed", "incomplete_run", null] },
+    "deployment_digests": { "$ref": "#/$defs/deployment_digests" },
+    "source_commit": { "$ref": "#/$defs/commit" },
+    "source_tree": { "$ref": "#/$defs/commit" },
+    "run_id": { "$ref": "#/$defs/run_id" },
+    "job_id": { "$ref": "#/$defs/run_id" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "completed_at": { "$ref": "#/$defs/timestamp" },
+    "instances": { "type": "array", "minItems": 0, "maxItems": 2, "items": { "$ref": "#/$defs/instance" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "not_run" } } },
+      "then": {
+        "properties": { "qualified": { "const": false } }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": {
+        "required": ["source_commit", "source_tree", "run_id", "job_id", "deployment_digests", "instances"],
+        "properties": { "qualified": { "const": true }, "reason": { "const": null }, "instances": { "type": "array", "minItems": 2 } }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": {
+        "required": ["source_commit", "source_tree", "run_id", "job_id", "deployment_digests", "instances"],
+        "properties": { "qualified": { "const": false } }
+      }
+    }
+  ],
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "deployment_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "secondary"],
+      "properties": {
+        "primary": { "$ref": "#/$defs/digest" },
+        "secondary": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "typed_value": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "boolean" }, "value": { "type": "boolean" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "digest" }, "value": { "$ref": "#/$defs/digest" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "identifier" }, "value": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "non_negative_integer" }, "value": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "status" }, "value": { "enum": ["passed", "failed", "not_run"] } } }
+      ]
+    },
+    "scenario_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_id", "expected", "result", "status"],
+      "properties": {
+        "check_id": { "enum": [
+          "old_identifier_rejected", "new_identifier_accepted", "in_flight_operations_drained", "rotation_state_durable", "binding_integrity",
+          "response_loss_reconciled", "restart_state_recovered", "provider_outage_fail_closed", "database_failover_reconciled", "duplicate_operation_prevented"
+        ] },
+        "status": { "enum": ["passed", "failed"] },
+        "expected": { "$ref": "#/$defs/typed_value" },
+        "result": { "$ref": "#/$defs/typed_value" }
+      }
+    },
+    "scenario_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "scenario", "status", "instance", "source_commit", "source_tree", "deployment_digest", "run_id", "job_id", "started_at", "completed_at", "checks"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "agentpass-platform-auth-qualification-scenario" },
+        "scenario": { "enum": ["rotation", "resilience"] },
+        "status": { "enum": ["passed", "failed"] },
+        "instance": { "enum": ["primary", "secondary"] },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "source_tree": { "$ref": "#/$defs/commit" },
+        "deployment_digest": { "$ref": "#/$defs/digest" },
+        "run_id": { "$ref": "#/$defs/run_id" },
+        "job_id": { "$ref": "#/$defs/run_id" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "checks": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/scenario_check" } }
+      }
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_commit", "deployment_digest", "scenarios"],
+      "properties": {
+        "name": { "enum": ["primary", "secondary"] },
+        "source_commit": { "$ref": "#/$defs/commit" },
+        "deployment_digest": { "$ref": "#/$defs/digest" },
+        "scenarios": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scenario", "status", "evidence_sha256"],
+            "properties": {
+              "scenario": { "enum": ["static_config", "mtls_peer_binding", "workload_identity_binding", "webauthn_consumption", "http_contract", "rotation", "resilience"] },
+              "status": { "enum": ["passed", "failed"] },
+              "evidence_sha256": { "$ref": "#/$defs/digest" },
+              "evidence": { "$ref": "#/$defs/scenario_evidence" }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "scenario": { "enum": ["rotation", "resilience"] } }, "required": ["scenario"] },
+                "then": { "required": ["evidence"] }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

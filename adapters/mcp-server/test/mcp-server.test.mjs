@@ -18,10 +18,14 @@ async function initializedServer(commandRunner = async () => ({ code: 0, stdout:
   return server;
 }
 
-test("advertises the four read-only tools with strict schemas", async () => {
+test("advertises the policy and Small Software read-only tools with strict schemas", async () => {
   const server = await initializedServer();
   const result = await server.handle(rpc(2, "tools/list", {}));
-  assert.deepEqual(result.result.tools.map((tool) => tool.name), ["agentpass_status", "agentpass_check", "agentpass_setup", "agentpass_audit_tail"]);
+  assert.deepEqual(result.result.tools.map((tool) => tool.name), [
+    "agentpass_status", "agentpass_check", "agentpass_setup", "agentpass_audit_tail",
+    "agentpass_app_inspect", "agentpass_publish_prepare", "agentpass_deployment_status",
+    "agentpass_apps_list", "agentpass_app_open", "agentpass_maintenance_status"
+  ]);
   for (const tool of result.result.tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(result.result.tools.some((tool) => tool.name.includes("sign")), false);
 });
@@ -132,4 +136,104 @@ test("CLI runner terminates commands that exceed the deadline", async () => {
   const runner = createCliRunner({ spawnImpl: fakeSpawn, executable: "/usr/bin/node", agentpassPath: "/agentpass.mjs", timeoutMs: 5 });
   await assert.rejects(runner(["status"]), /timed out/);
   assert.equal(killed, true);
+});
+
+const ORG = "00000000-0000-4000-8000-000000000001";
+const APP = "00000000-0000-4000-8000-000000000002";
+const RELEASE = "00000000-0000-4000-8000-000000000003";
+
+function softwareSurfaceHarness() {
+  const operations = [];
+  const surface = {
+    async authorize(input) { operations.push(["authorize", input]); return true; },
+    async inspectApp(input) { operations.push(["inspect", input]); return { organization_id: ORG, app_id: APP, state: "active", name: "CRM", local_path: "/private/project", token: "never-return" }; },
+    async preparePublish(input) {
+      operations.push(["prepare", input]);
+      return {
+        organization_id: ORG, app_id: APP, state: "complete", idempotency_key: input.idempotency_key,
+        publish_plan: { organization_id: ORG, app_id: APP, release_id: RELEASE, risk_classification: "low", artifact_digest: "a".repeat(64), source_bundle_digest: "b".repeat(64), build_receipt_digest: "c".repeat(64), approval_required: false },
+        deployment_receipt: { organization_id: ORG, app_id: APP, release_id: RELEASE, state: "active", active_generation: 1, route: "https://apps.example.test/crm", provider_deployment_id: "provider-1" }
+      };
+    },
+    async deploymentStatus(input) { operations.push(["deployment", input]); return { organization_id: ORG, app_id: APP, release_id: RELEASE, state: "active", active_generation: 1, provider_deployment_id: "provider-1", provider_secret: "hidden" }; },
+    async listApps(input) { operations.push(["list", input]); return { organization_id: ORG, apps: [{ organization_id: ORG, app_id: APP, name: "CRM", state: "active", local_path: "/private/project" }] }; },
+    async openApp(input) { operations.push(["open", input]); return { organization_id: ORG, app_id: APP, app_url: "https://apps.example.test/crm", console_url: "https://console.example.test/apps/2", bearer_token: "hidden" }; },
+    async maintenanceStatus(input) { operations.push(["maintenance", input]); return { organization_id: ORG, app_id: APP, state: "idle", jobs: [{ organization_id: ORG, app_id: APP, state: "completed", private_path: "/private/project" }], pull_request: { organization_id: ORG, app_id: APP, state: "reconciled", operation_id: "op-1", patch_digest: "a".repeat(64), url: "https://github.com/example/repo/pull/1", body: "do not return" }, verification: { status: "uncertain", verification_status: "partial", result_digest: "b".repeat(64), uncertainty: ["security:not_proven"], output: "private" } }; }
+  };
+  return { surface, operations };
+}
+
+async function initializedSoftwareServer() {
+  const harness = softwareSurfaceHarness();
+  const server = createMcpServer({ commandRunner: async () => ({ code: 0, stdout: "{}", stderr: "" }), smallSoftwareSurface: harness.surface });
+  await server.handle(rpc(20, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }));
+  await server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  return { server, ...harness };
+}
+
+test("Small Software tools bind tenant and idempotency inputs, and redact provider/local data", async () => {
+  const { server, operations } = await initializedSoftwareServer();
+  const base = { organization_id: ORG, app_id: APP };
+  const inspect = await server.handle(rpc(21, "tools/call", { name: "agentpass_app_inspect", arguments: base }));
+  assert.deepEqual(JSON.parse(inspect.result.content[0].text), { organization_id: ORG, app_id: APP, state: "active", name: "CRM" });
+  const prepared = await server.handle(rpc(22, "tools/call", { name: "agentpass_publish_prepare", arguments: { ...base, idempotency_key: "preview-001", source_bundle: { version: 1, kind: "agentpass.source-bundle" } } }));
+  const preparedValue = JSON.parse(prepared.result.content[0].text);
+  assert.equal(preparedValue.deployment_receipt.state, "active");
+  assert.equal(preparedValue.deployment_receipt.route, "https://apps.example.test/crm");
+  assert.equal(JSON.stringify(preparedValue).includes("provider-1"), true);
+  assert.equal(JSON.stringify(preparedValue).includes("token"), false);
+  const list = await server.handle(rpc(23, "tools/call", { name: "agentpass_apps_list", arguments: { organization_id: ORG } }));
+  assert.equal(JSON.parse(list.result.content[0].text).apps[0].local_path, undefined);
+  assert.equal(operations.filter(([kind]) => kind === "authorize").length, 3);
+  assert.equal(operations.find(([kind]) => kind === "prepare")[1].idempotency_key, "preview-001");
+});
+
+test("Small Software tools reject cross-tenant results and unavailable surfaces", async () => {
+  const { server } = await initializedSoftwareServer();
+  const crossTenant = { organization_id: ORG, app_id: APP };
+  const bad = createMcpServer({ commandRunner: async () => ({ code: 0, stdout: "{}", stderr: "" }), smallSoftwareSurface: { async inspectApp() { return { organization_id: "00000000-0000-4000-8000-000000000099", app_id: APP }; } } });
+  await bad.handle(rpc(30, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }));
+  await bad.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const denied = await bad.handle(rpc(31, "tools/call", { name: "agentpass_app_inspect", arguments: crossTenant }));
+  assert.equal(denied.result.isError, true);
+  assert.match(denied.result.content[0].text, /cross-tenant/u);
+  const unavailableServer = createMcpServer({ commandRunner: async () => ({ code: 0, stdout: "{}", stderr: "" }) });
+  await unavailableServer.handle(rpc(32, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }));
+  await unavailableServer.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const unavailable = await unavailableServer.handle(rpc(33, "tools/call", { name: "agentpass_app_open", arguments: crossTenant }));
+  assert.equal(unavailable.result.isError, true);
+  assert.equal(unavailable.result.content[0].text, "Small Software surface is unavailable");
+});
+
+test("Small Software arguments are closed and bounded", async () => {
+  const { server } = await initializedSoftwareServer();
+  const extra = await server.handle(rpc(40, "tools/call", { name: "agentpass_apps_list", arguments: { organization_id: ORG, limit: 51 } }));
+  assert.equal(extra.error.code, -32602);
+  const noOrg = await server.handle(rpc(41, "tools/call", { name: "agentpass_app_inspect", arguments: { app_id: APP } }));
+  assert.equal(noOrg.error.code, -32602);
+  const secretBytes = await server.handle(rpc(42, "tools/call", { name: "agentpass_publish_prepare", arguments: { organization_id: ORG, app_id: APP, idempotency_key: "preview-002", source_bundle: { token: "secret" } } }));
+  assert.equal(secretBytes.error.code, -32602);
+});
+
+test("maintenance status exposes only tenant-bound PR and verification projections", async () => {
+  const { server, operations } = await initializedSoftwareServer();
+  const response = await server.handle(rpc(43, "tools/call", { name: "agentpass_maintenance_status", arguments: { organization_id: ORG, app_id: APP } }));
+  const value = JSON.parse(response.result.content[0].text);
+  assert.equal(operations.find(([kind]) => kind === "maintenance")[1].app_id, APP);
+  assert.deepEqual(value.pull_request, {
+    organization_id: ORG,
+    app_id: APP,
+    state: "reconciled",
+    operation_id: "op-1",
+    patch_digest: "a".repeat(64),
+    url: "https://github.com/example/repo/pull/1"
+  });
+  assert.deepEqual(value.verification, {
+    status: "uncertain",
+    verification_status: "partial",
+    result_digest: "b".repeat(64),
+    uncertainty: ["security:not_proven"]
+  });
+  assert.equal(JSON.stringify(value).includes("do not return"), false);
+  assert.equal(JSON.stringify(value).includes("private"), false);
 });

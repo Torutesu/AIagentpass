@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-session-signing-capability-response-v1.schema.json",
+  "title": "AgentPass Agent Session signing-capability issuance response v1",
+  "description": "A no-store response containing the canonical one-use capability and only safe public issuance metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 3,
+  "required": ["capability", "metadata", "request_id"],
+  "properties": {
+    "capability": { "$ref": "https://agentpass.dev/contracts/agent-signing-capability-v1.schema.json" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "request_id": { "$ref": "#/$defs/uuid" }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 7,
+      "required": ["operation", "key_purpose", "issued_at", "expires_at", "sequence", "remaining_session_signatures", "replayed"],
+      "properties": {
+        "operation": { "const": "git.commit.sign" },
+        "key_purpose": { "const": "git.commit.sign" },
+        "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+        "remaining_session_signatures": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "replayed": { "type": "boolean" }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    }
+  }
+}

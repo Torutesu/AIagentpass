@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "type": "agentpass.purge-authorization",
+  "authorization_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "intent": "purge-user-state",
+  "target": {
+    "organization_id": "22222222-2222-4222-8222-222222222222",
+    "device_id": "33333333-3333-4333-8333-333333333333",
+    "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "platform": "macos",
+    "scope": "current-user-agent-state"
+  },
+  "human_actor": {
+    "organization_id": "22222222-2222-4222-8222-222222222222",
+    "member_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "role": "admin",
+    "authentication": "webauthn"
+  },
+  "issued_at": "2026-08-14T00:00:00.000Z",
+  "expires_at": "2026-08-14T00:04:00.000Z",
+  "nonce": "EREREREREREREREREREREQ",
+  "signing_purpose": "AgentPass-Purge-Authorization-v1\u0000",
+  "signature_algorithm": "webauthn-es256",
+  "signer_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+}

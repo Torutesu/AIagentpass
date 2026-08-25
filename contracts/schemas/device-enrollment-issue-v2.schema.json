@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-enrollment-issue-v2.schema.json",
+  "title": "Device enrollment issue request v2",
+  "description": "A human-authenticated request to issue a candidate-bound enrollment challenge. Artifact digests, source commits, Team IDs, and manifest data are deliberately not accepted from the caller; the Cloud resolves them from candidate_id.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 8,
+  "required": ["proof_version", "candidate_id", "device_key_fingerprint", "label"],
+  "properties": {
+    "proof_version": { "const": 2 },
+    "candidate_id": { "$ref": "#/$defs/candidateId" },
+    "device_key_fingerprint": { "$ref": "#/$defs/deviceKeyFingerprint" },
+    "enrollment_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
+    "platform": { "const": "macos" },
+    "ttl_ms": { "type": "integer", "minimum": 60000, "maximum": 86400000 }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "candidateId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "deviceKeyFingerprint": { "type": "string", "minLength": 50, "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" }
+  }
+}

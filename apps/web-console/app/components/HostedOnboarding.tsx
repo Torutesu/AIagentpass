@@ -1,0 +1,512 @@
+"use client";
+
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+
+import {
+  createHostedBootstrapClient,
+  deriveHostedOnboardingState,
+  HostedBootstrapClientError,
+} from "../../lib/hosted-bootstrap-client.mjs";
+
+type BootstrapState =
+  | "oauth_started"
+  | "identity_verified"
+  | "organization_required"
+  | "webauthn_required"
+  | "ready"
+  | "no_membership"
+  | "completed"
+  | "expired";
+
+type PublicStatus = Readonly<{
+  state: BootstrapState;
+  organizationCount: number;
+  canCreateFirstOrganization: boolean;
+  webauthnRequired: boolean;
+  expiresAt: string;
+}>;
+
+type Screen = "loading" | "signin" | "flow" | "recovery" | "error" | "terminal";
+type Guidance = Readonly<{ kind: "retryable" | "terminal"; message: string }>;
+
+type InitialStatusOutcome = "pending" | "session_required" | "success" | "other";
+type InitialStatusGuard = {
+  startedAt: number;
+  outcome: InitialStatusOutcome;
+  status?: PublicStatus;
+  waiters: Set<(outcome: InitialStatusOutcome) => void>;
+};
+
+// Vinext can remount a client boundary while hydrating an unauthenticated
+// page. Coalesce only the short-lived, non-sensitive outcome classification;
+// no cookie, CSRF value, or status payload is retained here.
+const initialStatusGuardKey = "__agentpass_onboarding_initial_status_guard__";
+const initialStatusDomMarker = "data-agentpass-initial-status";
+const initialStatusHistoryKey = "__agentpass_onboarding_status__";
+const INITIAL_STATUS_RELOAD_WINDOW_MS = 30_000;
+// Hosted CI and first-load cold starts can take several seconds before the
+// status response resolves. Keep the remount handoff alive for that bounded
+// period so a slow first read is not aborted and replayed.
+const INITIAL_STATUS_GUARD_MS = 120_000;
+
+const STEPS = [
+  { id: "github", label: "GitHubで本人確認", detail: "GitHub identity" },
+  { id: "organization", label: "ワークスペース作成", detail: "Organization" },
+  { id: "passkey", label: "パスキーで保護", detail: "Passkey" },
+  { id: "device", label: "端末をAgentへ引き渡す", detail: "Device handoff" },
+] as const;
+
+function activeStep(state: BootstrapState | null): number {
+  if (state === "organization_required" || state === "identity_verified") return 2;
+  if (state === "webauthn_required") return 3;
+  if (state === "ready" || state === "completed") return 4;
+  return 0;
+}
+
+function friendlyError(error: unknown): Guidance {
+  if (error instanceof HostedBootstrapClientError) {
+    const code = error.serverCode ?? error.code;
+    if (code === "bootstrap_origin_not_allowed") return { kind: "terminal", message: "許可されたAgentPass Consoleからのみセットアップできます。ブックマークした正規のURLから開き直してください。" };
+    if (code === "bootstrap_csrf_failed") return { kind: "retryable", message: "安全なセッションを確認できませんでした。ページを再読み込みしてからもう一度お試しください。" };
+    if (code === "bootstrap_session_expired") return { kind: "terminal", message: "セットアップの有効期限が切れました。GitHubから新しく始めてください。" };
+    if (code === "bootstrap_no_membership") return { kind: "terminal", message: "以前の所属履歴があるため、新しいワークスペースは作成できません。管理者の招待または復旧が必要です。" };
+    if (code === "bootstrap_already_completed") return { kind: "terminal", message: "このセットアップはすでに完了しています。通常のConsoleへ進んでください。" };
+    if (code === "bootstrap_idempotency_conflict") return { kind: "retryable", message: "セットアップの状態を確認できませんでした。ページを再読み込みしてから続けてください。" };
+    if (code === "bootstrap_webauthn_replayed") return { kind: "terminal", message: "このパスキー確認はすでに使われました。状態を確認するにはConsoleを開いてください。" };
+    if (code === "bootstrap_webauthn_invalid" || code === "bootstrap_webauthn_required") return { kind: "retryable", message: "パスキーを確認できませんでした。登録した端末で、もう一度お試しください。" };
+    if (code === "bootstrap_unavailable") return { kind: "retryable", message: "AgentPassのセットアップサービスが一時的に利用できません。少し待ってからもう一度お試しください。" };
+    if (code === "webauthn_failed" || code === "aborted") return { kind: "retryable", message: "パスキーの確認がキャンセルされました。準備ができたらもう一度お試しください。" };
+    if (error.code === "transport_failed") return { kind: "retryable", message: "ネットワークへ接続できません。接続を確認してもう一度お試しください。" };
+  }
+  return { kind: "retryable", message: "セットアップを続けられませんでした。しばらく待ってからもう一度お試しください。" };
+}
+
+export function HostedOnboarding() {
+  const clientRef = useRef<ReturnType<typeof createHostedBootstrapClient> | null>(null);
+  if (clientRef.current === null) clientRef.current = createHostedBootstrapClient();
+
+  const [screen, setScreen] = useState<Screen>("loading");
+  const [status, setStatus] = useState<PublicStatus | null>(null);
+  const [organizationName, setOrganizationName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [guidanceKind, setGuidanceKind] = useState<Guidance["kind"] | null>(null);
+  const [deviceHandoffReady, setDeviceHandoffReady] = useState(false);
+  const initialStatusLoadStarted = useRef(false);
+  const statusAbortTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadStatus = useCallback(async (signal?: AbortSignal) => {
+    setMessage("");
+    setGuidanceKind(null);
+    try {
+      const next = await clientRef.current!.status({ signal }) as PublicStatus;
+      setStatus(next);
+      setDeviceHandoffReady(false);
+      setScreen(next.state === "no_membership" ? "recovery" : "flow");
+      return { ok: true as const, status: next };
+    } catch (error) {
+      if (signal?.aborted) return { ok: false as const, error };
+      if (error instanceof HostedBootstrapClientError && error.serverCode === "bootstrap_session_required") {
+        setScreen("signin");
+        setGuidanceKind("terminal");
+        return { ok: false as const, error };
+      }
+      const guidance = friendlyError(error);
+      setMessage(guidance.message);
+      setGuidanceKind(guidance.kind);
+      setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+      return { ok: false as const, error };
+    }
+  }, []);
+
+  useEffect(() => {
+    // StrictMode replays the effect immediately. Cancel the deferred abort
+    // from that replay, while still aborting a request on a real unmount.
+    if (statusAbortTimer.current !== null) {
+      clearTimeout(statusAbortTimer.current);
+      statusAbortTimer.current = null;
+    }
+    // React development/qualification builds may replay effects. The initial
+    // status read is safe and idempotent, but sending it twice makes the
+    // browser contract nondeterministic and can race a one-time bootstrap
+    // transition. Keep one request per mounted onboarding flow.
+    if (initialStatusLoadStarted.current) return;
+    initialStatusLoadStarted.current = true;
+    const browserWindow = typeof window === "object" ? window : null;
+    const documentRoot = typeof document === "object" ? document.documentElement : null;
+    const domOutcome = documentRoot?.getAttribute(initialStatusDomMarker);
+    const historyStatus = browserWindow?.history.state;
+    const historyOutcome = historyStatus !== null && typeof historyStatus === "object"
+      && historyStatus !== undefined && initialStatusHistoryKey in historyStatus
+      && typeof historyStatus[initialStatusHistoryKey] === "object"
+      && historyStatus[initialStatusHistoryKey] !== null
+      && typeof historyStatus[initialStatusHistoryKey].outcome === "string"
+      && (historyStatus[initialStatusHistoryKey].outcome === "session_required" || historyStatus[initialStatusHistoryKey].outcome === "other")
+      && typeof historyStatus[initialStatusHistoryKey].at === "number"
+      && Date.now() - historyStatus[initialStatusHistoryKey].at < INITIAL_STATUS_RELOAD_WINDOW_MS
+      ? historyStatus[initialStatusHistoryKey].outcome
+      : undefined;
+    // A hydration boundary can be evaluated in a separate client bundle. The
+    // document marker is only a non-sensitive outcome classification and is a
+    // final duplicate-request guard when Window properties are not shared.
+    if (domOutcome === "pending") return;
+    if (domOutcome === "session_required") {
+      queueMicrotask(() => {
+        setScreen("signin");
+        setGuidanceKind("terminal");
+      });
+      return;
+    }
+    if (domOutcome === "other") {
+      queueMicrotask(() => {
+        const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+        setMessage(guidance.message);
+        setGuidanceKind(guidance.kind);
+        setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+      });
+      return;
+    }
+    if (historyOutcome === "session_required") {
+      queueMicrotask(() => {
+        setScreen("signin");
+        setGuidanceKind("terminal");
+      });
+      return;
+    }
+    if (historyOutcome === "other") {
+      queueMicrotask(() => {
+        const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+        setMessage(guidance.message);
+        setGuidanceKind(guidance.kind);
+        setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+      });
+      return;
+    }
+    // Store the short-lived classification directly on Window so duplicate
+    // client bundles produced during hydration still share the same guard.
+    // Only the outcome label is retained; no response, cookie, or CSRF value
+    // crosses the bundle boundary.
+    const existingGuard = browserWindow === null
+      ? undefined
+      : Reflect.get(browserWindow, initialStatusGuardKey) as InitialStatusGuard | undefined;
+    if (existingGuard !== undefined && Date.now() - existingGuard.startedAt < INITIAL_STATUS_GUARD_MS) {
+      if (existingGuard.outcome === "pending") {
+        existingGuard.waiters.add((outcome) => {
+          if (outcome === "session_required") {
+            setScreen("signin");
+            setGuidanceKind("terminal");
+          } else if (outcome === "other") {
+            // Keep the initial read one-shot across hydration remounts. A
+            // remount must not turn a transient/invalid response into a
+            // duplicate request; the explicit retry control owns recovery.
+            const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+            setMessage(guidance.message);
+            setGuidanceKind(guidance.kind);
+            setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+          }
+        });
+      } else if (existingGuard.outcome === "session_required") {
+        queueMicrotask(() => {
+          setScreen("signin");
+          setGuidanceKind("terminal");
+        });
+      } else if (existingGuard.outcome === "other") {
+        queueMicrotask(() => {
+          const guidance = friendlyError(new HostedBootstrapClientError("SERVER_REJECTED", "Bootstrap status unavailable"));
+          setMessage(guidance.message);
+          setGuidanceKind(guidance.kind);
+          setScreen(guidance.kind === "terminal" ? "terminal" : "error");
+        });
+      } else {
+        // Reuse only the validated public state. The CSRF token remains in
+        // the original client closure and is never placed on Window/history.
+        // A remounted instance can obtain fresh mutation authority through
+        // the existing explicit retry/status path if it needs to mutate.
+        if (existingGuard.status !== undefined) {
+          queueMicrotask(() => {
+            setStatus(existingGuard.status!);
+            setDeviceHandoffReady(false);
+            setScreen(existingGuard.status!.state === "no_membership" ? "recovery" : "flow");
+          });
+        }
+      }
+      return;
+    }
+    const guard = browserWindow === null ? undefined : {
+      startedAt: Date.now(),
+      outcome: "pending" as const,
+      waiters: new Set<(outcome: InitialStatusOutcome) => void>(),
+    };
+    if (browserWindow !== null && guard !== undefined) Reflect.set(browserWindow, initialStatusGuardKey, guard);
+    documentRoot?.setAttribute(initialStatusDomMarker, "pending");
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      void loadStatus(controller.signal).then((result) => {
+        if (guard === undefined) return;
+        guard.outcome = result.ok
+          ? "success"
+          : result.error instanceof HostedBootstrapClientError && result.error.serverCode === "bootstrap_session_required"
+            ? "session_required"
+            : "other";
+        if (result.ok) guard.status = result.status;
+        documentRoot?.setAttribute(initialStatusDomMarker, guard.outcome);
+        if (guard.outcome === "session_required" || guard.outcome === "other") {
+          if (browserWindow !== null) {
+            const currentHistory = browserWindow.history.state;
+            const safeHistory = currentHistory !== null && typeof currentHistory === "object" && !Array.isArray(currentHistory)
+              ? currentHistory
+              : {};
+            browserWindow.history.replaceState({
+              ...safeHistory,
+              [initialStatusHistoryKey]: { outcome: guard.outcome, at: Date.now() },
+            }, "", browserWindow.location.href);
+          }
+        }
+        const waiters = [...guard.waiters];
+        guard.waiters.clear();
+        for (const waiter of waiters) waiter(guard.outcome);
+      });
+    });
+    return () => {
+      // A hydration remount can happen in a different component instance. Give
+      // the shared pending guard time to hand the result to that instance
+      // before aborting the original read; aborting immediately turns a
+      // harmless remount into a second status request.
+      statusAbortTimer.current = setTimeout(() => {
+        controller.abort();
+        statusAbortTimer.current = null;
+      }, INITIAL_STATUS_GUARD_MS);
+    };
+  }, [loadStatus]);
+
+  async function submitOrganization(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await clientRef.current!.createOrganization({ name: organizationName });
+      setOrganizationName("");
+      await loadStatus();
+    } catch (error) {
+      // The organization mutation is idempotent, but its key is intentionally
+      // not durable. Reconcile once from the authoritative status before
+      // showing a retry. This avoids resending after a lost 201 response.
+      const reconciled = await loadStatus();
+      if (reconciled.ok && reconciled.status.state !== "organization_required") {
+        setOrganizationName("");
+        return;
+      }
+      const guidance = friendlyError(error);
+      setMessage(guidance.message);
+      setGuidanceKind(guidance.kind);
+      if (guidance.kind === "terminal") setScreen("terminal");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function registerPasskey() {
+    if (busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await clientRef.current!.registerPasskey();
+      // Verification atomically rotates the bootstrap cookie into the normal
+      // HttpOnly Session cookie. A follow-up bootstrap status request would
+      // therefore be unauthorized; transition only from the verified result.
+      // The boolean is ephemeral UI state, not a session or credential cache.
+      setDeviceHandoffReady(true);
+      setStatus((current) => current === null ? null : {
+        ...current,
+        state: "completed",
+        webauthnRequired: false,
+      });
+      setScreen("flow");
+    } catch (error) {
+      const guidance = friendlyError(error);
+      setMessage(guidance.message);
+      setGuidanceKind(guidance.kind);
+      if (guidance.kind === "terminal") setScreen("terminal");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const currentStep = activeStep(status?.state ?? null);
+  const onboardingState = deriveHostedOnboardingState(status, { deviceHandoffReady });
+
+  return (
+    <main className="onboarding-shell">
+      <header className="onboarding-brand" aria-label="AgentPass">
+        <span className="brand-mark" aria-hidden="true">A</span>
+        <span>
+          <strong>AgentPass</strong>
+          <small>Secure autonomy for coding agents</small>
+        </span>
+      </header>
+
+      <section className="onboarding-card" aria-labelledby="onboarding-title" aria-busy={busy || screen === "loading"} data-onboarding-state={onboardingState}>
+        <div className="onboarding-intro">
+          <p className="eyebrow">SECURE ONBOARDING</p>
+          <h1 id="onboarding-title">Agentが安全に動ける場所をつくる</h1>
+          <p>秘密鍵を渡さず、Claude CodeやCursorに必要な権限だけを許可するための初期設定です。</p>
+        </div>
+
+        {screen !== "signin" && (
+          <ol className="onboarding-stepper" aria-label="セットアップの進行状況">
+            {STEPS.map((step, index) => {
+              const number = index + 1;
+              const state = number < currentStep ? "complete" : number === currentStep ? "current" : "upcoming";
+              return (
+                <li key={step.id} data-state={state} aria-current={state === "current" ? "step" : undefined}>
+                  <span className="step-number" aria-hidden="true">{state === "complete" ? "✓" : number}</span>
+                  <span><strong>{step.label}</strong><small>{step.detail}</small></span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        <div className="onboarding-action" aria-live="polite">
+          {screen === "loading" && (
+            <div className="onboarding-loading"><span aria-hidden="true" />安全なセットアップ状態を確認しています…</div>
+          )}
+
+          {screen === "signin" && (
+            <div className="onboarding-panel">
+              <span className="panel-icon" aria-hidden="true">GH</span>
+              <div>
+                <h2>GitHubで本人確認</h2>
+                <p>メールアドレスやアクセストークンはAgentPassへ保存しません。GitHubが確認した数値IDだけをサーバーで使用します。</p>
+              </div>
+              {/* OAuth must perform a top-level browser navigation so the
+                  provider redirect and HttpOnly state cookie stay intact. */}
+              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+              <a className="onboarding-primary" href="/api/auth/bootstrap/github/start">GitHubで続ける <span aria-hidden="true">→</span></a>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "organization" && status?.state === "organization_required" && (
+            <form className="onboarding-panel" onSubmit={submitOrganization}>
+              <span className="panel-icon" aria-hidden="true">01</span>
+              <div>
+                <h2>最初のワークスペースを作成</h2>
+                <p>会社名、チーム名、またはプロジェクト名を入力してください。後から変更できます。</p>
+              </div>
+              <label className="onboarding-field">
+                <span>ワークスペース名</span>
+                <input
+                  value={organizationName}
+                  onChange={(event) => setOrganizationName(event.target.value)}
+                  minLength={1}
+                  maxLength={128}
+                  autoComplete="organization"
+                  placeholder="例：Acme Engineering"
+                  disabled={busy}
+                  required
+                />
+              </label>
+              <button className="onboarding-primary" type="submit" disabled={busy || organizationName.trim().length === 0}>
+                {busy ? "作成しています…" : "ワークスペースを作成"}
+              </button>
+            </form>
+          )}
+
+          {screen === "flow" && onboardingState === "identity" && status?.state === "identity_verified" && (
+            <div className="onboarding-panel">
+              <h2>所属情報を確認しています</h2>
+              <p>サーバー上の権限を確認しています。表示が変わらない場合は状態を更新してください。</p>
+              <button className="onboarding-secondary" type="button" onClick={() => void loadStatus()} disabled={busy}>状態を更新</button>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "identity" && status?.state === "oauth_started" && (
+            <div className="onboarding-panel">
+              <h2>GitHubの確認を待っています</h2>
+              <p>GitHubの画面へ戻って本人確認を完了するか、最初からやり直してください。</p>
+              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+              <a className="onboarding-secondary" href="/api/auth/bootstrap/github/start">GitHubへ進む</a>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "terminal" && status?.state === "expired" && (
+            <div className="onboarding-panel onboarding-warning" role="alert">
+              <h2>セットアップの有効期限が切れました</h2>
+              <p>安全のため途中の権限は無効になりました。GitHubから新しく始めてください。</p>
+              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+              <a className="onboarding-secondary" href="/api/auth/bootstrap/github/start">最初からやり直す</a>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "webauthn" && status?.state === "webauthn_required" && (
+            <div className="onboarding-panel">
+              <span className="panel-icon passkey-icon" aria-hidden="true">⌁</span>
+              <div>
+                <h2>パスキーで管理者アカウントを保護</h2>
+                <p>Touch ID、セキュリティキー、または端末のパスキーを登録します。秘密鍵そのものがAgentPassへ送られることはありません。</p>
+              </div>
+              <ul className="onboarding-assurances" aria-label="パスキーの保護内容">
+                <li>フィッシング耐性のある本人確認</li>
+                <li>このサイトと端末に暗号学的に紐付け</li>
+                <li>重要操作はサーバー側の権限を再確認</li>
+              </ul>
+              <button className="onboarding-primary" type="button" onClick={() => void registerPasskey()} disabled={busy}>
+                {busy ? "パスキーを確認しています…" : "パスキーを登録"}
+              </button>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "device_handoff" && status?.state === "ready" && (
+            <div className="onboarding-panel" data-device-handoff="ready">
+              <h2>既存のパスキーが見つかりました</h2>
+              <p>本人確認が完了しています。Consoleで端末を追加すると、Coding Agentへ権限を引き渡せます。</p>
+              <Link className="onboarding-primary" href="/">Consoleで端末を追加</Link>
+            </div>
+          )}
+
+          {screen === "flow" && onboardingState === "device_handoff" && status?.state === "completed" && (
+            <div className="onboarding-panel onboarding-complete" data-device-handoff="ready">
+              <span className="complete-mark" aria-hidden="true">✓</span>
+              <div><h2>準備ができました</h2><p>次はConsoleで端末を追加します。端末の秘密鍵はブラウザやAgentPassへ送られません。</p></div>
+              <Link className="onboarding-primary" href="/">Consoleを開く <span aria-hidden="true">→</span></Link>
+            </div>
+          )}
+
+          {screen === "recovery" && (
+            <div className="onboarding-panel onboarding-warning" role="status">
+              <span className="panel-icon" aria-hidden="true">!</span>
+              <div><h2>管理者の確認が必要です</h2><p>このアカウントには過去の所属履歴があります。安全のため、新しいOwner権限を自動作成しません。組織のOwnerから招待を受けるか、復旧手続きを利用してください。</p></div>
+              <Link className="onboarding-secondary" href="/">復旧オプションを確認</Link>
+            </div>
+          )}
+
+          {screen === "terminal" && (
+            <div className="onboarding-panel onboarding-warning" role="alert" data-guidance="terminal">
+              <h2>セットアップを再開してください</h2>
+              <p>{message || "現在のセットアップはこの画面から続行できません。GitHubから新しいセットアップを開始してください。"}</p>
+              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+              <a className="onboarding-secondary" href="/api/auth/bootstrap/github/start">GitHubからやり直す</a>
+            </div>
+          )}
+
+          {screen === "error" && (
+            <div className="onboarding-panel onboarding-warning" role="alert">
+              <h2>状態を確認できませんでした</h2>
+              <p>{message}</p>
+              <button className="onboarding-secondary" type="button" onClick={() => { setScreen("loading"); void loadStatus(); }}>もう一度試す</button>
+            </div>
+          )}
+
+          {message && (screen === "flow" || screen === "error" || screen === "recovery") && <p className="onboarding-error" role="alert" data-guidance={guidanceKind ?? undefined}>{message}</p>}
+        </div>
+
+        <footer className="onboarding-footnote">
+          <span aria-hidden="true">◈</span>
+          <p><strong>秘密情報はブラウザに保存しません。</strong> セットアップ用CookieはHttpOnlyで保護され、CSRF・WebAuthnデータはこの処理の間だけメモリに保持されます。</p>
+        </footer>
+      </section>
+    </main>
+  );
+}

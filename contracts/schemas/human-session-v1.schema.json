@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/human-session-v1.schema.json",
+  "title": "Human session v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"],
+  "properties": {
+    "version": { "const": 1 },
+    "session_id": { "type": "string", "format": "uuid" },
+    "member_id": { "type": "string", "format": "uuid" },
+    "organization_id": { "type": "string", "format": "uuid" },
+    "role": { "enum": ["owner", "admin", "auditor", "viewer"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "recent_auth_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

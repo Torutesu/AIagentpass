@@ -1,0 +1,2296 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgentPass Human API",
+    "version": "1.0.0",
+    "license": { "name": "AgentPass API contract", "identifier": "AgentPass-API-Contract-1.0" },
+    "description": "Cookie-authenticated, tenant-qualified organization and membership management for the Web Console. All timestamps are RFC 3339 strings and all opaque identifiers are UUIDs. Session cookies are never returned in JSON; the session bootstrap response returns only an ephemeral CSRF token, and invitation tokens are never returned after creation. Responses never contain email addresses."
+  },
+  "servers": [{ "url": "https://app.ai-agentpass.com/api/v1" }],
+  "security": [],
+  "paths": {
+    "/auth/session": {
+      "post": {
+        "operationId": "exchangeSignedConsoleIdentityForSession",
+        "summary": "Exchange a verified SIWC Console assertion for a human session",
+        "description": "The hosted Console BFF calls the runtime path /api/auth/session after the platform has verified Sign in with ChatGPT (SIWC). The browser sends no upstream identity claim, Cloud bearer, or caller identity header. Cloud verifies the compact Ed25519 assertion, consumes its namespaced jti digest atomically, and resolves the active member and role from PostgreSQL using the asserted provider, subject, and organization context. This operation never redirects.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ConsoleIdentityAssertion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/SessionBootstrap" },
+        "x-agentpass-runtime-path": "/api/auth/session",
+        "x-agentpass-bff-only": true,
+        "x-agentpass-no-browser-redirect": true,
+        "x-agentpass-accepted-headers": ["Origin", "Content-Type", "agentpass-console-identity"],
+        "x-agentpass-rejected-identity-headers": ["Authorization", "agentpass-console-user-id", "agentpass-member-id", "agentpass-role"],
+        "x-agentpass-identity-resolution": "Resolve provider/subject/organization membership server-side; never accept member_id, membership_id, or role from the assertion or request body.",
+        "x-agentpass-assertion": {
+          "transport": "agentpass-console-identity",
+          "format": "base64url(canonical-header).base64url(canonical-payload).base64url(ed25519-signature)",
+          "header": {
+            "alg": "EdDSA",
+            "kid": "deployment-selected-key-id",
+            "typ": "agentpass.console.identity",
+            "version": 1,
+            "canonical": true,
+            "additionalProperties": false
+          },
+          "payload": {
+            "claims": ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"],
+            "additionalProperties": false,
+            "jti": { "encoding": "base64url", "minLength": 22, "maxLength": 256 },
+            "max_ttl_seconds": 60,
+            "clock_skew_seconds": 5
+          },
+          "forbidden_claims": ["redirect_uri"],
+          "verification": [
+            "Verify Ed25519 with the pinned kid before parsing identity fields.",
+            "Require exact configured issuer, audience, origin, provider, and UUID organization context.",
+            "Require iat and nbf to be current within the configured clock skew and exp to be no more than 60 seconds after iat.",
+            "Consume SHA-256(iss || U+0000 || aud || U+0000 || jti) exactly once in durable PostgreSQL before membership resolution.",
+            "Reject Authorization and caller-supplied identity/member/role headers before replay consumption or membership resolution."
+          ],
+          "replay": {
+            "digest": "SHA-256(iss || U+0000 || aud || U+0000 || jti)",
+            "table": "human_identity_assertion_replays",
+            "atomic_consume_function": "agentpass_consume_human_identity_assertion",
+            "stored_fields": ["jti_digest", "expires_at"]
+          }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/SessionBootstrapCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/IdentityAssertionUnauthorized" },
+          "403": { "$ref": "#/components/responses/OriginForbidden" },
+          "409": { "$ref": "#/components/responses/IdentityAssertionReplay" },
+          "503": { "$ref": "#/components/responses/SessionBootstrapUnavailable" }
+        }
+      }
+    },
+    "/auth/session/organization-switch": {
+      "post": {
+        "operationId": "switchHumanSessionOrganization",
+        "summary": "Switch the active organization for the current human session",
+        "description": "Validates the current HttpOnly session and CSRF token, resolves the caller's active target membership server-side, atomically revokes the old session, and returns a replacement session cookie and CSRF token. Role and authority epochs are never accepted from the request.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["organization_id"], "properties": { "organization_id": { "type": "string", "format": "uuid" } } } } } },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-agentpass-runtime-path": "/api/auth/session/organization-switch"
+      }
+    },
+    "/auth/session/resume": {
+      "post": {
+        "operationId": "resumeHumanSession",
+        "summary": "Resume a human session by atomically rotating its cookie",
+        "description": "The Console sends the existing __Host-agentpass_session cookie, the exact configured Origin, and the same application/json body contract as session bootstrap: exactly {}. The request accepts no caller-supplied CSRF token. Cloud hashes the cookie value, authenticates and locks the active session, then atomically creates a replacement session and revokes the old session. The old cookie cannot be reused after a successful rotation, and no replacement cookie is returned when the atomic rotation loses the old session.",
+        "security": [{ "humanSession": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/SessionResume" },
+        "x-agentpass-runtime-path": "/api/auth/session/resume",
+        "x-agentpass-no-browser-redirect": true,
+        "x-agentpass-accepted-headers": ["Origin", "Content-Type"],
+        "x-agentpass-rejected-headers": ["Authorization", "agentpass-console-identity", "agentpass-csrf", "X-CSRF-Token", "Idempotency-Key"],
+        "x-agentpass-origin-policy": {
+          "header": "Origin",
+          "required": true,
+          "match": "exact-configured-console-origin",
+          "null_origin": "reject",
+          "additionalProperties": false
+        },
+        "x-agentpass-empty-body": {
+          "required": true,
+          "content_type": "application/json",
+          "schema_ref": "#/components/schemas/SessionBootstrapRequest",
+          "required_properties": 0,
+          "additionalProperties": false
+        },
+        "x-agentpass-cookie-binding": {
+          "cookie": "__Host-agentpass_session",
+          "lookup": "sha256(cookie_value)",
+          "raw_cookie": "transport-only",
+          "additionalProperties": false
+        },
+        "x-agentpass-atomic-rotation": {
+          "repository_method": "rotateSession",
+          "transaction": "single-database-transaction",
+          "steps": [
+            "lock organization and member session set",
+            "lock the active old session by cookie hash",
+            "insert replacement session with a new cookie hash and CSRF hash",
+            "revoke the old session with reason session_rotation",
+            "commit both session changes or return no replacement"
+          ],
+          "old_cookie_replay": "reject-without-new-cookie",
+          "additionalProperties": false
+        },
+        "x-agentpass-csrf-policy": {
+          "caller_header": null,
+          "response": "new-ephemeral-csrf-token",
+          "origin_remains_required": true,
+          "additionalProperties": false
+        },
+        "x-agentpass-secret-policy": {
+          "session_cookie": "never-json",
+          "raw_cookie": "never-log-or-durable",
+          "csrf_token": "response-only-and-never-durable",
+          "cache": "no-store",
+          "additionalProperties": false
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/SessionResumed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/OriginForbidden" },
+          "503": { "$ref": "#/components/responses/SessionResumeUnavailable" }
+        }
+      }
+    },
+    "/platform/promotions": {
+      "post": {
+        "operationId": "issuePlatformPromotion",
+        "summary": "Issue platform promotion evidence",
+        "description": "Issues exactly one deployment-scoped Promotion Evidence v3 envelope through the hosted signer. This is a global platform-operator operation, not an organization-member operation. The platform operator role and capability are resolved server-side; organization roles, caller-supplied roles, provider fields, claim tokens, approval principal identities, and provider diagnostics are never accepted or returned.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PlatformPromotionRequest" },
+        "x-agentpass-runtime-path": "/v1/platform/promotions",
+        "x-agentpass-platform-scope": { "role": "platform_operator", "capability": "platform.promotion.issue", "tenant": "global", "organization-membership-roles": "denied" },
+        "x-agentpass-recent-auth-operation": "platform.promotion.issue",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,operation,promotion_id,deployment_id,environment,candidate_id,idempotency_key}))",
+        "x-agentpass-idempotency": { "source": "Idempotency-Key", "same-key-same-request": "return-original-public-result", "same-key-different-request": "platform_promotion_idempotency_conflict", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "response": "public-evidence-only", "private-approval-fields": "never", "provider-fields": "never", "claim-token": "never", "cache": "no-store", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "200": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/platform/promotions/replay": {
+      "post": {
+        "operationId": "replayPlatformPromotion",
+        "summary": "Replay committed platform promotion evidence",
+        "description": "Replays only the exact committed public Promotion Evidence v3 result identified by the supplied request identity. It never signs again, never returns claim material, and does not expose uncertain or absent authority state.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PlatformPromotionRequest" },
+        "x-agentpass-runtime-path": "/v1/platform/promotions/replay",
+        "x-agentpass-platform-scope": { "role": "platform_operator", "capability": "platform.promotion.replay", "tenant": "global", "organization-membership-roles": "denied" },
+        "x-agentpass-recent-auth-operation": "platform.promotion.replay",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,operation,promotion_id,deployment_id,environment,candidate_id,idempotency_key}))",
+        "x-agentpass-idempotency": { "source": "Idempotency-Key", "same-key-same-request": "return-committed-public-result", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "response": "public-evidence-only", "private-approval-fields": "never", "provider-fields": "never", "claim-token": "never", "cache": "no-store", "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/auth/github/start": {
+      "post": {
+        "operationId": "startGithubAuthorization",
+        "summary": "Start GitHub authorization",
+        "description": "Starts the upstream identity authorization flow. This is the only unauthenticated Human API operation.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/auth/github/callback": {
+      "post": {
+        "operationId": "completeGithubAuthorization",
+        "summary": "Complete GitHub authorization",
+        "description": "Completes upstream authorization and establishes the HttpOnly humanSession cookie.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Revoke the current human session",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "204": { "description": "Session revoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/auth/management/credentials": {
+      "get": {
+        "operationId": "listWebAuthnCredentials",
+        "summary": "List WebAuthn credentials",
+        "security": [{ "humanSession": [] }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/credentials/{credential_id}": {
+      "patch": {
+        "operationId": "renameWebAuthnCredential",
+        "summary": "Rename a WebAuthn credential",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RenameWebAuthnCredential" },
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnCredentialMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "502": { "$ref": "#/components/responses/ServiceUnavailable" } }
+      }
+    },
+    "/auth/management/credentials/{credential_id}/revoke": {
+      "post": {
+        "operationId": "revokeWebAuthnCredential",
+        "summary": "Revoke a WebAuthn credential",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }, { "$ref": "#/components/parameters/RecentAuthContext" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RevokeWebAuthnCredential" },
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnCredentialMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "502": { "$ref": "#/components/responses/ServiceUnavailable" } }
+      }
+    },
+    "/auth/management/sessions": {
+      "get": {
+        "operationId": "listHumanSessions",
+        "summary": "List human sessions",
+        "security": [{ "humanSession": [] }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/sessions/{session_id}/revoke": {
+      "post": {
+        "operationId": "revokeHumanSession",
+        "summary": "Revoke a human session",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "x-agentpass-recent-webauthn-when": "target-is-current-session",
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/sessions/revoke-others": {
+      "post": {
+        "operationId": "revokeOtherHumanSessions",
+        "summary": "Revoke all other active human sessions",
+        "description": "Atomically revokes every other currently usable session for the authenticated member in the authenticated organization. The current session is never revoked. An empty result is a successful no-op.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuth" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RevokeOtherSessions" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/OtherSessionsRevoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/webauthn/registration/options": {
+      "post": {
+        "operationId": "createRegistrationOptions",
+        "summary": "Create WebAuthn registration options",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuthForCredentialRegistration" }],
+        "requestBody": { "$ref": "#/components/requestBodies/WebAuthnRegistrationOptions" },
+        "x-agentpass-runtime-path": "/api/auth/webauthn/registration/options",
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnRegistrationOptions" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "428": { "$ref": "#/components/responses/PreconditionRequired" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/ServiceUnavailable" } }
+      }
+    },
+    "/webauthn/registration/verify": {
+      "post": {
+        "operationId": "verifyRegistration",
+        "summary": "Verify WebAuthn registration",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuthForCredentialRegistration" }],
+        "requestBody": { "$ref": "#/components/requestBodies/WebAuthnRegistrationVerify" },
+        "x-agentpass-runtime-path": "/api/auth/webauthn/registration/verify",
+        "responses": { "201": { "$ref": "#/components/responses/WebAuthnRegistrationVerified" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "428": { "$ref": "#/components/responses/PreconditionRequired" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/ServiceUnavailable" } }
+      }
+    },
+    "/webauthn/authentication/options": {
+      "post": {
+        "operationId": "createAuthenticationOptions",
+        "summary": "Create WebAuthn authentication options",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/webauthn/authentication/verify": {
+      "post": {
+        "operationId": "verifyAuthentication",
+        "summary": "Verify WebAuthn authentication",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+
+    "/organizations": {
+      "get": {
+        "operationId": "listOrganizations",
+        "summary": "List organizations visible to the authenticated human",
+        "security": [{ "humanSession": [] }],
+        "description": "The authenticated identity is the tenant selector. Only active memberships of that identity are returned; an organization outside that set is never disclosed.",
+        "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "authenticated-human-memberships", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "post": {
+        "operationId": "createOrganization",
+        "summary": "Create an organization and its initial owner membership",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateOrganization" },
+        "description": "The authenticated identity becomes the initial owner. The organization is the tenant root created by this request, so no organization_id path parameter exists yet.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "created-resource", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "x-agentpass-atomic-admin-audit-outbox": "Create the organization, initial owner membership, immutable admin-audit event, and any notification/outbox intent in one transaction.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/OrganizationCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}": {
+      "patch": {
+        "operationId": "renameOrganization",
+        "summary": "Rename an organization",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/RenameOrganization" },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-atomic-admin-audit-outbox": "The rename, version increment, immutable admin-audit event, and outbox publication intent commit atomically; a response is not successful if any one is missing.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "get": {
+        "operationId": "getOrganization",
+        "summary": "Get an organization visible to the authenticated human",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "viewer",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationResponse" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/members": {
+      "get": {
+        "operationId": "listMembers",
+        "summary": "List active and revoked organization memberships",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/members/{member_id}/role": {
+      "patch": {
+        "operationId": "updateMemberRole",
+        "summary": "Change a member role",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/MemberId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/UpdateMemberRole" },
+        "description": "The owner role may be assigned or removed only when the resulting organization still has an active owner. This invariant is checked under the organization membership lock.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-final-owner-invariant": "Never leave an organization without at least one active owner; reject the last-owner transition with last_owner_protected.",
+        "x-agentpass-atomic-admin-audit-outbox": "Role change, affected-session/capability revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/members/{member_id}/remove": {
+      "post": {
+        "operationId": "removeMember",
+        "summary": "Revoke a member membership",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/MemberId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "description": "Removal is a revocation tombstone, not physical deletion. The final active owner cannot be removed.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-final-owner-invariant": "Never leave an organization without at least one active owner; reject removal of the last active owner with last_owner_protected.",
+        "x-agentpass-atomic-admin-audit-outbox": "Membership revocation, session/capability revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/invitations": {
+      "get": {
+        "operationId": "listInvitations",
+        "summary": "List organization invitations",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "responses": {
+          "200": { "$ref": "#/components/responses/InvitationList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "post": {
+        "operationId": "createInvitation",
+        "summary": "Create an organization invitation",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuthForInvitationReissue" },
+          { "$ref": "#/components/parameters/ExpectedVersionForInvitationReissue" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateInvitation" },
+        "description": "Invitation roles are deliberately limited to admin, auditor, and viewer. An invitation can never grant owner. The response contains the random one-time token exactly once; the server stores only its hash. The token is not email-bound. The same collection POST accepts ReissueInvitationRequest to rotate the digest and expiry for an existing pending or expired invitation under If-Match and recent operation-bound WebAuthn authentication.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-invite-roles": ["admin", "auditor", "viewer"],
+        "x-agentpass-one-time-token": "Return the raw random token only in this response; never log, persist, list, or return it again.",
+        "x-agentpass-reissue-operation": "A body containing reissue_invitation_id selects reissue: the prior digest becomes invalid immediately, a pending or expired invitation may be rotated, accepted/revoked invitations remain terminal, and the same tenant-bound invitation ID receives an incremented version.",
+        "x-agentpass-recent-auth-operation": "human.organizations.invitation.reissue",
+        "x-agentpass-atomic-admin-audit-outbox": "Invitation creation, token-hash persistence, immutable admin-audit event, and notification/outbox publication intent commit atomically.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/InvitationCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/invitations/{invitation_id}/revoke": {
+      "post": {
+        "operationId": "revokeInvitation",
+        "summary": "Revoke a pending organization invitation",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/InvitationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "description": "Revocation is idempotent for the same request but cannot resurrect or mutate an accepted invitation.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-atomic-admin-audit-outbox": "Invitation revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/InvitationResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/invitations/accept": {
+      "post": {
+        "operationId": "acceptInvitation",
+        "summary": "Accept an invitation using the authenticated identity and one-time token",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/AcceptInvitation" },
+        "description": "Acceptance requires both a valid authenticated human session and possession of the random one-time token. The token is bearer possession proof only and is intentionally not bound to an email address; the authenticated identity becomes the member. A token is consumed atomically and cannot be reused.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "stored-invitation-selected-by-token-digest", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "x-agentpass-identity-binding": "authenticated-human-session-not-email",
+        "x-agentpass-one-time-token": "Accept exactly once; store only a digest and reject replay, expiry, revocation, or organization mismatch.",
+        "x-agentpass-final-owner-invariant": "Invitation acceptance cannot remove or demote an existing owner; the organization must retain at least one active owner.",
+        "x-agentpass-atomic-admin-audit-outbox": "Token consumption, membership creation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/InvitationAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/InvitationConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/devices": {
+      "get": {
+        "operationId": "listDevices",
+        "summary": "List organization devices",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "viewer",
+        "responses": { "200": { "$ref": "#/components/responses/DeviceList" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/revoke": {
+      "post": {
+        "operationId": "revokeDevice",
+        "summary": "Revoke a device and reduce its authority",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 128 } } } } } },
+        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "device.revoke"
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/refresh-requests": {
+      "post": {
+        "operationId": "requestDeviceRefresh",
+        "summary": "Request an authority-neutral device refresh wake",
+        "description": "Creates or coalesces a delivery hint for the device's current desired generation. This request is authority-neutral: it does not increment authority generation, mutate the ControlBundle, bundle statement, consumed ACK nonce, or observed ACK state, and it does not prove notification delivery, bundle fetch, or device application. The device API polling path remains the correctness fallback. The exact empty JSON object body is intentional; the server derives the current generation and tenant scope from authenticated state.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/DeviceId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceRefreshRequest" },
+        "responses": {
+          "202": { "$ref": "#/components/responses/DeviceRefreshRequestAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-p0-a",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "device.refresh.request",
+        "x-agentpass-authority-neutral": true,
+        "x-agentpass-authority-effects": {
+          "authority_generation": "unchanged",
+          "bundle_and_ack_state": "unchanged",
+          "device_delivery": "not_proven",
+          "device_application": "not_proven"
+        }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports": {
+      "post": {
+        "operationId": "createAuditExport",
+        "summary": "Create an immutable organization audit export",
+        "description": "Creates or returns the exact committed immutable audit export for the organization, environment, and chain. The JSON body accepts only export_id, environment, and chain; range, digest, timestamps, signer state, claims, provider fields, idempotency material, and private material are server-derived or transport-only. Owner and admin roles require a recent operation-bound WebAuthn authorization.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateAuditExport" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/AuditExportCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "audit.export.create",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-committed-result", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-authority": { "range": "server-derived contiguous committed range", "payload": "immutable committed payload", "anchor": "managed audit anchor", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports/{export_id}": {
+      "get": {
+        "operationId": "getAuditExport",
+        "summary": "Retrieve an immutable organization audit export",
+        "description": "Returns the exact committed immutable payload, payload_digest, audit_anchor, range, and validity for the requested export. The response has no idempotency, request, claim, provider, or private material fields. Owner, admin, and auditor roles may retrieve the export after recent resource-bound WebAuthn authentication.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/AuditExportId" }, { "$ref": "#/components/parameters/AuditExportEnvironment" }, { "$ref": "#/components/parameters/AuditExportChain" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportRetrieved" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.retrieve",
+        "x-agentpass-authority": { "immutable": true, "response": "exact committed export only", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports/{export_id}/download": {
+      "get": {
+        "operationId": "downloadAuditExport",
+        "summary": "Download an immutable organization audit export",
+        "description": "Downloads the exact committed public audit export object as canonical application/json attachment bytes. The response is immutable, no-store, nosniff, and contains no request, idempotency, claim, provider, or secret material. Owner, admin, and auditor roles may download after recent resource-bound WebAuthn authentication.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/AuditExportId" }, { "$ref": "#/components/parameters/AuditExportEnvironment" }, { "$ref": "#/components/parameters/AuditExportChain" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportDownload" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.download",
+        "x-agentpass-authority": { "immutable": true, "bytes": "exact canonical application/json public export attachment", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports/verify": {
+      "post": {
+        "operationId": "verifyAuditExport",
+        "summary": "Verify a public audit export offline",
+        "description": "Verifies the exact public audit export object supplied in the JSON body without accepting idempotency material or returning secrets. The result reports payload_digest, root, anchor, and historical_key checks, overall valid, and one stable reason code.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }],
+        "requestBody": { "$ref": "#/components/requestBodies/VerifyAuditExport" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportVerificationResult" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.verify",
+        "x-agentpass-authority": { "input": "exact public export object", "secrets": "never-accepted-or-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/device-enrollments": {
+      "post": {
+        "operationId": "issueDeviceEnrollment",
+        "summary": "Issue a device enrollment",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceEnrollmentIssue" },
+        "responses": { "201": { "$ref": "#/components/responses/DeviceEnrollmentIssued" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/InternalError" } },
+        "x-agentpass-transport": { "cache-control": "no-store" },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-enrollment-v2": {
+          "request_schema": "../schemas/device-enrollment-issue-v2.schema.json",
+          "candidate_binding": "candidate_id is resolved against the server-side release candidate registry; artifact_sha256, source_commit, team_id, and manifest_sha256 are never accepted as caller input",
+          "device_key_binding": "device_key_fingerprint is bound to the one-time challenge and must match the public key used at completion",
+          "forbidden_request_fields": ["artifact_sha256", "source_commit", "team_id", "manifest_sha256", "release_manifest", "private_key", "credential"]
+        },
+        "x-agentpass-browser-onboarding": {
+          "preflight_schema": "../schemas/device-onboarding-preflight-v1.schema.json",
+          "invitation_delivery_schema": "../schemas/device-onboarding-invitation-delivery-v1.schema.json",
+          "possession_receipt_schema": "../schemas/device-possession-receipt-v1.schema.json",
+          "trust_installation_ack_schema": "../schemas/device-trust-installation-ack-v1.schema.json",
+          "control_ack_schema": "../schemas/bundle-ack-v1.schema.json",
+          "authority_fields": "server-derived only; caller cannot select organization, device, candidate provenance, authority generation, or trust roots",
+          "secret_transport": "credential is one-shot in-memory delivery only and is forbidden in argv, environment, URL, and durable storage",
+          "downgrade": "reject browser-led proof versions other than 2"
+        }
+      }
+    },
+    "/organizations/{organization_id}/agents/{agent_id}/session-grants": {
+      "post": {
+        "operationId": "issueAgentSessionGrant",
+        "summary": "Issue a bounded Agent Session Grant",
+        "description": "Issues one Cloud-signed Agent Session Grant for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. Idempotency-Key retries with the same canonical request return the same committed grant; reusing a key with a different request returns idempotency_key_reused. The grant contains no private key, session token, raw WebAuthn assertion, or reusable bearer credential. Cloud derives both control_sequence and authority_generation; they are distinct authority bindings and neither is accepted from the caller.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/AgentId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/IssueAgentSessionGrant" },
+        "x-agentpass-contract-status": "frozen-m2",
+        "x-agentpass-runtime-path": "/api/v1/organizations/{organization_id}/agents/{agent_id}/session-grants",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-agent-scope": { "kind": "agent", "source": "path.agent_id", "cross-agent-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "agent.session_grant.issue",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-committed-result", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-atomic-admin-audit-outbox": "Grant issuance, immutable admin-audit event, idempotency record, and publication intent commit atomically. A successful response is not returned if any one is missing.",
+        "x-agentpass-authority": { "issuer": "agentpass-cloud", "grant-schema": "../schemas/agent-session-grant-v1.schema.json", "derived-bindings": ["control_sequence", "authority_generation"], "private-material": "never-returned", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/AgentSessionGrantIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/agents/{agent_id}/qualification-grant-batches": {
+      "post": {
+        "operationId": "issueQualificationGrantBatch",
+        "summary": "Authorize a seven-step qualification Grant batch",
+        "description": "Authorizes one device-bound qualification batch for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. The response is deliberately limited to public batch metadata; it never contains an Agent Session Grant, the signed qualification manifest, private key material, a session token, or a reusable bearer credential. The device receives the authority-bearing manifest only through the separately device-authenticated claim endpoint.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/AgentId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/IssueQualificationGrantBatch" },
+        "x-agentpass-contract-status": "frozen-qualification-batch-v1",
+        "x-agentpass-runtime-path": "/api/v1/organizations/{organization_id}/agents/{agent_id}/qualification-grant-batches",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-agent-scope": { "kind": "agent", "source": "path.agent_id", "cross-agent-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "qualification.grant_batch.issue",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-metadata", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-authority": { "grant-count": 7, "manifest": "issued only to the device claim boundary", "human-response": "public-metadata-only", "private-material": "never-returned", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/QualificationGrantBatchIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/emergency-stop": {
+      "post": {
+        "operationId": "emergencyStop",
+        "summary": "Stop all organization devices",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "owner"
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests": {
+      "post": {
+        "operationId": "createOwnerRecoveryRequest",
+        "summary": "Create a threshold owner recovery request",
+        "description": "Creates a recovery request for the authenticated member after credential loss. The authenticated session is the recovery subject; subject_member_id is never accepted from the caller. The server requires at least two distinct active owners other than that subject. The response contains only public recovery state and, when the server has issued it, a one-time exchange value that must be shown only in memory.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateOwnerRecovery" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recovery": { "threshold": 2, "independent-owners": "two distinct active owners other than authenticated session member", "subject": "authenticated session member", "insufficient-owners": "deny-and-direct-to-add-recovery-owners", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "201": { "$ref": "#/components/responses/RecoveryRequestCreated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}": {
+      "get": {
+        "operationId": "getOwnerRecoveryRequest",
+        "summary": "Get secret-free owner recovery status",
+        "description": "Returns the versioned, secret-free recovery state for the tenant and request. A delayed request may include the raw one-time exchange value exactly once; clients must display it only in memory, must never persist or log it, and must not place it in a URL. Every later response is secret-free.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }],
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-secret-policy": { "durable": "no-raw-exchange-or-session-material", "browser": "memory-only-one-time-display", "logs": "never", "url": "never", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestStatus" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}/approve": {
+      "post": {
+        "operationId": "approveOwnerRecoveryRequest",
+        "summary": "Approve an owner recovery request",
+        "description": "Records one distinct eligible owner approval. The authenticated member cannot approve their own request, duplicate approvals are rejected, and every approval consumes a fresh operation-bound WebAuthn authorization. Replaying an authorization or using a stale request version fails closed.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}/approve",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recent-auth-operation": "human.recovery.approve",
+        "x-agentpass-recovery": { "self-approval": "denied", "duplicate-owner": "denied", "stale-version": "denied", "threshold": "two-distinct-active-owners-other-than-subject", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestUpdated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}/cancel": {
+      "post": {
+        "operationId": "cancelOwnerRecoveryRequest",
+        "summary": "Cancel an owner recovery request",
+        "description": "Cancels a live recovery request using a compare-and-set version. Cancellation is terminal, cannot shorten or bypass the fixed delay, and cannot be used to reactivate any terminal request.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}/cancel",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recovery": { "terminal": true, "fixed-delay": "cannot-be-shortened", "stale-version": "denied", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestUpdated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/dead-letters": {
+      "get": {
+        "operationId": "listOwnerRecoveryDeadLetters",
+        "summary": "List owner recovery notification dead letters",
+        "description": "Returns a bounded tenant-scoped page of secret-free delivery failures. Provider destinations, payloads, claim tokens, and diagnostics are never returned.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/dead-letters",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryDeadLetterList" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/dead-letters/{event_id}/redrive": {
+      "post": {
+        "operationId": "redriveOwnerRecoveryDeadLetter",
+        "summary": "Redrive one owner recovery notification dead letter",
+        "description": "Consumes a resource-bound recent WebAuthn authorization and compare-and-set version, then requeues the exact event with an audited idempotent mutation.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryOutboxEventId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/dead-letters/{event_id}/redrive",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "human.recovery.outbox.redrive",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,organization_id,event_id,action:'redrive',expected_management_version}))",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryDeadLetterMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/dead-letters/{event_id}/suppress": {
+      "post": {
+        "operationId": "suppressOwnerRecoveryDeadLetter",
+        "summary": "Suppress one owner recovery notification dead letter",
+        "description": "Consumes a resource-bound recent WebAuthn authorization and compare-and-set version, then terminally suppresses the exact event with an audited reason.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryOutboxEventId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/SuppressRecoveryDeadLetter" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/dead-letters/{event_id}/suppress",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "human.recovery.outbox.suppress",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,organization_id,event_id,action:'suppress',expected_management_version}))",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryDeadLetterMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/uncertain": {
+      "get": {
+        "operationId": "listOwnerRecoveryUncertainDeliveries",
+        "summary": "List uncertain owner recovery notification deliveries",
+        "description": "Returns deliveries whose provider outcome cannot be proven. These rows are quarantined and are never treated as delivered automatically.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/uncertain",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryUncertainList" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/uncertain/{event_id}/retry": {
+      "post": {
+        "operationId": "retryOwnerRecoveryUncertainDelivery",
+        "summary": "Retry one bound uncertain delivery",
+        "description": "Requeues a quarantined event only when its immutable provider binding is still valid. Legacy unbound rows and exhausted retry budgets fail closed.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryOutboxEventId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/uncertain/{event_id}/retry",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "human.recovery.outbox.retry_uncertain",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,organization_id,event_id,action:'retry_uncertain',expected_management_version}))",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryUncertainMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-outbox/uncertain/{event_id}/suppress": {
+      "post": {
+        "operationId": "suppressOwnerRecoveryUncertainDelivery",
+        "summary": "Suppress one uncertain delivery",
+        "description": "Terminally suppresses a quarantined event with an audited operator reason. No operation can manually confirm delivery.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryOutboxEventId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/SuppressRecoveryDeadLetter" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-outbox/uncertain/{event_id}/suppress",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "human.recovery.outbox.suppress_uncertain",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,organization_id,event_id,action:'suppress_uncertain',expected_management_version}))",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryUncertainMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/exchange": {
+      "post": {
+        "operationId": "exchangeOwnerRecoveryValue",
+        "summary": "Consume a one-time recovery exchange value",
+        "description": "Atomically consumes one hashed exchange value after the fixed delay and establishes a restricted recovery session in an HttpOnly cookie. Replays, expired values, wrong organization bindings, wrong members, and wrong request bindings are denied. JSON contains public session metadata only; the raw restricted-session bearer is never returned in JSON.",
+        "security": [],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryExchange" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/exchange",
+        "x-agentpass-session": { "issued": "restricted-recovery-session-cookie", "allowed-stages": ["session_issued", "credential_enrolled"], "normal-session": "not-issued-or-returned", "additionalProperties": false },
+        "x-agentpass-one-time": { "input": "exchange", "durable": "sha256-digest-only", "replay": "reject", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoverySessionIssued" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "410": { "$ref": "#/components/responses/RecoveryExpired" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/webauthn/registration/options": {
+      "post": {
+        "operationId": "createOwnerRecoveryRegistrationOptions",
+        "summary": "Create restricted-session recovery registration options",
+        "description": "Only a restricted recovery session in session_issued or credential_enrolled stage may call this operation. request_id is checked against the restricted cookie binding. The challenge is short-lived, request-bound, and never durable as raw ceremony material.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryRegistrationOptions" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/webauthn/registration/options",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["session_issued", "credential_enrolled"], "organization": "session-bound", "member": "session-bound", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "challenge": "transport-only", "browser": "WebAuthn-call-frame-only", "durable": "digest-or-challenge-id-only", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRegistrationOptions" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/webauthn/registration/verify": {
+      "post": {
+        "operationId": "verifyOwnerRecoveryRegistration",
+        "summary": "Verify the restricted-session recovery credential",
+        "description": "Verifies and serializes insertion of the newly enrolled credential under the member credential lock. The restricted session advances only once to credential_enrolled; raw assertions, attestation, private keys, and reusable bearer material are never returned or stored.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryRegistrationVerify" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/webauthn/registration/verify",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["session_issued"], "next-stage": "credential_enrolled", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "assertion": "transport-only", "response": "public-recovery-state-only", "durable": "credential-public-id-only", "additionalProperties": false },
+        "responses": { "201": { "$ref": "#/components/responses/RecoveryRegistrationVerified" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/activate": {
+      "post": {
+        "operationId": "activateOwnerRecovery",
+        "summary": "Activate owner authority after recovery",
+        "description": "Verifies and consumes a fresh WebAuthn authentication assertion created by the newly enrolled credential and bound server-side to human.recovery.activate. Activation atomically invalidates the restricted recovery session and all prior normal sessions, advances the membership session epoch, appends audit state, and commits the secret-free notification outbox entry.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryActivation" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/activate",
+        "x-agentpass-webauthn-operation": "human.recovery.activate",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["credential_enrolled"], "next-stage": "activated", "revoked-after-success": true, "additionalProperties": false },
+        "x-agentpass-atomic-activation": ["consume-human.recovery.activate-challenge", "invalidate-recovery-session", "invalidate-prior-normal-sessions", "advance-membership-session-epoch", "append-audit-event", "commit-secret-free-notification-outbox"],
+        "x-agentpass-secret-policy": { "response": "secret-free", "raw-session": "never-json", "raw-assertion": "never-json-or-durable", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-activated-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryActivated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "humanSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_session",
+        "description": "Opaque, rotated, HttpOnly, Secure, SameSite session cookie. The server stores only a hash and resolves the authenticated identity server-side."
+      },
+      "recentWebAuthn": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "AgentPass-Recent-Auth",
+        "description": "Operation-bound, server-verified recent WebAuthn authorization; freshness alone is insufficient and reuse is rejected."
+      },
+      "recoverySession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_recovery_session",
+        "description": "Opaque, restricted, HttpOnly recovery-session cookie. It is bound to one organization, request, member, stage, absolute expiry, and idle expiry; the raw value is never returned in JSON."
+      }
+    },
+    "parameters": {
+      "ConsoleIdentityAssertion": {
+        "name": "agentpass-console-identity",
+        "in": "header",
+        "required": true,
+        "description": "BFF-only compact Ed25519 assertion. It is not a browser credential and must be rejected when supplied together with Authorization or any caller identity header. The header and payload are exact canonical JSON objects; no redirect_uri claim is accepted.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+        },
+        "x-agentpass-bff-only": true,
+        "x-agentpass-no-raw-browser-claims": true
+      },
+      "OrganizationId": {
+        "name": "organization_id",
+        "in": "path",
+        "required": true,
+        "description": "Tenant identifier. Every organization resource lookup is qualified by this value; cross-tenant existence is not disclosed.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "DeviceId": {
+        "name": "device_id",
+        "in": "path",
+        "required": true,
+        "description": "Device identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "AgentId": {
+        "name": "agent_id",
+        "in": "path",
+        "required": true,
+        "description": "Agent identifier, interpreted only together with organization_id. The path value is authoritative for the grant subject.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CredentialId": {
+        "name": "credential_id",
+        "in": "path",
+        "required": true,
+        "description": "WebAuthn credential identifier.",
+        "schema": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "description": "Human session identifier.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "MemberId": {
+        "name": "member_id",
+        "in": "path",
+        "required": true,
+        "description": "Member identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecoveryRequestId": {
+        "name": "request_id",
+        "in": "path",
+        "required": true,
+        "description": "Threshold owner recovery request identifier, interpreted only with organization_id and the authenticated or restricted session binding.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecoveryOutboxEventId": {
+        "name": "event_id",
+        "in": "path",
+        "required": true,
+        "description": "Owner recovery outbox event identifier, interpreted only with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "InvitationId": {
+        "name": "invitation_id",
+        "in": "path",
+        "required": true,
+        "description": "Invitation identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "AuditExportId": {
+        "name": "export_id",
+        "in": "path",
+        "required": true,
+        "description": "Immutable audit export identifier, interpreted only together with organization_id, environment, and chain.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CsrfToken": {
+        "name": "AgentPass-CSRF",
+        "in": "header",
+        "required": true,
+        "description": "Session-bound CSRF token. Same-origin/origin checks remain required; this header is not authentication.",
+        "schema": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" }
+      },
+      "RecentAuth": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": true,
+        "description": "One-use, operation- and request-bound WebAuthn authorization identifier.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecentAuthContext": {
+        "name": "agentpass-recent-auth-context",
+        "in": "header",
+        "required": true,
+        "description": "SHA-256 of canonical JSON {version:1,operation,credential_id,expected_version}; binds the one-use proof to this exact credential mutation.",
+        "schema": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" }
+      },
+      "RecentAuthForInvitationReissue": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": false,
+        "description": "Required when the request body is ReissueInvitationRequest and prohibited for ordinary invitation creation.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecentAuthForCredentialRegistration": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": false,
+        "description": "Required only when the authenticated member already has an active credential; the one-use proof is bound to human.webauthn.credential.register.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Stable per-operation retry key. Reusing it with a different canonical request is rejected with idempotency_key_reused.",
+        "schema": { "type": "string", "minLength": 8, "maxLength": 255, "pattern": "^[A-Za-z0-9._~-]+$" }
+      },
+      "ExpectedVersion": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "description": "Expected resource version for optimistic concurrency. Send the quoted decimal version, for example \"7\". A stale value returns version_conflict.",
+        "schema": { "type": "string", "pattern": "^\"[1-9][0-9]*\"$" }
+      },
+      "ExpectedVersionForInvitationReissue": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "description": "Required when the request body is ReissueInvitationRequest and forbidden for ordinary invitation creation. It carries the current invitation version as a quoted decimal.",
+        "schema": { "type": "string", "pattern": "^\"[1-9][0-9]*\"$" }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque, versioned, authenticated keyset cursor bound to the resource kind and authenticated tenant/member scope. Clients must not inspect or modify it. A malformed, tampered, expired-format, cross-resource, or cross-scope cursor is rejected as invalid_request.",
+        "schema": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+      },
+      "AuditExportEnvironment": {
+        "name": "environment",
+        "in": "query",
+        "required": true,
+        "description": "Audit environment bound to the immutable export.",
+        "schema": { "type": "string", "enum": ["staging", "production"] }
+      },
+      "AuditExportChain": {
+        "name": "chain",
+        "in": "query",
+        "required": true,
+        "description": "Audit chain bound to the immutable export.",
+        "schema": { "type": "string", "enum": ["admin", "cloud_agent", "device"] }
+      }
+    },
+    "requestBodies": {
+      "PlatformPromotionRequest": {
+        "required": true,
+        "description": "Exactly the public promotion, deployment, environment, and candidate identity. Idempotency-Key, role, approval, provider, claim, and private fields are transport- or server-bound and forbidden in the body.",
+        "content": { "application/json": { "schema": { "$ref": "../schemas/platform-promotion-issuance-request-v1.schema.json" } } }
+      },
+      "SessionBootstrap": {
+        "required": true,
+        "description": "The request body is exactly the empty JSON object. Identity, organization, member, role, nonce, and provider fields are forbidden in the body.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SessionBootstrapRequest" }
+          }
+        }
+      },
+      "SessionResume": {
+        "required": true,
+        "description": "The request body is exactly the empty JSON object. The existing session cookie and exact Origin are transport-bound; caller identity and CSRF fields are forbidden in the body and headers.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SessionBootstrapRequest" }
+          }
+        }
+      },
+      "WebAuthnRegistrationOptions": {
+        "required": true,
+        "description": "The organization must equal the organization bound to the authenticated Human Session. No member, role, RP, Origin, challenge, or credential field is accepted.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationOptionsRequest" } } }
+      },
+      "WebAuthnRegistrationVerify": {
+        "required": true,
+        "description": "Exact browser registration transport material bound to the authenticated Human Session and issued challenge. Raw ceremony material is never returned or durably stored.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifyRequest" } } }
+      },
+      "RenameWebAuthnCredential": {
+        "required": true,
+        "description": "Exactly the mutable display label. Credential identity and expected version are transport-bound.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameWebAuthnCredentialRequest" } } }
+      },
+      "RevokeWebAuthnCredential": {
+        "required": true,
+        "description": "Exactly {}. Credential identity, expected version, idempotency, and recent-auth context are transport-bound.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeWebAuthnCredentialRequest" } } }
+      },
+      "CreateOrganization": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrganizationRequest" } } }
+      },
+      "RenameOrganization": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameOrganizationRequest" } } }
+      },
+      "UpdateMemberRole": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateMemberRoleRequest" } } }
+      },
+      "CreateInvitation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "oneOf": [
+          { "$ref": "#/components/schemas/CreateInvitationRequest" },
+          { "$ref": "#/components/schemas/ReissueInvitationRequest" }
+        ] } } }
+      },
+      "AcceptInvitation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptInvitationRequest" } } }
+      },
+      "RevokeOtherSessions": {
+        "required": true,
+        "description": "Exactly {}. Organization, member, current session, target sessions, and revocation time are resolved from the authenticated session and server-side transaction.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeOtherSessionsRequest" } } }
+      },
+      "CreateOwnerRecovery": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOwnerRecoveryRequest" } } }
+      },
+      "RecoveryEmpty": {
+        "required": true,
+        "description": "Exactly {}. The request is bound to the authenticated human or restricted recovery session and never accepts caller-supplied organization, member, role, or state.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryEmptyRequest" } } }
+      },
+      "RecoveryExchange": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryExchangeRequest" } } }
+      },
+      "RecoveryRegistrationOptions": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationOptionsRequest" } } }
+      },
+      "RecoveryRegistrationVerify": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationVerifyRequest" } } }
+      },
+      "RecoveryActivation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryActivationRequest" } } }
+      },
+      "SuppressRecoveryDeadLetter": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuppressRecoveryDeadLetterRequest" } } }
+      },
+      "DeviceRefreshRequest": {
+        "required": true,
+        "description": "Exactly {}. The request carries no generation, bundle, ACK, notification, or policy input; those values are resolved from the authenticated organization and device state.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestBody" } } }
+      },
+      "CreateAuditExport": {
+        "required": true,
+        "description": "Exactly export_id, environment, and chain. Organization, range, digest, timestamps, anchor, claims, provider fields, idempotency material, and private material are not accepted in the JSON body.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportCreateRequest" } } }
+      },
+      "VerifyAuditExport": {
+        "required": true,
+        "description": "Exactly the public AuditExport object. No idempotency key, request metadata, claim, provider, or secret field is accepted.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportVerifyRequest" } } }
+      },
+      "DeviceEnrollmentIssue": {
+        "required": true,
+        "description": "The legacy request shape remains accepted. A v2 request must use proof_version=2, candidate_id, and device_key_fingerprint; release artifact metadata is resolved by Cloud and cannot be supplied by the caller.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueRequestV1" },
+                { "$ref": "../schemas/device-enrollment-issue-v2.schema.json" }
+              ]
+            }
+          }
+        }
+      },
+      "IssueAgentSessionGrant": {
+        "required": true,
+        "description": "The request contains only grant issuance intent. organization_id and agent_id are taken from the path; signed authority fields such as grant_id, issuer, key_id, signature, not-before, expiry, and control sequence are Cloud-assigned and cannot be supplied by the caller.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssueRequest" } } }
+      },
+      "IssueQualificationGrantBatch": {
+        "required": true,
+        "description": "The request contains public release bindings and the existing Agent Session Grant issuance intent. The organization_id and agent_id are taken from the path. Cloud allocates the seven grant identities, validity window, control bindings, and the purpose-separated manifest; those authority fields cannot be supplied by the caller.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchIssueRequest" } } }
+      }
+    },
+    "responses": {
+      "PlatformPromotionIssued": {
+        "description": "A public, independently verified Promotion Evidence v3 envelope. The response is never cacheable.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "../schemas/platform-promotion-issuance-response-v1.schema.json" } } }
+      },
+      "SessionBootstrapCreated": {
+        "description": "A short-lived opaque human session was issued.",
+        "headers": {
+          "Set-Cookie": {
+            "required": true,
+            "description": "Opaque __Host-agentpass_session cookie. The value is never returned in JSON and must be Secure, HttpOnly, SameSite=Strict, Path=/, and have no Domain attribute.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+          },
+          "Cache-Control": {
+            "required": true,
+            "schema": { "type": "string", "const": "no-store, max-age=0" }
+          }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionBootstrapResponse" } } }
+      },
+      "SessionResumed": {
+        "description": "The existing human session was valid and was atomically replaced by a new opaque session.",
+        "headers": {
+          "Set-Cookie": {
+            "required": true,
+            "description": "Replacement __Host-agentpass_session cookie. The old cookie is revoked in the same database transaction. The value is never returned in JSON and must be Secure, HttpOnly, SameSite=Strict, Path=/, and have no Domain attribute.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+          },
+          "Cache-Control": {
+            "required": true,
+            "schema": { "type": "string", "const": "no-store, max-age=0" }
+          }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionBootstrapResponse" } } }
+      },
+      "IdentityAssertionUnauthorized": {
+        "description": "The assertion is malformed, has an untrusted signature or binding, is expired, or does not resolve to an active membership. The response is intentionally opaque.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "OriginForbidden": {
+        "description": "The request Origin is not the exact configured HTTPS Console origin.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "IdentityAssertionReplay": {
+        "description": "The signed assertion jti digest was already consumed. No session is issued.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "SessionBootstrapUnavailable": {
+        "description": "The identity replay ledger or membership store is unavailable. The service fails closed and does not issue a session.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "SessionResumeUnavailable": {
+        "description": "The session store was unavailable or the atomic rotation could not be committed. The service fails closed and does not issue a replacement cookie.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Json": {
+        "description": "JSON response",
+        "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+      },
+      "OtherSessionsRevoked": {
+        "description": "The exact committed set of other sessions revoked by this operation. The response is never cacheable and never contains session bearer or CSRF hashes.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeOtherSessionsResponse" } } }
+      },
+      "DeviceEnrollmentIssued": {
+        "description": "Legacy v1 enrollment response or the strict v2 invitation. v2 includes only public possession-receipt verification metadata; private keys and signing secrets are never returned.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "anyOf": [
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueResponseV1" },
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueResponseV2" }
+              ]
+            }
+          }
+        }
+      },
+      "AuditExportCreated": {
+        "description": "The exact committed immutable audit export created or returned for the idempotent retry. No request, claim, provider, idempotency, or private material is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportResponse" } } }
+      },
+      "AuditExportRetrieved": {
+        "description": "The exact committed immutable audit export. No request, claim, provider, idempotency, or private material is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportResponse" } } }
+      },
+      "AuditExportDownload": {
+        "description": "The exact public audit export object as a canonical application/json attachment. The response is no-store and nosniff.",
+        "headers": {
+          "Content-Type": { "required": true, "schema": { "type": "string", "const": "application/json" } },
+          "Content-Disposition": { "required": true, "schema": { "type": "string", "const": "attachment; filename=\"agentpass-audit-export.json\"" } },
+          "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } },
+          "X-Content-Type-Options": { "required": true, "schema": { "type": "string", "const": "nosniff" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExport" } } }
+      },
+      "AuditExportVerificationResult": {
+        "description": "Strict secret-free offline verification result with component checks, overall validity, and a stable reason code.",
+        "headers": {
+          "Content-Type": { "required": true, "schema": { "type": "string", "const": "application/json" } },
+          "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } },
+          "X-Content-Type-Options": { "required": true, "schema": { "type": "string", "const": "nosniff" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportVerificationResult" } } }
+      },
+      "OrganizationList": { "description": "Organizations visible to the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationListResponse" } } } },
+      "OrganizationCreated": { "description": "Organization created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
+      "OrganizationResponse": { "description": "Organization response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
+      "MemberList": { "description": "Membership list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberListResponse" } } } },
+      "MemberResponse": { "description": "Membership response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberResponse" } } } },
+      "InvitationList": { "description": "Invitation list without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationListResponse" } } } },
+      "InvitationCreated": { "description": "Invitation and its one-time token. The token is returned only once.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationCreatedResponse" } } } },
+      "InvitationResponse": { "description": "Invitation response without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationResponse" } } } },
+      "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
+      "WebAuthnRegistrationOptions": {
+        "description": "Short-lived WebAuthn registration options bound to the current Human Session. Challenge material is transport-only.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationOptionsResponse" } } }
+      },
+      "WebAuthnRegistrationVerified": {
+        "description": "The public credential was created. No attestation, public key, challenge, session authority, or provider diagnostics are returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifiedResponse" } } }
+      },
+      "WebAuthnCredentialMutation": {
+        "description": "Authoritative, secret-free credential metadata after an atomic rename or revoke.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnCredentialMutationResponse" } } }
+      },
+      "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
+      "DeviceRefreshRequestAccepted": { "description": "A wake request was accepted, coalesced with a pending wake, or found unnecessary because no refresh is pending. The response is a delivery hint only; it does not prove device delivery or application.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestResponse" } } } },
+      "AgentSessionGrantIssued": {
+        "description": "A Cloud-signed Agent Session Grant was issued or returned as the exact idempotent retry result. The response is no-store and never contains private key material, a session token, a WebAuthn assertion, or a reusable bearer credential.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssuedResponse" } } }
+      },
+      "QualificationGrantBatchIssued": {
+        "description": "Public qualification batch metadata was issued or returned as the exact idempotent retry result. The response is no-store and contains no Agent Session Grant, signed manifest, private key material, session token, or reusable bearer credential.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchIssueResponse" } } }
+      },
+      "RecoveryRequestCreated": {
+        "description": "Created public recovery state. No session token, WebAuthn material, notification destination, or durable secret is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoveryRequestStatus": {
+        "description": "Secret-free recovery state, except for an eligible one-time exchange value returned at most once and intended for memory-only display.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoveryRequestUpdated": {
+        "description": "Updated public recovery state without raw exchange or session material.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoverySessionIssued": {
+        "description": "Restricted recovery session established in an HttpOnly cookie. JSON contains metadata only; the raw cookie value is never returned.",
+        "headers": { "Set-Cookie": { "required": true, "description": "Opaque __Host-agentpass_recovery_session cookie, Secure, HttpOnly, SameSite=Strict, Path=/, with no Domain attribute.", "schema": { "type": "string", "minLength": 1, "maxLength": 2048 } }, "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoverySessionResponse" } } }
+      },
+      "RecoveryRegistrationOptions": {
+        "description": "Short-lived public WebAuthn registration options. Challenge material is transport-only and is never durable or logged.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationOptionsResponse" } } }
+      },
+      "RecoveryRegistrationVerified": {
+        "description": "The recovery credential was enrolled; response is public recovery state only.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationVerifiedResponse" } } }
+      },
+      "RecoveryActivated": {
+        "description": "Recovery authority was activated and prior sessions were invalidated. Response is secret-free.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryActivatedResponse" } } }
+      },
+      "RecoveryDeadLetterList": {
+        "description": "A bounded secret-free page of owner recovery notification dead letters.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryDeadLetterListResponse" } } }
+      },
+      "RecoveryDeadLetterMutation": {
+        "description": "The secret-free state after redrive or suppression.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryDeadLetterMutationResponse" } } }
+      },
+      "RecoveryUncertainList": {
+        "description": "A bounded secret-free page of quarantined owner recovery notification deliveries.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryUncertainListResponse" } } }
+      },
+      "RecoveryUncertainMutation": {
+        "description": "The secret-free state after a bounded retry or terminal suppression.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryUncertainMutationResponse" } } }
+      },
+      "RecoveryReplay": { "description": "A one-time exchange, challenge, recent-auth proof, restricted session, or activation was replayed or already consumed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "RecoveryExpired": { "description": "The recovery request, exchange value, challenge, or restricted session has expired.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "NotFound": { "description": "Tenant or resource is not visible to this session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "VersionConflict": { "description": "Expected version is stale", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "IdempotencyConflict": { "description": "Idempotency key is reused with a different request or an incompatible in-flight result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "InvitationConflict": { "description": "Invitation token or state cannot be accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ValidationError": { "description": "Request fields fail the contract", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "PreconditionRequired": { "description": "A fresh operation-bound WebAuthn authorization is required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "TooManyRequests": { "description": "Rate limit exceeded", "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ServiceUnavailable": { "description": "A required session, registration, verifier, recent-authorization, or credential-storage dependency is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "InternalError": { "description": "Stable internal failure response; sensitive details are not disclosed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    },
+    "schemas": {
+      "DeviceOnboardingPreflightV1": { "$ref": "../schemas/device-onboarding-preflight-v1.schema.json" },
+      "DeviceOnboardingInvitationDeliveryV1": { "$ref": "../schemas/device-onboarding-invitation-delivery-v1.schema.json" },
+      "DeviceTrustInstallationAcknowledgementV1": { "$ref": "../schemas/device-trust-installation-ack-v1.schema.json" },
+      "SessionBootstrapRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. All identity and tenant context comes from the BFF-only signed assertion and server-side membership lookup."
+      },
+      "SessionBootstrapResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session", "csrf_token"],
+        "properties": {
+          "session": { "$ref": "#/components/schemas/HumanSession" },
+          "csrf_token": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+        }
+      },
+      "HumanSession": { "$ref": "../schemas/human-session-v1.schema.json" },
+      "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "RevokeOtherSessionsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. No organization_id, member_id, session_id, target list, reason, or timestamp is accepted from the caller."
+      },
+      "ManagedHumanSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "version", "member_id", "organization_id", "role", "status", "is_current", "created_at", "expires_at", "last_seen_at", "recent_auth_at", "revoked_at"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "member_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/MemberRole" },
+          "status": { "const": "revoked" },
+          "is_current": { "type": "boolean", "const": false },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "last_seen_at": { "type": ["string", "null"], "format": "date-time" },
+          "recent_auth_at": { "type": ["string", "null"], "format": "date-time" },
+          "revoked_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RevokeOtherSessionsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revoked_sessions", "revoked_count", "truncated"],
+        "x-agentpass-invariants": ["revoked_count is the exact committed total", "truncated is true exactly when revoked_count exceeds revoked_sessions.length", "revoked_sessions contains at most the first 100 committed records", "every revoked_sessions item has status=revoked and is_current=false"],
+        "properties": {
+          "revoked_sessions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ManagedHumanSession" } },
+          "revoked_count": { "type": "integer", "minimum": 0 },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "WebAuthnRegistrationOptionsRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id"],
+        "properties": { "organization_id": { "type": "string", "format": "uuid" } }
+      },
+      "RenameWebAuthnCredentialRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label"],
+        "properties": { "label": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "RevokeWebAuthnCredentialRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "minProperties": 0,
+        "maxProperties": 0
+      },
+      "WebAuthnCredentialMutationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credential"],
+        "properties": {
+          "credential": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["credential_id", "version", "label", "transports", "backup_eligible", "backup_state", "status", "created_at", "last_used_at", "revoked_at"],
+            "properties": {
+              "credential_id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+              "version": { "type": "integer", "minimum": 1 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "transports": { "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "type": "string", "enum": ["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"] } },
+              "backup_eligible": { "type": "boolean" },
+              "backup_state": { "type": "boolean" },
+              "status": { "type": "string", "enum": ["active", "revoked"] },
+              "created_at": { "type": "string", "format": "date-time" },
+              "last_used_at": { "type": ["string", "null"], "format": "date-time" },
+              "revoked_at": { "type": ["string", "null"], "format": "date-time" }
+            }
+          }
+        }
+      },
+      "WebAuthnRegistrationVerifyRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "challenge_id", "credential"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "challenge_id": { "type": "string", "format": "uuid" },
+          "credential": { "$ref": "#/components/schemas/WebAuthnBrowserRegistrationCredential" }
+        }
+      },
+      "WebAuthnBrowserRegistrationCredential": {
+        "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+        "description": "Exact browser serialization. id and rawId must be identical canonical base64url values.",
+        "x-agentpass-invariants": ["id equals rawId"],
+        "properties": {
+          "id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+          "rawId": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+          "type": { "const": "public-key" },
+          "clientExtensionResults": { "type": "object", "additionalProperties": true, "maxProperties": 32 },
+          "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+          "response": {
+            "type": "object", "additionalProperties": false, "required": ["clientDataJSON", "attestationObject"],
+            "properties": {
+              "clientDataJSON": { "type": "string", "minLength": 2, "maxLength": 21846, "pattern": "^[A-Za-z0-9_-]+$" },
+              "attestationObject": { "type": "string", "minLength": 2, "maxLength": 87382, "pattern": "^[A-Za-z0-9_-]+$" },
+              "transports": { "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "type": "string", "enum": ["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"] } }
+            }
+          }
+        }
+      },
+      "WebAuthnRegistrationOptionsResponse": {
+        "type": "object", "additionalProperties": false, "required": ["challenge_id", "options"],
+        "properties": { "challenge_id": { "type": "string", "format": "uuid" }, "options": { "$ref": "#/components/schemas/RecoveryRegistrationOptions" } }
+      },
+      "WebAuthnRegistrationVerifiedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["credential_id", "registered_at"],
+        "properties": { "credential_id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" }, "registered_at": { "type": "string", "format": "date-time" } }
+      },
+      "DeviceRefreshRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. No caller-supplied generation, bundle, ACK, notification, or policy field is accepted."
+      },
+      "AuditExportCreateRequest": { "$ref": "../schemas/audit-export-create-v1.schema.json" },
+      "AuditExportPayloadV1": { "$ref": "../schemas/audit-export-payload-v1.schema.json" },
+      "AuditExport": { "$ref": "../schemas/audit-export-response-v1.schema.json" },
+      "AuditExportVerifyRequest": { "$ref": "#/components/schemas/AuditExport" },
+      "AuditExportVerificationResult": { "$ref": "../schemas/audit-export-verification-result-v1.schema.json" },
+      "AuditExportResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "audit_export"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "audit_export": { "$ref": "#/components/schemas/AuditExport" }
+        }
+      },
+      "DeviceEnrollmentIssueRequestV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 5,
+        "required": ["label"],
+        "description": "Legacy enrollment issuance request. It contains no release candidate or artifact identity and remains valid for v1 enrollment proof.",
+        "properties": {
+          "enrollment_id": { "type": "string", "format": "uuid" },
+          "device_id": { "type": "string", "format": "uuid" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
+          "platform": { "const": "macos" },
+          "ttl_ms": { "type": "integer", "minimum": 60000, "maximum": 86400000 }
+        }
+      },
+      "PossessionReceiptVerificationV1": { "$ref": "../schemas/device-possession-receipt-verification-v1.schema.json" },
+      "DeviceEnrollmentIssueResponseV1": {
+        "type": "object",
+        "required": ["enrollment", "request_id"],
+        "properties": {
+          "enrollment": { "type": "object", "additionalProperties": true },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
+        },
+        "additionalProperties": true
+      },
+      "DeviceEnrollmentIssueResponseV2": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 2,
+        "required": ["enrollment", "request_id"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "enrollment": {
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 15,
+            "required": ["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "possession_receipt_verification", "endpoint"],
+            "properties": {
+              "version": { "const": 2 },
+              "proof_version": { "const": 2 },
+              "enrollment_id": { "type": "string", "format": "uuid" },
+              "organization_id": { "type": "string", "format": "uuid" },
+              "device_id": { "type": "string", "format": "uuid" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "platform": { "const": "macos" },
+              "candidate_binding": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 10,
+                "required": ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"],
+                "properties": {
+                  "version": { "const": 1 },
+                  "enrollment_id": { "type": "string", "format": "uuid" },
+                  "organization_id": { "type": "string", "format": "uuid" },
+                  "device_id": { "type": "string", "format": "uuid" },
+                  "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                  "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+                  "device_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+                  "expires_at": { "type": "string", "format": "date-time" }
+                }
+              },
+              "challenge_id": { "type": "string", "format": "uuid" },
+              "nonce": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+              "expires_at": { "type": "string", "format": "date-time" },
+              "challenge": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 5,
+                "required": ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"],
+                "properties": {
+                  "challenge_id": { "type": "string", "format": "uuid" },
+                  "nonce": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+                  "expires_at": { "type": "string", "format": "date-time" },
+                  "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                  "device_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" }
+                }
+              },
+              "credential": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+              "possession_receipt_verification": { "$ref": "#/components/schemas/PossessionReceiptVerificationV1" },
+              "endpoint": { "type": "string", "pattern": "^/v1/enrollments/[0-9a-f-]+$" }
+            }
+          }
+        }
+      },
+      "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
+      "QualificationGrantBatchV1": { "$ref": "../schemas/qualification-grant-batch-v1.schema.json" },
+      "AgentSessionGrantIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 9,
+        "required": ["device_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "process_binding_policy_id", "scope", "max_signatures", "ttl_seconds"],
+        "description": "Grant issuance intent only. Cloud derives and signs the grant identity, tenant/agent subject, validity timestamps, distinct control sequence and authority generation, issuer, key identifier, statement hash, and signature.",
+        "properties": {
+          "device_id": { "type": "string", "format": "uuid" },
+          "agent_kind": { "type": "string", "enum": ["claude-code", "cursor"] },
+          "adapter_id": { "type": "string", "format": "uuid" },
+          "adapter_version": { "type": "string", "minLength": 5, "maxLength": 32, "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
+          "worktree_binding_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "process_binding_policy_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+          "scope": { "$ref": "../schemas/scope-v1.schema.json" },
+          "max_signatures": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 3600 }
+        }
+      },
+      "AgentSessionGrantIssuedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["grant", "request_id"],
+        "properties": {
+          "grant": { "$ref": "#/components/schemas/AgentSessionGrantV1" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
+        }
+      },
+      "QualificationGrantBatchIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 7,
+        "required": ["artifact_sha256", "candidate_checkpoint_sha256", "candidate_sha256", "grant_intent", "release_trust_sha256", "source_commit", "team_id"],
+        "description": "Qualification request intent only. Cloud derives the batch and Grant identities, exact seven-step order, timestamps, control bindings, issuer, key identifiers, statement hashes, signatures, and manifest.",
+        "properties": {
+          "artifact_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "candidate_checkpoint_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "candidate_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "grant_intent": { "$ref": "#/components/schemas/AgentSessionGrantIssueRequest" },
+          "release_trust_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "source_commit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+          "team_id": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" }
+        }
+      },
+      "QualificationGrantBatchIssueResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 3,
+        "required": ["batch", "request_id"],
+        "properties": {
+          "batch": { "$ref": "#/components/schemas/QualificationGrantBatchV1" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "replayed": { "const": true }
+        }
+      },
+      "DeviceRefreshRequestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "request_id", "device_id", "desired_generation", "status", "requested_at"],
+        "properties": {
+          "version": { "const": 1 },
+          "request_id": { "type": "string", "format": "uuid", "description": "The wake request identifier, distinct from the top-level HTTP request correlation identifier." },
+          "device_id": { "type": "string", "format": "uuid" },
+          "desired_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "status": { "type": "string", "enum": ["accepted", "coalesced", "no_pending_refresh"] },
+          "requested_at": { "type": "string", "format": "date-time", "description": "RFC 3339 timestamp at which the wake request result was recorded." }
+        }
+      },
+      "DeviceRefreshRequestResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "refresh_request"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "refresh_request": { "$ref": "#/components/schemas/DeviceRefreshRequestResult" }
+        }
+      },
+      "DeviceConsoleState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["device_id", "name", "status", "created_at", "last_seen_at", "version", "desired_generation", "observed_generation", "refresh_state", "bundle_sequence", "bundle_expires_at", "last_ack_at", "blocked_reason"],
+        "properties": {
+          "device_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "type": "string", "enum": ["pending", "active", "revoked"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_seen_at": { "type": ["string", "null"], "format": "date-time" },
+          "version": { "type": "integer", "minimum": 1 },
+          "desired_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "observed_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "refresh_state": { "type": "string", "enum": ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"] },
+          "bundle_sequence": { "type": ["integer", "null"], "minimum": 1 },
+          "bundle_expires_at": { "type": ["string", "null"], "format": "date-time" },
+          "last_ack_at": { "type": ["string", "null"], "format": "date-time" },
+          "blocked_reason": { "type": ["string", "null"], "enum": ["bundle_expired", "bundle_not_yet_valid", "bundle_signature_invalid", "bundle_signer_untrusted", "bundle_audience_mismatch", "bundle_sequence_rollback", "bundle_sequence_conflict", "bundle_storage_failed", "device_revoked", "emergency_stop", "internal_error", null] }
+        }
+      },
+      "DeviceListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "devices"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "devices": { "type": "array", "items": { "$ref": "#/components/schemas/DeviceConsoleState" } } }
+      },
+      "Organization": { "$ref": "../schemas/organization-v1.schema.json" },
+      "Membership": { "$ref": "../schemas/membership-v1.schema.json" },
+      "MemberRole": { "type": "string", "enum": ["owner", "admin", "auditor", "viewer"] },
+      "InviteRole": { "type": "string", "enum": ["admin", "auditor", "viewer"], "description": "Owner is intentionally excluded from invitation roles." },
+      "Invitation": { "$ref": "../schemas/invitation-v1.schema.json" },
+      "OwnerRecoveryV1": { "$ref": "../schemas/owner-recovery-v1.schema.json" },
+      "CreateOwnerRecoveryRequest": {
+        "type": "object", "additionalProperties": false, "required": [], "maxProperties": 1,
+        "description": "The authenticated session member is the subject. The optional threshold is a bounded policy request; organization, subject, creator, owner eligibility, delay, expiry, and all authority metadata are resolved server-side.",
+        "properties": { "threshold": { "type": "integer", "minimum": 2, "maximum": 32 } }
+      },
+      "RecoveryEmptyRequest": { "type": "object", "additionalProperties": false, "minProperties": 0, "maxProperties": 0 },
+      "RecoveryExchangeRequest": {
+        "type": "object", "additionalProperties": false, "required": ["exchange"],
+        "description": "One-time random exchange material. Only its SHA-256 digest is durable. Clients must not place this value in browser storage, logs, telemetry, or URLs.",
+        "properties": { "exchange": { "type": "string", "minLength": 43, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$", "writeOnly": true } }
+      },
+      "RecoveryRegistrationOptionsRequest": {
+        "type": "object", "additionalProperties": false, "required": ["request_id"],
+        "properties": { "request_id": { "type": "string", "format": "uuid" } }
+      },
+      "RecoveryRegistrationVerifyRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "challenge_id", "credential"],
+        "description": "WebAuthn registration material is transport-only. The server accepts the exact browser serialization and never returns it or stores raw assertion/attestation material.",
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "challenge_id": { "type": "string", "format": "uuid" },
+          "credential": {
+            "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+            "properties": {
+              "id": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+              "rawId": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "public-key" },
+              "clientExtensionResults": { "type": "object", "additionalProperties": true },
+              "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+              "response": {
+                "type": "object", "additionalProperties": false, "required": ["clientDataJSON", "attestationObject"],
+                "properties": {
+                  "clientDataJSON": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+                  "attestationObject": { "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[A-Za-z0-9_-]+$" },
+                  "transports": { "type": "array", "items": { "type": "string", "enum": ["usb", "nfc", "ble", "internal", "hybrid"] }, "maxItems": 8 },
+                  "publicKeyAlgorithm": { "type": "integer" },
+                  "publicKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+                  "authenticatorData": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RecoveryActivationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "assertion"],
+        "description": "The newly enrolled credential creates this WebAuthn assertion. The server binds its challenge and operation to human.recovery.activate and consumes it exactly once. No session bearer is accepted in this JSON body.",
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "assertion": { "$ref": "#/components/schemas/RecoveryAuthenticationAssertion" }
+        }
+      },
+      "RecoveryAuthenticationAssertion": {
+        "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+        "description": "WebAuthn authentication assertion created by the newly enrolled recovery credential. It is transport-only and never returned, logged, or durably stored.",
+        "properties": {
+          "id": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+          "rawId": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+          "type": { "const": "public-key" },
+          "clientExtensionResults": { "type": "object", "additionalProperties": true },
+          "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+          "response": {
+            "type": "object", "additionalProperties": false, "required": ["authenticatorData", "clientDataJSON", "signature"],
+            "properties": {
+              "authenticatorData": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "clientDataJSON": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "signature": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "userHandle": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" }
+            }
+          }
+        }
+      },
+      "RecoveryEligibility": {
+        "type": "object", "additionalProperties": false, "required": ["eligible_owner_count", "threshold", "recoverable"],
+        "properties": { "eligible_owner_count": { "type": "integer", "minimum": 0, "maximum": 32 }, "threshold": { "type": "integer", "minimum": 2, "maximum": 32 }, "recoverable": { "type": "boolean" } }
+      },
+      "RecoveryRequestResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery"],
+        "description": "Public state only. exchange_value is an exceptional one-time field and is not returned after consumption or on ordinary status responses.",
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" },
+          "exchange_value": { "type": "string", "minLength": 43, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$", "writeOnly": true, "description": "Returned at most once after delay; memory-only display and immediate exchange." },
+          "eligibility": { "$ref": "#/components/schemas/RecoveryEligibility" },
+          "replayed": { "const": true }
+        }
+      },
+      "RecoverySessionMetadata": {
+        "type": "object", "additionalProperties": false, "required": ["recovery_session_id", "request_id", "member_id", "stage", "expires_at", "idle_expires_at"],
+        "properties": {
+          "recovery_session_id": { "type": "string", "format": "uuid" },
+          "request_id": { "type": "string", "format": "uuid" },
+          "member_id": { "type": "string", "format": "uuid" },
+          "stage": { "type": "string", "enum": ["session_issued", "credential_enrolled", "activated", "revoked", "expired"] },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "idle_expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RecoverySessionResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery_session"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery_session": { "$ref": "#/components/schemas/RecoverySessionMetadata" } }
+      },
+      "RecoveryRegistrationOptions": {
+        "type": "object", "additionalProperties": false, "required": ["rp", "user", "challenge", "pubKeyCredParams"],
+        "properties": {
+          "rp": { "type": "object", "additionalProperties": false, "required": ["id", "name"], "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 253 }, "name": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+          "user": { "type": "object", "additionalProperties": false, "required": ["id", "name", "displayName"], "properties": { "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }, "name": { "type": "string", "minLength": 1, "maxLength": 320 }, "displayName": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+          "challenge": { "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+          "pubKeyCredParams": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "object", "additionalProperties": false, "required": ["type", "alg"], "properties": { "type": { "const": "public-key" }, "alg": { "type": "integer" } } } },
+          "timeout": { "type": "integer", "minimum": 1, "maximum": 120000 },
+          "excludeCredentials": { "type": "array", "maxItems": 100, "items": { "type": "object", "additionalProperties": false, "required": ["id", "type"], "properties": { "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }, "type": { "const": "public-key" }, "transports": { "type": "array", "items": { "type": "string" }, "maxItems": 8 } } } },
+          "authenticatorSelection": { "type": "object", "additionalProperties": false, "properties": { "authenticatorAttachment": { "type": "string" }, "residentKey": { "type": "string" }, "requireResidentKey": { "type": "boolean" }, "userVerification": { "type": "string" } } },
+          "hints": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
+          "attestation": { "type": "string" },
+          "attestationFormats": { "type": "array", "items": { "type": "string" }, "maxItems": 16 },
+          "extensions": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "RecoveryRegistrationOptionsResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "challenge_id", "options"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "challenge_id": { "type": "string", "format": "uuid" }, "options": { "$ref": "#/components/schemas/RecoveryRegistrationOptions" } }
+      },
+      "RecoveryRegistrationVerifiedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery", "registered", "activation"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" }, "registered": { "const": true }, "activation": { "$ref": "#/components/schemas/RecoveryActivationChallenge" } }
+      },
+      "RecoveryActivationChallenge": {
+        "type": "object", "additionalProperties": false, "required": ["challenge_id", "options"],
+        "properties": { "challenge_id": { "type": "string", "format": "uuid" }, "options": { "type": "object", "additionalProperties": true } }
+      },
+      "RecoveryActivatedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery", "activated"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" }, "activated": { "const": true } }
+      },
+      "CreateOrganizationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "RenameOrganizationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "UpdateMemberRoleRequest": {
+        "type": "object", "additionalProperties": false, "required": ["role"],
+        "properties": { "role": { "$ref": "#/components/schemas/MemberRole" } }
+      },
+      "CreateInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["role", "expires_at"],
+        "properties": {
+          "role": { "$ref": "#/components/schemas/InviteRole" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "Short-lived expiry chosen by the server within its configured maximum." }
+        }
+      },
+      "ReissueInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["reissue_invitation_id", "expires_at"],
+        "description": "Rotates the one-time token for a pending or expired invitation. The request must also carry If-Match with the current invitation version and a recent operation-bound WebAuthn proof. Accepted and revoked invitations are terminal.",
+        "properties": {
+          "reissue_invitation_id": { "type": "string", "format": "uuid" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "New short-lived expiry; it must be later than the server evaluation time." }
+        }
+      },
+      "AcceptInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["one_time_token"],
+        "description": "The request deliberately has no email field. The authenticated humanSession identity, not an email claim, receives the membership.",
+        "properties": {
+          "one_time_token": { "type": "string", "minLength": 43, "maxLength": 512, "writeOnly": true, "description": "Random, single-use bearer token returned by invitation creation." }
+        }
+      },
+      "OrganizationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "organization"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "organization": { "$ref": "#/components/schemas/Organization" } }
+      },
+      "OrganizationListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "organizations"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "organizations": { "type": "array", "items": { "$ref": "#/components/schemas/Organization" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "MemberResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "member"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "member": { "$ref": "#/components/schemas/Membership" } }
+      },
+      "MemberListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "members"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "members": { "type": "array", "items": { "$ref": "#/components/schemas/Membership" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "InvitationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitation": { "$ref": "#/components/schemas/Invitation" } }
+      },
+      "InvitationListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitations"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitations": { "type": "array", "items": { "$ref": "#/components/schemas/Invitation" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "InvitationCreatedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation", "one_time_token"],
+        "description": "The one_time_token is returned once and must be delivered through a protected channel. It is never returned by list, get, revoke, or accept responses.",
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "invitation": { "$ref": "#/components/schemas/Invitation" },
+          "one_time_token": { "type": "string", "minLength": 43, "maxLength": 512, "writeOnly": true, "description": "Random token with at least 256 bits of entropy; only its server-side hash is durable." }
+        }
+      },
+      "InvitationAcceptedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation", "member"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitation": { "$ref": "#/components/schemas/Invitation" }, "member": { "$ref": "#/components/schemas/Membership" } }
+      },
+      "SuppressRecoveryDeadLetterRequest": {
+        "type": "object", "additionalProperties": false, "required": ["reason"],
+        "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" } }
+      },
+      "RecoveryDeadLetter": {
+        "type": "object", "additionalProperties": false,
+        "required": ["organization_id", "event_id", "request_id", "subject_member_id", "event_type", "status", "attempts", "total_attempts", "management_version", "redrive_count", "last_error_code", "created_at", "updated_at", "suppressed_at", "suppression_reason"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" }, "event_id": { "type": "string", "format": "uuid" }, "request_id": { "type": "string", "format": "uuid" }, "subject_member_id": { "type": "string", "format": "uuid" },
+          "event_type": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$" }, "status": { "const": "dead_letter" }, "attempts": { "type": "integer", "minimum": 0 }, "total_attempts": { "type": "integer", "minimum": 0 }, "management_version": { "type": "integer", "minimum": 1 }, "redrive_count": { "type": "integer", "minimum": 0 }, "last_error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "suppressed_at": { "type": ["string", "null"], "format": "date-time" }, "suppression_reason": { "type": ["string", "null"], "maxLength": 128 }
+        }
+      },
+      "RecoveryDeadLetterMutation": {
+        "type": "object", "additionalProperties": false,
+        "required": ["organization_id", "event_id", "status", "attempts", "total_attempts", "management_version", "redrive_count", "suppressed_at", "suppression_reason"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" }, "event_id": { "type": "string", "format": "uuid" }, "status": { "enum": ["pending", "suppressed"] }, "attempts": { "type": "integer", "minimum": 0 }, "total_attempts": { "type": "integer", "minimum": 0 }, "management_version": { "type": "integer", "minimum": 1 }, "redrive_count": { "type": "integer", "minimum": 0 }, "suppressed_at": { "type": ["string", "null"], "format": "date-time" }, "suppression_reason": { "type": ["string", "null"], "maxLength": 128 }
+        }
+      },
+      "RecoveryDeadLetterListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["dead_letters", "next_cursor"],
+        "properties": { "dead_letters": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/RecoveryDeadLetter" } }, "next_cursor": { "type": ["string", "null"], "maxLength": 512 } }
+      },
+      "RecoveryDeadLetterMutationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["dead_letter"],
+        "properties": { "dead_letter": { "$ref": "#/components/schemas/RecoveryDeadLetterMutation" } }
+      },
+      "RecoveryUncertainDelivery": {
+        "type": "object", "additionalProperties": false,
+        "required": ["organization_id", "event_id", "request_id", "subject_member_id", "event_type", "status", "attempts", "total_attempts", "management_version", "redrive_count", "last_error_code", "uncertain_at", "uncertain_reason", "created_at", "updated_at", "suppressed_at", "suppression_reason"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" }, "event_id": { "type": "string", "format": "uuid" }, "request_id": { "type": "string", "format": "uuid" }, "subject_member_id": { "type": "string", "format": "uuid" },
+          "event_type": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$" }, "status": { "const": "uncertain" }, "attempts": { "type": "integer", "minimum": 0 }, "total_attempts": { "type": "integer", "minimum": 0 }, "management_version": { "type": "integer", "minimum": 1 }, "redrive_count": { "type": "integer", "minimum": 0, "maximum": 3 }, "last_error_code": { "const": "delivery_uncertain" }, "uncertain_at": { "type": "string", "format": "date-time" }, "uncertain_reason": { "enum": ["provider_timeout", "provider_transport_error", "provider_response_invalid", "terminal_commit_unknown", "process_interrupted", "delivery_unknown", "provider_unconfigured", "legacy_unbound"] }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "suppressed_at": { "type": ["string", "null"], "format": "date-time" }, "suppression_reason": { "type": ["string", "null"], "maxLength": 128 }
+        }
+      },
+      "RecoveryUncertainMutation": {
+        "type": "object", "additionalProperties": false,
+        "required": ["organization_id", "event_id", "status", "attempts", "total_attempts", "management_version", "redrive_count", "uncertain_at", "uncertain_reason", "suppressed_at", "suppression_reason"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" }, "event_id": { "type": "string", "format": "uuid" }, "status": { "enum": ["pending", "suppressed"] }, "attempts": { "type": "integer", "minimum": 0 }, "total_attempts": { "type": "integer", "minimum": 0 }, "management_version": { "type": "integer", "minimum": 1 }, "redrive_count": { "type": "integer", "minimum": 0, "maximum": 3 }, "uncertain_at": { "type": ["string", "null"], "enum": [null] }, "uncertain_reason": { "type": ["string", "null"], "enum": [null] }, "suppressed_at": { "type": ["string", "null"], "format": "date-time" }, "suppression_reason": { "type": ["string", "null"], "maxLength": 128 }
+        }
+      },
+      "RecoveryUncertainListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["uncertain_deliveries", "next_cursor"],
+        "properties": { "uncertain_deliveries": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/RecoveryUncertainDelivery" } }, "next_cursor": { "type": ["string", "null"], "maxLength": 512 } }
+      },
+      "RecoveryUncertainMutationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["uncertain_delivery"],
+        "properties": { "uncertain_delivery": { "$ref": "#/components/schemas/RecoveryUncertainMutation" } }
+      },
+      "Error": {
+        "type": "object", "additionalProperties": false, "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "string", "enum": ["invalid_request", "csrf_failed", "authentication_required", "forbidden", "resource_not_found", "version_conflict", "idempotency_key_reused", "last_owner_protected", "role_not_allowed", "invitation_invalid", "invitation_expired", "invitation_revoked", "invitation_already_accepted", "invitation_token_replayed", "rate_limited", "internal_error"] },
+          "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "details": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object", "additionalProperties": false, "required": ["error", "request_id"],
+        "properties": { "error": { "$ref": "#/components/schemas/Error" }, "request_id": { "$ref": "#/components/schemas/RequestId" } }
+      }
+    }
+  }
+}

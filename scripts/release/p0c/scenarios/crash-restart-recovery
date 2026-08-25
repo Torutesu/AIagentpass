@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { join, resolve } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import {
+  canonicalJSON,
+  executePhysicalScenario,
+  parseJSONOutput,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from '../lib/scenario-runtime.mjs';
+
+const GATE = 'crash-restart-recovery';
+const TESTS = Object.freeze(['service-crash-recovery', 'os-reboot-recovery']);
+const SERVICE_LABEL = 'dev.agentpass.native-service';
+const LAUNCHCTL = '/bin/launchctl';
+const SYSCTL = '/usr/sbin/sysctl';
+const REBOOT_MARKER_NAME = 'crash-restart-recovery.reboot.json';
+const REBOOT_MARKER_SCHEMA = 1;
+const CONTROL_REFRESH_ARGS = Object.freeze(['--service', SERVICE_LABEL, 'control-refresh']);
+// Darwin prints `{ sec = …, usec = … }` and may append a human-readable date.
+// Bind only the kernel-owned numeric tuple; the localized suffix is not stable.
+const BOOT_TIME_PATTERN = /^\{\s*sec\s*=\s*([0-9]+)\s*,\s*usec\s*=\s*([0-9]+)\s*\}(?:\s.*)?$/u;
+
+const exactKeys = (value, keys, label) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has missing or unknown fields`);
+};
+
+const requireRoot = (getUid = process.getuid) => {
+  if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root');
+};
+
+const resultBytes = (result) => Buffer.concat([result?.stdout ?? Buffer.alloc(0), result?.stderr ?? Buffer.alloc(0)]);
+
+const runAndRequire = async (runCommand, command, args) => requireCommandSuccess(await runCommand(command, args, { cwd: '/' }), command);
+
+const parseServicePid = (result) => {
+  const output = resultBytes(result).toString('utf8');
+  const matches = [...output.matchAll(/(?:^|\n)\s*pid\s*=\s*([1-9][0-9]*)\s*$/gmu)];
+  if (matches.length !== 1) throw new Error('launchd service PID was not mechanically observable');
+  const pid = Number(matches[0][1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('launchd service PID is invalid');
+  return pid;
+};
+
+const observeServicePid = async (runCommand) => parseServicePid(await runCommand(LAUNCHCTL, ['print', `system/${SERVICE_LABEL}`], { cwd: '/' }));
+
+const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+const waitForRestart = async (runCommand, previousPid, { sleepFn = sleep, attempts = 40, intervalMs = 250 } = {}) => {
+  if (!Number.isSafeInteger(previousPid) || previousPid <= 0) throw new Error('previous service PID is invalid');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const pid = await observeServicePid(runCommand);
+      if (pid !== previousPid) return pid;
+    } catch {
+      // launchd may have removed the dead process before it publishes the new one.
+    }
+    if (attempt + 1 < attempts) await sleepFn(intervalMs);
+  }
+  throw new Error('launchd service did not restart with a new PID');
+};
+
+const killService = async (runCommand) => {
+  await runAndRequire(runCommand, LAUNCHCTL, ['kill', 'SIGKILL', `system/${SERVICE_LABEL}`]);
+};
+
+const parseNativeClientEnvelope = (result, label) => {
+  let value;
+  try {
+    value = parseJSONOutput(resultBytes(result), label);
+  } catch {
+    throw new Error(`${label} did not return a native client envelope`);
+  }
+  exactKeys(value, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`);
+  if (typeof value.ok !== 'boolean' || (value.error !== null && typeof value.error !== 'string') || (value.version !== null && !Number.isInteger(value.version))) throw new Error(`${label} envelope is invalid`);
+  return value;
+};
+
+const requireFailedNativeResponse = (result, label) => {
+  if (result?.ok === true) throw new Error(`${label} unexpectedly completed before the service was killed`);
+  const envelope = parseNativeClientEnvelope(result, label);
+  if (envelope.ok !== false || typeof envelope.error !== 'string' || envelope.error.length === 0) throw new Error(`${label} did not expose a lost XPC response`);
+  return envelope;
+};
+
+const runLostResponseRetry = async ({ machine, production, runCommand, runPinned, sleepFn = sleep, killDelayMs = 50 } = {}) => {
+  const beforePid = await observeServicePid(runCommand);
+  let firstSettled = false;
+  const firstRequest = Promise.resolve(runPinned(machine.executables.native_client, CONTROL_REFRESH_ARGS, { production, runCommand })).then((result) => {
+    firstSettled = true;
+    return result;
+  });
+  await sleepFn(killDelayMs);
+  if (firstSettled) throw new Error('lost-response window was not mechanically observable');
+  await killService(runCommand);
+  const firstResult = await firstRequest;
+  requireFailedNativeResponse(firstResult, 'lost-response control refresh');
+  const restartedPid = await waitForRestart(runCommand, beforePid, { sleepFn });
+  const retryResult = await runPinned(machine.executables.native_client, CONTROL_REFRESH_ARGS, { production, runCommand });
+  requireCommandSuccess(retryResult, 'retry control refresh');
+  const retryEnvelope = parseNativeClientEnvelope(retryResult, 'retry control refresh');
+  if (retryEnvelope.ok !== true) throw new Error('retry control refresh returned a failed native envelope');
+  return Object.freeze({ beforePid, restartedPid });
+};
+
+const readBootIdentity = async (runCommand) => {
+  const output = requireCommandSuccess(await runCommand(SYSCTL, ['-n', 'kern.boottime'], { cwd: '/' }), 'kernel boot identity').toString('utf8').trim();
+  const match = BOOT_TIME_PATTERN.exec(output ?? '');
+  if (!match) throw new Error('kernel boot identity was not mechanically observable');
+  return `${match[1]}:${match[2]}`;
+};
+
+const markerPath = (checkpointDirectory) => resolve(join(checkpointDirectory, REBOOT_MARKER_NAME));
+
+const readMarker = (fileSystem, path) => {
+  let descriptor;
+  try {
+    descriptor = fileSystem.openSync(path, fileSystem.constants.O_RDONLY | fileSystem.constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw new Error('reboot observation marker is unavailable');
+  }
+  try {
+    const stat = fileSystem.fstatSync(descriptor, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || (stat.mode & 0o7777n) !== 0o600n || stat.size <= 0n || stat.size > 64n * 1024n) throw new Error('reboot observation marker is unsafe');
+    const bytes = Buffer.alloc(Number(stat.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fileSystem.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) throw new Error('reboot observation marker changed while reading');
+      offset += count;
+    }
+    let value;
+    try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('reboot observation marker is invalid JSON'); }
+    if (!bytes.equals(canonicalJSON(value))) throw new Error('reboot observation marker is not canonical JSON');
+    exactKeys(value, ['artifact_sha256', 'boot_identity', 'schema_version', 'source_commit', 'team_id'], 'reboot observation marker');
+    if (value.schema_version !== REBOOT_MARKER_SCHEMA || !/^[0-9a-f]{64}$/u.test(value.artifact_sha256) || !/^[0-9a-f]{40}$/u.test(value.source_commit) || !/^[A-Z0-9]{10}$/u.test(value.team_id) || !/^[0-9]+:[0-9]+$/u.test(value.boot_identity)) throw new Error('reboot observation marker is invalid');
+    return Object.freeze(value);
+  } finally {
+    fileSystem.closeSync(descriptor);
+  }
+};
+
+const writeMarker = (fileSystem, path, value) => {
+  const bytes = canonicalJSON(value);
+  const temporary = `${path}.${process.pid}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fileSystem.openSync(temporary, fileSystem.constants.O_WRONLY | fileSystem.constants.O_CREAT | fileSystem.constants.O_EXCL | fileSystem.constants.O_NOFOLLOW, 0o600);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fileSystem.writeSync(descriptor, bytes, offset, bytes.length - offset);
+      if (count <= 0) throw new Error('reboot observation marker write failed');
+      offset += count;
+    }
+    fileSystem.fsyncSync(descriptor);
+    fileSystem.closeSync(descriptor);
+    descriptor = undefined;
+    fileSystem.renameSync(temporary, path);
+    const parent = fileSystem.openSync(resolve(path, '..'), fileSystem.constants.O_RDONLY | (fileSystem.constants.O_DIRECTORY ?? 0) | fileSystem.constants.O_NOFOLLOW);
+    try { fileSystem.fsyncSync(parent); } finally { fileSystem.closeSync(parent); }
+  } finally {
+    if (descriptor !== undefined) fileSystem.closeSync(descriptor);
+    try { fileSystem.unlinkSync(temporary); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  }
+};
+
+const verifyRebootObservation = async ({ release, machine, runCommand, fileSystem = fs } = {}) => {
+  const path = markerPath(machine.checkpointDirectory);
+  const currentBootIdentity = await readBootIdentity(runCommand);
+  const previous = readMarker(fileSystem, path);
+  if (!previous) {
+    writeMarker(fileSystem, path, { schema_version: REBOOT_MARKER_SCHEMA, artifact_sha256: release.artifactSha256, source_commit: release.sourceCommit, team_id: release.teamId, boot_identity: currentBootIdentity });
+    throw new Error('OS reboot qualification is pending; rerun after a real reboot');
+  }
+  if (previous.artifact_sha256 !== release.artifactSha256 || previous.source_commit !== release.sourceCommit || previous.team_id !== release.teamId) throw new Error('reboot observation marker is bound to a different release');
+  if (previous.boot_identity === currentBootIdentity) throw new Error('OS reboot was not mechanically observed');
+  fileSystem.unlinkSync(path);
+  const parent = fileSystem.openSync(resolve(path, '..'), fileSystem.constants.O_RDONLY | (fileSystem.constants.O_DIRECTORY ?? 0) | fileSystem.constants.O_NOFOLLOW);
+  try { fileSystem.fsyncSync(parent); } finally { fileSystem.closeSync(parent); }
+  return true;
+};
+
+export const performCrashRestartRecovery = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, fileSystem = fs, sleepFn = sleep, killDelayMs = 50 } = {}) => {
+  requireRoot(getUid);
+  if (machine.serviceLabel !== SERVICE_LABEL) throw new Error('scenario config service identity is not fixed');
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const initialPid = await observeServicePid(runCommand);
+    const initialPing = await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'ping'], { production, runCommand });
+    requireCommandSuccess(initialPing, 'native service preflight ping');
+
+    await runLostResponseRetry({ machine, production, runCommand, runPinned, sleepFn, killDelayMs });
+
+    const crashPid = await observeServicePid(runCommand);
+    if (crashPid === initialPid) throw new Error('lost-response test did not replace the service process');
+    await killService(runCommand);
+    await waitForRestart(runCommand, crashPid, { sleepFn });
+    const recoveryPing = await runPinned(machine.executables.native_client, ['--service', SERVICE_LABEL, 'ping'], { production, runCommand });
+    requireCommandSuccess(recoveryPing, 'native service post-crash ping');
+
+    await verifyRebootObservation({ release, machine, runCommand, fileSystem });
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: machine.applicationPath } });
+};
+
+export const executeCrashRestartRecovery = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performCrashRestartRecovery(context) });
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performCrashRestartRecovery(context) });

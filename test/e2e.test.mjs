@@ -57,9 +57,12 @@ test("Git creates a signed commit through the AgentPass broker", { timeout: 30_0
 
   const session = run(process.execPath, [cli, "session", "start", "300"], { cwd: repo, env });
   const broker = spawn(process.execPath, [daemon], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
+  let brokerStderr = "";
+  broker.stderr.setEncoding("utf8");
+  broker.stderr.on("data", (chunk) => { brokerStderr += chunk; });
   const socket = path.join(testHome, ".agentpass", "agentpass.sock");
   try {
-    await waitForSocket(socket, broker);
+    await waitForSocket(socket, broker, () => brokerStderr);
     run("git", ["-C", repo, "config", "gpg.format", "ssh"]);
     run("git", ["-C", repo, "config", "user.signingkey", `${key}.pub`]);
     run("git", ["-C", repo, "config", "gpg.ssh.program", signingProgram]);
@@ -74,15 +77,38 @@ test("Git creates a signed commit through the AgentPass broker", { timeout: 30_0
     const verification = JSON.parse(run(process.execPath, [cli, "audit", "--verify"], { cwd: repo, env }));
     assert.equal(verification.valid, true);
   } finally {
-    broker.kill("SIGTERM");
-    await new Promise((resolve) => broker.once("exit", resolve));
+    await stopBroker(broker);
   }
 });
 
-async function waitForSocket(socket, broker) {
+async function stopBroker(broker) {
+  if (broker.exitCode !== null || broker.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const onExit = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      broker.removeListener("exit", onExit);
+      broker.removeListener("error", onError);
+    };
+    broker.once("exit", onExit);
+    broker.once("error", onError);
+    if (broker.exitCode === null && broker.signalCode === null) broker.kill("SIGTERM");
+  });
+}
+
+async function waitForSocket(socket, broker, getStderr = () => "") {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (fs.existsSync(socket)) return;
-    if (broker.exitCode !== null) throw new Error("Broker exited before creating its socket");
+    if (broker.exitCode !== null) {
+      const detail = getStderr().trim();
+      throw new Error(`Broker exited before creating its socket${detail ? `: ${detail}` : ""}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("Broker socket did not appear");
