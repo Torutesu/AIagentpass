@@ -43,7 +43,7 @@ agentpass small-software prepare
 agentpass small-software publish --plan-only
 ```
 
-現在のOSS経路は意図的にplan-onlyです。実Cloudflare/GitHub/PostgreSQLの資格確認と本番証跡は別の外部ゲートです。詳細は [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md)、[Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md)、[Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md) を参照してください。
+現在のOSS経路は意図的にplan-onlyです。実Cloudflare/GitHub/PostgreSQLの資格確認と本番証跡は別の外部ゲートです。詳細は [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md)、[Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md)、[Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md)、[Product Hunt Early Alpha launch guide](docs/PRODUCT_HUNT_EARLY_ALPHA_LAUNCH.md) を参照してください。
 
 ## クイックスタート
 

@@ -77,7 +77,7 @@ agentpass small-software prepare
 agentpass small-software publish --plan-only
 ```
 
-The current OSS path is intentionally plan-only: provider deployment, Cloudflare credentials, GitHub PR creation, PostgreSQL role qualification, and production evidence remain explicit external gates. See [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md), [Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md), and [Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md).
+The current OSS path is intentionally plan-only: provider deployment, Cloudflare credentials, GitHub PR creation, PostgreSQL role qualification, and production evidence remain explicit external gates. See [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md), [Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md), [Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md), and the [Product Hunt Early Alpha launch guide](docs/PRODUCT_HUNT_EARLY_ALPHA_LAUNCH.md).
 
 ## Quick start
 
