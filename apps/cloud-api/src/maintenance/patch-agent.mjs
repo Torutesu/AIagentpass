@@ -79,9 +79,11 @@ function validateChange(item, index, allowedPaths) {
   if (!["add", "modify", "delete"].includes(value.operation)) fail(PATCH_AGENT_ERROR_CODES.INVALID_INPUT, `changes[${index}].operation is invalid`);
   if (typeof value.diff !== "string" || value.diff.length === 0 || Buffer.byteLength(value.diff, "utf8") > MAX_FILE_DIFF_BYTES) fail(PATCH_AGENT_ERROR_CODES.LIMIT_EXCEEDED, `changes[${index}].diff is invalid or too large`);
   ensureNoSecret(value.diff, `changes[${index}].diff`);
+  if (/(?:^|\n)\+#!|\b(?:chmod|install)\s+[+]?x\b/iu.test(value.diff)) fail(PATCH_AGENT_ERROR_CODES.EXECUTABLE_REJECTED, `changes[${index}].diff introduces executable content`);
   if (value.content !== undefined) {
     if (typeof value.content !== "string" || Buffer.byteLength(value.content, "utf8") > MAX_FILE_DIFF_BYTES) fail(PATCH_AGENT_ERROR_CODES.LIMIT_EXCEEDED, `changes[${index}].content is invalid or too large`);
     ensureNoSecret(value.content, `changes[${index}].content`);
+    if (/^#!/u.test(value.content)) fail(PATCH_AGENT_ERROR_CODES.EXECUTABLE_REJECTED, `changes[${index}].content is executable`);
     if (value.operation === "delete") fail(PATCH_AGENT_ERROR_CODES.INVALID_INPUT, "delete changes cannot carry content");
     const actual = sha256(value.content);
     if (value.after_digest !== undefined && value.after_digest !== actual) fail(PATCH_AGENT_ERROR_CODES.INVALID_INPUT, "after_digest does not match content");
