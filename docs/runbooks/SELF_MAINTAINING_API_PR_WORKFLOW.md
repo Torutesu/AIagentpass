@@ -35,3 +35,13 @@ The provider worker must independently authenticate the repository, verify the
 intent digest, submit only a draft PR, and persist the response as a separate
 effect/receipt. A successful local test or fixture is not external GitHub
 qualification.
+
+## Read-only status projection
+
+`projectMaintenancePrStatus` is the read boundary for CLI, MCP, and Console
+surfaces. It requires the same tenant, repository, plan, and job bindings as
+the intent, and emits only state, branch/commit identities, content digests,
+approval/uncertainty flags, and reconciled provider identifiers. PR body,
+check-run payloads, provider response bodies, and credentials are excluded.
+The projection is read-only and carries `retry_allowed: false` for every
+state, including `reconcile_required`.

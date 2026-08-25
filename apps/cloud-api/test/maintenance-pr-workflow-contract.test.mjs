@@ -8,7 +8,8 @@ import {
   evaluateDraftPullRequest,
   maintenanceResultBindingDigest,
   markPullRequestOperationUncertain,
-  reconcilePullRequestOperation
+  reconcilePullRequestOperation,
+  projectMaintenancePrStatus
 } from "../src/maintenance/pr-workflow.mjs";
 
 const now = "2026-08-25T00:00:00.000Z";
@@ -45,4 +46,19 @@ test("uncertain provider response is reconciled without retry authority", () => 
   assert.equal(pending.state, "reconcile_required"); assert.equal(pending.retry_allowed, false);
   const done = reconcilePullRequestOperation({ uncertain, observation: { operation_id: uncertain.operation_id, request_digest: uncertain.request_digest, provider_state: "draft", response_digest: digest("a"), observed_at: now }, now });
   assert.equal(done.state, "reconciled"); assert.equal(done.retry_allowed, false);
+});
+
+test("status projection is tenant-bound, redacted, and exposes only digest identities", () => {
+  const value = base();
+  const intent = buildDraftPullRequestIntent({ ...value, title: "Update API", now });
+  const status = projectMaintenancePrStatus({ job: value.job, plan: value.plan, workflow: { state: "pr_create_intent", intent }, now });
+  assert.equal(status.kind, "agentpass.maintenance.pull-request-status");
+  assert.equal(status.organization_id, value.job.organization_id);
+  assert.equal(status.head_branch, intent.head_branch);
+  assert.equal(status.patch_digest, value.result.patch_digest);
+  assert.equal(status.result_digest, value.result.result_digest);
+  assert.equal(Object.hasOwn(status, "body"), false);
+  assert.equal(Object.hasOwn(status, "title"), false);
+  assert.equal(Object.hasOwn(status, "check_runs"), false);
+  assert.throws(() => projectMaintenancePrStatus({ job: value.job, plan: value.plan, workflow: { state: "pr_create_intent", intent: { ...intent, organization_id: "other" } }, now }), { code: PR_WORKFLOW_ERROR_CODES.BINDING_MISMATCH });
 });

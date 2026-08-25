@@ -287,6 +287,87 @@ export function reconcilePullRequestOperation({ uncertain, observation, now } = 
 
 export const reconcileUncertainPullRequestOperation = reconcilePullRequestOperation;
 
+/**
+ * Project a provider-neutral, redacted status for CLI/MCP/Console readers.
+ * The projection intentionally excludes PR body, check-run names/URLs, and
+ * any provider response payload; only already-bound digests and identifiers
+ * cross this read boundary.
+ */
+export function projectMaintenancePrStatus({ job, plan, workflow, now } = {}) {
+  validateWorkflowJobPlan(job, plan);
+  const value = object(workflow, "workflow status");
+  const state = value.state;
+  if (!PR_WORKFLOW_STATES.includes(state)) fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "workflow state is invalid");
+  const updatedAt = now ?? value.reconciled_at ?? value.occurred_at ?? value.created_at;
+  timestamp(updatedAt, "updated_at");
+  const result = {
+    schema_version: 1,
+    kind: "agentpass.maintenance.pull-request-status",
+    organization_id: job.organization_id,
+    job_id: job.job_id,
+    repository_id: job.repository_id,
+    plan_digest: plan.plan_digest,
+    state,
+    approval_required: state === "awaiting_approval",
+    draft: state === "pr_create_intent" || state === "awaiting_approval",
+    retry_allowed: false,
+    updated_at: updatedAt
+  };
+  const branch = value.head_branch ?? value.branch;
+  if (branch !== undefined) {
+    if (typeof branch !== "string" || !BRANCH.test(branch)) fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "workflow branch is invalid");
+    result.head_branch = branch;
+  }
+  for (const key of ["patch_digest", "result_digest", "check_runs_digest", "request_digest", "response_digest"]) {
+    if (value[key] !== undefined) digest(value[key], key);
+    if (value[key] !== undefined) result[key] = value[key];
+  }
+  if (state === "pr_create_intent") {
+    const intent = object(value.intent, "pull-request intent");
+    if (intent.job_id !== job.job_id || intent.organization_id !== job.organization_id || intent.repository_id !== job.repository_id || intent.plan_digest !== plan.plan_digest || intent.draft !== true || intent.state !== "pr_create_intent") fail(PR_WORKFLOW_ERROR_CODES.BINDING_MISMATCH, "intent is not bound to the status subject");
+    if (intent.base_commit !== plan.base_commit || typeof intent.head_commit !== "string" || intent.head_commit.length === 0) fail(PR_WORKFLOW_ERROR_CODES.BINDING_MISMATCH, "intent commit binding is invalid");
+    result.base_commit = intent.base_commit;
+    result.head_commit = intent.head_commit;
+    if (typeof intent.head_branch !== "string" || !BRANCH.test(intent.head_branch)) fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "intent branch is invalid");
+    result.head_branch = intent.head_branch;
+    for (const key of ["patch_digest", "result_digest", "check_runs_digest", "request_digest"]) {
+      result[key] = digest(intent[key], key);
+    }
+    result.approval_id = id(intent.approval_id, "approval_id");
+    result.intent_id = id(intent.intent_id, "intent_id");
+  } else if (state === "uncertain" || state === "reconcile_required" || state === "reconciled") {
+    if (value.job_id !== job.job_id || value.organization_id !== job.organization_id) fail(PR_WORKFLOW_ERROR_CODES.BINDING_MISMATCH, "operation is not bound to the status subject");
+    result.operation_id = id(value.operation_id, "operation_id");
+    result.request_digest = digest(value.request_digest, "request_digest");
+    if (typeof value.reason === "string") result.uncertainty = value.reason;
+    if (state !== "uncertain") {
+      if (!PROVIDER_STATES.has(value.provider_state)) fail(PR_WORKFLOW_ERROR_CODES.RECONCILIATION_REQUIRED, "provider state is invalid");
+      result.provider_state = value.provider_state;
+    }
+    if (state === "reconciled") {
+      if (value.external_number !== undefined && (!Number.isSafeInteger(value.external_number) || value.external_number < 1)) fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "external_number is invalid");
+      if (value.url !== undefined && (typeof value.url !== "string" || !/^https:\/\/[^\s\0]{1,2048}$/u.test(value.url))) fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "provider URL is invalid");
+      if (value.external_number !== undefined) result.external_number = value.external_number;
+      if (value.url !== undefined) result.url = value.url;
+    }
+  } else {
+    result.patch_digest = digest(value.patch_digest, "patch_digest");
+    result.result_digest = digest(value.result_digest, "result_digest");
+    result.check_runs_digest = digest(value.check_runs_digest, "check_runs_digest");
+    result.head_branch = maintenanceBranchName({ job, patchDigest: value.patch_digest });
+  }
+  return Object.freeze(result);
+}
+
+function validateWorkflowJobPlan(job, plan) {
+  try { validateMaintenanceJob(job); validateMaintenancePlan(plan); }
+  catch { fail(PR_WORKFLOW_ERROR_CODES.INVALID_INPUT, "maintenance status subject is invalid"); }
+  if (job.organization_id !== plan.organization_id || job.repository_id !== plan.repository_id || job.plan_id !== plan.plan_id || job.plan_digest !== plan.plan_digest) fail(PR_WORKFLOW_ERROR_CODES.BINDING_MISMATCH, "status subject bindings do not match");
+}
+
+export const projectPullRequestStatus = projectMaintenancePrStatus;
+export const projectPrWorkflowStatus = projectMaintenancePrStatus;
+
 export function createPullRequestWorkflowAdapter() {
   return Object.freeze({
     branchName: maintenanceBranchName,
@@ -296,7 +377,8 @@ export function createPullRequestWorkflowAdapter() {
     prepare: evaluateDraftPullRequest,
     createDraftPullRequestIntent: buildDraftPullRequestIntent,
     markUncertain: markPullRequestOperationUncertain,
-    reconcile: reconcilePullRequestOperation
+    reconcile: reconcilePullRequestOperation,
+    projectStatus: projectMaintenancePrStatus
   });
 }
 
