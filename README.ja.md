@@ -32,6 +32,19 @@ AgentPassでは、秘密鍵はMac側に残り、エージェントはポリシ�
 
 ![AgentPassの権限境界](docs/assets/agentpass-boundary.svg)
 
+## Small Software Cloud（Early Alpha）
+
+Claude CodeやCursorで、自分専用CRM、社内workflow、dashboard、顧客専用ツールを数分で作れるようになりました。AgentPassは、その後に残るdeploy・権限・共有の境界を扱います。プロジェクトを検査し、source bundleとpublish planを作り、資格情報をエージェントへ渡さずに共有できます。
+
+```sh
+agentpass small-software inspect
+agentpass small-software bundle
+agentpass small-software prepare
+agentpass small-software publish --plan-only
+```
+
+現在のOSS経路は意図的にplan-onlyです。実Cloudflare/GitHub/PostgreSQLの資格確認と本番証跡は別の外部ゲートです。詳細は [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md)、[Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md)、[Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md) を参照してください。
+
 ## クイックスタート
 
 ```sh

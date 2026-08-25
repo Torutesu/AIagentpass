@@ -66,6 +66,19 @@ and do not treat the evaluation path as production approval.
 
 Password managers are designed around human approval. Coding agents need unattended execution, but a plaintext key gives an untrusted process too much power. AgentPass starts with Git commit signing: the private key remains in macOS Secure Enclave-backed infrastructure, while AgentPass applies repository, branch, and remote policy before delegating to `ssh-keygen`.
 
+## Small Software Cloud (Early Alpha)
+
+Claude Code and Cursor can build a private CRM, workflow, dashboard, or customer-specific tool in minutes. AgentPass adds the missing control plane: inspect the project, create a content-addressed source bundle, prepare a publish plan, bind permissions, and share a revocable app locator without handing an agent a cloud credential.
+
+```sh
+agentpass small-software inspect
+agentpass small-software bundle
+agentpass small-software prepare
+agentpass small-software publish --plan-only
+```
+
+The current OSS path is intentionally plan-only: provider deployment, Cloudflare credentials, GitHub PR creation, PostgreSQL role qualification, and production evidence remain explicit external gates. See [Small Software CLI](docs/SMALL_SOFTWARE_CLI.md), [Cloud spec](docs/SMALL_SOFTWARE_CLOUD_SPEC.md), and [Self-Maintaining API PR workflow](docs/runbooks/SELF_MAINTAINING_API_PR_WORKFLOW.md).
+
 ## Quick start
 
 ### Vibe-coding / agent-coding users
