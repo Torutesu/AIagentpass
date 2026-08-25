@@ -1,0 +1,1 @@
+{"version":1,"kind":"agentpass.app-manifest","name":"sales-follow-up","runtime":"cloudflare-worker","entrypoint":"dist/worker.js","static_assets":"dist/public","data":[],"egress":[{"origin":"https://api.example.com","methods":["GET"]}],"connections":[],"schedules":[],"health_path":"/_agentpass/health"}
