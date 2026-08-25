@@ -70,6 +70,7 @@ test("WebAuthn unattended qualification is a dedicated fail-closed execution wit
   assert.match(ciWorkflow, /: "\$\{AGENTPASS_WEBAUTHN_QUALIFICATION_RUNNER_ID:\?protected WebAuthn qualification runner binding is required\}"/u);
   assert.match(ciWorkflow, /npx playwright test e2e\/webauthn-agent-unattended-qualification\.spec\.ts --reporter=json/u);
   assert.match(ciWorkflow, /dedicated WebAuthn qualification did not execute exactly one passing test/u);
+  assert.match(ciWorkflow, /if: github\.ref == 'refs\/heads\/main'/u, "production qualification must remain protected from OSS pull-request runs");
   assert.match(ciWorkflow, /WebAuthn qualification evidence is not bound to the external run/u);
   assert.match(ciWorkflow, /webauthn-agent-unattended-qualification\.evidence\.json/u);
   assert.doesNotMatch(ciWorkflow, /webauthn-qualification:\s*$/mu);

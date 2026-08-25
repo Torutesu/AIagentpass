@@ -447,6 +447,10 @@ jobs:
             "$AGENTPASS_EXPECTED_BROWSER_E2E_TESTS"
           mv "$bound_path" "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/browser-e2e-result.json"
       - name: Run dedicated WebAuthn unattended qualification (external bindings required)
+        # Pull requests and the OSS Early Alpha branch prove the real-browser
+        # suite above. Production WebAuthn qualification remains a separate
+        # protected gate on main and in external-qualification-runners.yml.
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           AGENTPASS_WEBAUTHN_QUALIFICATION_MODE: external
@@ -489,7 +493,7 @@ jobs:
           node ../../scripts/release/archive-secret-scan.mjs "$AGENTPASS_QUALIFICATION_EVIDENCE_PATH" >/dev/null
         working-directory: apps/web-console
       - name: Retain typed WebAuthn qualification evidence
-        if: success()
+        if: success() && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: browser-webauthn-qualification-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
