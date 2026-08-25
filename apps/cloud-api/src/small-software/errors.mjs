@@ -8,7 +8,13 @@ export const SMALL_SOFTWARE_ERROR_CODES = Object.freeze({
   DIGEST_MISMATCH: "small_software.digest_mismatch",
   IDEMPOTENCY_CONFLICT: "small_software.idempotency_conflict",
   NOT_READY: "small_software.not_ready",
-  RECONCILIATION_REQUIRED: "small_software.reconciliation_required"
+  RECONCILIATION_REQUIRED: "small_software.reconciliation_required",
+  AUTHENTICATION_REQUIRED: "small_software.authentication_required",
+  FORBIDDEN: "small_software.forbidden",
+  NOT_FOUND: "small_software.not_found",
+  ROLE_CONFLICT: "small_software.role_conflict",
+  SHARE_REVOKED: "small_software.share_revoked",
+  INVITATION_REVOKED: "small_software.invitation_revoked"
 });
 
 const MESSAGES = Object.freeze({
@@ -21,7 +27,13 @@ const MESSAGES = Object.freeze({
   [SMALL_SOFTWARE_ERROR_CODES.DIGEST_MISMATCH]: "Small Software content digest does not match",
   [SMALL_SOFTWARE_ERROR_CODES.IDEMPOTENCY_CONFLICT]: "Small Software idempotency key was reused with different content",
   [SMALL_SOFTWARE_ERROR_CODES.NOT_READY]: "Small Software operation is not ready",
-  [SMALL_SOFTWARE_ERROR_CODES.RECONCILIATION_REQUIRED]: "Small Software provider state requires reconciliation"
+  [SMALL_SOFTWARE_ERROR_CODES.RECONCILIATION_REQUIRED]: "Small Software provider state requires reconciliation",
+  [SMALL_SOFTWARE_ERROR_CODES.AUTHENTICATION_REQUIRED]: "Small Software authentication is required",
+  [SMALL_SOFTWARE_ERROR_CODES.FORBIDDEN]: "Small Software access is forbidden",
+  [SMALL_SOFTWARE_ERROR_CODES.NOT_FOUND]: "Small Software resource was not found",
+  [SMALL_SOFTWARE_ERROR_CODES.ROLE_CONFLICT]: "Small Software role change conflicts with app authority",
+  [SMALL_SOFTWARE_ERROR_CODES.SHARE_REVOKED]: "Small Software share link is revoked or expired",
+  [SMALL_SOFTWARE_ERROR_CODES.INVITATION_REVOKED]: "Small Software invitation is revoked or expired"
 });
 
 export class SmallSoftwareError extends Error {

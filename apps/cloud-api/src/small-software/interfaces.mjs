@@ -27,4 +27,15 @@ export const smallSoftwareBuildRunner = (runner) => requireMethods(runner, ["res
 /** Durable workflow/idempotency repository used by the orchestration service. */
 export const smallSoftwareWorkflowRepository = (repository) => requireMethods(repository, ["getWorkflow", "saveWorkflow", "savePublishPlan", "saveDeploymentReceipt"], "small-software-workflow-repository");
 
+/**
+ * App authorization authority. Implementations must route mutations through
+ * tenant-bound database functions; this service never accepts table DML or a
+ * provider SDK. Idempotency records are keyed by the complete request digest.
+ */
+export const smallSoftwareAuthorizationRepository = (repository) => requireMethods(repository, [
+  "getApplication", "listAccessRules", "saveAccessRule", "revokeAccessRule",
+  "getInvitation", "saveInvitation", "revokeInvitation", "getRoute",
+  "getShare", "saveShare", "revokeShare", "getAuthorizationOperation", "saveAuthorizationOperation",
+], "small-software-authorization-repository");
+
 export const isTestOnlyDependency = (dependency) => dependency?.testOnly === true;
