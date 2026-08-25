@@ -7,6 +7,7 @@ test("0138 stores append-only receipts through a tenant-bound function", async (
   assert.match(sql, /CREATE FUNCTION public\.agentpass_record_maintenance_receipt\(p_input jsonb\)/u);
   assert.match(sql, /maintenance_current_organization|agentpass_current_organization_id\(\)/u);
   assert.match(sql, /ON CONFLICT \(receipt_digest\) DO NOTHING/u);
+  assert.match(sql, /maintenance receipt contains unknown fields/u);
   assert.match(sql, /REVOKE ALL ON FUNCTION[\s\S]*FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup/u);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*TO agentpass_maintenance/u);
 });

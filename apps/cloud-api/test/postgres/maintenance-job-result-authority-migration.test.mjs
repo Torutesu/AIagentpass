@@ -12,6 +12,8 @@ test("0137 provides tenant-bound job/result/PR authority functions without table
   assert.match(sql, /CREATE FUNCTION public\.agentpass_record_maintenance_result\(p_input jsonb\)/u);
   assert.match(sql, /CREATE FUNCTION public\.agentpass_record_maintenance_pull_request\(p_input jsonb\)/u);
   assert.match(sql, /agentpass_current_organization_id\(\) IS DISTINCT FROM/u);
+  assert.match(sql, /maintenance result contains unknown fields/u);
+  assert.match(sql, /maintenance PR contains unknown fields/u);
   assert.match(sql, /REVOKE ALL ON FUNCTION[\s\S]*FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup/u);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*TO agentpass_maintenance/u);
   assert.doesNotMatch(sql, /GRANT (?:ALL|INSERT|UPDATE|DELETE) ON TABLE public\.maintenance_/u);

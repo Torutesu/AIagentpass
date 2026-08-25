@@ -46,8 +46,9 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER VOLATILE SET search_path = pg_ca
 DECLARE v_result public.maintenance_results; v_org uuid := (p_input->>'organization_id')::uuid; v_job uuid := (p_input->>'job_id')::uuid;
 BEGIN
   IF p_input IS NULL OR public.agentpass_current_organization_id() IS DISTINCT FROM v_org OR NOT EXISTS (SELECT 1 FROM public.maintenance_jobs WHERE job_id=v_job AND organization_id=v_org) THEN RAISE EXCEPTION USING ERRCODE='insufficient_privilege', MESSAGE='maintenance result binding is invalid'; END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_input) AS key WHERE key NOT IN ('schema_version','kind','result_id','job_id','organization_id','source_commit','result_commit','result_tree','patch_digest','evidence','status','verification_status','created_at')) THEN RAISE EXCEPTION USING ERRCODE='invalid_parameter_value', MESSAGE='maintenance result contains unknown fields'; END IF;
   INSERT INTO public.maintenance_results(job_id, organization_id, result_commit, result_tree, patch_digest, evidence, status)
-  VALUES (v_job, v_org, NULLIF(p_input->>'result_commit',''), NULLIF(p_input->>'result_tree',''), CASE WHEN p_input->>'patch_digest' IS NULL THEN NULL ELSE decode(p_input->>'patch_digest','hex') END, p_input, COALESCE(p_input->>'status','uncertain')) RETURNING * INTO v_result;
+  VALUES (v_job, v_org, NULLIF(p_input->>'result_commit',''), NULLIF(p_input->>'result_tree',''), CASE WHEN p_input->>'patch_digest' IS NULL THEN NULL ELSE decode(p_input->>'patch_digest','hex') END, jsonb_strip_nulls(jsonb_build_object('result_id',p_input->>'result_id','verification_status',p_input->>'verification_status','evidence',p_input->'evidence','uncertainty',p_input->'uncertainty')), COALESCE(p_input->>'status','uncertain')) RETURNING * INTO v_result;
   RETURN to_jsonb(v_result);
 END $$;
 
@@ -56,6 +57,7 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER VOLATILE SET search_path = pg_ca
 DECLARE v_pr public.maintenance_pull_requests; v_org uuid := (p_input->>'organization_id')::uuid; v_job uuid := (p_input->>'job_id')::uuid;
 BEGIN
   IF p_input IS NULL OR public.agentpass_current_organization_id() IS DISTINCT FROM v_org OR NOT EXISTS (SELECT 1 FROM public.maintenance_jobs WHERE job_id=v_job AND organization_id=v_org) OR (p_input->>'external_number')::bigint < 1 THEN RAISE EXCEPTION USING ERRCODE='insufficient_privilege', MESSAGE='maintenance PR binding is invalid'; END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_input) AS key WHERE key NOT IN ('schema_version','kind','job_id','organization_id','repository_id','external_number','head_commit','base_commit','state')) THEN RAISE EXCEPTION USING ERRCODE='invalid_parameter_value', MESSAGE='maintenance PR contains unknown fields'; END IF;
   INSERT INTO public.maintenance_pull_requests(job_id, organization_id, repository_id, external_number, head_commit, base_commit, state)
   VALUES (v_job, v_org, p_input->>'repository_id', (p_input->>'external_number')::bigint, p_input->>'head_commit', p_input->>'base_commit', COALESCE(p_input->>'state','draft'))
   ON CONFLICT (repository_id, external_number) DO UPDATE SET state=EXCLUDED.state
