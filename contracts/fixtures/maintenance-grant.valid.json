@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"agentpass.maintenance.grant","grant_id":"grant-1","organization_id":"org-1","repository_id":"repo-1","branch":"main","job_id":"job-1","issued_at":"2026-08-25T00:00:00.000Z","expires_at":"2026-08-25T01:00:00.000Z","operations":["read_source","write_patch","run_tests","create_draft_pr"]}

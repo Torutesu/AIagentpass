@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"agentpass.maintenance.policy","policy_id":"pol-1","organization_id":"org-1","mode":"draft_pr","allowed_provider_ids":["sample.api"],"allowed_branches":["main"],"allowed_paths":["/src"],"max_files":20,"expires_at":"2026-09-25T00:00:00.000Z"}

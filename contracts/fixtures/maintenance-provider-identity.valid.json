@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"agentpass.maintenance.provider-identity","provider_id":"sample.api","display_name":"Sample API","publisher_origin":"https://provider.example","identity_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","key_ids":["sample-key-1"]}
