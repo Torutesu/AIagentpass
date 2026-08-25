@@ -5,11 +5,14 @@ The CLI currently provides a provider-free, plan-only workflow. It reads an
 source, contact Cloudflare, create a GitHub PR, or read credentials.
 
 ```sh
-agentpass small-software inspect --path ./my-app
-agentpass small-software bundle --path ./my-app
-agentpass small-software prepare --path ./my-app
-agentpass small-software publish --path ./my-app --plan-only
+agentpass small-software inspect --path ./examples/small-software-demo
+agentpass small-software bundle --path ./examples/small-software-demo
+agentpass small-software prepare --path ./examples/small-software-demo
+agentpass small-software publish --path ./examples/small-software-demo --plan-only
 ```
+
+The repository includes this runnable manifest and Worker as a safe first
+demo. Copy the directory before adding application-specific code.
 
 The manifest must be inside the project root and use the frozen
 `agentpass.app-manifest` v1 contract. Symlinks, non-regular files, path

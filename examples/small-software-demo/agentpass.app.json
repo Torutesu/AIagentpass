@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kind": "agentpass.app-manifest",
+  "name": "team-briefing",
+  "runtime": "cloudflare-worker",
+  "entrypoint": "worker.js",
+  "data": [],
+  "egress": [],
+  "connections": [],
+  "schedules": [],
+  "health_path": "/_agentpass/health"
+}
