@@ -14,6 +14,7 @@ import { AuditExportPanel } from "./AuditExportPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { createSecurityClient, type SecurityClient } from "../security-client";
 import { createSessionAuthority } from "../session-authority";
+import { SmallSoftwarePanel } from "./SmallSoftwarePanel";
 
 export type ConsoleView =
   | "overview"
@@ -25,7 +26,8 @@ export type ConsoleView =
   | "security"
   | "organizations"
   | "recovery"
-  | "emergency";
+  | "emergency"
+  | "small-software";
 
 export type AgentPassInitialData = {
   workspace: string;
@@ -683,6 +685,7 @@ const navItems: Array<{ id: ConsoleView; label: string; icon: string }> = [
   { id: "organizations", label: "Organizations", icon: "◎" },
   { id: "recovery", label: "アカウント復旧", icon: "◌" },
   { id: "emergency", label: "緊急停止", icon: "■" },
+  { id: "small-software", label: "Small Software", icon: "✦" },
 ];
 
 function StatusTag({ tone, children }: { tone: "green" | "amber" | "red"; children: React.ReactNode }) {
@@ -1911,6 +1914,7 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "security" ? <SecurityPanel securityClient={securityClient} onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} onOrganizationSwitched={handleOrganizationSwitched} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
+          {sessionState === "active" && activeView === "small-software" ? <SmallSoftwarePanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => { setStopError(null); setConfirmOpen(true); }} stopped={stopped} stopError={stopError} /> : null}
         </main>
       </div>
