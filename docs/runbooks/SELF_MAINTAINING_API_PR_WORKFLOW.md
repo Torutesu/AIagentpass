@@ -45,3 +45,23 @@ approval/uncertainty flags, and reconciled provider identifiers. PR body,
 check-run payloads, provider response bodies, and credentials are excluded.
 The projection is read-only and carries `retry_allowed: false` for every
 state, including `reconcile_required`.
+
+## Durable cloud authority
+
+The hosted persistence path is function-only. The application role must not
+receive table DML on maintenance relations. The `agentpass_maintenance` role
+uses the following SECURITY DEFINER entry points, with the organization bound
+inside the database transaction:
+
+- `agentpass_reserve_maintenance_job(jsonb)`;
+- `agentpass_get_maintenance_job(uuid, uuid)` and
+  `agentpass_update_maintenance_job(uuid, uuid, jsonb)`;
+- `agentpass_record_maintenance_result(jsonb)`;
+- `agentpass_record_maintenance_pull_request(jsonb)`;
+- `agentpass_record_maintenance_receipt(jsonb)`.
+
+Result and receipt records remain digest-bound. Receipt writes are append-only;
+repeating the same receipt digest returns the existing record and never creates
+a second authority row. Adapter code must unwrap the function result and must
+not expose the database driver response, SQL diagnostics, or raw provider
+payload to the agent or MCP client.
