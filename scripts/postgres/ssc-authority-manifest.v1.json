@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass.ssc-postgres-authority-manifest",
+  "domains": {
+    "small_software": {
+      "application_role": "agentpass_app",
+      "maintenance_role": "agentpass_maintenance",
+      "tables": [
+        "applications", "application_releases", "application_deployments",
+        "repository_installations", "repository_snapshots", "provider_operations",
+        "usage_attestations"
+      ],
+      "function_execute": [
+        "agentpass_small_software_application_create",
+        "agentpass_small_software_release_prepare",
+        "agentpass_small_software_release_activate",
+        "agentpass_small_software_provider_operation_reconcile"
+      ]
+    },
+    "maintenance": {
+      "application_role": "agentpass_app",
+      "maintenance_role": "agentpass_maintenance",
+      "tables": [
+        "maintenance_policies", "maintenance_jobs", "maintenance_effects",
+        "maintenance_results", "maintenance_receipts", "maintenance_exceptions"
+      ],
+      "function_execute": [
+        "agentpass_maintenance_job_create",
+        "agentpass_maintenance_effect_reserve",
+        "agentpass_maintenance_effect_complete",
+        "agentpass_maintenance_effect_reconcile"
+      ]
+    }
+  },
+  "invariants": {
+    "app_direct_dml": false,
+    "maintenance_provider_customer_reads": false,
+    "tenant_rls_for_customer_relations": true,
+    "function_search_path": "pg_catalog, public",
+    "migration_head_fixture_required": true,
+    "response_loss_is_uncertain": true
+  }
+}
