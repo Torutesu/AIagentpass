@@ -18,4 +18,13 @@ export const smallSoftwareProvider = (provider) => requireMethods(provider, ["re
 export const smallSoftwareClock = (clock) => requireMethods(clock, ["now"], "clock");
 export const smallSoftwareUuid = (uuid) => requireMethods(uuid, ["randomUUID"], "uuid");
 
+/** Content-addressed source object boundary. Implementations must not accept
+ * credentials or return provider-specific errors to the cloud API. */
+export const smallSoftwareSourceStorage = (storage) => requireMethods(storage, ["put", "get", "delete"], "small-software-source-storage");
+/** Isolated build runner boundary. A runner receives a digest-bound request,
+ * never the cloud API's production credentials. */
+export const smallSoftwareBuildRunner = (runner) => requireMethods(runner, ["reserve", "inspect", "reconcile"], "small-software-build-runner");
+/** Durable workflow/idempotency repository used by the orchestration service. */
+export const smallSoftwareWorkflowRepository = (repository) => requireMethods(repository, ["getWorkflow", "saveWorkflow", "savePublishPlan", "saveDeploymentReceipt"], "small-software-workflow-repository");
+
 export const isTestOnlyDependency = (dependency) => dependency?.testOnly === true;
