@@ -1,4 +1,4 @@
-import { sha256 } from "../../../../packages/maintenance-contracts/src/index.mjs";
+import { sha256, validateMaintenanceReceipt } from "../../../../packages/maintenance-contracts/src/index.mjs";
 import { MaintenanceError, MAINTENANCE_ERROR_CODES } from "./errors.mjs";
 import { maintenanceEffectRepository, maintenanceJobRepository, maintenancePullRequestRepository, maintenanceReceiptRepository, maintenanceResultRepository } from "./interfaces.mjs";
 import { planMaintenanceJob } from "./planner.mjs";
@@ -64,7 +64,17 @@ export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequ
     },
     async saveResult(result) { try { return await resultRepository.saveResult(result); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async savePullRequest(pullRequest) { try { return await pullRequestRepository.savePullRequest(pullRequest); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
-    async saveReceipt(receipt) { if (receiptRepository === null) fail(MAINTENANCE_ERROR_CODES.INVALID_CONFIGURATION); try { return await receiptRepository.saveReceipt(receipt); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
+    async saveReceipt(receipt) {
+      if (receiptRepository === null) fail(MAINTENANCE_ERROR_CODES.INVALID_CONFIGURATION);
+      try {
+        validateMaintenanceReceipt(receipt);
+        const receiptDigest = sha256(receipt);
+        return await receiptRepository.saveReceipt({ ...receipt, receipt_digest: receiptDigest });
+      } catch (error) {
+        if (error?.name === "MaintenanceContractError") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT);
+        fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error);
+      }
+    },
     async getJob(subject) { if (!subject || typeof subject !== "object" || typeof (subject.organization_id ?? subject.organizationId) !== "string" || typeof (subject.job_id ?? subject.jobId) !== "string") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT); try { const job = await jobRepository.getJob(subject); if (job == null) fail(MAINTENANCE_ERROR_CODES.OPERATION_NOT_FOUND); return job; } catch (error) { if (error instanceof MaintenanceError) throw error; fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async updateJob(subject, patch) { if (!subject || typeof subject !== "object" || typeof (subject.organization_id ?? subject.organizationId) !== "string" || typeof (subject.job_id ?? subject.jobId) !== "string" || !patch || typeof patch !== "object") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT); try { return await jobRepository.updateJob(subject, patch); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } }
   });

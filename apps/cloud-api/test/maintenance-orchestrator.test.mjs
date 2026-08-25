@@ -35,7 +35,10 @@ test("orchestrator persists the planned job and keeps receipt persistence explic
   const verified = await orchestrator.verifyPatch({ job: planned.job, proposal: proposed.proposal, evidence: { syntax: { status: "passed" }, repository: { status: "passed" }, security: { status: "passed" }, authority_delta: { status: "passed" } }, createdAt: "2026-08-25T00:00:00.000Z" });
   assert.equal(verified.verification_status, "passed");
   assert.equal(calls.some(([kind]) => kind === "saveResult"), true);
-  assert.equal((await orchestrator.saveReceipt({ organization_id: "org-1", job_id: planned.job.job_id, receipt_digest: "a".repeat(64) })).receipt_digest, "a".repeat(64));
+  const receipt = { schema_version: 1, kind: "agentpass.maintenance.receipt", receipt_id: "receipt-1", organization_id: "org-1", job_id: planned.job.job_id, source_commit: "a".repeat(40), patch_digest: "b".repeat(64), verification_status: "passed", created_at: "2026-08-25T00:00:00.000Z", uncertainty: [] };
+  const savedReceipt = await orchestrator.saveReceipt(receipt);
+  assert.equal(savedReceipt.receipt_digest.length, 64);
+  assert.deepEqual(calls.find(([kind]) => kind === "saveReceipt")[1], { ...receipt, receipt_digest: savedReceipt.receipt_digest });
 });
 
 test("orchestrator without a receipt repository fails closed", async () => {
