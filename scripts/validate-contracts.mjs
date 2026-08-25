@@ -60,7 +60,17 @@ const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "doctor-report-v1.schema.json": "doctor-report.valid.json",
   "refresh-hint-v1.schema.json": "refresh-hint.valid.json"
 });
-const SCHEMA_FIXTURES = Object.freeze({ ...BASELINE_SCHEMA_FIXTURES, ...PROMOTED_SCHEMA_FIXTURES });
+const WAVE0_SCHEMA_FIXTURES = Object.freeze({
+  "maintenance-advisory-v1.schema.json": "maintenance-advisory-endpoint.valid.json",
+  "maintenance-grant-v1.schema.json": "maintenance-grant.valid.json",
+  "maintenance-plan-v1.schema.json": "maintenance-plan.valid.json",
+  "maintenance-policy-v1.schema.json": "maintenance-policy.valid.json",
+  "maintenance-provider-identity-v1.schema.json": "maintenance-provider-identity.valid.json",
+  "maintenance-provider-key-event-v1.schema.json": "maintenance-provider-key-event.valid.json",
+  "maintenance-receipt-v1.schema.json": "maintenance-receipt.valid.json",
+  "maintenance-usage-attestation-v1.schema.json": "maintenance-usage-attestation.valid.json"
+});
+const SCHEMA_FIXTURES = Object.freeze({ ...BASELINE_SCHEMA_FIXTURES, ...PROMOTED_SCHEMA_FIXTURES, ...WAVE0_SCHEMA_FIXTURES });
 
 function fail(message) {
   process.stderr.write(`contract validation failed: ${message}\n`);

@@ -1,1 +1,20 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"agentpass.app-manifest.v1","type":"object","additionalProperties":false,"required":["version","kind","name","runtime","entrypoint"],"properties":{"version":{"const":1},"kind":{"const":"agentpass.app-manifest"},"name":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},"runtime":{"const":"cloudflare-worker"},"entrypoint":{"type":"string","pattern":"^(?!/)(?!.*(?:^|/)\.\.?(/|$))(?!.*\\\\)[^/]+(?:/[^/]+)*$"},"static_assets":{"type":"string"},"data":{"type":"array","maxItems":64},"egress":{"type":"array","maxItems":64},"connections":{"type":"array","maxItems":64},"schedules":{"type":"array","maxItems":64},"health_path":{"type":"string","pattern":"^/"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentpass.app-manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "kind", "name", "runtime", "entrypoint"],
+  "properties": {
+    "version": {"const": 1},
+    "kind": {"const": "agentpass.app-manifest"},
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "runtime": {"const": "cloudflare-worker"},
+    "entrypoint": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$"},
+    "static_assets": {"type": "string"},
+    "data": {"type": "array", "maxItems": 64},
+    "egress": {"type": "array", "maxItems": 64},
+    "connections": {"type": "array", "maxItems": 64},
+    "schedules": {"type": "array", "maxItems": 64},
+    "health_path": {"type": "string", "pattern": "^/"}
+  }
+}
