@@ -121,6 +121,33 @@ function maintenanceSummary(raw, args) {
   assertTenant(raw, args.organization_id, args.app_id);
   const result = lifecycleSummary(raw, args.organization_id, args.app_id);
   if (Array.isArray(raw.jobs) && raw.jobs.length <= 50) result.jobs = raw.jobs.map((job) => lifecycleSummary(job, args.organization_id, args.app_id)).filter((job) => job.state || job.status);
+  // Maintenance records may contain provider responses, patch bodies, or
+  // repository paths. Expose only the already-projected PR state and digest
+  // bound verification outcome; never forward the raw nested objects.
+  if (raw.pull_request && typeof raw.pull_request === "object" && !Array.isArray(raw.pull_request)) {
+    assertTenant(raw.pull_request, args.organization_id, args.app_id);
+    result.pull_request = lifecycleSummary(raw.pull_request, args.organization_id, args.app_id);
+    for (const key of ["head_branch", "base_commit", "head_commit", "approval_id", "intent_id", "operation_id", "external_number"]) {
+      if (safeId(raw.pull_request[key])) result.pull_request[key] = raw.pull_request[key];
+      else if (key === "external_number" && Number.isSafeInteger(raw.pull_request[key]) && raw.pull_request[key] >= 1) result.pull_request[key] = raw.pull_request[key];
+    }
+    for (const key of ["patch_digest", "result_digest", "check_runs_digest", "request_digest", "response_digest"]) {
+      const value = safeDigest(raw.pull_request[key]);
+      if (value !== undefined) result.pull_request[key] = value;
+    }
+    const url = safeUrl(raw.pull_request.url);
+    if (url !== undefined) result.pull_request.url = url;
+  }
+  if (raw.verification && typeof raw.verification === "object" && !Array.isArray(raw.verification)) {
+    const verification = {};
+    for (const key of ["status", "verification_status"]) if (safeCode(raw.verification[key], 32)) verification[key] = raw.verification[key];
+    for (const key of ["result_digest", "patch_digest"]) {
+      const value = safeDigest(raw.verification[key]);
+      if (value !== undefined) verification[key] = value;
+    }
+    if (Array.isArray(raw.verification.uncertainty) && raw.verification.uncertainty.length <= 16 && raw.verification.uncertainty.every((value) => safeCode(value, 64))) verification.uncertainty = [...raw.verification.uncertainty];
+    if (Object.keys(verification).length > 0) result.verification = verification;
+  }
   return result;
 }
 

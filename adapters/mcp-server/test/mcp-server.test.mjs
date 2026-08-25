@@ -158,7 +158,7 @@ function softwareSurfaceHarness() {
     async deploymentStatus(input) { operations.push(["deployment", input]); return { organization_id: ORG, app_id: APP, release_id: RELEASE, state: "active", active_generation: 1, provider_deployment_id: "provider-1", provider_secret: "hidden" }; },
     async listApps(input) { operations.push(["list", input]); return { organization_id: ORG, apps: [{ organization_id: ORG, app_id: APP, name: "CRM", state: "active", local_path: "/private/project" }] }; },
     async openApp(input) { operations.push(["open", input]); return { organization_id: ORG, app_id: APP, app_url: "https://apps.example.test/crm", console_url: "https://console.example.test/apps/2", bearer_token: "hidden" }; },
-    async maintenanceStatus(input) { operations.push(["maintenance", input]); return { organization_id: ORG, app_id: APP, state: "idle", jobs: [{ organization_id: ORG, app_id: APP, state: "completed", private_path: "/private/project" }] }; }
+    async maintenanceStatus(input) { operations.push(["maintenance", input]); return { organization_id: ORG, app_id: APP, state: "idle", jobs: [{ organization_id: ORG, app_id: APP, state: "completed", private_path: "/private/project" }], pull_request: { organization_id: ORG, app_id: APP, state: "reconciled", operation_id: "op-1", patch_digest: "a".repeat(64), url: "https://github.com/example/repo/pull/1", body: "do not return" }, verification: { status: "uncertain", verification_status: "partial", result_digest: "b".repeat(64), uncertainty: ["security:not_proven"], output: "private" } }; }
   };
   return { surface, operations };
 }
@@ -213,4 +213,27 @@ test("Small Software arguments are closed and bounded", async () => {
   assert.equal(noOrg.error.code, -32602);
   const secretBytes = await server.handle(rpc(42, "tools/call", { name: "agentpass_publish_prepare", arguments: { organization_id: ORG, app_id: APP, idempotency_key: "preview-002", source_bundle: { token: "secret" } } }));
   assert.equal(secretBytes.error.code, -32602);
+});
+
+test("maintenance status exposes only tenant-bound PR and verification projections", async () => {
+  const { server, operations } = await initializedSoftwareServer();
+  const response = await server.handle(rpc(43, "tools/call", { name: "agentpass_maintenance_status", arguments: { organization_id: ORG, app_id: APP } }));
+  const value = JSON.parse(response.result.content[0].text);
+  assert.equal(operations.find(([kind]) => kind === "maintenance")[1].app_id, APP);
+  assert.deepEqual(value.pull_request, {
+    organization_id: ORG,
+    app_id: APP,
+    state: "reconciled",
+    operation_id: "op-1",
+    patch_digest: "a".repeat(64),
+    url: "https://github.com/example/repo/pull/1"
+  });
+  assert.deepEqual(value.verification, {
+    status: "uncertain",
+    verification_status: "partial",
+    result_digest: "b".repeat(64),
+    uncertainty: ["security:not_proven"]
+  });
+  assert.equal(JSON.stringify(value).includes("do not return"), false);
+  assert.equal(JSON.stringify(value).includes("private"), false);
 });
