@@ -2,6 +2,7 @@ import { sha256 } from "../../../../packages/maintenance-contracts/src/index.mjs
 import { MaintenanceError, MAINTENANCE_ERROR_CODES } from "./errors.mjs";
 import { maintenanceEffectRepository, maintenanceJobRepository, maintenancePullRequestRepository, maintenanceResultRepository } from "./interfaces.mjs";
 import { planMaintenanceJob } from "./planner.mjs";
+import { createPatchProposal } from "./patch-agent.mjs";
 
 const fail = (code, cause = undefined) => { const error = new MaintenanceError(code); if (cause !== undefined) error.cause = undefined; throw error; };
 const effectId = (value) => typeof value === "string" ? value : value?.effect_id ?? value?.effectId;
@@ -39,6 +40,19 @@ export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequ
         try { await effectRepository.reconcile(id, "uncertain"); } catch { /* preserve the original bounded operation error */ }
         fail(MAINTENANCE_ERROR_CODES.OPERATION_FAILED, error);
       }
+    },
+    /**
+     * Reserve and return a bounded patch proposal. The candidate is structured
+     * data only; no shell, repository connector, model, or credential is
+     * passed to the maintenance agent boundary.
+     */
+    async proposePatch({ job, plan, advisory, snapshot, policy, changes, tests, conformance, createdAt } = {}) {
+      if (!job || typeof job !== "object") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT);
+      let proposal;
+      try { proposal = createPatchProposal({ job, plan, advisory, snapshot, policy, changes, tests, conformance, createdAt }); }
+      catch (error) { if (error?.code?.startsWith("maintenance.patch_agent.")) throw error; fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT, error); }
+      const effect = await this.executeEffect({ job, kind: "patch_propose", idempotencyKey: proposal.proposal_id, request: { plan_id: proposal.plan_id, patch_digest: proposal.patch_digest, changed_paths: proposal.changed_paths }, execute: async () => proposal });
+      return Object.freeze({ proposal, effect });
     },
     async saveResult(result) { try { return await resultRepository.saveResult(result); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async savePullRequest(pullRequest) { try { return await pullRequestRepository.savePullRequest(pullRequest); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
