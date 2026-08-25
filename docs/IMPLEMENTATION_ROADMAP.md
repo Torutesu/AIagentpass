@@ -15,6 +15,11 @@ It adds signed provider advisories, affected-code detection, isolated repair,
 Draft PRs, and verified republishing without granting provider agents standing
 repository access.
 
+The combined issue-level build order, Luna lane ownership, dependencies,
+acceptance criteria, integration gates, and external qualification matrix are
+defined in [Small Software + Self-Maintaining APIs Parallel Execution
+Plan](SMALL_SOFTWARE_PARALLEL_EXECUTION_PLAN.md).
+
 The ordered, issue-level execution backlog for this roadmap is maintained in
 [`EXECUTION_PLAN.md`](./EXECUTION_PLAN.md).
 
