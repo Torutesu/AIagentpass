@@ -20,6 +20,19 @@ test("generic Console dialogs expose an accessible modal contract", async () => 
   assert.match(shell, /Escape/u, "modal dismissal must remain keyboard discoverable");
 });
 
+test("Small Software uses named regions and semantic badge lists", async () => {
+  const panel = await source("SmallSoftwarePanel.tsx");
+  const css = await readFile(cssUrl, "utf8");
+
+  assert.match(panel, /<section className="small-software-panel" aria-labelledby="console-page-heading">/u);
+  assert.match(panel, /<ol className="small-software-steps" aria-label=/u);
+  assert.match(panel, /<ul className="small-software-maintenance-badges" aria-label=/u);
+  assert.match(panel, /<li><span className="tag amber">PR EXTERNAL NOT PROVEN<\/span><\/li>/u);
+  assert.doesNotMatch(panel, /<div[^>]+aria-label=/u, "generic divs must not carry accessible names");
+  assert.match(css, /\.tag\.amber\s*\{[^}]*color:\s*#5b3500/isu);
+  assert.match(css, /\.small-software-maintenance-badges\s*\{[^}]*list-style:\s*none/isu);
+});
+
 test("organization and session failures use live regions and a user recovery path", async () => {
   const organization = await source("OrganizationPanel.tsx");
 

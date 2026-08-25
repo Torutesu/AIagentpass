@@ -1406,7 +1406,8 @@ a:focus-visible {
 
 .tag.amber {
   background: var(--amber-soft);
-  color: #754708;
+  border: 1px solid #8c5a00;
+  color: #5b3500;
 }
 
 .tag.red {
@@ -1956,6 +1957,6 @@ form.onboarding-panel .onboarding-primary { grid-column: 3; }
 .small-software-command-panel, .small-software-maintenance { margin-top: 1.5rem; padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
 .small-software-code { margin: 1rem 0 0; overflow-x: auto; padding: 1rem 1.1rem; border-radius: 9px; background: #132019; color: #e8fff0; font: .78rem/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .small-software-maintenance { display: flex; justify-content: space-between; gap: 1.5rem; background: linear-gradient(135deg, rgba(237,247,239,.72), rgba(255,255,255,.55)); }
-.small-software-maintenance-badges { display: flex; flex-wrap: wrap; align-content: flex-start; justify-content: flex-end; gap: .5rem; min-width: 190px; }
+.small-software-maintenance-badges { display: flex; flex-wrap: wrap; align-content: flex-start; justify-content: flex-end; gap: .5rem; min-width: 190px; margin: 0; padding: 0; list-style: none; }
 @media (max-width: 900px) { .small-software-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); } .small-software-maintenance { display: grid; } .small-software-maintenance-badges { justify-content: flex-start; } }
 @media (max-width: 560px) { .small-software-hero { display: grid; } .small-software-steps { grid-template-columns: 1fr; } }

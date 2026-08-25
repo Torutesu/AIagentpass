@@ -15,7 +15,7 @@ export function SmallSoftwarePanel() {
   ] as const;
 
   return (
-    <>
+    <section className="small-software-panel" aria-labelledby="console-page-heading">
       <header>
         <p className="eyebrow">SMALL SOFTWARE CLOUD / EARLY ALPHA</p>
         <h1 className="page-heading" id="console-page-heading">作った小さなアプリを、<br />安全に共有する。</h1>
@@ -49,8 +49,8 @@ export function SmallSoftwarePanel() {
 
       <section className="small-software-maintenance" aria-labelledby="small-software-maintenance-heading">
         <div><span className="section-kicker">SELF-MAINTAINING APIs</span><h2 className="section-heading" id="small-software-maintenance-heading">通知で終わらず、修正候補まで</h2><p>API仕様の変更を検出したら、顧客コードを対象範囲として固定し、digest付きのpatch proposalとレビュー用PR intentを生成します。自動マージや秘密値の取得は行いません。</p></div>
-        <div className="small-software-maintenance-badges"><span className="tag green">SCOPE BOUND</span><span className="tag green">HUMAN REVIEW</span><span className="tag amber">PR EXTERNAL NOT PROVEN</span></div>
+        <ul className="small-software-maintenance-badges" aria-label="Self-Maintaining APIの検証状態"><li><span className="tag green">SCOPE BOUND</span></li><li><span className="tag green">HUMAN REVIEW</span></li><li><span className="tag amber">PR EXTERNAL NOT PROVEN</span></li></ul>
       </section>
-    </>
+    </section>
   );
 }
