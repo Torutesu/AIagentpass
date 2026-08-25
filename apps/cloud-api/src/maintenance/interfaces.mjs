@@ -8,4 +8,13 @@ export const maintenanceProvider = (value) => requireMethods(value, ["reserveOpe
 export const maintenanceClock = (value) => requireMethods(value, ["now"]);
 export const maintenanceUuid = (value) => requireMethods(value, ["randomUUID"]);
 export const maintenanceSandbox = (value) => requireMethods(value, ["reserve", "inspect"]);
+/** Customer repository snapshot authority; it never exposes repository tokens. */
+export const maintenanceSnapshotRepository = (value) => requireMethods(value, ["getSnapshot", "saveSnapshot"]);
+/** Usage classification is evidence-only and contains no source or payload data. */
+export const maintenanceUsageRepository = (value) => requireMethods(value, ["getAttestation", "saveAttestation"]);
+/** Durable job lifecycle authority. Effects are reserved before external work. */
+export const maintenanceJobRepository = (value) => requireMethods(value, ["reserveJob", "getJob", "updateJob"]);
+export const maintenanceEffectRepository = (value) => requireMethods(value, ["reserve", "complete", "reconcile"]);
+export const maintenanceResultRepository = (value) => requireMethods(value, ["saveResult"]);
+export const maintenancePullRequestRepository = (value) => requireMethods(value, ["savePullRequest"]);
 export const isTestOnlyDependency = (value) => value?.testOnly === true;
