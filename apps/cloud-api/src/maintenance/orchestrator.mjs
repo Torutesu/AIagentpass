@@ -3,6 +3,7 @@ import { MaintenanceError, MAINTENANCE_ERROR_CODES } from "./errors.mjs";
 import { maintenanceEffectRepository, maintenanceJobRepository, maintenancePullRequestRepository, maintenanceResultRepository } from "./interfaces.mjs";
 import { planMaintenanceJob } from "./planner.mjs";
 import { createPatchProposal } from "./patch-agent.mjs";
+import { verifyMaintenancePatch } from "./verification.mjs";
 
 const fail = (code, cause = undefined) => { const error = new MaintenanceError(code); if (cause !== undefined) error.cause = undefined; throw error; };
 const effectId = (value) => typeof value === "string" ? value : value?.effect_id ?? value?.effectId;
@@ -53,6 +54,13 @@ export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequ
       catch (error) { if (error?.code?.startsWith("maintenance.patch_agent.")) throw error; fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT, error); }
       const effect = await this.executeEffect({ job, kind: "patch_propose", idempotencyKey: proposal.proposal_id, request: { plan_id: proposal.plan_id, patch_digest: proposal.patch_digest, changed_paths: proposal.changed_paths }, execute: async () => proposal });
       return Object.freeze({ proposal, effect });
+    },
+    /** Aggregate supplied evidence only; this boundary never executes tests. */
+    async verifyPatch({ job, proposal, evidence, createdAt } = {}) {
+      let result;
+      try { result = verifyMaintenancePatch({ job, proposal, evidence, createdAt }); }
+      catch (error) { if (error?.code?.startsWith("maintenance.verification.")) throw error; fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT, error); }
+      try { return await resultRepository.saveResult(result); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); }
     },
     async saveResult(result) { try { return await resultRepository.saveResult(result); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async savePullRequest(pullRequest) { try { return await pullRequestRepository.savePullRequest(pullRequest); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },

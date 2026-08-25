@@ -5,3 +5,4 @@ export * from "./planner.mjs";
 export * from "./orchestrator.mjs";
 export * from "./patch-agent.mjs";
 export * from "./pr-workflow.mjs";
+export * from "./verification.mjs";
