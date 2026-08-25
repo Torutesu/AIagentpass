@@ -109,7 +109,8 @@ Reusable implementation exists for:
   one-consume handoff, native macOS boundary, and production qualification
   infrastructure.
 
-Not present yet:
+At the original planning baseline (`8337884`), the following was not present
+yet (the implementation checkpoint above supersedes this historical list):
 
 - Small Software app/release/source/build/deployment/access domain;
 - `agentpass publish` CLI/MCP journey;
