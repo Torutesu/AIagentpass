@@ -29,3 +29,14 @@ test("small software CLI rejects live publish and unsafe symlinks", async () => 
   await fs.symlink(path.join(root, "worker.js"), path.join(root, "link.js"));
   assert.throws(() => runSmallSoftwareCli("inspect", ["--path", root]), /symlinks/);
 });
+
+test("small software CLI refuses credential-like files, project-root symlinks, and duplicate flags", async () => {
+  const root = await fixture();
+  await fs.writeFile(path.join(root, ".env.local"), "DO_NOT_READ=1\n");
+  assert.throws(() => runSmallSoftwareCli("inspect", ["--path", root]), /credential-like/);
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-ssc-link-"));
+  const link = path.join(parent, "project");
+  await fs.symlink(root, link);
+  assert.throws(() => runSmallSoftwareCli("inspect", ["--path", link]), /symlink/);
+  assert.throws(() => runSmallSoftwareCli("inspect", ["--path", root, "--path", root]), /only be supplied once/);
+});
