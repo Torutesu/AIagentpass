@@ -23,6 +23,8 @@ ALTER TABLE public.maintenance_advisories FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.maintenance_advisory_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.maintenance_advisories OWNER TO agentpass_migrator;
 ALTER TABLE public.maintenance_advisory_events OWNER TO agentpass_migrator;
+CREATE POLICY maintenance_advisories_provider_read ON public.maintenance_advisories FOR SELECT TO agentpass_app, agentpass_maintenance USING (EXISTS (SELECT 1 FROM public.maintenance_providers p WHERE p.provider_id=maintenance_advisories.provider_id AND p.status='active'));
+CREATE POLICY maintenance_advisory_events_provider_read ON public.maintenance_advisory_events FOR SELECT TO agentpass_app, agentpass_maintenance USING (EXISTS (SELECT 1 FROM public.maintenance_advisories a JOIN public.maintenance_providers p ON p.provider_id=a.provider_id WHERE a.advisory_id=maintenance_advisory_events.advisory_id AND p.status='active'));
 REVOKE ALL ON public.maintenance_advisories, public.maintenance_advisory_events FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 GRANT SELECT ON public.maintenance_advisories, public.maintenance_advisory_events TO agentpass_app, agentpass_maintenance;
 COMMIT;

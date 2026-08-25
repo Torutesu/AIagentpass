@@ -29,6 +29,7 @@ CREATE OR REPLACE FUNCTION public.agentpass_small_software_reserve_provider_oper
 ) RETURNS uuid LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE v_id uuid;
 BEGIN
+  IF public.agentpass_current_organization_id() IS DISTINCT FROM p_organization_id THEN RAISE EXCEPTION USING ERRCODE='insufficient_privilege',MESSAGE='provider operation tenant is invalid'; END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('agentpass:small-software:operation:'||p_organization_id::text||':'||p_operation_key,0));
   SELECT id INTO v_id FROM public.small_software_provider_operations WHERE organization_id=p_organization_id AND operation_key=p_operation_key AND request_digest=p_request_digest;
   IF v_id IS NOT NULL THEN RETURN v_id; END IF;
