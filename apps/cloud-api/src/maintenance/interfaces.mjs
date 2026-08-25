@@ -17,4 +17,5 @@ export const maintenanceJobRepository = (value) => requireMethods(value, ["reser
 export const maintenanceEffectRepository = (value) => requireMethods(value, ["reserve", "complete", "reconcile"]);
 export const maintenanceResultRepository = (value) => requireMethods(value, ["saveResult"]);
 export const maintenancePullRequestRepository = (value) => requireMethods(value, ["savePullRequest"]);
+export const maintenanceReceiptRepository = (value) => requireMethods(value, ["saveReceipt"]);
 export const isTestOnlyDependency = (value) => value?.testOnly === true;

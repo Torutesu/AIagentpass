@@ -13,7 +13,11 @@ export function createMaintenanceJobRepository({ db } = {}) {
     return [organizationId, jobId];
   };
   return Object.freeze({
-    reserveJob: (input) => call("agentpass_reserve_maintenance_job", [input]),
+    reserveJob: (input) => {
+      const job = input?.job && typeof input.job === "object" ? input.job : input;
+      if (!job || typeof job !== "object") throw new TypeError("maintenance job is required");
+      return call("agentpass_reserve_maintenance_job", [job]);
+    },
     getJob: (value) => call("agentpass_get_maintenance_job", subject(value)),
     updateJob: (value, patch = undefined) => {
       const [organizationId, jobId] = subject(value);

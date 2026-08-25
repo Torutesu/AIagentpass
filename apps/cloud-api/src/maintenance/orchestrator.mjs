@@ -1,6 +1,6 @@
 import { sha256 } from "../../../../packages/maintenance-contracts/src/index.mjs";
 import { MaintenanceError, MAINTENANCE_ERROR_CODES } from "./errors.mjs";
-import { maintenanceEffectRepository, maintenanceJobRepository, maintenancePullRequestRepository, maintenanceResultRepository } from "./interfaces.mjs";
+import { maintenanceEffectRepository, maintenanceJobRepository, maintenancePullRequestRepository, maintenanceReceiptRepository, maintenanceResultRepository } from "./interfaces.mjs";
 import { planMaintenanceJob } from "./planner.mjs";
 import { createPatchProposal } from "./patch-agent.mjs";
 import { verifyMaintenancePatch } from "./verification.mjs";
@@ -13,9 +13,9 @@ const effectId = (value) => typeof value === "string" ? value : value?.effect_id
  * only to executeEffect and receives the already-reserved effect metadata; it
  * never receives a repository connector or installation token.
  */
-export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequests } = {}) {
-  let jobRepository, effectRepository, resultRepository, pullRequestRepository;
-  try { jobRepository = maintenanceJobRepository(jobs); effectRepository = maintenanceEffectRepository(effects); resultRepository = maintenanceResultRepository(results); pullRequestRepository = maintenancePullRequestRepository(pullRequests); }
+export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequests, receipts } = {}) {
+  let jobRepository, effectRepository, resultRepository, pullRequestRepository, receiptRepository;
+  try { jobRepository = maintenanceJobRepository(jobs); effectRepository = maintenanceEffectRepository(effects); resultRepository = maintenanceResultRepository(results); pullRequestRepository = maintenancePullRequestRepository(pullRequests); receiptRepository = receipts === undefined ? null : maintenanceReceiptRepository(receipts); }
   catch { fail(MAINTENANCE_ERROR_CODES.INVALID_CONFIGURATION); }
   return Object.freeze({
     planJob: planMaintenanceJob,
@@ -64,6 +64,7 @@ export function createMaintenanceOrchestrator({ jobs, effects, results, pullRequ
     },
     async saveResult(result) { try { return await resultRepository.saveResult(result); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async savePullRequest(pullRequest) { try { return await pullRequestRepository.savePullRequest(pullRequest); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
+    async saveReceipt(receipt) { if (receiptRepository === null) fail(MAINTENANCE_ERROR_CODES.INVALID_CONFIGURATION); try { return await receiptRepository.saveReceipt(receipt); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async getJob(subject) { if (!subject || typeof subject !== "object" || typeof (subject.organization_id ?? subject.organizationId) !== "string" || typeof (subject.job_id ?? subject.jobId) !== "string") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT); try { const job = await jobRepository.getJob(subject); if (job == null) fail(MAINTENANCE_ERROR_CODES.OPERATION_NOT_FOUND); return job; } catch (error) { if (error instanceof MaintenanceError) throw error; fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } },
     async updateJob(subject, patch) { if (!subject || typeof subject !== "object" || typeof (subject.organization_id ?? subject.organizationId) !== "string" || typeof (subject.job_id ?? subject.jobId) !== "string" || !patch || typeof patch !== "object") fail(MAINTENANCE_ERROR_CODES.INVALID_INPUT); try { return await jobRepository.updateJob(subject, patch); } catch (error) { fail(MAINTENANCE_ERROR_CODES.DEPENDENCY_UNAVAILABLE, error); } }
   });
