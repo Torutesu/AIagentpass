@@ -97,6 +97,7 @@ export function createCloudflareRuntimeAdapter(options = {}) {
 
   function planPublication(input = {}) {
     const publication = normalizePublication(input, config);
+    verifyArtifactBytes(publication.artifact_bytes, publication.artifact_digest, config.limits.maxArtifactBytes);
     const preimage = {
       provider: CLOUDFLARE_RUNTIME_PROVIDER,
       account_id: config.accountId,
@@ -381,6 +382,7 @@ function normalizeGeneration(value) {
 function normalizeProviderObservation(value, operation) {
   const object = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const providerDigest = object.artifact_digest ?? object.artifactDigest ?? object.metadata?.artifact_digest ?? object.metadata?.artifactDigest;
+  if (providerDigest === undefined) throw new CloudflareRuntimeError(CLOUDFLARE_RUNTIME_ERROR_CODES.RECONCILIATION_REQUIRED, { field: "artifact_digest" });
   if (providerDigest !== undefined && providerDigest !== operation.artifact_digest) throw new CloudflareRuntimeError(CLOUDFLARE_RUNTIME_ERROR_CODES.DIGEST_MISMATCH, { field: "artifact_digest" });
   const state = object.state ?? object.status;
   const active = state === "active" || state === "succeeded" || state === "ready" || object.success === true;
@@ -497,4 +499,3 @@ function canonicalJson(value) {
 function fail(code, details) {
   throw new CloudflareRuntimeError(code, details);
 }
-
