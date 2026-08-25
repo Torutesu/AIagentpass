@@ -6,6 +6,30 @@ Branch: `codex/agent-platform`
 PostgreSQL schema head at planning time: `0118_authority_generation_update_qualification.sql`
 Date: 2026-08-25
 
+## Implementation checkpoint — 2026-08-25
+
+The initial private-alpha control-plane slice is implemented on the current
+`codex/agent-platform` branch. The following items are now present and covered
+by focused tests:
+
+- plan-only Small Software CLI (`inspect`, `bundle`, `prepare`, `publish`) with
+  bounded project inventory and manifest/artifact digests;
+- Console Apps/Small Software surface with explicit Early Alpha, plan-only, and
+  `NOT PROVEN` states;
+- MCP inspect, publish-prepare, deployment-status, app-list/open, and
+  maintenance-status read models with tenant binding and redaction;
+- maintenance patch proposals, independent verification aggregation, and
+  provider-neutral draft-PR intent/status projection;
+- demo app, README/Product Hunt launch material, and bilingual product copy;
+- PostgreSQL 16/17 authority lanes, integration tests, P0-B artifact scanning,
+  and browser E2E (83/83 in the latest run).
+
+The following are deliberately still outside the proof boundary and must not be
+described as production-qualified: provider deployment, GitHub PR mutation,
+real external WebAuthn qualification, live Cloudflare routing, and production
+data/egress connectors. The current OSS path remains plan-only until those
+external evidence inputs are supplied.
+
 Parent specifications:
 
 - [Small Software Cloud](SMALL_SOFTWARE_CLOUD_SPEC.md)
