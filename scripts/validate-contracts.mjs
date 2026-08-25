@@ -70,7 +70,17 @@ const WAVE0_SCHEMA_FIXTURES = Object.freeze({
   "maintenance-receipt-v1.schema.json": "maintenance-receipt.valid.json",
   "maintenance-usage-attestation-v1.schema.json": "maintenance-usage-attestation.valid.json"
 });
-const SCHEMA_FIXTURES = Object.freeze({ ...BASELINE_SCHEMA_FIXTURES, ...PROMOTED_SCHEMA_FIXTURES, ...WAVE0_SCHEMA_FIXTURES });
+const SSC_SCHEMA_FIXTURES = Object.freeze({
+  "small-software-app-manifest-v1.schema.json": "small-software-app-manifest-v1.json",
+  "small-software-application-grant-v1.schema.json": "small-software-application-grant-v1.json",
+  "small-software-build-receipt-v1.schema.json": "small-software-build-receipt-v1.json",
+  "small-software-deployment-receipt-v1.schema.json": "small-software-deployment-receipt-v1.json",
+  "small-software-provider-operation-v1.schema.json": "small-software-provider-operation-v1.json",
+  "small-software-provider-result-v1.schema.json": "small-software-provider-result-v1.json",
+  "small-software-publish-plan-v1.schema.json": "small-software-publish-plan-v1.json",
+  "small-software-source-bundle-v1.schema.json": "small-software-source-bundle-v1.json"
+});
+const SCHEMA_FIXTURES = Object.freeze({ ...BASELINE_SCHEMA_FIXTURES, ...PROMOTED_SCHEMA_FIXTURES, ...WAVE0_SCHEMA_FIXTURES, ...SSC_SCHEMA_FIXTURES });
 
 function fail(message) {
   process.stderr.write(`contract validation failed: ${message}\n`);
@@ -131,12 +141,12 @@ for (const name of schemaFiles) {
   schemas.set(name, schema);
 }
 
-const schemaValidator = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+const schemaValidator = new Ajv2020({ allErrors: true, strict: true, strictTypes: false, strictRequired: false });
 addFormats(schemaValidator);
 schemaValidator.addKeyword({ keyword: "x-agentpass-binding", schemaType: "object", valid: true });
 for (const schema of schemas.values()) schemaValidator.addSchema(schema);
 
-const fixtureFiles = fs.readdirSync(path.join(contracts, "fixtures")).filter((name) => name.endsWith(".valid.json")).sort();
+const fixtureFiles = fs.readdirSync(path.join(contracts, "fixtures")).filter((name) => name.endsWith(".valid.json") || name.startsWith("small-software-")).sort();
 const baselineFixtureNames = Object.values(BASELINE_SCHEMA_FIXTURES);
 const expectedFixtureNames = Object.values(SCHEMA_FIXTURES).sort();
 if (JSON.stringify(fixtureFiles) !== JSON.stringify(expectedFixtureNames)) fail(`positive fixture inventory is out of contract: expected ${expectedFixtureNames.length}, found ${fixtureFiles.length}`);

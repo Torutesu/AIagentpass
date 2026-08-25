@@ -7,11 +7,12 @@ const requireMethods = (value, methods, kind) => {
   }
   return value;
 };
+export const HOSTED_ADAPTER_BRAND = Symbol("agentpass.hosted-adapter");
 
 /** Repository authority for app manifests, source bundles, and build receipts. */
 export const smallSoftwareRepository = (repository) => requireMethods(repository, ["getApplication", "saveBuildReceipt"], "small-software-repository");
 /** Provider adapter: reserve an effect, then inspect its independently observed result. */
-export const smallSoftwareProvider = (provider) => requireMethods(provider, ["reserveOperation", "inspectOperation"], "small-software-provider");
+export const smallSoftwareProvider = (provider) => requireMethods(provider, ["reserveOperation", "inspectOperation", "reconcileOperation"], "small-software-provider");
 export const smallSoftwareClock = (clock) => requireMethods(clock, ["now"], "clock");
 export const smallSoftwareUuid = (uuid) => requireMethods(uuid, ["randomUUID"], "uuid");
 

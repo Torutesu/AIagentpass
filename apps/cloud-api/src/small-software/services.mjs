@@ -1,11 +1,11 @@
 import { SmallSoftwareError, SMALL_SOFTWARE_ERROR_CODES } from "./errors.mjs";
-import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency } from "./interfaces.mjs";
+import { smallSoftwareProvider, smallSoftwareRepository, smallSoftwareClock, smallSoftwareUuid, isTestOnlyDependency, HOSTED_ADAPTER_BRAND } from "./interfaces.mjs";
 
 const fail = (code, cause) => { throw new SmallSoftwareError(code, cause ? { cause } : {}); };
 
 export const createSmallSoftwareService = ({ profile = "hosted", repository, provider, clock, uuid } = {}) => {
   if (profile !== "hosted" && profile !== "test") fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
-  if (profile === "hosted" && [repository, provider, clock, uuid].some(isTestOnlyDependency)) {
+  if (profile === "hosted" && ([repository, provider, clock, uuid].some(isTestOnlyDependency) || [repository, provider, clock, uuid].some((dependency) => dependency?.[HOSTED_ADAPTER_BRAND] !== true))) {
     fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
   }
   const repo = smallSoftwareRepository(repository);
@@ -31,6 +31,11 @@ export const createSmallSoftwareService = ({ profile = "hosted", repository, pro
         if (error instanceof SmallSoftwareError) throw error;
         fail(SMALL_SOFTWARE_ERROR_CODES.OPERATION_FAILED, error);
       }
+    },
+    async reconcileBuild(operationId) {
+      if (typeof operationId !== "string" || operationId.length === 0) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT);
+      try { return await external.reconcileOperation(operationId); }
+      catch (error) { fail(SMALL_SOFTWARE_ERROR_CODES.OPERATION_FAILED, error); }
     },
     async saveBuildReceipt(applicationId, receipt) {
       if (typeof applicationId !== "string" || !receipt || typeof receipt !== "object") fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT);
