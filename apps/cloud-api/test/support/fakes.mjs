@@ -1,0 +1,1 @@
+export const createFakeSandbox = () => { const calls = []; return Object.freeze({ testOnly: true, calls, async reserve(request) { calls.push({ method: "reserve", request }); return { status: "reserved" }; }, async inspect(operationId) { calls.push({ method: "inspect", operationId }); return { status: "observed", operationId }; } }); };
