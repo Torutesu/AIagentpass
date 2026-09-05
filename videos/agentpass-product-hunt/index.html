@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #061127; }
+      body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; color: #f4f7ff; }
+      .clip { position: absolute; }
+      .bg { inset: 0; width: 1920px; height: 1080px; object-fit: cover; opacity: .18; }
+      .veil { inset: 0; background: linear-gradient(90deg, rgba(6,17,39,.98) 0%, rgba(6,17,39,.84) 47%, rgba(6,17,39,.24) 100%); }
+      .grid { inset: 0; opacity: .16; background-image: linear-gradient(rgba(51,168,255,.18) 1px, transparent 1px), linear-gradient(90deg, rgba(51,168,255,.18) 1px, transparent 1px); background-size: 64px 64px; }
+      .eyebrow { left: 120px; top: 92px; font-size: 26px; letter-spacing: .22em; text-transform: uppercase; color: #5be58c; font-weight: 700; }
+      .headline { left: 120px; top: 210px; width: 950px; font-size: 88px; line-height: 1.03; letter-spacing: -.045em; font-weight: 800; }
+      .sub { left: 126px; top: 510px; width: 760px; font-size: 34px; line-height: 1.28; color: #b8c8e2; }
+      .pill { left: 126px; top: 760px; padding: 16px 24px; border: 1px solid rgba(91,229,140,.65); border-radius: 999px; color: #5be58c; font-size: 24px; font-weight: 700; }
+      .scene-title { left: 120px; top: 108px; font-size: 58px; font-weight: 800; letter-spacing: -.035em; }
+      .scene-copy { left: 124px; top: 210px; width: 720px; font-size: 34px; line-height: 1.22; color: #b8c8e2; }
+      .card { left: 123px; top: 510px; width: 760px; padding: 34px; border-radius: 24px; border: 1px solid rgba(159,177,209,.26); background: rgba(9,24,52,.88); box-shadow: 0 22px 80px rgba(0,0,0,.32); }
+      .card-line { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid rgba(159,177,209,.18); font-size: 28px; }
+      .card-line:last-child { border-bottom: 0; }
+      .label { color: #9fb1d1; }
+      .good { color: #5be58c; font-weight: 750; }
+      .terminal { left: 1080px; top: 230px; width: 690px; padding: 30px; border: 1px solid rgba(51,168,255,.4); border-radius: 20px; background: rgba(2,8,22,.88); color: #dce8ff; font: 24px/1.55 "SFMono-Regular", Consolas, monospace; box-shadow: 0 26px 90px rgba(0,0,0,.4); }
+      .terminal .prompt { color: #5be58c; }
+      .terminal .dim { color: #7d90b2; }
+      .cta { left: 124px; top: 760px; font-size: 28px; color: #33a8ff; font-weight: 700; }
+      .logo { right: 120px; bottom: 84px; z-index: 20; font-size: 30px; font-weight: 800; letter-spacing: -.02em; }
+      .logo span { color: #5be58c; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="30" data-width="1920" data-height="1080">
+      <div class="clip" data-start="0" data-duration="30" data-track-index="0" style="inset:0;background:#061127"></div>
+      <div class="clip grid" data-start="0" data-duration="30" data-track-index="1"></div>
+      <section id="hook" class="clip" data-start="0" data-duration="5.5" data-track-index="2" style="inset:0">
+        <div class="eyebrow" data-layout-allow-overlap="true">AgentPass / Early Alpha</div>
+        <div class="headline" data-layout-allow-overlap="true">Want AI to write code?<br/><span style="color:#ff9f5a">Don't give it your password.</span></div>
+        <div class="sub">AgentPass lets AI do the useful part — without handing over the keys to everything else.</div>
+        <div class="pill">Free · Open Source · Early Alpha</div><div class="logo" data-layout-allow-occlusion="true">Agent<span>Pass</span></div>
+      </section>
+      <section id="problem" class="clip" data-start="5.5" data-duration="7" data-track-index="3" style="inset:0">
+        <img class="clip bg" data-start="5.5" data-duration="7" data-track-index="0" src="assets/agentpass-problem.png" alt="" />
+        <div class="clip veil" data-start="5.5" data-duration="7" data-track-index="1"></div>
+        <div class="scene-title">One password can unlock everything.</div>
+        <div class="scene-copy">If you paste it into an AI tool, it may read, change, or send more than you meant to.</div>
+        <div class="cta">❌ password shared → ❌ no clear limit</div><div class="logo" data-layout-allow-occlusion="true">Agent<span>Pass</span></div>
+      </section>
+      <section id="boundary" class="clip" data-start="12.5" data-duration="8" data-track-index="4" style="inset:0">
+        <img class="clip bg" data-start="12.5" data-duration="8" data-track-index="0" src="assets/agentpass-boundary.png" alt="" />
+        <div class="clip veil" data-start="12.5" data-duration="8" data-track-index="1"></div>
+        <div class="scene-title">Give one small permission.</div>
+        <div class="scene-copy">Choose what the AI may do, where it may do it, and how long the permission lasts.</div>
+        <div class="cta" style="color:#5be58c">✓ small permission → ✓ secret stays protected</div><div class="logo" data-layout-allow-occlusion="true">Agent<span>Pass</span></div>
+      </section>
+      <section id="demo" class="clip" data-start="20.5" data-duration="6.5" data-track-index="5" style="inset:0">
+        <div class="scene-title">A safer request looks like this.</div>
+        <div class="scene-copy">The AI can do exactly this — then the permission turns off.</div>
+        <div class="card">
+          <div class="card-line"><span class="label">Where</span><span>This project</span></div><div class="card-line"><span class="label">What</span><span>Send this change</span></div><div class="card-line"><span class="label">How long</span><span class="good">10 minutes</span></div><div class="card-line"><span class="label">Your password</span><span class="good">never shared</span></div>
+        </div>
+        <div class="terminal"><span class="prompt">AI asks:</span> Can I send this change?<br/><span class="dim">check: right place ✓ right action ✓ time limit ✓</span><br/><span class="good">yes · one small permission</span></div><div class="logo" data-layout-allow-occlusion="true">Agent<span>Pass</span></div>
+      </section>
+      <section id="close" class="clip" data-start="27" data-duration="3" data-track-index="6" style="inset:0">
+        <div class="eyebrow" data-layout-allow-overlap="true">Free · Open Source · macOS</div><div class="headline" data-layout-allow-overlap="true" style="top:300px;font-size:92px">Let AI help.<br/><span style="color:#5be58c">Keep your secrets.</span></div><div class="sub" style="top:620px">Try AgentPass with a test project.</div><div class="pill" style="top:760px">github.com/Torutesu/AIagentpass</div><div class="logo" data-layout-allow-occlusion="true">Agent<span>Pass</span></div>
+      </section>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.from("#hook .eyebrow, #hook .headline, #hook .sub, #hook .pill", { opacity: 0, y: 28, duration: .6, stagger: .12, ease: "power2.out" }, 0);
+      tl.from("#problem .scene-title, #problem .scene-copy, #problem .cta", { opacity: 0, x: -32, duration: .6, stagger: .12, ease: "power2.out" }, 5.5);
+      tl.from("#boundary .scene-title, #boundary .scene-copy, #boundary .cta", { opacity: 0, x: -32, duration: .6, stagger: .12, ease: "power2.out" }, 12.5);
+      tl.from("#demo .scene-title, #demo .scene-copy, #demo .card, #demo .terminal", { opacity: 0, y: 24, duration: .55, stagger: .1, ease: "power2.out" }, 20.5);
+      tl.from("#close .eyebrow, #close .headline, #close .sub, #close .pill", { opacity: 0, y: 24, duration: .55, stagger: .1, ease: "power2.out" }, 27);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
