@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import { createOperationalLog } from "./operational-log.mjs";
+import { createOperationalAlerts } from "./operational-alerts.mjs";
 import { authenticateApiToken, createReplayCache, requireOrganizationRole, verifyDeviceRequest } from "./auth.mjs";
 import { MAX_REVOCATIONS, controlBundleStatementHash, issueControlBundle, parseControlBundleJson, verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, intersectScopes, verifyCapability } from "../../../packages/capability/src/index.mjs";
@@ -64,7 +66,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, deviceAuditInbox, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, agentLaunchAuthorityHandoffApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, deviceAuditInbox, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret, operationalLog, operationalAlerts } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -104,6 +106,10 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
   if (operationalProbeSecret !== undefined && (!Buffer.isBuffer(operationalProbeSecret) || operationalProbeSecret.length !== 32)) throw new TypeError("operationalProbeSecret must be an exact 32-byte Buffer");
   if ((readiness !== undefined || operationalMetrics !== undefined) && operationalProbeSecret === undefined) throw new TypeError("operationalProbeSecret is required for operational endpoints");
+  if (operationalLog !== undefined && typeof operationalLog !== "object") throw new TypeError("operationalLog must be an object");
+  if (operationalAlerts !== undefined && (!operationalAlerts || typeof operationalAlerts.evaluate !== "function")) throw new TypeError("operationalAlerts must expose evaluate()");
+  const log = operationalLog ?? createOperationalLog();
+  const alerts = operationalAlerts ?? createOperationalAlerts();
   // A hosted readiness report performs database, schema, and managed-signer
   // checks. The Console fans out several requests at once; running that full
   // probe once per request can consume the application pool and make the
@@ -161,6 +167,13 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         const report = await Promise.resolve().then(() => operationalMetrics.snapshot()).then(publicMetricsReport).catch(() => null);
         return report ? send(response, 200, report) : send(response, 503, { version: 1, valid: false, code: "metrics_unavailable" });
       }
+      if (request.method === "GET" && healthPath === "/health/alerts" && operationalMetrics) {
+        if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
+        const metricsReport = await Promise.resolve().then(() => operationalMetrics.snapshot()).then(publicMetricsReport).catch(() => null);
+        if (!metricsReport) return send(response, 503, { version: 1, ok: false, code: "metrics_unavailable" });
+        const alertReport = alerts.evaluate(metricsReport);
+        return send(response, alertReport.ok ? 200 : 200, alertReport);
+      }
       if (readiness) {
         const report = await applicationReadinessReport();
         if (!report || report.ready !== true) {
@@ -171,7 +184,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     };
     try { return await (trackInFlight ? trackInFlight(operation) : operation()); }
     catch (error) {
-      if (!response.headersSent && error?.code === "draining") return send(response, 503, { error: { code: "draining", message: "Service is draining" }, request_id: crypto.randomUUID() });
+      if (!response.headersSent && error?.code === "draining") { try { log.drainRejected({ requestId: crypto.randomUUID() }); } catch { /* non-fatal */ } return send(response, 503, { error: { code: "draining", message: "Service is draining" }, request_id: crypto.randomUUID() }); }
       if (!response.headersSent) return send(response, 500, { error: { code: "internal_error", message: "Internal error" }, request_id: crypto.randomUUID() });
       response.destroy();
     }
@@ -179,7 +192,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
 
   async function handleRequest(request, response) {
     const requestId = crypto.randomUUID();
+    let startMark;
     try {
+      startMark = log.requestStart({ requestId, route: "unknown" });
       if (platformSessionHttpApi && isPlatformSessionHttpPath(request.url, platformSessionHttpApi.paths)) {
         // Platform Session is its own trust boundary. Pass the untouched
         // IncomingMessage through so its boundary owns body/header/cookie
@@ -207,7 +222,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           principalType: "device",
           principalId: transportPrincipalId(request)
         });
-        if (!admissionDecision.allowed) return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true));
+        if (!admissionDecision.allowed) { try { log.admissionDenied({ requestId, route: "agent_session.launch_handoff" }); } catch { /* non-fatal */ } return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true)); }
         const bodyBytes = await readBody(request, 16 * 1024);
         const result = await agentLaunchAuthorityHandoffApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
         const normalized = normalizeAgentSessionDeviceResult(result);
@@ -223,7 +238,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           principalType: "device",
           principalId: transportPrincipalId(request)
         });
-        if (!admissionDecision.allowed) return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true));
+        if (!admissionDecision.allowed) { try { log.admissionDenied({ requestId, route: "agent_session.consume" }); } catch { /* non-fatal */ } return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true)); }
         const bodyBytes = await readBody(request);
         const result = await agentSessionDeviceApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
         const normalized = normalizeAgentSessionDeviceResult(result);
@@ -275,7 +290,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           let accepted = false;
           try { accepted = await deviceReplayConsumer({ organizationId, deviceId: principal.device_id, nonce: request.headers["agentpass-nonce"] }); }
           catch { throw apiError("auth_replay_unavailable", 503, "Authentication replay protection is unavailable"); }
-          if (accepted !== true) { recordOperationalMetric(operationalMetrics, "recordReplayDenial"); throw apiError("auth_replay_detected", 401, "Authentication failed"); }
+          if (accepted !== true) { recordOperationalMetric(operationalMetrics, "recordReplayDenial"); try { log.authReplayDetected({ requestId, route: "unknown" }); } catch { /* non-fatal */ } throw apiError("auth_replay_detected", 401, "Authentication failed"); }
         }
       } else if (route.enrollment) {
         principal = { enrollment_id: match?.groups?.enrollmentId, member_id: admissionId };
@@ -298,17 +313,18 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         if (error?.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") throw error;
         throw apiError("rate_limiter_unavailable", 503, "Rate limiter is temporarily unavailable", { "Retry-After": "1" });
       }
-      if (!rateLimit.allowed) { recordOperationalMetric(operationalMetrics, "recordRateLimitDenial"); throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true)); }
+      if (!rateLimit.allowed) { recordOperationalMetric(operationalMetrics, "recordRateLimitDenial"); try { log.rateLimitDenied({ requestId, route: "unknown" }); } catch { /* non-fatal */ } throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true)); }
       const context = { request, url, body, bodyBytes, organizationId, principal, match: match.groups ?? {}, idempotencyKey: idempotencyKey(request, route), requestId };
       const result = await route.handle(context);
       const gapCount = result?.body?.ingestion?.gaps?.length;
-      if (Number.isSafeInteger(gapCount) && gapCount > 0) recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount);
-      if (result.status === 204) sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers });
-      else send(response, result.status ?? 200, result.omitRequestId ? result.body : { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
+      if (Number.isSafeInteger(gapCount) && gapCount > 0) { recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount); try { log.auditGapDetected({ requestId }); } catch { /* non-fatal */ } }
+      if (result.status === 204) { try { log.requestComplete({ requestId, route: "unknown", status: 204, decisionCode: "allowed", startMark }); } catch { /* non-fatal */ } sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers }); }
+      else { try { log.requestComplete({ requestId, route: "unknown", status: result.status ?? 200, decisionCode: "allowed", startMark }); } catch { /* non-fatal */ } send(response, result.status ?? 200, result.omitRequestId ? result.body : { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers }); }
     } catch (error) {
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
-      if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
+      if (hasErrorCode(error, "55P03")) { recordOperationalMetric(operationalMetrics, "recordLockTimeout"); try { log.lockTimeout({ requestId }); } catch { /* non-fatal */ } }
       const mapped = mapError(error);
+      try { log.requestError({ requestId, route: "unknown", status: mapped.status, decisionCode: mapped.code === "internal_error" ? "internal_error" : "denied", startMark }); } catch { /* non-fatal */ }
       if (!response.headersSent && !response.writableEnded) {
         send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
       } else if (!response.writableEnded && typeof response.destroy === "function") {
