@@ -14,7 +14,9 @@ import {
 } from "./production-readiness-gate.mjs";
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 
-const NOW = Date.parse("2026-08-22T00:00:00.000Z");
+const NOW = Date.now();
+const DAY = 24 * 60 * 60 * 1_000;
+const ISO = (ms) => new Date(ms).toISOString();
 const SHA = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
 const sourceCommit = "a".repeat(40);
 const sourceTree = "b".repeat(40);
@@ -28,10 +30,10 @@ function baseGate() {
   const evidence = REQUIRED_PRODUCTION_EVIDENCE_ROWS.map((required, index) => ({
     artifact_sha256: artifact,
     candidate_id: candidateId,
-    expires_at: "2026-08-30T00:00:00.000Z",
+    expires_at: ISO(NOW + 28 * DAY),
     kind: required.kind,
     name: `evidence-${index}`,
-    produced_at: "2026-08-21T00:00:00.000Z",
+    produced_at: ISO(NOW - DAY),
     provenance: {
       environment: "production",
       execution_class: "protected_external",
@@ -54,11 +56,11 @@ function baseGate() {
       artifact_sha256: artifact,
       candidate_id: candidateId,
       evidence_sha256: productionReadinessEvidenceSHA256(evidence),
-      expires_at: "2026-08-30T00:00:00.000Z",
+      expires_at: ISO(NOW + 28 * DAY),
       id: "external-reviewer-1",
       independent: true,
       report_sha256: SHA("d"),
-      reviewed_at: "2026-08-21T12:00:00.000Z",
+      reviewed_at: ISO(NOW - 12 * 60 * 60 * 1_000),
       source_commit: sourceCommit,
       source_tree: sourceTree
     },
@@ -115,9 +117,9 @@ test("rejects candidate, source, tree, and artifact substitutions", () => {
 });
 
 test("rejects expired and overlong evidence and review windows", () => {
-  const evidenceExpired = baseGate(); evidenceExpired.evidence[0].expires_at = "2026-08-21T00:00:00.000Z"; assertReason(evidenceExpired, "evidence_expired");
-  const evidenceLong = baseGate(); evidenceLong.evidence[0].expires_at = "2026-09-22T00:00:00.000Z"; assertReason(evidenceLong, "evidence_expired");
-  const reviewExpired = baseGate(); reviewExpired.reviewer.expires_at = "2026-08-21T00:00:00.000Z"; assertReason(reviewExpired, "review_expired");
+  const evidenceExpired = baseGate(); evidenceExpired.evidence[0].expires_at = ISO(NOW - 2 * DAY); assertReason(evidenceExpired, "evidence_expired");
+  const evidenceLong = baseGate(); evidenceLong.evidence[0].expires_at = ISO(NOW + 31 * DAY); assertReason(evidenceLong, "evidence_expired");
+  const reviewExpired = baseGate(); reviewExpired.reviewer.expires_at = ISO(NOW - 2 * DAY); assertReason(reviewExpired, "review_expired");
 });
 
 test("requires protected external provenance and rejects local/static/mock/fixture/sandbox evidence", () => {
