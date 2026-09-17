@@ -68,7 +68,7 @@ export function createCliRunner({
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"]
       });
-    } catch (error) {
+    } catch (_error) {
       reject(new CliRunnerError("Unable to start AgentPass", "spawn_failed"));
       return;
     }

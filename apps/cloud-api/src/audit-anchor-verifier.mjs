@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 
 import {
-  AUDIT_ANCHOR_ALGORITHM,
   AUDIT_ANCHOR_ERROR_CODES,
   AUDIT_ANCHOR_MAX_TTL_MS,
   AUDIT_ANCHOR_PURPOSE,

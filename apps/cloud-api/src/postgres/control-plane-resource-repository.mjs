@@ -1229,5 +1229,5 @@ function requireIdempotencyKey(value) { if (typeof value !== "string" || !IDEMPO
 function notFound(label, id) { return new ControlPlaneResourceRepositoryError("ERR_NOT_FOUND", `${label} not found: ${id}`); }
 function rowCount(result) { return result?.rowCount ?? result?.rows?.length ?? 0; }
 function cloneJson(value) { return value === undefined ? undefined : structuredClone(value); }
-function isEmptyObject(value) { return Object.keys(value).length === 0; }
+function _isEmptyObject(value) { return Object.keys(value).length === 0; }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client must provide query(text, params)"); }

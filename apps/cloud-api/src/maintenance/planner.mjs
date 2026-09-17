@@ -25,7 +25,7 @@ export class MaintenancePlannerError extends Error {
 
 const fail = (code, message) => { throw new MaintenancePlannerError(code, message); };
 const timestamp = (value) => new Date(value).toISOString();
-const string = (value, name) => { if (typeof value !== "string" || value.length === 0) fail(MAINTENANCE_PLANNER_ERROR_CODES.INVALID_INPUT, `${name} is invalid`); return value; };
+const _string = (value, name) => { if (typeof value !== "string" || value.length === 0) fail(MAINTENANCE_PLANNER_ERROR_CODES.INVALID_INPUT, `${name} is invalid`); return value; };
 
 /**
  * Computes a maintenance decision without I/O. The returned plan and job are
@@ -34,7 +34,7 @@ const string = (value, name) => { if (typeof value !== "string" || value.length 
  */
 export function planMaintenanceJob({ advisory, snapshot, usage, policy, now = new Date().toISOString(), idempotencyKey = undefined } = {}) {
   try { validateAdvisory(advisory); validateRepositorySnapshot(snapshot); validateUsageClassification(usage); validateMaintenancePolicy(policy); }
-  catch (error) { fail(MAINTENANCE_PLANNER_ERROR_CODES.INVALID_INPUT, "maintenance planning input is invalid"); }
+  catch (_error) { fail(MAINTENANCE_PLANNER_ERROR_CODES.INVALID_INPUT, "maintenance planning input is invalid"); }
   let observedAt;
   try { observedAt = timestamp(now); } catch { fail(MAINTENANCE_PLANNER_ERROR_CODES.INVALID_INPUT, "now is invalid"); }
   if (advisory.event === "withdrawal") fail(MAINTENANCE_PLANNER_ERROR_CODES.NO_ACTION, "withdrawn advisories cannot create maintenance jobs");

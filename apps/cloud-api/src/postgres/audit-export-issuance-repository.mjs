@@ -43,7 +43,7 @@ const AUTHORITY_KEYS = Object.freeze([
 ]);
 const COMMIT_KEYS = Object.freeze([...AUTHORITY_KEYS, "claim_token", "audit_anchor"]);
 const UNCERTAIN_KEYS = Object.freeze([...AUTHORITY_KEYS, "claim_token", "reason"]);
-const ROW_COLUMNS = Object.freeze([
+const _ROW_COLUMNS = Object.freeze([
   "organization_id", "export_id", "environment", "chain", "idempotency_key", "state",
   "from_audit_position", "to_audit_position", "previous_root_digest", "root_digest", "record_count",
   "payload_digest", "request_digest", "issued_at", "expires_at", "claim_expires_at", "key_id", "key_version",

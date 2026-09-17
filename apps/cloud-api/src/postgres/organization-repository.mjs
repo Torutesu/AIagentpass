@@ -15,7 +15,7 @@ const MAX_PAGE_SIZE = 100;
 
 const READ_MEMBER_COLUMNS = `m.id AS member_id,m.github_subject,m.display_name,m.created_at AS member_created_at,
   ms.organization_id,ms.id AS membership_id,ms.role,ms.status,ms.version,ms.created_at,ms.updated_at`;
-const SAFE_INVITATION_COLUMNS = `i.organization_id,i.id AS invitation_id,i.role,i.created_at,i.expires_at,
+const _SAFE_INVITATION_COLUMNS = `i.organization_id,i.id AS invitation_id,i.role,i.created_at,i.expires_at,
   i.consumed_by AS accepted_member_id,i.consumed_at,i.revoked_at,i.version,i.created_by`;
 
 export class OrganizationRepositoryError extends Error {
@@ -489,7 +489,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     return safeMembershipRow(row);
   }
 
-  async function revokeMemberSessions(tx, { organizationId, memberId, revokedAt, reason }) {
+  async function _revokeMemberSessions(tx, { organizationId, memberId, revokedAt, reason }) {
     const sessionRevoke = await tx.query(
       "SELECT public.agentpass_human_member_session_revoke($1::uuid,$2::uuid,$3::timestamptz,$4::text) AS result",
       [memberId, organizationId, revokedAt, reason]
@@ -747,7 +747,7 @@ function keysetPagination(input, resource) {
   if (hasCreatedAt !== hasId) throw new TypeError(`${resource} cursor position is incomplete`);
   return { limit, after: hasCreatedAt ? { createdAt: timestamp(input.after_created_at, "after_created_at"), id: uuid(input.after_id) } : null };
 }
-function nullableTimestamp(value, field) { return value === null || value === undefined ? null : timestamp(value, field); }
+function _nullableTimestamp(value, field) { return value === null || value === undefined ? null : timestamp(value, field); }
 function returnedVersion(value) { const result = typeof value === "bigint" ? Number(value) : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; return version(result); }
 function returnedSequence(value) { const result = typeof value === "bigint" ? Number(value) : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(result) || result < 0) throw new TypeError("audit sequence is invalid"); return result; }
 function returnedTimestamp(value) { if (value instanceof Date) { if (!Number.isFinite(value.getTime())) throw new TypeError("timestamp is invalid"); return value.toISOString(); } return timestamp(value, "timestamp"); }

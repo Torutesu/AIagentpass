@@ -19,7 +19,7 @@ const MAX_CURSOR_LENGTH = 512;
 const MAX_REASON_BYTES = 128;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 const DEFAULT_PAGE_SIZE = 25;
-const MAX_PAGE_SIZE = 100;
+const _MAX_PAGE_SIZE = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const OPAQUE_CURSOR = /^[A-Za-z0-9_-]+$/u;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:~-]{7,254}$/u;
@@ -247,7 +247,7 @@ export function createOwnerRecoveryDeadLetterHttpApi({
   async function authenticateSession(request) {
     const cookie = header(request.headers, "cookie");
     try { parseSessionCookie(cookie); }
-    catch (error) { throw new OwnerRecoveryDeadLetterHttpError(HCODE.SESSION_REQUIRED, { status: 401 }); }
+    catch (_error) { throw new OwnerRecoveryDeadLetterHttpError(HCODE.SESSION_REQUIRED, { status: 401 }); }
     const csrfToken = header(request.headers, HUMAN_SESSION_CSRF_HEADER);
     if (!isOpaqueToken(csrfToken)) throw new OwnerRecoveryDeadLetterHttpError(HCODE.CSRF_FAILED, { status: 403 });
     try {
@@ -275,7 +275,7 @@ export function createOwnerRecoveryDeadLetterHttpApi({
     try {
       authenticatedAt = now();
       if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt < 0) throw new Error("invalid clock");
-    } catch (error) {
+    } catch (_error) {
       throw new OwnerRecoveryDeadLetterHttpError(HCODE.RECENT_AUTH_UNAVAILABLE, { status: 503 });
     }
 
@@ -289,7 +289,7 @@ export function createOwnerRecoveryDeadLetterHttpApi({
         context_hash: contextHash,
         now: authenticatedAt
       });
-    } catch (error) {
+    } catch (_error) {
       throw new OwnerRecoveryDeadLetterHttpError(HCODE.RECENT_AUTH_UNAVAILABLE, { status: 503 });
     }
 

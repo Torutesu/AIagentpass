@@ -11,7 +11,7 @@ import { HumanAuthAbuseControlError, HUMAN_AUTH_RATE_LIMIT_OPERATIONS } from "..
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const DEFAULT_PAGE_SIZE = 50;
-const MAX_PAGE_SIZE = 100;
+const _MAX_PAGE_SIZE = 100;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
@@ -580,7 +580,7 @@ function requiredName(value) {
   return value;
 }
 
-function requiredVersion(value) {
+function _requiredVersion(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw invalidRequest();
   return value;
 }
@@ -595,7 +595,7 @@ function decodeSegment(value) {
   let decoded;
   try { decoded = decodeURIComponent(value); } catch { throw invalidRequest(); }
   if (!decoded || decoded.includes("/") || decoded.includes("\\") || !PATH_SEGMENT.test(decoded)) throw invalidRequest();
-  try { return requiredUuid(decoded); } catch (error) { throw invalidRequest(); }
+  try { return requiredUuid(decoded); } catch (_error) { throw invalidRequest(); }
 }
 
 function normalizePage(result, limit, normalizer) {

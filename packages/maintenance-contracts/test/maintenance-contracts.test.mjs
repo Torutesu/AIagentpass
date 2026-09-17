@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { validateProviderIdentity, validateAdvisory, validateSelector, validateMaintenancePolicy, validateMaintenancePlan, validateMaintenanceReceipt, validateMaintenanceGrant, canonicalJson, signAdvisory, verifyAdvisory, advisoryDigest, MaintenanceContractError } from '../src/index.mjs';
+import { validateProviderIdentity, validateAdvisory, validateSelector, validateMaintenancePolicy, validateMaintenancePlan, validateMaintenanceReceipt, validateMaintenanceGrant, canonicalJson, signAdvisory, verifyAdvisory, advisoryDigest } from '../src/index.mjs';
 
 const fixture = (name) => JSON.parse(fs.readFileSync(new URL(`../../../contracts/fixtures/${name}`, import.meta.url)));
 test('valid provider and advisory fixtures validate', () => { validateProviderIdentity(fixture('maintenance-provider-identity.valid.json')); const a = fixture('maintenance-advisory-endpoint.valid.json'); validateAdvisory(a); assert.equal(advisoryDigest(a).length, 64); });

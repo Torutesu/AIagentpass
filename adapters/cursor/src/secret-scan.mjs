@@ -42,7 +42,7 @@ function scanEnvironment(value) {
   return count;
 }
 
-function scanArray(value, label) {
+function scanArray(value, _label) {
   if (value === undefined) return 0;
   if (!Array.isArray(value)) secretFailure();
   for (const entry of value) scanText(entry);

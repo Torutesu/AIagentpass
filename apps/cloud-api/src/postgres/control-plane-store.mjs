@@ -351,7 +351,7 @@ async function callRepository(fn, repository, operation, input) {
   }
 }
 
-function publicError(error, operation) {
+function publicError(error, _operation) {
   if (error instanceof ControlPlaneStoreError) return error;
   if (isDatabaseError(error)) return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.DATABASE, DATABASE_MESSAGE, 503);
   if (error && typeof error.code === "string" && (error.code.startsWith("ERR_") || error.code === "shared_control_unavailable" || error.code === "idempotency_conflict")) return error;
@@ -363,7 +363,7 @@ function isDatabaseError(error) {
   return DATABASE_ERROR_CODES.has(code) || code.startsWith("08") || code.startsWith("53") || code === "23505" || code === "23503" || code === "XX000";
 }
 
-function unavailable(operation) {
+function unavailable(_operation) {
   return new ControlPlaneStoreError(CONTROL_PLANE_STORE_ERROR_CODES.METHOD_UNAVAILABLE, UNAVAILABLE_MESSAGE, 503);
 }
 

@@ -23,7 +23,7 @@ export function createSmallSoftwareSourceStorage({ storage, profile = "hosted" }
     async putBundle({ statement, bytes } = {}) {
       let normalized;
       try { normalized = normalizeSourceBundleStatement(statement); }
-      catch (error) { fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, { issue: "source_bundle" }); }
+      catch (_error) { fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, { issue: "source_bundle" }); }
       if (!isBytes(bytes) || byteLength(bytes) < 0 || byteLength(bytes) > MAX_SOURCE_BYTES) {
         fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, { issue: "source_bytes" });
       }
@@ -31,7 +31,7 @@ export function createSmallSoftwareSourceStorage({ storage, profile = "hosted" }
       let result;
       try {
         result = await objects.put({ digest, statement: normalized, bytes: Buffer.from(bytes) });
-      } catch (error) {
+      } catch (_error) {
         fail(SMALL_SOFTWARE_ERROR_CODES.DEPENDENCY_UNAVAILABLE);
       }
       assertStored(result, digest, byteLength(bytes));

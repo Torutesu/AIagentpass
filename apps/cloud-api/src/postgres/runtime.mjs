@@ -49,6 +49,7 @@ import { createPostgresPlatformSessionBootstrapRepository } from "./platform-ses
 import { createPostgresDeviceAuditInboxRepository } from "./device-audit-inbox-repository.mjs";
 import { createDeviceAuditInboxWorker } from "./device-audit-inbox-worker.mjs";
 import { createPostgresHostedIdentityBootstrapRepository } from "./hosted-identity-bootstrap-repository.mjs";
+import { measurePostgresSchemaIdentity } from "./schema-identity.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -246,7 +247,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       });
     }
   });
-  const readiness = expectedDatabaseSchemaDigest === undefined ? operationalHealth.readiness : async () => {
+  const _readiness = expectedDatabaseSchemaDigest === undefined ? operationalHealth.readiness : async () => {
     const report = await operationalHealth.readiness();
     let connection;
     let identity;

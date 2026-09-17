@@ -30,7 +30,7 @@ function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function providerUnavailable() {
+function _providerUnavailable() {
   return new GithubOAuthError(GITHUB_OAUTH_ERROR_CODES.PROVIDER_UNAVAILABLE);
 }
 

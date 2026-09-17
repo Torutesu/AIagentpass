@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import { parseBoundedJson } from "../../../lib/control-bundle-v2.mjs";
 
 import {
-  AGENT_SESSION_GRANT_ISSUER,
   AGENT_SESSION_GRANT_TYPE,
   AGENT_SESSION_GRANT_VERSION,
   agentSessionGrantSigningData,

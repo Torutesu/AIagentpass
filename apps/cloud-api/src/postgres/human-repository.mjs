@@ -786,7 +786,7 @@ function cursorTimestamp(value) {
   if (!Number.isFinite(date.getTime())) throw new TypeError("cursor timestamp is invalid");
   return date.toISOString();
 }
-function credentialCursorIdSql(alias) {
+function _credentialCursorIdSql(alias) {
   const digest = `encode(sha256(${alias}.id),'hex')`;
   return `(substr(${digest},1,8)||'-'||substr(${digest},9,4)||'-4'||substr(${digest},14,3)||'-8'||substr(${digest},18,3)||'-'||substr(${digest},21,12))::uuid`;
 }

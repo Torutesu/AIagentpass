@@ -204,9 +204,7 @@ export function createSharedControlRepository({ client, limits = {}, hash = sha2
       const acquired = await acquireIdempotency({ tx, organizationId, principalId, idempotencyKey, requestHash, ttlMs });
       if (acquired.state === "replay") return acquired;
       if (acquired.state === "conflict" || acquired.state === "in_progress") return { state: acquired.state };
-      let result;
-      try { result = await operation(tx); }
-      catch (error) { throw error; }
+      const result = await operation(tx);
       if (!result || typeof result !== "object" || Array.isArray(result)) throw invalidRequest();
       await completeIdempotency({ tx, organizationId, principalId, idempotencyKey, requestHash, responseStatus: result.responseStatus, response: result.response });
       return { state: "committed", responseStatus: normalizeResponseStatus(result.responseStatus), response: safeStoredResponse(result.response) };

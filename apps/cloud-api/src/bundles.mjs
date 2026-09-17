@@ -422,8 +422,7 @@ function parseIssueTimestamp(value) {
 }
 
 function issueTimestamp(value) {
-  let milliseconds;
-  try { milliseconds = parseIssueTimestamp(value); } catch (error) { throw error; }
+  const milliseconds = parseIssueTimestamp(value);
   const date = new Date(milliseconds);
   if (!Number.isFinite(date.getTime())) fail(BUNDLE_REASONS.INVALID_TIMESTAMP, "Bundle timestamp is out of range");
   return date.toISOString();

@@ -46,7 +46,7 @@ const SCOPE_KEYS = new Set(["operations", "repositories", "branches", "remotes",
 const FILTER_KEYS = new Set(["allow", "deny"]);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const BASE64URL = /^[A-Za-z0-9_-]+$/;
+const _BASE64URL = /^[A-Za-z0-9_-]+$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_SCOPE_ITEMS = 256;
 const MAX_SCOPE_ITEM_LENGTH = 2048;

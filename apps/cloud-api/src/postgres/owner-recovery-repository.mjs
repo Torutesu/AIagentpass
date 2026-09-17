@@ -12,7 +12,7 @@ const HEX = /^[0-9a-f]+$/iu;
 const TOKEN_BYTES = 32;
 const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const LIVE_REQUEST_STATES = new Set(["pending", "approved", "delayed", "session_issued", "credential_enrolled"]);
-const TERMINAL_REQUEST_STATES = new Set(["cancelled", "expired", "failed", "activated"]);
+const _TERMINAL_REQUEST_STATES = new Set(["cancelled", "expired", "failed", "activated"]);
 const RECOVERY_SESSION_STAGES = new Set(["session_issued", "credential_enrolled", "activated", "revoked", "expired"]);
 const OUTBOX_EVENTS = new Set([
   "recovery.request.created",
@@ -637,8 +637,8 @@ export function createPostgresOwnerRecoveryRepository({
       const approvalIds = await approvalOwnerIds(tx, values.organizationId, values.requestId);
       const memberships = await lockMemberships(tx, values.organizationId, uniqueSorted([request.subject_member_id, ...approvalIds]));
       const currentSession = await lockRecoverySessionByDigest(tx, values.organizationId, values.requestId, sha256(values.recoverySessionToken));
-      const humanSessions = await lockHumanSessionsForMember(tx, values.organizationId, request.subject_member_id);
-      const recoverySessions = await lockRecoverySessions(tx, values.organizationId, request.subject_member_id, values.requestId);
+      const _humanSessions = await lockHumanSessionsForMember(tx, values.organizationId, request.subject_member_id);
+      const _recoverySessions = await lockRecoverySessions(tx, values.organizationId, request.subject_member_id, values.requestId);
       if (request.state === "activated" && currentSession?.stage === "activated" && currentSession.activation_authorization_id === values.authorizationId) return Object.freeze({ request: publicRequest(request), recovery_session_id: currentSession.recovery_session_id, replayed: true });
       requireExpectedVersion(request, values.expectedVersion);
       if (request.state !== "credential_enrolled" || !currentSession || currentSession.stage !== "credential_enrolled") throw failure(request.state === "expired" ? "expired" : "conflict");
@@ -1495,10 +1495,10 @@ function publicCredential(row) { return Object.freeze({ credential_id: credentia
 
 function membershipFor(rows, memberId) { return rows.find((row) => row.member_id === memberId); }
 function uniqueSorted(values) { return [...new Set(values)].sort(); }
-function approvalOwnerIdsFromRows(rows) { return rows.map((row) => row.owner_member_id); }
+function _approvalOwnerIdsFromRows(rows) { return rows.map((row) => row.owner_member_id); }
 function requireExpectedVersion(request, expectedVersion) { if (request.version !== expectedVersion) throw failure("stale_version"); }
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
-function oneRow(result, label) { if (rowCount(result) !== 1) throw failure("unavailable"); return result.rows[0]; }
+function oneRow(result, _label) { if (rowCount(result) !== 1) throw failure("unavailable"); return result.rows[0]; }
 function boundedCount(value) { const count = Number(value); if (!Number.isSafeInteger(count) || count < 0 || count > 32) throw failure("unavailable"); return count; }
 function role(value) { if (!ROLES.has(value)) throw failure("unavailable"); return value; }
 function recoveryStage(value) { if (!RECOVERY_SESSION_STAGES.has(value)) throw failure("unavailable"); return value; }
@@ -1508,7 +1508,7 @@ function duration(value, label) { if (!Number.isSafeInteger(value) || value < 1 
 function uuid(value, label) { if (typeof value !== "string" || !UUID.test(value)) throw failure(label === "organization_id" ? "tenant_scope" : "invalid_input"); return value.toLowerCase(); }
 function optionalUuid(value, label) { if (value === undefined || value === null) return undefined; return uuid(value, label); }
 function newUuid(generator) { const value = generator(); return uuid(value, "uuid"); }
-function date(value, label) { const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value); if (!Number.isFinite(parsed.getTime())) throw failure("invalid_input"); return parsed; }
+function date(value, _label) { const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value); if (!Number.isFinite(parsed.getTime())) throw failure("invalid_input"); return parsed; }
 function optionalDate(value) { return value === undefined || value === null ? null : date(value, "timestamp"); }
 function timestamp(value) { return date(value, "timestamp").toISOString(); }
 function optionalTimestamp(value) { return value === null || value === undefined ? null : timestamp(value); }
@@ -1516,13 +1516,13 @@ function safeText(value, label, max) { if (typeof value !== "string" || value.le
 function assertObject(value) { if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw failure("invalid_input"); }
 function assertKeys(input, keys) { const allowed = new Set(keys); if (Object.keys(input).some((key) => !allowed.has(key))) throw failure("invalid_input"); }
 function credentialBytes(value) { if (Buffer.isBuffer(value)) { if (value.length < 16 || value.length > 1024) throw failure("invalid_input"); return Buffer.from(value); } if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) throw failure("invalid_input"); let parsed; try { parsed = Buffer.from(value, "base64url"); } catch { throw failure("invalid_input"); } if (parsed.length < 16 || parsed.length > 1024) throw failure("invalid_input"); return parsed; }
-function rawToken(value, label) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw failure("invalid_input"); let parsed; try { parsed = Buffer.from(value, "base64url"); } catch { throw failure("invalid_input"); } if (parsed.length !== TOKEN_BYTES) throw failure("invalid_input"); return parsed; }
-function digestValue(value, label = "digest") { if (Buffer.isBuffer(value)) { if (value.length !== 32) throw failure("invalid_input"); return Buffer.from(value); } if (typeof value !== "string" || !DIGEST.test(value)) throw failure("invalid_input"); return Buffer.from(value, "hex"); }
+function rawToken(value, _label) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw failure("invalid_input"); let parsed; try { parsed = Buffer.from(value, "base64url"); } catch { throw failure("invalid_input"); } if (parsed.length !== TOKEN_BYTES) throw failure("invalid_input"); return parsed; }
+function digestValue(value, _label = "digest") { if (Buffer.isBuffer(value)) { if (value.length !== 32) throw failure("invalid_input"); return Buffer.from(value); } if (typeof value !== "string" || !DIGEST.test(value)) throw failure("invalid_input"); return Buffer.from(value, "hex"); }
 function publicKeyBytes(value) { if (Buffer.isBuffer(value)) { if (value.length < 32 || value.length > 4096) throw failure("invalid_input"); return Buffer.from(value); } if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) throw failure("invalid_input"); let parsed; try { parsed = Buffer.from(value, "base64url"); } catch { throw failure("invalid_input"); } if (parsed.length < 32 || parsed.length > 4096) throw failure("invalid_input"); return parsed; }
 function transportList(value) { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 7) throw failure("invalid_input"); const allowed = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]); const seen = new Set(); for (const item of value) { if (typeof item !== "string" || !allowed.has(item) || seen.has(item)) throw failure("invalid_input"); seen.add(item); } return [...value]; }
-function counterValue(value, label = "sign_count") { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 0) throw failure("invalid_input"); return number; }
-function optionalBoolean(value, label) { if (value === undefined) return undefined; if (typeof value !== "boolean") throw failure("invalid_input"); return value; }
-function requiredBoolean(value, label) { if (typeof value !== "boolean") throw failure("authorization_required"); return value; }
+function counterValue(value, _label = "sign_count") { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 0) throw failure("invalid_input"); return number; }
+function optionalBoolean(value, _label) { if (value === undefined) return undefined; if (typeof value !== "boolean") throw failure("invalid_input"); return value; }
+function requiredBoolean(value, _label) { if (typeof value !== "boolean") throw failure("authorization_required"); return value; }
 function constantBufferEqual(left, right) { return Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.length === right.length && crypto.timingSafeEqual(left, right); }
 function randomToken(generator) { const value = generator(TOKEN_BYTES); if (!Buffer.isBuffer(value) || value.length !== TOKEN_BYTES) throw failure("unavailable"); return value; }
 function sha256(value) { return crypto.createHash("sha256").update(value).digest(); }

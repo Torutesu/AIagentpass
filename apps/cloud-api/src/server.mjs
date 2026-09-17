@@ -1216,7 +1216,7 @@ function mapAuditExportServiceError(error, create) {
   return apiError("audit_export_unavailable", 503, "Audit export is unavailable");
 }
 
-function mapPlatformPromotionServiceError(error) {
+function _mapPlatformPromotionServiceError(error) {
   const code = String(error?.code ?? "").toLowerCase();
   if (code.includes("input") || code.includes("binding")) return apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
   if (code.includes("conflict")) return apiError("platform_promotion_idempotency_conflict", 409, "Platform promotion idempotency conflicts with prior state");
@@ -1666,7 +1666,7 @@ async function existingPossessionReceiptForEnrollment(store, organizationId, dev
   return receipt?.statement?.enrollment_id === enrollmentId ? receipt : undefined;
 }
 
-function validatePossessionReceiptResponse(receipt, { organizationId, deviceId }) {
+function _validatePossessionReceiptResponse(receipt, { organizationId, deviceId }) {
   try {
     const keys = ["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"];
     if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).sort().join(",") !== keys.slice().sort().join(",")) throw new Error("receipt envelope is invalid");
@@ -1838,7 +1838,7 @@ function rejectUnknown(value, allowed, label) {
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw apiError("unknown_field", 400, `${label} contains an unknown field`);
 }
 
-function requiredQuery(url, name) { const value = url.searchParams.get(name); if (!value) throw apiError("invalid_query", 400, `${name} is required`); return value; }
+function _requiredQuery(url, name) { const value = url.searchParams.get(name); if (!value) throw apiError("invalid_query", 400, `${name} is required`); return value; }
 function requireExactQueryKeys(url, allowed) {
   for (const key of url.searchParams.keys()) if (!allowed.has(key)) throw apiError("invalid_query", 400, "query is invalid");
 }
@@ -1928,7 +1928,7 @@ function verifyBundleAcknowledgementSignature(acknowledgement, publicKey) {
   if (!valid) throw apiError("invalid_acknowledgement_signature", 401, "Bundle acknowledgement signature is invalid");
 }
 function publicCapability(capability) {
-  const { nonce, ...metadata } = capability;
+  const { _nonce, ...metadata } = capability;
   return metadata;
 }
 
@@ -2200,8 +2200,8 @@ function sendNoContent(response, headers = {}) {
 
 const API_ERROR = Symbol("agentpass.api_error");
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; error[API_ERROR] = true; if (headers) error.headers = headers; return error; }
-function platformPromotionErrorStatus(status) { return new Set([400, 401, 403, 404, 409, 503]).has(status) ? status : 503; }
-function platformPromotionErrorCode(code) {
+function _platformPromotionErrorStatus(status) { return new Set([400, 401, 403, 404, 409, 503]).has(status) ? status : 503; }
+function _platformPromotionErrorCode(code) {
   return new Set([
     "invalid_platform_request",
     "not_found",

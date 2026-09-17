@@ -662,7 +662,7 @@ function exactObject(value, expected, kind = "INPUT") {
 
 function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function selector(value, name) { return text(value, MAX_SELECTOR_BYTES, name); }
-function digest(value, name) {
+function digest(value, _name) {
   if (Buffer.isBuffer(value) && value.length === 32) return Buffer.from(value);
   if (value instanceof Uint8Array && value.length === 32) return Buffer.from(value);
   if (typeof value === "string" && DIGEST.test(value)) return Buffer.from(value, "hex");

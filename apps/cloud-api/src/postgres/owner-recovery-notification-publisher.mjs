@@ -208,7 +208,6 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
   return new Promise((resolve, reject) => {
     let request;
     let settled = false;
-    let abortListener;
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -221,7 +220,7 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
       catch { /* The stable abort error remains authoritative. */ }
       fail(aborted());
     };
-    abortListener = onAbort;
+    const abortListener = onAbort;
     if (signal?.aborted) { fail(aborted()); return; }
 
     const onRequestError = () => fail(signal?.aborted ? aborted() : unavailable());

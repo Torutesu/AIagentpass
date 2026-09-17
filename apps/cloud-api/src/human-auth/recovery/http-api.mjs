@@ -417,7 +417,7 @@ function serializeRecoveryCookie(token) { if (!OPAQUE.test(token)) throw new Own
 function timestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
 function requiredUuid(value) { if (!isUuid(value)) throw invalidRequest(); return value.toLowerCase(); }
 function decodeUuid(value) { try { const decoded = decodeURIComponent(value); return requiredUuid(decoded); } catch { throw invalidRequest(); } }
-function assertAllowedKeys(value, allowed) { for (const key of Object.keys(value)) if (!allowed.has(key)) throw invalidRequest(); }
+function _assertAllowedKeys(value, allowed) { for (const key of Object.keys(value)) if (!allowed.has(key)) throw invalidRequest(); }
 function assertExactKeys(value, keys) { if (!plainObject(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) throw invalidRequest(); }
 function hasBody(request) { return request.body !== undefined && request.body !== null && (!(typeof request.body === "string") || request.body.length > 0); }
 function invalidRequest() { return new OwnerRecoveryHttpError(HCODE.INVALID_REQUEST); }
@@ -427,7 +427,7 @@ function isUuid(value) { return typeof value === "string" && UUID.test(value); }
 function assertOrigin(value) { if (typeof value !== "string" || value.length > 512) throw new TypeError("origin is invalid"); let parsed; try { parsed = new URL(value); } catch { throw new TypeError("origin is invalid"); } if (parsed.protocol !== "https:" || parsed.origin !== value || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new TypeError("origin is invalid"); }
 function normalizeBasePath(value) { if (value === "") return ""; if (typeof value !== "string" || !value.startsWith("/") || value.endsWith("/") || value.includes("?") || value.includes("#") || /[\u0000-\u001f\u007f]/u.test(value)) throw new TypeError("basePath is invalid"); return value; }
 
-async function readOptionalJsonBody(request, maxBytes) { return hasBody(request) ? readJsonBody(request, maxBytes) : {}; }
+async function _readOptionalJsonBody(request, maxBytes) { return hasBody(request) ? readJsonBody(request, maxBytes) : {}; }
 async function readJsonBody(request, maxBytes) {
   const contentType = header(request.headers, "content-type");
   if (typeof contentType !== "string" || !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(contentType)) throw invalidRequest();

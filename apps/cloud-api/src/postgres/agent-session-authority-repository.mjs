@@ -39,14 +39,14 @@ const PUBLIC_MESSAGES = Object.freeze({
   ERR_DATABASE: "Agent session authority storage is unavailable"
 });
 
-const IMMUTABLE_GRANT_COLUMNS = [
+const _IMMUTABLE_GRANT_COLUMNS = [
   "organization_id", "grant_id", "device_id", "agent_id", "agent_kind", "adapter_id",
   "adapter_version", "worktree_binding_sha256", "process_binding_policy_id", "scope_json",
   "max_signatures", "not_before", "expires_at", "control_sequence", "authority_generation", "issuer", "signer_key_id",
   "statement_hash", "grant_hash", "signature_base64url", "status", "issued_at", "created_by"
 ];
 
-const GRANT_RETURNING = `organization_id,grant_id,device_id,agent_id,agent_kind,adapter_id,
+const _GRANT_RETURNING = `organization_id,grant_id,device_id,agent_id,agent_kind,adapter_id,
       adapter_version,worktree_binding_sha256,process_binding_policy_id,scope_json,max_signatures,
       not_before,expires_at,control_sequence,authority_generation,issuer,signer_key_id,statement_hash,grant_hash,
       signature_base64url,status,issued_at,consumed_at,consumed_session_id,
@@ -178,7 +178,7 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     }
   }
 
-  async function consumeExistingSession(tx, grant, values) {
+  async function _consumeExistingSession(tx, grant, values) {
     const consumedSessionId = uuidValue(grant.consumed_session_id, "consumed_session_id");
     const sessionResult = await tx.query(`SELECT ${SESSION_RETURNING}
       FROM agent_sessions
@@ -534,7 +534,7 @@ function sameImmutableGrant(row, values) {
     && row.created_by === values.createdBy;
 }
 
-function sameGrantEnvelope(row, values) {
+function _sameGrantEnvelope(row, values) {
   return row.grant_id === values.grantId
     && row.organization_id === values.organizationId
     && row.device_id === values.deviceId
@@ -543,7 +543,7 @@ function sameGrantEnvelope(row, values) {
     && row.signature_base64url === values.envelope.signature;
 }
 
-function sameNewSession(session, grant, values) {
+function _sameNewSession(session, grant, values) {
   return session.organization_id === grant.organization_id
     && session.grant_id === grant.grant_id
     && session.device_id === grant.device_id
@@ -565,7 +565,7 @@ function sameNewSession(session, grant, values) {
     && session.used_signatures === 0;
 }
 
-function grantAvailabilityError(status) {
+function _grantAvailabilityError(status) {
   return new AgentSessionAuthorityRepositoryError(status === "expired" ? "ERR_GRANT_EXPIRED" : "ERR_GRANT_UNAVAILABLE");
 }
 
@@ -576,11 +576,11 @@ async function setTenantContext(tx, organizationId) {
   if (rowCount(verified) !== 1 || verified.rows[0]?.organization_id !== organizationId) throw new AgentSessionAuthorityRepositoryError("ERR_TENANT_DRIFT");
 }
 
-async function lockGrant(tx, organizationId, grantId) {
+async function _lockGrant(tx, organizationId, grantId) {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`agentpass:agent-session-grant:${organizationId}:${grantId}`]);
 }
 
-async function assertCurrentGrantAuthority(tx, grant) {
+async function _assertCurrentGrantAuthority(tx, grant) {
   const current = await tx.query(`SELECT 1
     FROM agents a
     JOIN devices d ON d.organization_id=a.organization_id AND d.id=a.device_id

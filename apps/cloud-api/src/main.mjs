@@ -1,14 +1,9 @@
 #!/usr/bin/env node
 import { createCloudRuntime } from "./runtime.mjs";
 
-let runtime;
-try {
-  const env = Object.freeze({ ...process.env });
-  runtime = await createCloudRuntime({ env });
-  await runtime.listen();
-} catch (error) {
-  throw error;
-}
+const env = Object.freeze({ ...process.env });
+const runtime = await createCloudRuntime({ env });
+await runtime.listen();
 let stopping = false;
 async function stop(signal) {
   if (stopping) return;

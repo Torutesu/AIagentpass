@@ -6,7 +6,7 @@ import {
 } from "../device-audit-inbox-contract.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const BATCH_ID = /^audit-[0-9a-f]{64}$/u;
+const _BATCH_ID = /^audit-[0-9a-f]{64}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 
 export class DeviceAuditInboxRepositoryError extends Error {
@@ -99,7 +99,7 @@ function rowToEntry(row, fallback) {
   return { ...fallback, organization_id: String(row.organization_id), inbox_id: String(row.inbox_id), device_id: String(row.device_id), batch_id: String(row.batch_id), payload_sha256: String(row.payload_sha256), events: payload.events, state: String(row.state), attempt: Number(row.attempt), claim_token_digest: row.claim_token_digest === null ? null : Buffer.from(row.claim_token_digest).toString("hex"), claim_expires_at: row.claim_expires_at === null ? null : new Date(row.claim_expires_at).toISOString(), created_at: new Date(row.created_at ?? fallback.created_at).toISOString(), updated_at: new Date(row.updated_at ?? fallback.updated_at).toISOString() };
 }
 
-function rowToClaim(row, claimToken, now) {
+function rowToClaim(row, claimToken, _now) {
   const payload = parsePayload(row.payload);
   const claimed = {
     organization_id: String(row.organization_id), inbox_id: String(row.inbox_id), device_id: String(row.device_id), batch_id: String(row.batch_id), payload_sha256: String(row.payload_sha256), events: payload.events,

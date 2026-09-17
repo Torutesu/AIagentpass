@@ -1123,7 +1123,7 @@ function jsonBoundaryError(path, code, message) {
   return new ProtocolValidationError([issue(path, code, message)]);
 }
 
-function canonicalizeValue(value, seen, path, inArray) {
+function canonicalizeValue(value, seen, path, _inArray) {
   if (value === null) return "null";
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") {

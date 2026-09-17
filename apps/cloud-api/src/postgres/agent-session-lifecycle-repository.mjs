@@ -3,7 +3,7 @@ import { withTransaction } from "./repository.mjs";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const MAX_BATCH = 500;
-const REVOCABLE_SESSION_STATUSES = Object.freeze([
+const _REVOCABLE_SESSION_STATUSES = Object.freeze([
   "challenge_pending", "active", "request_reserved", "signed"
 ]);
 
@@ -98,7 +98,7 @@ function lifecycleJsonResult(result) {
   return Object.freeze({ counts: Object.freeze(value.counts), expired: value.expired, revoked: value.revoked });
 }
 
-function selectorClauses(values, alias, { sessionColumn }) {
+function _selectorClauses(values, alias, { sessionColumn }) {
   const clauses = [];
   const params = [];
   for (const [field, column] of [
@@ -146,7 +146,7 @@ function normalizeRevokeInput(input) {
   return Object.freeze(values);
 }
 
-function lifecycleResult(grants, sessions) {
+function _lifecycleResult(grants, sessions) {
   const counts = Object.freeze([requiredRowCount(grants), requiredRowCount(sessions)]);
   const rows = [...(grants.rows ?? []), ...(sessions.rows ?? [])];
   const expired = rows.filter((row) => row?.status === "expired").length;

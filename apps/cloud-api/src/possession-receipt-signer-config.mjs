@@ -56,7 +56,7 @@ const MAX_VERIFICATION_DOCUMENT_BYTES = 32 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 30_000;
 const PUBLIC_KEY_PEM = /^-----BEGIN PUBLIC KEY-----\n[\s\S]+\n-----END PUBLIC KEY-----\n$/u;
-const PUBLIC_METADATA_KEYS = Object.freeze(["algorithm", "key_id", "public_key"]);
+const _PUBLIC_METADATA_KEYS = Object.freeze(["algorithm", "key_id", "public_key"]);
 const VERIFICATION_KEY_KEYS = Object.freeze(["key_id", "not_after", "public_key"]);
 const PUBLIC_KEY_HASH_ALGORITHM = "sha256";
 

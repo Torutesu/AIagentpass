@@ -58,7 +58,7 @@ const RANGE_KEYS = Object.freeze([
 const PAYLOAD_KEYS = Object.freeze([
   "version", "type", "organization_id", "environment", "chain", "range", "entries"
 ]);
-const ENTRY_KEYS = Object.freeze([
+const _ENTRY_KEYS = Object.freeze([
   "version", "organization_id", "environment", "chain", "export_position", "source_id", "source_device_id",
   "source_previous_hash", "source_hash", "source_gap", "event"
 ]);

@@ -596,3 +596,5 @@ jobs:
       - run: npm run release:workflow-validate
       - run: node --test scripts/release/sign-deployment-trust.test.mjs scripts/release/validate-promotion-workflow.test.mjs
       - run: npm run lint
+      - name: ESLint production code
+        run: npm run lint:eslint

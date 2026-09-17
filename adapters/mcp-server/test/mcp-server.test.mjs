@@ -5,7 +5,6 @@ import { PassThrough } from "node:stream";
 import { createCliRunner, minimalEnvironment } from "../src/cli-runner.mjs";
 import { createMcpServer } from "../src/server.mjs";
 import { MAX_AUDIT_TAIL_COUNT } from "../src/schemas.mjs";
-import { createToolHandler } from "../src/tools.mjs";
 
 function rpc(id, method, params) {
   return { jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) };
@@ -189,7 +188,7 @@ test("Small Software tools bind tenant and idempotency inputs, and redact provid
 });
 
 test("Small Software tools reject cross-tenant results and unavailable surfaces", async () => {
-  const { server } = await initializedSoftwareServer();
+  await initializedSoftwareServer();
   const crossTenant = { organization_id: ORG, app_id: APP };
   const bad = createMcpServer({ commandRunner: async () => ({ code: 0, stdout: "{}", stderr: "" }), smallSoftwareSurface: { async inspectApp() { return { organization_id: "00000000-0000-4000-8000-000000000099", app_id: APP }; } } });
   await bad.handle(rpc(30, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }));

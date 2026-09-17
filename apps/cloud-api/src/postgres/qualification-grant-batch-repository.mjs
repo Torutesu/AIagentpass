@@ -380,7 +380,7 @@ async function loadBatch(tx, organizationId, batchId, includeManifest) {
   });
 }
 
-function normalizeIssueInput(input, clock) {
+function normalizeIssueInput(input, _clock) {
   const actor = normalizeActor(input.actor);
   const organizationId = tenant(input.organization_id);
   if (organizationId !== actor.organizationId) throw failure("TENANT_SCOPE");
@@ -765,7 +765,7 @@ async function allocateControlSequences(tx, values, authorityGeneration) {
   return Object.freeze(Array.from({ length: 7 }, (_, index) => Object.freeze({
     grant_id: values.steps[index].grant_id,
     control_sequence: baseline + index + 1,
-    authority_generation
+    authority_generation: authorityGeneration
   })));
 }
 
@@ -794,7 +794,7 @@ function failure(code, cause = undefined) { return new QualificationGrantBatchRe
 function publicMessage(code) { return `Qualification Grant batch ${String(code).toLowerCase()}`; }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw failure("DATABASE"); }
 function assertMethod(value, method) { if (!value || typeof value[method] !== "function") throw failure("DATABASE"); }
-function assertTransactionClient(client) { assertClient(client); }
+function _assertTransactionClient(client) { assertClient(client); }
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
 function plainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null); }
 function isUuid(value) { return typeof value === "string" && UUID.test(value); }
@@ -809,7 +809,7 @@ function enumValue(value, set) { if (!set.has(value)) throw failure("INVALID_INP
 function positiveInteger(value, min, max) { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < min || number > max) throw failure("INVALID_INPUT"); return number; }
 function idempotency(value) { if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw failure("INVALID_INPUT"); return value; }
 function timestamp(value) { if (typeof value !== "string" || !TIMESTAMP.test(value) || new Date(value).toISOString() !== value) throw failure("INVALID_INPUT"); return value; }
-function timestampValue(value, label) { try { return timestamp(value instanceof Date ? value.toISOString() : value); } catch { throw failure("DATABASE"); } }
+function timestampValue(value, _label) { try { return timestamp(value instanceof Date ? value.toISOString() : value); } catch { throw failure("DATABASE"); } }
 function readClockMilliseconds(clock) { const value = clock(); const milliseconds = value instanceof Date ? value.getTime() : typeof value === "number" ? value : Date.parse(value); if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) throw failure("INVALID_INPUT"); return milliseconds; }
 function sha256(value) { return crypto.createHash("sha256").update(String(value), "utf8").digest("hex"); }
 function deterministicUuid(value) { const bytes = crypto.createHash("sha256").update("AgentPass-Qualification-Batch-v1\0").update(value).digest().subarray(0, 16); bytes[6] = (bytes[6] & 0x0f) | 0x50; bytes[8] = (bytes[8] & 0x3f) | 0x80; const hex = bytes.toString("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`; }

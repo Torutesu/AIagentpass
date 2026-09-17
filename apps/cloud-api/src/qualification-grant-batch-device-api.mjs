@@ -532,7 +532,7 @@ function validateBatch(value, route, request, clock) {
   });
 }
 
-function validateGrant(value, { batch, step, clock }) {
+function validateGrant(value, { batch, _step, clock }) {
   if (!isObject(value)) throw new Error("repository Grant output is invalid");
   assertExactKeys(value, GRANT_KEYS, "qualification Grant", unavailable);
   if (value.version !== QUALIFICATION_GRANT_BATCH_SCHEMA_VERSION

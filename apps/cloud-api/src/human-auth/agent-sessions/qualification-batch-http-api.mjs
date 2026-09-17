@@ -360,7 +360,7 @@ function normalizeQualificationBatchBody(value) {
     || !isCommit(value.source_commit)
     || !isTeamId(value.team_id)) throw invalidRequest();
   let grantIntent;
-  try { grantIntent = normalizeAgentSessionGrantIssueIntent(value.grant_intent); } catch (error) { throw invalidRequest(); }
+  try { grantIntent = normalizeAgentSessionGrantIssueIntent(value.grant_intent); } catch (_error) { throw invalidRequest(); }
   if (grantIntent.max_signatures !== 1 || grantIntent.ttl_seconds < 60 || grantIntent.ttl_seconds > 3_600) throw invalidRequest();
   return Object.freeze({
     artifact_sha256: value.artifact_sha256,

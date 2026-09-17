@@ -556,7 +556,7 @@ function validCursorSecret(value) {
   } catch { return false; }
 }
 
-function validExactSecret(value) {
+function _validExactSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) return false;
   const bytes = Buffer.from(value, "base64url");
   return bytes.length === 32 && bytes.toString("base64url") === value;

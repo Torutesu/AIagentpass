@@ -487,7 +487,7 @@ function recordFromEnvelope(envelope) {
   return row;
 }
 
-function throwSigningOutcome(envelope, values, config) {
+function throwSigningOutcome(envelope, values, _config) {
   if (envelope.outcome === "pending" || envelope.outcome === "uncertain") {
     let details;
     if (Object.hasOwn(envelope, "record")) {
@@ -640,7 +640,7 @@ function normalizeConfig(value) {
   });
 }
 
-function configFor(row, config) {
+function _configFor(row, config) {
   const value = {
     purpose: text(row.purpose, PURPOSE, "purpose"),
     algorithm: text(row.algorithm, /^ed25519$/u, "algorithm"),

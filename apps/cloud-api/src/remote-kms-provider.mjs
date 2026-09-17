@@ -61,7 +61,7 @@ export function createRemoteEd25519KmsProvider({
   timeoutMs = REMOTE_KMS_DEFAULT_TIMEOUT_MS,
   maxRequestBytes = REMOTE_KMS_DEFAULT_MAX_REQUEST_BYTES
 } = {}) {
-  const config = validateConfig({ purpose, keyId, version, algorithm, publicKey, transport, timeoutMs, maxRequestBytes });
+  const _config = validateConfig({ purpose, keyId, version, algorithm, publicKey, transport, timeoutMs, maxRequestBytes });
   const pinned = canonicalEd25519PublicKey(publicKey, REMOTE_KMS_ERROR_CODES.CONFIG);
   const binding = Object.freeze({ purpose, key_id: keyId, algorithm, version });
 

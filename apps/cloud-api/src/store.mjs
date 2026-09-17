@@ -1154,7 +1154,7 @@ function boundedPattern(value, label, pattern) {
   return text;
 }
 
-function sha256Text(value) {
+function _sha256Text(value) {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 

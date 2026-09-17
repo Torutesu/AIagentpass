@@ -183,7 +183,7 @@ function normalizeAgentSessionSigningCapabilityBinding({ organization_id, device
   });
 }
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, agentSessionSigningCapabilitySigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformPromotionApi, platformAuthenticator, platformAuthFactory = createPlatformAuthenticator, platformAuthConfig: injectedPlatformAuthConfig, platformPrincipalResolver, platformMtlsVerifier, platformWorkloadVerifier, platformWebAuthnVerifier, platformAuditAppender, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, agentSessionSigningCapabilitySigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformPromotionApi, platformAuthenticator, platformAuthFactory = createPlatformAuthenticator, platformAuthConfig: injectedPlatformAuthConfig, platformPrincipalResolver, platformMtlsVerifier, platformWorkloadVerifier, platformWebAuthnVerifier, _platformAuditAppender, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   if (profile.isHosted && platformOperatorAuthorizer !== undefined) {
@@ -225,7 +225,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let platformSessionHttpApi;
   let platformSessionRateLimiter;
   let platformSessionReadiness;
-  let effectivePlatformOperatorAuthorizer = platformOperatorAuthorizer;
+  const effectivePlatformOperatorAuthorizer = platformOperatorAuthorizer;
   let verifyPlatformPromotionEvidence;
   let ownedKmsProviders;
   let processBindingPolicies;
@@ -1443,7 +1443,7 @@ export function createHostedReadiness(databaseReadiness, signers, deploymentIden
           const expected = SIGNER_PURPOSE_REGISTRY[dependency.registryName];
           managedSigners[dependency.registryName] = Object.freeze({ ok: true, code: "ready", state: "active", purpose: expected?.purpose ?? dependency.purpose, domain: expected?.domain ?? null, algorithm: expected?.managed_algorithm ?? "ed25519", registry_version: expected?.registry_version ?? null, protocol_version: expected?.protocol_version ?? null, signing_version: expected?.signing_version ?? null, key_id: report.key_id, key_version: lifecycleKey.key_version, lifecycle_version: lifecycle.version, public_key_fingerprint: report.public_key_fingerprint });
         }
-      } catch (error) {
+      } catch (_error) {
         signerFailure ??= dependency.unavailableCode;
         report = Object.freeze({ ok: false, purpose: dependency.purpose, algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
         if (dependency.registryName !== undefined) {
@@ -1557,14 +1557,14 @@ function fingerprintsEqual(left, right) {
   return normalize(left) !== undefined && normalize(left) === normalize(right);
 }
 
-async function readinessHealthFromMetadata(signer, expectedPurpose) {
+async function _readinessHealthFromMetadata(signer, expectedPurpose) {
   const metadata = await signer.publicKeyMetadata();
   if (!metadata || typeof metadata !== "object" || metadata.purpose !== expectedPurpose || metadata.algorithm !== "ed25519"
     || typeof metadata.key_id !== "string" || typeof metadata.public_key !== "string") throw new Error("invalid signer metadata");
   return Object.freeze({ ready: true, purpose: metadata.purpose, algorithm: metadata.algorithm, key_id: metadata.key_id, public_key_fingerprint: publicKeyFingerprint(metadata.public_key) });
 }
 
-function readinessKeyRingFromHealth(value) {
+function _readinessKeyRingFromHealth(value) {
   if (!value || value.ready !== true || typeof value.purpose !== "string" || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
   return Object.freeze({ version: 1, purpose: value.purpose, active_key_id: value.key_id, keys: Object.freeze([Object.freeze({ key_id: value.key_id, algorithm: "ed25519", public_key_fingerprint: value.public_key_fingerprint, status: "active" })]) });
 }

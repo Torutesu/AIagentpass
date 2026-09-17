@@ -51,8 +51,8 @@ const AUTHORIZATION_KEYS = Object.freeze([
   "organization_id", "session_material_hash", "csrf_token", "proof_id", "jti"
 ]);
 const PUBLIC_KEYS = Object.freeze([...IDENTITY_KEYS]);
-const COMMIT_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "promotion_evidence"]);
-const UNCERTAIN_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "reason"]);
+const _COMMIT_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "promotion_evidence"]);
+const _UNCERTAIN_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "reason"]);
 
 /**
  * This is the sole online promotion mutation SQL for the adapter.  The
@@ -603,7 +603,7 @@ function parseResult(value) {
   return value;
 }
 
-function normalizeDigestRequestForService(input) {
+function _normalizeDigestRequestForService(input) {
   return normalizeDigestRequest(input);
 }
 

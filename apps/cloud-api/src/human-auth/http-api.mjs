@@ -189,7 +189,7 @@ export function createHumanAuthHttpApi({
     }
   }
 
-  async function createOptions({ request, session, body }) {
+  async function createOptions({ _request, session, body }) {
     const input = parseOptionsBody(body, session, expectedRpId, expectedOrigin, operationSet);
     await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.webauthnBegin, session, organizationId: input.organization_id });
     if (input.organization_id !== session.organization_id) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);

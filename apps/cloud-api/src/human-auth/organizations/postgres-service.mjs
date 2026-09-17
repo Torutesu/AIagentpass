@@ -403,7 +403,7 @@ function requiredActor(input) {
 function requiredOrganizationId(value) { return requiredUuid(value, "organization_id"); }
 function requiredMemberId(value) { return requiredUuid(value, "member_id"); }
 function requiredInvitationId(value) { return requiredUuid(value, "invitation_id"); }
-function requiredUuid(value, field) {
+function requiredUuid(value, _field) {
   if (typeof value !== "string" || !UUID.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   return value.toLowerCase();
 }

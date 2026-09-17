@@ -224,7 +224,7 @@ export function createSmallSoftwareAuthorizationService({ repository, clock, uui
     return row.result ?? row.response ?? row;
   }
   async function commit(request, digest, result, operation) {
-    const value = Object.freeze({ operation, request_digest: digest, result });
+    const _value = Object.freeze({ operation, request_digest: digest, result });
     await callRepo("saveAuthorizationOperation", { organization_id: request.organization_id, app_id: request.app_id, actor_member_id: request.actor_member_id, idempotency_key: request.idempotency_key, request_digest: digest, operation, result });
     return result;
   }
@@ -267,7 +267,7 @@ function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) fail(
 function assertRole(role) { if (!ROLES.includes(role)) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "role"); return role; }
 function assertOrigin(value) { try { const url = new URL(value); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); } catch { fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION, "origin"); } }
 function rejectSecrets(value) { if (!value || typeof value !== "object") return; for (const [key, child] of Object.entries(value)) { if (SECRET_FIELD.test(key)) fail(SMALL_SOFTWARE_ERROR_CODES.INVALID_INPUT, "secret_like_input"); if (child && typeof child === "object") rejectSecrets(child); } }
-function effectiveRole(app, rules, memberId, organizationId) {
+function effectiveRole(app, rules, memberId, _organizationId) {
   if (app.owner_member_id === memberId) return "owner";
   const eligible = rules.filter((row) => row.state === "active" && !expired(row.expires_at) && ((row.subject_kind === "member" || row.member_id) && (row.subject_id === memberId || row.member_id === memberId) || row.subject_kind === "organization"));
   return eligible.map((row) => row.app_role ?? row.role).filter((role) => ROLES.includes(role)).sort((a, b) => ROLE_RANK[b] - ROLE_RANK[a])[0] ?? null;

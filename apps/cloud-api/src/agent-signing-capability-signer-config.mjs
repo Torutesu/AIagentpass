@@ -495,7 +495,7 @@ function mapPrimitiveError(error) {
   }
 }
 
-function mapProviderError(error, fallbackCode) {
+function mapProviderError(error, _fallbackCode) {
   if (error instanceof AgentSigningCapabilitySignerConfigError) return error;
   if (error?.code === CODES.TIMEOUT) return error;
   return new AgentSigningCapabilitySignerConfigError(CODES.PROVIDER);

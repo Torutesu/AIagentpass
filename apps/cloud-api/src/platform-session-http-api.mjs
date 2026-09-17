@@ -437,7 +437,7 @@ function countPlatformCookies(cookieHeader) {
   return cookieHeader.split(";").filter((part) => part.slice(0, part.indexOf("=")).trim() === PLATFORM_SESSION_COOKIE_NAME).length;
 }
 
-function redactedTransportRequest(request) {
+function _redactedTransportRequest(request) {
   const headers = { ...request.headers };
   delete headers.cookie;
   delete headers[PLATFORM_SESSION_CSRF_HEADER];

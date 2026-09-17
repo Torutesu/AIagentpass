@@ -18,7 +18,7 @@ const MAX_CLOCK_SKEW_MS = 30_000;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const _IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const CONTEXT_HASH = /^[0-9a-f]{64}$/;
 const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
@@ -299,9 +299,8 @@ export function createPostgresWebAuthnCeremony({
     }
     assertClaimRow(claimed.rows[0], request.challenge_id, record);
 
-    let verification;
     try {
-      verification = validateVerifierResult(
+      validateVerifierResult(
         await withTimeout(
           () => verifyAssertion(verifierInput),
           Math.max(1, Math.min(verifierTimeoutMs, record.expires_at - currentTime))

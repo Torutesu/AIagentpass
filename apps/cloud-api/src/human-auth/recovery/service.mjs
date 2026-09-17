@@ -9,8 +9,8 @@ const DEFAULT_THRESHOLD = 2;
 const DEFAULT_REQUEST_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_DELAY_MS = 24 * 60 * 60 * 1_000;
 const MAX_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
-const TERMINAL_STATES = new Set(["cancelled", "expired", "failed", "activated"]);
-const LIVE_STATES = new Set(["pending", "approved", "delayed", "session_issued", "credential_enrolled"]);
+const _TERMINAL_STATES = new Set(["cancelled", "expired", "failed", "activated"]);
+const _LIVE_STATES = new Set(["pending", "approved", "delayed", "session_issued", "credential_enrolled"]);
 const OWNER_ROLES = new Set(["owner"]);
 
 export const OWNER_RECOVERY_OPERATIONS = Object.freeze({

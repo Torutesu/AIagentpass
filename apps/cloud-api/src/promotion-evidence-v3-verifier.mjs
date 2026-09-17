@@ -39,7 +39,7 @@ const METADATA_KEYS = Object.freeze([
   "version", "type", "purpose", "domain", "protocol_version", "signing_version", "algorithm", "key_id",
   "key_version", "lifecycle_version", "public_key", "public_key_fingerprint",
 ]);
-const REQUEST_KEYS = Object.freeze([
+const _REQUEST_KEYS = Object.freeze([
   "purpose", "algorithm", "protocol_version", "signing_version", "key_id", "key_version", "lifecycle_version",
   "signer_key_fingerprint",
 ]);

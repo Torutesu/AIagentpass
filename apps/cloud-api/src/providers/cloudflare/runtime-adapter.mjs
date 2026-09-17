@@ -13,7 +13,7 @@ export const CLOUDFLARE_ADAPTER_MODES = Object.freeze(["plan", "live"]);
 export const CLOUDFLARE_RESOURCE_KINDS = Object.freeze(["worker", "pages", "r2", "d1"]);
 
 const SHA256 = /^[0-9a-f]{64}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const _UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,255}$/;
 const ORIGIN = /^https:\/\/[^/]+$/;

@@ -309,7 +309,7 @@ function readNow(clock) {
   return value;
 }
 
-function createUuid(uuid, label) {
+function createUuid(uuid, _label) {
   let value;
   try { value = uuid(); } catch (error) { throw issuanceError(AGENT_SESSION_GRANT_ISSUANCE_ERROR_CODES.UNAVAILABLE, { cause: error }); }
   if (!isUuid(value)) throw issuanceError(AGENT_SESSION_GRANT_ISSUANCE_ERROR_CODES.UNAVAILABLE);

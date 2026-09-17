@@ -3,7 +3,6 @@ import crypto from "node:crypto";
 import {
   MANAGED_SIGNER_ALGORITHM,
   REQUEST_DIGEST_ALGORITHM,
-  SIGNER_PROTOCOL_VERSIONS,
   createManagedSignerBinding,
 } from "./managed-signer-provider-contract.mjs";
 

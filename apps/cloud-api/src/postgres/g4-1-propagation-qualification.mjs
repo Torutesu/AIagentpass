@@ -404,7 +404,7 @@ function validateFailure(value) {
   if (value.threshold !== null) boundedFinite(value.threshold, 0, MAX_SAFE);
 }
 
-function exactKeys(value, keys, label) {
+function exactKeys(value, keys, _label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new G41PropagationQualificationError("invalid_input");
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();

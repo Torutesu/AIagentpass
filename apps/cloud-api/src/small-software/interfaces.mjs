@@ -1,6 +1,6 @@
 import { SmallSoftwareError, SMALL_SOFTWARE_ERROR_CODES } from "./errors.mjs";
 
-const requireMethods = (value, methods, kind) => {
+const requireMethods = (value, methods, _kind) => {
   if (!value || typeof value !== "object") throw new SmallSoftwareError(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
   for (const method of methods) if (typeof value[method] !== "function") {
     throw new SmallSoftwareError(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION);
@@ -8,7 +8,7 @@ const requireMethods = (value, methods, kind) => {
   return value;
 };
 const hostedDependencies = new WeakSet();
-const registerHostedDependency = (value) => { if (!value || typeof value !== "object") throw new SmallSoftwareError(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION); hostedDependencies.add(value); return value; };
+const _registerHostedDependency = (value) => { if (!value || typeof value !== "object") throw new SmallSoftwareError(SMALL_SOFTWARE_ERROR_CODES.INVALID_CONFIGURATION); hostedDependencies.add(value); return value; };
 export const isRegisteredHostedDependency = (value) => hostedDependencies.has(value);
 
 /** Repository authority for app manifests, source bundles, and build receipts. */
