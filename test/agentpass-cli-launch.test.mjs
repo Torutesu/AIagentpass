@@ -103,6 +103,29 @@ test("help remains successful and unknown commands remain usage failures", () =>
   assert.equal(unknown.stderr, "agentpass: unknown command\n");
 });
 
+test("help is tiered: everyday surface stays small and defers operator and internal commands", () => {
+  const everyday = run("--help");
+  assert.match(everyday.stdout, /agentpass help ops/u);
+  assert.match(everyday.stdout, /agentpass help internal/u);
+  assert.equal(everyday.stdout.includes("recovery-anchor-install"), false);
+  assert.equal(everyday.stdout.includes("control keygen"), false);
+
+  for (const tier of ["ops", "internal"]) {
+    const result = run("help", tier);
+    assert.equal(result.status, 0, tier);
+    assert.match(result.stdout, /^AgentPass 0\.18\.0/u);
+    assert.equal(result.stderr, "");
+  }
+  assert.match(run("help", "ops").stdout, /broker ping/u);
+  assert.match(run("help", "internal").stdout, /recovery-anchor-install/u);
+
+  for (const arguments_ of [["help"], ["help", "unknown-tier"]]) {
+    const result = run(...arguments_);
+    assert.equal(result.status, 0, arguments_.join(" "));
+    assert.match(result.stdout, /^AgentPass 0\.18\.0/u);
+  }
+});
+
 function trustedLauncherStat(file) {
   if (file !== FIXED_NATIVE_HOST_LAUNCHER) {
     return {

@@ -9,7 +9,7 @@ import { addAgent, revokeAgent, rotateAgent, setAgentScope, setDefaultAgent } fr
 import { anchorPendingCheckpoints, verifyStoredAnchorReceipts } from "../lib/anchor-client.mjs";
 import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verifyAuditCheckpoints } from "../lib/audit.mjs";
 import { brokerRequest } from "../lib/broker-client.mjs";
-import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
+import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState } from "../lib/config.mjs";
 import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { installIntegration, integrationPlan, integrationRemovalPlan, removeIntegration } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
@@ -31,7 +31,7 @@ import { prepareSetupPreflight, publicSetupPreflightFailure, serializeSetupPrefl
 import { readInstalledReleaseReceipt, verifyInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
-import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
+import { SETUP_STATES, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
@@ -39,6 +39,7 @@ import { AgentLaunchContractError, parseAgentLaunchArgs } from "../lib/agent-lau
 import { createAgentLifecycleLaunchDescriptor, launchAgentLifecycleWithHandoff, unavailableAgentLifecycle } from "../lib/agent-lifecycle-cli.mjs";
 import { normalizeOnboardingControlAcknowledgement } from "../packages/protocol/src/index.mjs";
 import { smallSoftwareCommand } from "../lib/small-software-cli.mjs";
+import { revokeOperations } from "./revoke-command.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -50,12 +51,50 @@ function shellWord(value) {
 function usage() {
   console.log(`AgentPass 0.18.0
 
-Commands:
+Connect a coding agent, then let it work — inside its scope.
+
   start [--project DIR] [--client auto|claude-code|cursor]
                     connect the current coding project in one guided flow
+  init              create a secure local policy
+  status            show local policy and revocation status
+  check             evaluate the current repository
+  doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
+                    diagnose production installation without changing state
+  session start     issue a short-lived agent session token
+  revoke            immediately deny all operations
+  restore           re-enable operations after revocation
+  audit [--verify]  print or verify audit logs and checkpoints
+  agent list|add|set-default|scope|rotate|revoke
+                    manage enrolled agent identities
+  integrate CLIENT [--install|--remove [--execute]] [--project DIR]
+                    preview, install, or remove project-scoped MCP setup
+  install-hook      install a policy-enforcing pre-push hook
+  small-software inspect|bundle|prepare|publish [--path DIR] [--manifest FILE]
+                    inspect and plan a Small Software publish (publish is plan-only)
+  uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]
+                    remove integrations/app registration, keep protected state
+
+Operator commands:  agentpass help ops
+Internal commands:  agentpass help internal
+`);
+}
+
+function opsUsage() {
+  console.log(`AgentPass 0.18.0 — operator commands
+
+Release and installation:
   install --manifest FILE --signature FILE --public-key FILE
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
+  setup-macos       show Secure Enclave setup (use --execute to run)
+  migrate           upgrade an older policy to signed-agent format
+
+Broker:
+  broker ping       verify that the signing broker is running
+  broker install    install and start the macOS LaunchAgent
+  broker stop       stop the macOS LaunchAgent
+
+Setup states (verified, crash-resumable):
   setup status
   setup prepare --json
                     emit a public, candidate-bound local setup handoff
@@ -65,26 +104,52 @@ Commands:
                     advance exactly one verified, crash-resumable setup state
   setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
                     configure the native bridge and project MCP integration
-  init              create a secure local policy
-  migrate           upgrade an older policy to signed-agent format
-  launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
-  close --session-id UUID [--operation-id UUID] [--reason completed|cancelled|client_shutdown]
-                    close a running Host session through the signed native control service
-  status            show legacy local policy and revocation status
-  check             evaluate the current repository
-  doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
-                    diagnose production installation without changing state
-  uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]
-                    remove integrations/app registration while preserving all protected state
-  broker ping       verify that the signing broker is running
-  broker install    install and start the macOS LaunchAgent
-  broker stop       stop the macOS LaunchAgent
+
+Remote control:
+  control keygen DIR
+  control trust PUBLIC_KEY [--url HTTPS_URL]
+  control sign       create an offline-signed control bundle
+  control source URL configure the native HTTPS distribution URL
+  control apply FILE verify and install a control bundle
+  control fetch      fetch and install the configured HTTPS bundle
+  control status     inspect active remote revocation state
+
+Audit anchor:
+  audit checkpoint  sign the current audit head
+  audit public-key  print the checkpoint verification key
+  audit anchor trust --url HTTPS_URL --tenant TENANT --key PUBLIC_KEY
+  audit anchor push
+  audit anchor status
+
+Native service:
   native status     verify protected native audit and broker health
   native public-key print the native Git signing public key
   native audit-key  print the native audit checkpoint public key
   native checkpoint create a protected native audit checkpoint
   native audit-rotate archive a full protected native audit segment
   native audit-evidence-rotate archive protected checkpoint/receipt evidence
+  native session-approval-key  create/print the human-presence approval key
+  native revoke-sessions       immediately invalidate protected native sessions
+  native daemon-register       register the bundled privileged service
+  native daemon-unregister     unregister the bundled privileged service
+  native daemon-status         inspect Service Management registration
+  native daemon-open-settings  open macOS Login Items settings
+`);
+}
+
+function internalUsage() {
+  console.log(`AgentPass 0.18.0 — internal commands
+
+Agent lifecycle (signed, process-bound):
+  launch            reserved for the signed process-bound Agent lifecycle; fails closed until connected
+  close --session-id UUID [--operation-id UUID] [--reason completed|cancelled|client_shutdown]
+                    close a running Host session through the signed native control service
+
+Git plumbing (invoked by Git, not by hand):
+  git-sign [args]   send a signing request to the broker
+  push-check        evaluate a pre-push request
+
+Protected key lifecycle:
   native key-lifecycle-status inspect protected key lifecycle state
   native key-stage ROLE stage a new git_signing, audit_checkpoint, or session_approval generation
   native key-activate ROLE GENERATION --reason TEXT
@@ -93,6 +158,8 @@ Commands:
                     approve deletion of a staged service key
   native key-delete audit_checkpoint GENERATION --reason TEXT --retention SECONDS --proof FILE
                     permanently delete an externally archived retired service key
+
+Native recovery:
   native recovery-request ROLE
                     emit an exact host recovery request for offline signing
   native recovery-install --request FILE --policy FILE --authorization FILE...
@@ -103,47 +170,8 @@ Commands:
                     install threshold-approved schema-v3 audit recovery evidence
   native anchor-push push the next protected checkpoint to the native anchor
   native anchor-status verify protected native anchor receipts
-  native session-approval-key  create/print the human-presence approval key
-  native revoke-sessions       immediately invalidate protected native sessions
-  native daemon-register       register the bundled privileged service
-  native daemon-unregister     unregister the bundled privileged service
-  native daemon-status         inspect Service Management registration
-  native daemon-open-settings  open macOS Login Items settings
-  agent list        list enrolled agent identities
-  agent add NAME    enroll a new agent identity
-  agent set-default ID
-  agent scope ID    replace per-agent authorization scope
-  agent rotate ID   replace an agent identity key
-  agent revoke ID   revoke an identity (--confirm REVOKE)
-  integrate CLIENT  preview Claude Code or Cursor MCP setup
-  integrate CLIENT --install [--project DIR]
-                    install project-scoped MCP setup without replacing other servers
-  integrate CLIENT --remove [--execute] [--project DIR]
-                    remove only the matching AgentPass MCP entry (dry run by default)
-  setup-macos       show Secure Enclave setup (use --execute to run)
-  install-hook      install a policy-enforcing pre-push hook
-  push-check        evaluate a pre-push request
-  small-software inspect|bundle|prepare [--path DIR] [--manifest FILE]
-                    inspect a Small Software project without mutation
-  small-software publish --path DIR --plan-only
-                    emit a provider-free publish plan; live publish is gated
-  session start     issue a short-lived agent session token
-  revoke            immediately deny all operations (native mode invalidates protected sessions)
-  restore           re-enable operations after revocation
-  git-sign [args]   send a signing request to the broker
-  audit [--verify]  print or verify audit logs and checkpoints
-  audit checkpoint  sign the current audit head
-  audit public-key  print the checkpoint verification key
-  audit anchor trust --url HTTPS_URL --tenant TENANT --key PUBLIC_KEY
-  audit anchor push
-  audit anchor status
-  control keygen DIR
-  control trust PUBLIC_KEY [--url HTTPS_URL]
-  control sign       create an offline-signed control bundle
-  control source URL configure the native HTTPS distribution URL
-  control apply FILE verify and install a control bundle
-  control fetch      fetch and install the configured HTTPS bundle
-  control status     inspect active remote revocation state
+
+Offline recovery signing:
   recovery keygen DIR --signer ID
                     create an offline Ed25519 recovery identity
   recovery sign --request FILE --key FILE --signer ID
@@ -781,7 +809,7 @@ async function pushCheck() {
     const isTag = remoteRef?.startsWith("refs/tags/");
     const operation = isTag ? "git.tag.push" : "git.push";
     const branch = (remoteRef ?? `refs/heads/${git(["branch", "--show-current"], true)}`).replace(/^refs\/(heads|tags)\//, "");
-    const agentId = identity.id;
+    const _agentId = identity.id;
     const requestContext = { policy: { ...config, session: { ...config.session, valid: sessionValid } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: config.native_broker?.enabled ? !controlValid : state.revoked };
     const result = evaluateAgentRequest(requestContext, identity);
     audit({ operation, decision: result.allowed ? "allow" : "deny", reason: result.reason, branch, remote: remoteUrl }, defaultConfigDir);
@@ -1173,7 +1201,7 @@ function writeCanonicalJson(value, outputFile) {
     descriptor = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
     fs.writeFileSync(descriptor, bytes, { encoding: "utf8" });
     fs.fsyncSync(descriptor);
-  } catch (error) {
+  } catch (_error) {
     throw new Error(`Recovery output file must not already exist and must be safely creatable: ${file}`);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
@@ -1480,7 +1508,9 @@ export function normalizeNativeControlRefreshResponse(value) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) try {
-  if (command === undefined || command === "--help" || command === "-h") usage();
+  if (command === undefined || command === "--help" || command === "-h" || (command === "help" && !["ops", "internal"].includes(args[0]))) usage();
+  else if (command === "help" && args[0] === "ops") opsUsage();
+  else if (command === "help" && args[0] === "internal") internalUsage();
   else if (command === "start") await startAgentPass();
   else if (command === "launch") await launchAgent();
   else if (command === "close") await closeAgent();
