@@ -1,5 +1,7 @@
 # macOS Swift qualification CI
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 The source-bound Swift lane is part of `.github/workflows/macos-hardware-qualification.yml`.
 It runs after the exact commit/tree checkout binding and before the protected
 release-artifact probes:

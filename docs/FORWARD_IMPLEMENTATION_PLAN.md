@@ -3,7 +3,7 @@
 Status: active
 
 The current merge-sized execution order and production gates are maintained in
-[NEXT_IMPLEMENTATION_PLAN.md](./NEXT_IMPLEMENTATION_PLAN.md). This document
+[NEXT_IMPLEMENTATION_PLAN.md](./archive/NEXT_IMPLEMENTATION_PLAN.md). This document
 retains the longer historical and architectural work breakdown.
 
 Updated: 2026-08-14

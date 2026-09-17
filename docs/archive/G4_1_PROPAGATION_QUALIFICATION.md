@@ -1,5 +1,7 @@
 # G4.1 propagation latency qualification
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 `apps/cloud-api/src/postgres/g4-1-propagation-qualification.mjs` is the
 aggregate-only evidence component for G4.1. It is intentionally not imported
 by the cloud service, PostgreSQL runtime, refresh service, or notifier. A

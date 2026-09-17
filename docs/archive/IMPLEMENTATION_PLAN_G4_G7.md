@@ -1,12 +1,14 @@
 # AgentPass G4–G7 implementation plan
 
-Status: active execution baseline; G4.0 qualified, G4.1 locally qualified, G4.2 live daemon path implemented with real-boundary qualification remaining
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
+Status: archived 2026-09-16 (was: active)
 
 Updated: 2026-08-13
 
 Branch baseline: `codex/agent-platform`
 
-The detailed forward sequence from the current sixteen-of-sixteen software-procedure checkpoint is maintained in [`FORWARD_IMPLEMENTATION_PLAN.md`](./FORWARD_IMPLEMENTATION_PLAN.md). It defines the remaining operational qualification, deployment, evidence, and release gates.
+The detailed forward sequence from the current sixteen-of-sixteen software-procedure checkpoint is maintained in [`FORWARD_IMPLEMENTATION_PLAN.md`](../FORWARD_IMPLEMENTATION_PLAN.md). It defines the remaining operational qualification, deployment, evidence, and release gates.
 
 ## 1. Production outcome
 

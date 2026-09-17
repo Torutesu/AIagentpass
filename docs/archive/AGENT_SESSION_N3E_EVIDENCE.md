@@ -1,5 +1,7 @@
 # Agent session N3-E lane 3 evidence: secret and path leakage
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: deterministic recovery/fault/leakage core implemented. Signed-daemon N3-E qualification is **not complete**.
 
 This lane freezes the public leakage boundary for the process-bound Agent

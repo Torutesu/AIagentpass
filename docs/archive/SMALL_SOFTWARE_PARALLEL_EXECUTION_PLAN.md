@@ -1,5 +1,7 @@
 # AgentPass Small Software + Self-Maintaining APIs Parallel Execution Plan
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: active implementation plan; not a production-readiness claim
 Baseline commit: `8337884`
 Branch: `codex/agent-platform`
@@ -32,10 +34,10 @@ external evidence inputs are supplied.
 
 Parent specifications:
 
-- [Small Software Cloud](SMALL_SOFTWARE_CLOUD_SPEC.md)
-- [Self-Maintaining APIs](SELF_MAINTAINING_APIS_SPEC.md)
-- [Contract authority ADR](ADR-003-contract-authority-and-versioning.md)
-- [Current production roadmap](IMPLEMENTATION_ROADMAP.md)
+- [Small Software Cloud](../SMALL_SOFTWARE_CLOUD_SPEC.md)
+- [Self-Maintaining APIs](../SELF_MAINTAINING_APIS_SPEC.md)
+- [Contract authority ADR](../ADR-003-contract-authority-and-versioning.md)
+- [Current production roadmap](../IMPLEMENTATION_ROADMAP.md)
 
 ## 1. Goal and completion boundary
 

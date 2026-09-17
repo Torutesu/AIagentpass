@@ -1,7 +1,9 @@
 # AgentPass next implementation plan
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 > Current execution order and release gates are maintained in
-> [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md). This document retains the
+> [`V1_EXECUTION_PLAN.md`](../V1_EXECUTION_PLAN.md). This document retains the
 > deeper historical work-package record.
 
 Status: active  

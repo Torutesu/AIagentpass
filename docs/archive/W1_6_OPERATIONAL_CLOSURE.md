@@ -1,5 +1,7 @@
 # W1.6 operational closure
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: documentation contract prepared; the fixed alert policy and
 evidence validator/verifier are present in the current worktree, while staging
 execution remains pending.
@@ -25,7 +27,7 @@ or touching the database directly:
 
 W1.6 does not add an emergency backdoor, a manual state-edit procedure, a
 provider-side workaround, an operator bearer token, or a generic threat model.
-The repository-level [THREAT_MODEL.md](../THREAT_MODEL.md) records the
+The repository-level [THREAT_MODEL.md](../../THREAT_MODEL.md) records the
 non-authoritative notification and aggregate-only observability boundary.
 
 ## 2. Authoritative current-state contract
@@ -155,7 +157,7 @@ counter. Readiness database counts/ages and the provider acceptance ledger are
 the durable cross-process signals.
 
 The exact warning/critical values are defined in
-[OWNER_RECOVERY_DELIVERY_RUNBOOK.md](OWNER_RECOVERY_DELIVERY_RUNBOOK.md),
+[OWNER_RECOVERY_DELIVERY_RUNBOOK.md](../OWNER_RECOVERY_DELIVERY_RUNBOOK.md),
 Section 2, and materialized in
 `ops/observability/owner-recovery-alerts.v1.json`. A dashboard that merely
 displays these counters is not an alert qualification.

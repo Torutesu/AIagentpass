@@ -35,7 +35,7 @@ The Cloud path is synchronous request-transaction ingestion into
 `device_audit_events`; it is not yet a separate durable `device_audit_inbox`
 plus asynchronous worker. PostgreSQL serializes a device head, exact retries
 become `duplicates`, and predecessor mismatches become durable `gap` evidence.
-See [`docs/NEXT_IMPLEMENTATION_PLAN.md`](../docs/NEXT_IMPLEMENTATION_PLAN.md)
+See [`docs/NEXT_IMPLEMENTATION_PLAN.md`](../docs/archive/NEXT_IMPLEMENTATION_PLAN.md)
 for the resend, head, and failure-recovery procedure and for the explicit
 local-versus-external verification boundary.
 

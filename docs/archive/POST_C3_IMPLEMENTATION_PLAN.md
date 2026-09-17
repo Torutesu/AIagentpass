@@ -1,5 +1,7 @@
 # AgentPass post-C3 implementation plan
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: active — P0/W1 and N1 qualification source complete; protected CI run pending
 Baseline: `codex/agent-platform` at PostgreSQL migration `0051`
 Planning date: 2026-08-15

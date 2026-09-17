@@ -1,5 +1,7 @@
 # C3 forward implementation plan
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status date: 2026-08-15  
 Starting point: local commits `a14b11a` and `4343b0f` on
 `codex/agent-platform`  

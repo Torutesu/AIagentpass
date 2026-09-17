@@ -1,5 +1,7 @@
 # Independent security-review production gate
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 この文書は、AgentPass の production-ready 判定に必要な security review
 証跡の契約を定義する。ここに記載された fixture、focused test、静的監査、
 レビュー計画は、実際の第三者レビューを実施した証明ではない。第三者が実際に

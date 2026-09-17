@@ -1,5 +1,7 @@
 # Managed-signer provider-operation uncertainty adjudication
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: deployment-internal contract v1, implemented in
 `apps/cloud-api/src/managed-signer-provider-operation-adjudication.mjs`.
 

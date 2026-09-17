@@ -1,5 +1,7 @@
 # PostgreSQL C3 migration 0047 qualification
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 `0047_platform_promotion_issuance.sql` must be qualified against a real PostgreSQL instance. Static SQL tests and a fake client do not prove that the migration can be committed, that the catalog objects exist, or that the transition, role boundary, RLS, and concurrency guards behave in PostgreSQL.
 
 Focused static tests are explicitly `static-only`: they inspect the migration text and qualification contract, but they are not a PostgreSQL qualification result. A real database run is required before claiming that 0047 is qualified.

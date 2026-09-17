@@ -1,6 +1,8 @@
 # AgentPass execution plan
 
-Status: active
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
+Status: archived 2026-09-16 (was: active)
 Baseline commit: `6b2f7f1`
 Branch: `codex/agent-platform`
 Updated: 2026-08-15

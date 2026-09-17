@@ -1,6 +1,8 @@
 # Hosted v1 implementation plan
 
-Status: active  
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
+Status: archived 2026-09-16 (was: active)
 Baseline: `codex/agent-platform` at migration `0070`
 Updated: 2026-08-15
 

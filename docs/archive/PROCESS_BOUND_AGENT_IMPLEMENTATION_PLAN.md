@@ -1,5 +1,7 @@
 # Process-bound Agent implementation plan
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 Status: active implementation sequence after the M1 physical-qualification slice. As of 2026-08-14, the M2 contract/persistence foundation, hosted Grant/Lease authority, atomic consume audit/outbox and lifecycle revocation, audit-token-derived XPC peer metadata capture, PID-scoped Darwin process and Git worktree observation, split Agent XPC listener, connection-bound one-time bootstrap, strict native Cloud Lease decoder, monotonic deadline boundary, linearizable in-memory lease/budget registry, process-bound `start/status/close` activation coordinator, and the deterministic signed-manifest-v4-derived qualification configuration provision/restore implementation plus attack tests are implemented locally. The P0-C runner provisioner installs the tool as a root-owned digest-manifested tree and both workflow lanes verify it against the trusted commit before qualification. Actual privileged invocation/unconditional restore, launchd reload, the real Developer ID identity matrix, six physical scenarios, signed-host physical qualification, adapters, external KMS exercises, and production evidence remain open. Checked-out runner-owned JavaScript must never be executed with `sudo`; production invocation must use the protected installed copy. Passing unit tests alone does not make a lane production-ready.
 
 ## 1. Security outcome

@@ -1,5 +1,7 @@
 # Security review: dedicated Host/Child XPC identity boundary
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 判定: `not_proven`。これは checkout の静的読み取りによる repository-side review
 record であり、実際の第三者レビューを実施・完了したという主張ではない。実機・
 protected runner・署名付き reviewer identity の証跡が揃うまで、focused finding

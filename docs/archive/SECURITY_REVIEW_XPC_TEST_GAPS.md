@@ -1,5 +1,7 @@
 # Host/Child XPC adversarial test lane
 
+> Archived 2026-09-16 — historical record. See [docs/README.md](../README.md) for current documentation.
+
 ## Review-status boundary
 
 This is a local adversarial test lane and not an independent third-party security

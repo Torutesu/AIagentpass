@@ -29,7 +29,8 @@ keys.
 
 ![AgentPass security boundary](docs/assets/agentpass-boundary.svg)
 
-Further reading: [execution plan](docs/V1_EXECUTION_PLAN.md), [detailed design](docs/DETAILED_DESIGN.md), [architecture](docs/AGENT_PLATFORM_ARCHITECTURE.md), [qualification runbook](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md), and [operator packet](docs/runbooks/README.md).
+Further reading: the [documentation index](docs/README.md) maps everything —
+[execution plan](docs/V1_EXECUTION_PLAN.md), [detailed design](docs/DETAILED_DESIGN.md), [architecture](docs/AGENT_PLATFORM_ARCHITECTURE.md), [qualification runbook](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md), and [operator packet](docs/runbooks/README.md).
 
 Hosted deployment choices, including self-hosted OSS, a low-cost private beta,
 and an operator-funded hosted service, are documented in
