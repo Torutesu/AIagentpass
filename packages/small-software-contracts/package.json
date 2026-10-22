@@ -6,6 +6,6 @@
   "exports": "./src/index.mjs",
   "files": ["src"],
   "scripts": {"test": "node --test test/*.test.mjs"},
-  "engines": {"node": ">=20"},
+  "engines": {"node": "^22.23.4 || ^24.22.1 || >=26.12.1"},
   "license": "MIT"
 }

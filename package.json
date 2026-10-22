@@ -89,7 +89,7 @@
     "prepack": "npm run release:validate && npm run contracts:validate && npm run test:w16 && npm test && npm run test:console && npm run lint:console && npm run test:native && npm run test:native-app && npm run test:native-installer-preservation && npm run test:native-durability-model && npm run lint"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "repository": {
     "type": "git",

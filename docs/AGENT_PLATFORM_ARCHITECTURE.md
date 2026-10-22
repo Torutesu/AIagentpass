@@ -112,7 +112,7 @@ apps/web-console/        human control surface
 native/macos/            protected enforcement and key use
 ```
 
-The root package continues to ship the local CLI and Git helper. New packages use Node 20 ESM and the built-in test runner until a workspace build system is justified.
+The root package continues to ship the local CLI and Git helper. New packages use Node 22 ESM and the built-in test runner until a workspace build system is justified.
 
 ## 9. Delivery sequence and gates
 
