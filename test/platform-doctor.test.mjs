@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { saveConfig } from "../lib/config.mjs";
-import { DOCTOR_SCHEMA_VERSION, runProductionDoctor } from "../lib/platform-doctor.mjs";
+import { DOCTOR_SCHEMA_VERSION, isPatchedNodeRuntime, runProductionDoctor } from "../lib/platform-doctor.mjs";
 import { SETUP_STATES, createSetupJournal } from "../lib/setup-journal.mjs";
 
 const FIXED_CLIENT = "/Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client";
@@ -73,7 +73,7 @@ test("production doctor returns stable healthy checks without leaking local path
     const report = await runProductionDoctor({ configDir: value.configDir, application: value.application, expectedAppOwner: process.getuid(), expectedTeamId: "ABCDE12345", client: "claude-code", projectDir: value.project }, {
       platform: "darwin",
       architecture: "arm64",
-      nodeVersion: "22.14.0",
+      nodeVersion: "22.23.4",
       now: () => new Date("2026-08-12T00:00:00.000Z"),
       run: successfulRun,
       inspectApplication: () => ({ serviceStatus: "enabled", requiresApproval: false }),
@@ -97,7 +97,7 @@ test("doctor fails closed when the public release receipt is unavailable or unsa
     const report = await runProductionDoctor({ configDir: value.configDir, application: value.application, expectedAppOwner: process.getuid(), expectedTeamId: "ABCDE12345", client: "claude-code", projectDir: value.project }, {
       platform: "darwin",
       architecture: "arm64",
-      nodeVersion: "22.14.0",
+      nodeVersion: "22.23.4",
       run: successfulRun,
       inspectApplication: () => ({ serviceStatus: "enabled", requiresApproval: false }),
       nativeStatus: async () => ({ ok: true }),
@@ -118,7 +118,7 @@ test("doctor rejects a public receipt whose Team ID differs from the inspected s
   try {
     const report = await runProductionDoctor({ configDir: value.configDir, application: value.application, expectedAppOwner: process.getuid(), expectedTeamId: "ABCDE12345", client: "claude-code", projectDir: value.project }, {
       platform: "darwin",
-      nodeVersion: "22.14.0",
+      nodeVersion: "22.23.4",
       run: successfulRun,
       inspectApplication: () => ({ serviceStatus: "enabled", requiresApproval: false }),
       nativeStatus: async () => ({ ok: true }),
@@ -137,7 +137,7 @@ test("doctor gives browser-assisted remediation at service_keys_activated", asyn
   try {
     const report = await runProductionDoctor({ configDir: value.configDir, application: value.application, expectedAppOwner: process.getuid(), expectedTeamId: "ABCDE12345", client: "claude-code", projectDir: value.project }, {
       platform: "darwin",
-      nodeVersion: "22.14.0",
+      nodeVersion: "22.23.4",
       run: successfulRun,
       inspectApplication: () => ({ serviceStatus: "enabled", requiresApproval: false }),
       nativeStatus: async () => ({ ok: true }),
@@ -172,7 +172,7 @@ test("doctor fails closed on native application and service substitution", async
   try {
     const report = await runProductionDoctor({ configDir: value.configDir, application: value.application, expectedAppOwner: process.getuid(), client: "claude-code", projectDir: value.project, verbose: true }, {
       platform: "darwin",
-      nodeVersion: "22.14.0",
+      nodeVersion: "22.23.4",
       run: successfulRun,
       inspectApplication: () => { throw new Error("substituted manager"); },
       nativeStatus: async () => { throw new Error("XPC identity rejected"); }
@@ -181,4 +181,13 @@ test("doctor fails closed on native application and service substitution", async
     assert.match(report.checks.find((item) => item.id === "app.layout").detail, /substituted/);
     assert.match(report.checks.find((item) => item.id === "service.health").detail, /XPC identity/);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("doctor accepts only Node.js releases that include the October 2026 security fixes", () => {
+  for (const version of ["22.23.4", "v22.23.5", "22.24.0", "24.22.1", "24.23.0", "26.12.1", "26.13.0", "27.0.0"]) {
+    assert.equal(isPatchedNodeRuntime(version), true, version);
+  }
+  for (const version of ["18.20.8", "20.19.4", "21.7.3", "22.14.0", "22.23.3", "23.11.0", "24.22.0", "25.0.0", "26.12.0", "", "not-a-version"]) {
+    assert.equal(isPatchedNodeRuntime(version), false, version);
+  }
 });

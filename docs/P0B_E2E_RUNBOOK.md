@@ -9,7 +9,7 @@ stored in the repository or printed by the harness.
 
 ## Preconditions
 
-- Node.js 20+ and the repository dependencies are installed.
+- Node.js 22.23.4+ (or 24.22.1+ / 26.12.1+) and the repository dependencies are installed.
 - `openssl` is available for test-only certificate generation.
 - A PostgreSQL administrator URL is available in
   `P0B_POSTGRES_ADMIN_URL` (or `AGENTPASS_TEST_POSTGRES_ADMIN_URL`). It must be
