@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { WebAuthnCeremonyError, WEBAUTHN_ERROR_CODES } from "../src/human-auth/webauthn/ceremony.mjs";
-import { createPostgresWebAuthnCeremony, PostgresWebAuthnCeremonyError, POSTGRES_WEBAUTHN_SCHEMA_REQUIREMENTS } from "../src/human-auth/webauthn/postgres-ceremony.mjs";
+import { createPostgresWebAuthnCeremony, PostgresWebAuthnCeremonyError } from "../src/human-auth/webauthn/postgres-ceremony.mjs";
 
 const ids = Object.freeze({
   session: "11111111-1111-4111-8111-111111111111",
@@ -442,13 +441,4 @@ test("does not complete a claim after the challenge expires during verification"
   const issued = await coordinator.begin(context);
   await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error.code === WEBAUTHN_ERROR_CODES.CHALLENGE_EXPIRED);
   assert.equal([...client.rows.values()][0].status, "failed");
-});
-
-test("binds the coordinator requirements to the reviewed 0003 migration", async () => {
-  assert.equal(POSTGRES_WEBAUTHN_SCHEMA_REQUIREMENTS.migration, "0003_webauthn_challenge_bindings.sql");
-  const sql = await readFile(new URL("../../../contracts/postgres/0003_webauthn_challenge_bindings.sql", import.meta.url), "utf8");
-  for (const qualified of POSTGRES_WEBAUTHN_SCHEMA_REQUIREMENTS.columns) assert.match(sql, new RegExp(`ADD COLUMN ${qualified.split(".")[1]}`));
-  assert.match(sql, /DROP INDEX webauthn_challenges_one_live_operation/);
-  assert.match(sql, /DROP INDEX webauthn_challenges_expiry/);
-  assert.match(sql, /status IN \('pending', 'consuming'\) AND consumed_at IS NULL/g);
 });

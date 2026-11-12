@@ -392,24 +392,6 @@ func dedicatedBrokerDelegatesAdapterOutcomeSemantics() throws {
     }
 }
 
-@Test("Dedicated broker contract contains no Host or Child authority surface")
-func dedicatedBrokerHasNoTransportAuthoritySurface() throws {
-    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-    let sourceURL = testDirectory
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent(
-            "Sources/AgentPassNativeCore/NativeAgentDedicatedSigningHandoffBroker.swift")
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
-
-    #expect(source.contains("AgentPassHostSignRequest") == false)
-    #expect(source.contains("AgentPassChildGitSignRequest") == false)
-    #expect(source.contains("NativeAgentSessionCoordinator"))
-    #expect(source.contains("NativeAgentSessionCoordinatorSigningAdapter"))
-    #expect(source.contains("makeSigningHandoff"))
-    #expect(source.contains("provider(" ) == false)
-}
-
 private final class LockIsolatedInt: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = 0

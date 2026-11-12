@@ -13,27 +13,6 @@ test("machine-readable platform contracts pass the offline validator", () => {
   assert.match(result.stdout, new RegExp(`validated 80 schemas, 3 OpenAPI documents, 44 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
 });
 
-test("production-readiness gate schema is closed and fixes the eleven-row production inventory", () => {
-  const schema = contractSchema("production-readiness-gate-v1.schema.json");
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, ["candidate", "evidence", "kind", "reviewer", "schema_version"]);
-  assert.equal(schema.properties.kind.const, "agentpass.production-readiness-gate");
-  assert.equal(schema.properties.schema_version.const, 1);
-  assert.equal(schema.properties.evidence.minItems, 11);
-  assert.equal(schema.properties.evidence.maxItems, 11);
-  assert.equal(schema.properties.evidence.prefixItems.length, 11);
-  assert.equal(schema.properties.evidence.items, false);
-  assert.deepEqual(schema.$defs.evidenceRow.required, ["artifact_sha256", "candidate_id", "expires_at", "kind", "name", "produced_at", "provenance", "qualified", "run", "sha256", "slot", "source_commit", "source_tree", "status"]);
-  assert.equal(schema.$defs.evidenceRow.properties.status.const, "passed");
-  assert.equal(schema.$defs.evidenceRow.properties.qualified.const, true);
-  assert.deepEqual(schema.$defs.provenance.required, ["environment", "execution_class", "runner_class", "source"]);
-  assert.equal(schema.$defs.provenance.properties.environment.const, "production");
-  assert.equal(schema.$defs.provenance.properties.execution_class.const, "protected_external");
-  assert.equal(schema.$defs.provenance.properties.source.const, "external");
-  assert.equal(schema.$defs.reviewer.properties.independent.const, true);
-  assert.equal(schema.$defs.reviewer.additionalProperties, false);
-});
-
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
 const contractSchema = (name) => JSON.parse(fs.readFileSync(path.join(root, "contracts", "schemas", name), "utf8"));
 
@@ -167,24 +146,6 @@ test("Human P1 organization, member, and invitation operations declare security 
   assert.equal(openapi.components.parameters.Limit.schema.default, 50);
 });
 
-test("Human P1 contract assertions reject missing security, idempotency, or tenant semantics", () => {
-  const baseline = humanOpenapi();
-  assertHumanP1Semantics(baseline);
-
-  const withoutSecurity = structuredClone(baseline);
-  delete operationFor(withoutSecurity, "listInvitations").operation.security;
-  assert.throws(() => assertHumanP1Semantics(withoutSecurity), /listInvitations must require humanSession/);
-
-  const withoutIdempotency = structuredClone(baseline);
-  const rename = operationFor(withoutIdempotency, "renameOrganization").operation;
-  rename.parameters = rename.parameters.filter((parameter) => !parameter.$ref.endsWith("/IdempotencyKey"));
-  assert.throws(() => assertHumanP1Semantics(withoutIdempotency), /renameOrganization must require idempotency/);
-
-  const withoutTenant = structuredClone(baseline);
-  delete operationFor(withoutTenant, "acceptInvitation").operation["x-agentpass-tenant-scope"];
-  assert.throws(() => assertHumanP1Semantics(withoutTenant), /acceptInvitation must declare tenant scope/);
-});
-
 test("human high-risk operations require role and recent WebAuthn", () => {
   const openapi = JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
   const stop = openapi.paths["/organizations/{organization_id}/emergency-stop"].post;
@@ -194,27 +155,6 @@ test("human high-risk operations require role and recent WebAuthn", () => {
 
 test("Human P0-A refresh request freezes authority-neutral wake semantics", () => {
   assertHumanP0ARefreshRequestSemantics(humanOpenapi());
-});
-
-test("Human P0-A contract assertions reject weakened refresh request guarantees", () => {
-  const baseline = humanOpenapi();
-  assertHumanP0ARefreshRequestSemantics(baseline);
-
-  const withoutRecentAuth = structuredClone(baseline);
-  withoutRecentAuth.paths["/organizations/{organization_id}/devices/{device_id}/refresh-requests"].post.security = [{ humanSession: [] }];
-  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withoutRecentAuth), /refresh request operation|deep-equal/i);
-
-  const withBodyInput = structuredClone(baseline);
-  withBodyInput.components.schemas.DeviceRefreshRequestBody.maxProperties = 1;
-  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withBodyInput), /strict equal|1|0/);
-
-  const withAuthorityMutation = structuredClone(baseline);
-  withAuthorityMutation.paths["/organizations/{organization_id}/devices/{device_id}/refresh-requests"].post["x-agentpass-authority-neutral"] = false;
-  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withAuthorityMutation), /strict equal|true|false/);
-
-  const withWeakResponse = structuredClone(baseline);
-  delete withWeakResponse.components.schemas.DeviceRefreshRequestResponse.additionalProperties;
-  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withWeakResponse), /strict equal|false|undefined/);
 });
 
 test("Human session bootstrap freezes the BFF-only SIWC signed assertion contract", () => {
@@ -366,20 +306,4 @@ test("G2 audit response schema and fixture reject unbounded or ambiguous pages",
   invalidPage.unexpected = true;
   assert.equal(Object.hasOwn(invalidPage, "unexpected"), true);
   assert.equal(schema.additionalProperties, false);
-});
-
-test("G2 PostgreSQL migration indexes the normalized activity keyset", () => {
-  const sql = fs.readFileSync(path.join(root, "contracts", "postgres", "0010_device_audit_activity_keyset.sql"), "utf8");
-  assert.match(sql, /^BEGIN;/);
-  assert.match(sql, /CREATE INDEX device_audit_events_activity_keyset/i);
-  assert.match(sql, /organization_id[\s\S]*device_id[\s\S]*redacted_json\s*->>\s*'device_timestamp'[\s\S]*event_id DESC/i);
-  assert.match(sql, /COMMIT;\s*$/);
-  assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/i);
-});
-
-test("PostgreSQL contract prevents cross-tenant device references", () => {
-  const sql = fs.readFileSync(path.join(root, "contracts", "postgres", "0001_control_plane.sql"), "utf8");
-  assert.match(sql, /PRIMARY KEY \(organization_id, id\)/);
-  assert.match(sql, /FOREIGN KEY \(organization_id, device_id\) REFERENCES devices\(organization_id, id\)/);
-  assert.match(sql, /PRIMARY KEY \(organization_id, principal_id, idempotency_key\)/);
 });

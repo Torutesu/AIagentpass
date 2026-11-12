@@ -17,8 +17,7 @@ proofs, credentials, authority counters, or a child process handle. The Host
 must validate the returned agent/device binding before pinning it, and must
 reuse the pinned identity for later observe, close, and rollback operations.
 
-Coverage: `NativeAgentHostActivationProjectionTests.swift` and
-`NativeAgentHostLifecycleCoordinatorTests.swift`.
+Coverage: `NativeAgentHostLifecycleCoordinatorTests.swift`.
 
 ## Authenticated child lifecycle
 

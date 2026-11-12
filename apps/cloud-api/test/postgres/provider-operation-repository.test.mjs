@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -202,50 +201,33 @@ function repository(client = new FakePg()) {
   }) };
 }
 
-test("0040 defines a closed immutable provider-operation state machine", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0040_managed_signer_provider_operations.sql", import.meta.url), "utf8");
-  assert.match(sql, /CREATE TABLE managed_signer_provider_operations/u);
-  assert.match(sql, /state IN \('pending', 'started', 'accepted', 'uncertain', 'committed', 'rejected', 'failed'\)/u);
-  assert.match(sql, /managed_signer_provider_operation_identity_immutable/u);
-  assert.match(sql, /managed_signer_provider_operation_terminal_immutable/u);
-  assert.match(sql, /OLD\.state = 'uncertain' AND NEW\.state IN \('accepted', 'committed'/u);
-  assert.match(sql, /claim_token_digest/u);
-  assert.match(sql, /octet_length\(signature\) = 64/u);
-  assert.doesNotMatch(sql, /organization_id|request_bytes|private_key|provider_credential/iu);
-});
-
-test("0041 adds closed uncertainty reasons and quarantines only bounded expired started claims", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0041_managed_signer_provider_operation_maintenance.sql", import.meta.url), "utf8");
-  assert.match(sql, /ADD COLUMN uncertain_reason text/u);
-  assert.match(sql, /SET uncertain_reason = 'process_interrupted'\s+WHERE state = 'uncertain'/u);
-  assert.match(sql, /state = 'uncertain'[\s\S]*uncertain_reason IN/u);
-  assert.match(sql, /state <> 'uncertain' AND uncertain_reason IS NULL/u);
-  assert.match(sql, /agentpass_quarantine_expired_managed_signer_provider_operations/u);
-  assert.match(sql, /WHERE state = 'started'[\s\S]*claim_expires_at <= clock_timestamp\(\)/u);
-  assert.match(sql, /LIMIT p_limit\s+FOR UPDATE SKIP LOCKED/u);
-  assert.match(sql, /uncertain_reason = 'claim_expired_after_start'/u);
-  assert.doesNotMatch(sql, /request_bytes|private_key|provider_credential/iu);
-});
-
-test("0049 exposes only purpose-specific signer functions and no repository table DML", async () => {
-  const source = await readFile(new URL("../../src/postgres/provider-operation-repository.mjs", import.meta.url), "utf8");
-  const sql = await readFile(new URL("../../../../contracts/postgres/0049_managed_signer_provider_operation_authority.sql", import.meta.url), "utf8");
-  const roles = await readFile(new URL("../../../../scripts/postgres/roles.sql", import.meta.url), "utf8");
-  const purposes = ["reserve", "claim", "start", "accept", "commit", "reconcile", "uncertain", "get", "health", "prune"];
-  assert.doesNotMatch(source, /managed_signer_provider_operations/u);
-  assert.doesNotMatch(source, /(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+)?[A-Za-z_]+/iu);
-  for (const purpose of purposes) {
-    assert.match(source, new RegExp(`\\["${purpose}",`, "u"));
-    assert.match(sql, new RegExp(`CREATE FUNCTION public\\.agentpass_managed_signer_provider_operation_${purpose}\\([\\s\\S]*?SECURITY DEFINER`, "u"));
-    assert.match(sql, new RegExp(`REVOKE ALL ON FUNCTION public\\.agentpass_managed_signer_provider_operation_${purpose}\\(`, "u"));
-    assert.match(roles, new RegExp(`agentpass_managed_signer_provider_operation_${purpose}\\(`, "u"));
-  }
-  assert.match(source, /agentpass_managed_signer_provider_operation_\$\{purpose\}/u);
-  assert.match(sql, /SET search_path = pg_catalog, public/gu);
-  assert.match(sql, /clock_timestamp\(\)/u);
-  assert.match(sql, /FOR UPDATE/u);
-  assert.match(sql, /SKIP LOCKED/u);
-  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_managed_signer_provider_operation_(?:error|record|binding_valid|not_found)/u);
+test("reserve binds retention as bigint and preserves a value beyond int4", async () => {
+  // Regression for the int4 overflow fixed by 0066: 30 days in ms exceeds 2^31-1.
+  const calls = [];
+  const client = {
+    async query(text, params) {
+      calls.push({ text, params });
+      return { rowCount: 1, rows: [{ result: { status: "not_found" } }] };
+    },
+  };
+  const repo = createPostgresProviderOperationRepository({
+    client,
+    purpose: PURPOSE,
+    keyId: "retention-bigint-test",
+    keyVersion: "1",
+    randomBytes: () => Buffer.alloc(32, 0x42),
+  });
+  await repo.reserveOperation({
+    purpose: PURPOSE,
+    operation_id: "retention-bigint-operation",
+    algorithm: "ed25519",
+    bytes_length: 32,
+    request_digest: "a".repeat(64),
+    key_id: "retention-bigint-test",
+    key_version: "1",
+  });
+  assert.match(calls[0].text, /\$10::bigint/u);
+  assert.equal(calls[0].params[9], 2_592_000_000);
 });
 
 test("reserves, starts, accepts, and commits one closed provider operation", async () => {

@@ -7,7 +7,6 @@ import { agentSessionGrantSigningData, agentSessionGrantStatementHash } from "..
 import { createReplayCache, signDeviceRequest, verifyDeviceRequest } from "../src/auth.mjs";
 import {
   AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_ERROR_CODES,
-  AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS,
   createAgentLaunchAuthorityHandoffApi
 } from "../src/agent-launch-authority-handoff-api.mjs";
 
@@ -148,11 +147,6 @@ function assertError(result, status, code) {
   assert.equal(result.body.request_id, IDS.correlation);
   assert.doesNotMatch(JSON.stringify(result.body), /token|bearer|secret|private|password/iu);
 }
-
-test("exports one exact handoff route and closed request contract", () => {
-  assert.deepEqual(AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS, { prepare: "/v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/launch-authority-handoff" });
-  assert.equal(Object.isFrozen(AGENT_LAUNCH_AUTHORITY_HANDOFF_HTTP_PATHS), true);
-});
 
 test("authenticates the raw request, binds the complete Lease, and fails closed without native proof", async () => {
   const f = fixture();

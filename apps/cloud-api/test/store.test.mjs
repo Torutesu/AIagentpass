@@ -459,11 +459,8 @@ test("v2 enrollment is candidate-bound, digest-only, and stores append-only poss
   await assert.rejects(() => store.getDevicePossessionReceipt({ organizationId: ids.org2, deviceId: enrollment.device_id }), { code: "ERR_NOT_FOUND" });
 });
 
-test("exports a clean, frozen API", async (t) => {
+test("snapshot rejects a request without a tenant", async (t) => {
   const { directory, store } = await fixture();
   t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
-  assert.equal(Object.isFrozen(store), true);
-  assert.equal(typeof store.snapshot, "function");
-  assert.equal(typeof store.reserveCapability, "function");
   await assert.rejects(() => store.snapshot({}), CloudStoreError);
 });

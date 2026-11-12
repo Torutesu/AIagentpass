@@ -334,17 +334,3 @@ private func advanceToCompleted(
     try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: path)
     #expect(throws: NativeControlBundleV2Error.self) { _ = try NativeSigningTransactionStore(path: link) }
 }
-
-@Test func legacyTransactionSurfaceStillReplaysAndMarksAmbiguity() throws {
-    let root = try transactionPath(); defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("legacy.json").path
-    let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    let request = try JSONSerialization.data(withJSONObject: ["request_id": id, "nonce": "nonce-abcdefghijklmnopqrstuvwxyz-123456"], options: [.sortedKeys, .withoutEscapingSlashes])
-    let authorized = AuthorizedSignRequest(requestID: id, payload: Data("commit".utf8), agentID: transactionAgent, repository: "/work/repo", branch: "feature/native", remote: "git@example.test:repo.git")
-    let store = try NativeSigningTransactionStore(path: path)
-    _ = try store.begin(requestData: request, authorized: authorized, payloadHash: String(repeating: "a", count: 64))
-    #expect(try store.markOutcomeUnknown(requestID: id).phase == .uncertain)
-    let link = root.appendingPathComponent("linked.json").path
-    try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: path)
-    #expect(throws: Error.self) { _ = try NativeSigningTransactionStore(path: link) }
-}

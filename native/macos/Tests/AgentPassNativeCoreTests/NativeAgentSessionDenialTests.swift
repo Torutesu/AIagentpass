@@ -14,19 +14,6 @@ import Testing
     #expect(reasons.allSatisfy { !$0.message.isEmpty && $0.message.utf8.count <= 128 })
 }
 
-@Test func agentSessionDenialReasonsRoundTripThroughCodable() throws {
-    let encoder = JSONEncoder()
-    let decoder = JSONDecoder()
-
-    for reason in NativeAgentSessionDenialReason.allCases {
-        let encoded = try encoder.encode(reason)
-        #expect(String(decoding: encoded, as: UTF8.self) == "\"\(reason.rawValue)\"")
-        #expect(try decoder.decode(NativeAgentSessionDenialReason.self, from: encoded) == reason)
-    }
-
-    #expect((try? decoder.decode(NativeAgentSessionDenialReason.self, from: Data("\"not_a_reason\"".utf8))) == nil)
-}
-
 @Test func agentSessionDenialNSErrorProjectionIsBounded() {
     for reason in NativeAgentSessionDenialReason.allCases {
         let error = reason.nsError

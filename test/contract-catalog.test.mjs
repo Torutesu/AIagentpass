@@ -183,7 +183,6 @@ test("catalog binds C3 promotion issuance to migration, repository, and seam evi
       "apps/cloud-api/src/postgres/index.mjs"
     ],
     compatibility_fixtures: [
-      "apps/cloud-api/test/postgres/platform-promotion-issuance-migration.test.mjs",
       "apps/cloud-api/test/postgres/platform-promotion-issuance-repository.test.mjs"
     ]
   });

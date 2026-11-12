@@ -5,8 +5,7 @@ import test from "node:test";
 import { WebAuthnRegistrationError, WEBAUTHN_REGISTRATION_ERROR_CODES } from "../src/human-auth/webauthn/registration.mjs";
 import {
   createPostgresWebAuthnRegistrationCeremony,
-  PostgresWebAuthnRegistrationCeremonyError,
-  POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS
+  PostgresWebAuthnRegistrationCeremonyError
 } from "../src/human-auth/webauthn/postgres-registration-ceremony.mjs";
 
 const ids = Object.freeze({
@@ -310,13 +309,6 @@ test("fails closed on malformed storage and malformed verifier output", async ()
   const fresh = create({ verifyAttestation: async (input) => ({ verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65), sign_count: -1, user_verified: true }) });
   const freshIssued = await fresh.ceremony.begin(context);
   await assert.rejects(() => fresh.ceremony.consume(registration(freshIssued.challenge)), (error) => error instanceof WebAuthnRegistrationError && error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
-});
-
-test("documents the no-attestation persistence boundary", () => {
-  assert.equal(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.table, "webauthn_challenges");
-  assert.equal(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.ceremony, "registration");
-  assert.ok(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.forbidden_persisted_fields.includes("attestation_object"));
-  assert.ok(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.forbidden_persisted_fields.includes("public_key"));
 });
 
 test("returns canonical credential metadata and rejects impossible backup flags", async () => {

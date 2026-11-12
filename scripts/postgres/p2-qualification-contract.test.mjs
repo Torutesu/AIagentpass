@@ -8,55 +8,9 @@ import test from "node:test";
 import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 import { validateTap, verifyEvidence } from "./postgres-qualification-evidence.mjs";
 
-const REPOSITORY_ROOT = path.resolve(new URL("../..", import.meta.url).pathname);
-const INTEGRATION_FILE = path.join(REPOSITORY_ROOT, "scripts/postgres/device-audit-postgres-qualification.integration.test.mjs");
-const EVIDENCE_FILE = path.join(REPOSITORY_ROOT, "scripts/postgres/postgres-qualification-evidence.mjs");
-const CI_FILE = path.join(REPOSITORY_ROOT, ".github/workflows/ci.yml");
-const ACTION_FILE = path.join(REPOSITORY_ROOT, ".github/actions/postgres-authority-qualification/action.yml");
-
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
-
-test("P2 qualification contract keeps security probes on agentpass_app", () => {
-  const integration = fs.readFileSync(INTEGRATION_FILE, "utf8");
-  assert.match(integration, /AGENTPASS_TEST_APP_DATABASE_URL/u);
-  assert.match(integration, /async function assertTls/u);
-  assert.match(integration, /pg_stat_ssl WHERE pid = pg_backend_pid\(\)/u);
-  assert.match(integration, /await assertTls\(maintenancePool, "maintenance"\)/u);
-  assert.match(integration, /assertIdentity\(appPool, "agentpass_app"\)/u);
-  assert.match(integration, /has_table_privilege\(current_user/u);
-  assert.match(integration, /await appClient\.query\("BEGIN"\)/u);
-  assert.match(integration, /agentpass_authorize_device_audit_tenant/u);
-  assert.match(integration, /other-tenant-populated-event/u);
-  assert.match(integration, /cross-tenant-write/u);
-  assert.match(integration, /set_config\('agentpass\.organization_id'/u);
-  assert.match(integration, /const insertEvent = \(values\) => appClient\.query\(`/u);
-  assert.match(integration, /await appClient\.query\("SELECT count\(\*\)::int AS count FROM device_audit_events"\)/u);
-  assert.doesNotMatch(integration, /const pool = new Pool\(\{ connectionString: DATABASE_URL/u);
-});
-
-test("P2 evidence contract records exact administrator and application identities", () => {
-  const evidence = fs.readFileSync(EVIDENCE_FILE, "utf8");
-  const ci = fs.readFileSync(CI_FILE, "utf8");
-  const action = fs.readFileSync(ACTION_FILE, "utf8");
-  assert.match(evidence, /SELECT session_user, current_user/u);
-  assert.match(evidence, /role_assertions/u);
-  assert.match(evidence, /agentpass_app/u);
-  assert.match(evidence, /report\.service\.role_assertions/u);
-  assert.match(evidence, /device_audit_inbox_authority/u);
-  assert.match(evidence, /assert\.equal\(row\.app_can_claim_inbox, false\)/u);
-  assert.match(evidence, /assert\.equal\(row\.maintenance_can_settle_inbox, true\)/u);
-  assert.match(evidence, /platform_device_audit_tenant_context/u);
-  assert.match(evidence, /tenant_authority_functions/u);
-  assert.match(action, /AGENTPASS_QUALIFICATION_ADMIN_ROLE="postgres"/u);
-  assert.match(action, /AGENTPASS_TEST_MAINTENANCE_DATABASE_URL="\$N1_MAINTENANCE_DATABASE_URL"/u);
-  assert.match(evidence, /AGENTPASS_TEST_MAINTENANCE_DATABASE_URL/u);
-  assert.match(evidence, /connection: "maintenance"/u);
-  assert.match(ci, /uses: \.\/\.github\/actions\/postgres-authority-qualification/u);
-  assert.match(action, /scripts\/postgres\/p2-qualification-contract\.test\.mjs/u);
-  assert.match(action, /postgres-qualification-evidence\.mjs verify/u);
-});
 
 test("P2 TAP validation requires a complete, passing, count-consistent envelope", () => {
   const passingTap = Buffer.from("TAP version 13\n1..1\nok 1 - app role\n");

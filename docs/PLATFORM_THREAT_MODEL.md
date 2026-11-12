@@ -101,8 +101,8 @@ external evidence when the deterministic test covers only a narrow abuse case.
           "name": "authorized Platform promotion API intercepts the raw request before Human auth"
         },
         {
-          "file": "apps/cloud-api/test/platform-promotion-hosted-composition-attack.test.mjs",
-          "name": "Human Session and recent-auth availability cannot resurrect Hosted legacy promotion routes"
+          "file": "apps/cloud-api/test/server-platform-promotion-http-routing-attack.test.mjs",
+          "name": "the authorized Platform promotion route is absent unless its HTTP API is injected"
         }
       ],
       "external_release_evidence": {
@@ -160,8 +160,8 @@ external evidence when the deterministic test covers only a narrow abuse case.
       "abuse_case": "Another same-user process or compromised Agent attempts to widen the Platform route, inject an authorizer, or use a session outside its bounded operation.",
       "local_tests": [
         {
-          "file": "apps/cloud-api/test/platform-promotion-hosted-composition-attack.test.mjs",
-          "name": "Hosted-style composition exposes only the authorized Platform boundary"
+          "file": "apps/cloud-api/test/server-platform-promotion-http-routing-attack.test.mjs",
+          "name": "the injected boundary owns only paths.issue and does not widen the route surface"
         },
         {
           "file": "apps/cloud-api/test/runtime.test.mjs",

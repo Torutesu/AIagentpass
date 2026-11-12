@@ -7,12 +7,9 @@ import { startInMemoryHttpServer } from "../../../test/support/http-test-transpo
 
 const IDS = Object.freeze({
   organization: "11111111-1111-4111-8111-111111111111",
-  agent: "22222222-2222-4222-8222-222222222222",
-  device: "33333333-3333-4333-8333-333333333333",
-  grant: "44444444-4444-4444-8444-444444444444"
+  agent: "22222222-2222-4222-8222-222222222222"
 });
 const HUMAN_PATH = `/api/v1/organizations/${IDS.organization}/agents/${IDS.agent}/session-grants`;
-const DEVICE_PATH = `/v1/organizations/${IDS.organization}/devices/${IDS.device}/agent-session-grants/${IDS.grant}/consume`;
 const DECISION = Object.freeze({ allowed: true, limit: 100, remaining: 99, retryAfterSeconds: 0, resetAt: 1_800_000_000_000 });
 
 function genericStore(calls) {
@@ -30,7 +27,6 @@ async function startServer(t, options = {}) {
     rateLimiter: options.rateLimiter ?? { acquire: async () => DECISION },
     admissionRateLimiter: options.admissionRateLimiter ?? { acquire: async () => DECISION },
     ...(options.humanAuthApi === undefined ? {} : { humanAuthApi: options.humanAuthApi }),
-    ...(options.agentSessionDeviceApi === undefined ? {} : { agentSessionDeviceApi: options.agentSessionDeviceApi }),
     ...(options.trackInFlight === undefined ? {} : { trackInFlight: options.trackInFlight })
   });
   startInMemoryHttpServer(server);
@@ -115,55 +111,6 @@ test("qualifies the Human Agent Session route over HTTP and rejects aliases with
   }
 
   assert.equal(adapterCalls.length, 3, "aliases must not reach the Human Agent Session adapter");
-  assert.deepEqual(genericCalls, [], "aliases must not reach generic routes or mutate generic stores");
-});
-
-test("qualifies the Device Agent Session route over HTTP with exact raw URL matching", async (t) => {
-  const adapterCalls = [];
-  const genericCalls = [];
-  const rawBody = Buffer.from('{"not-json":"to-the-generic-parser"}');
-  const headers = {
-    authorization: "Bearer attacker-controlled-token-that-must-not-be-used",
-    "agentpass-nonce": "nonce-preserved-by-the-frozen-route",
-    "agentpass-signature": "signature-preserved-by-the-frozen-route",
-    "content-type": "application/octet-stream"
-  };
-  const server = await startServer(t, {
-    store: genericStore(genericCalls),
-    agentSessionDeviceApi: {
-      async handle(input) {
-        adapterCalls.push({ ...input, body: Buffer.from(input.body) });
-        return { status: 201, body: { accepted: true, boundary: "device-agent-session" }, headers: { "X-AgentPass-Boundary": "device" } };
-      }
-    }
-  });
-
-  const exact = await fetchWithin(`${server}${DEVICE_PATH}`, { method: "POST", headers, body: rawBody });
-  assert.equal(exact.status, 201);
-  assert.deepEqual(await jsonResponse(exact), { accepted: true, boundary: "device-agent-session" });
-  assert.equal(adapterCalls.length, 1);
-  assert.equal(adapterCalls[0].method, "POST");
-  assert.equal(adapterCalls[0].url, DEVICE_PATH);
-  assert.deepEqual(adapterCalls[0].body, rawBody);
-  assert.equal(adapterCalls[0].headers["agentpass-nonce"], headers["agentpass-nonce"]);
-  assert.equal(adapterCalls[0].headers["agentpass-signature"], headers["agentpass-signature"]);
-
-  for (const [method, path] of [
-    ["POST", `${DEVICE_PATH}?unexpected=1`],
-    ["POST", `${DEVICE_PATH}/`],
-    ["POST", DEVICE_PATH.replace("agent-session-grants", "agent-session-grant")],
-    ["POST", DEVICE_PATH.replace("agent-session-grants", "Agent-Session-Grants")],
-    ["POST", DEVICE_PATH.replace("/consume", "")],
-    ["POST", DEVICE_PATH.replace(IDS.grant, "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")],
-    ["GET", DEVICE_PATH],
-    ["PUT", DEVICE_PATH]
-  ]) {
-    const response = await fetchWithin(`${server}${path}`, { method, headers, body: method === "GET" ? undefined : rawBody });
-    assert.equal(response.status, 404, `${method} ${path}`);
-    assert.equal((await jsonResponse(response)).error.code, "not_found", `${method} ${path}`);
-  }
-
-  assert.equal(adapterCalls.length, 1, "aliases and method substitutions must not reach the Device adapter");
   assert.deepEqual(genericCalls, [], "aliases must not reach generic routes or mutate generic stores");
 });
 

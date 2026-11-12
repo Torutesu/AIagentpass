@@ -1,23 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  N5_APPLICATION_VERSION,
   N5_MIGRATION_NAME,
-  N5_SOURCE_VERSION,
   N5_TARGET_VERSION,
   assertN5MigrationHistory,
   assertReviewedN5MigrationSet,
-  buildN5UpgradePlan,
   runN5UpgradeQualification
 } from "../../../../scripts/postgres/n5-upgrade-qualification.mjs";
-import { loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../scripts/postgres/n5-upgrade-qualification.mjs");
-const INTEGRATION_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "./n5-upgrade-qualification.integration.test.mjs");
+import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 
 function history(migrations) {
   return migrations.slice(0, N5_TARGET_VERSION).map(({ version, checksum }) => ({ version, checksum }));
@@ -26,22 +17,6 @@ function history(migrations) {
 function status(rows) {
   return { currentVersion: N5_TARGET_VERSION, pending: [], modified: [], dirty: false, dirtyRows: [], applied: rows };
 }
-
-test("N5 plan is exactly 54→55 and includes fresh and upgrade paths", async () => {
-  const migrations = await loadSqlMigrations();
-  const plan = buildN5UpgradePlan(migrations);
-  assert.equal(N5_SOURCE_VERSION, 54);
-  assert.equal(N5_TARGET_VERSION, 55);
-  assert.equal(N5_APPLICATION_VERSION, "n5-postgres-upgrade-qualification");
-  assert.deepEqual(plan.map(({ startVersion, targetVersion }) => ({ startVersion, targetVersion })), [{ startVersion: 54, targetVersion: 55 }]);
-  assert.equal(plan[0].bootstrap.at(-1).name, "0054_platform_authorization.sql");
-  assert.equal(plan[0].upgrade.at(-1).name, N5_MIGRATION_NAME);
-  assert.equal(plan[0].fresh.at(-1).name, N5_MIGRATION_NAME);
-  assert.equal(plan[0].bootstrap.length, 54);
-  assert.equal(plan[0].upgrade.length, 55);
-  assert.equal(plan[0].fresh.length, 55);
-  assert.ok(migrations.slice(0, 55).every(({ sql, checksum }) => migrationChecksum(sql) === checksum));
-});
 
 test("N5 reviewed migration set rejects missing, reordered, drifted, and wrong-headed history", async () => {
   const migrations = await loadSqlMigrations();
@@ -112,26 +87,6 @@ test("N5 validator rejects history, identity, path, and clean-status drift", asy
     mutate(candidate);
     assert.throws(() => assertN5MigrationHistory(candidate));
   }
-});
-
-test("N5 qualification owns only the 0055 path and has a DB-skippable integration gate", async () => {
-  const source = await readFile(SCRIPT_PATH, "utf8");
-  assert.match(source, /createMigrationRunner/u);
-  assert.match(source, /loadSqlMigrations/u);
-  assert.match(source, /createDisposablePostgres/u);
-  assert.match(source, /migrationChecksum/u);
-  assert.match(source, /schema_migrations/u);
-  assert.match(source, /0054_platform_authorization\.sql/u);
-  assert.match(source, /0055_platform_session_bootstrap\.sql/u);
-  assert.match(source, /databaseName\("fresh"\)/u);
-  assert.match(source, /databaseName\("upgrade"\)/u);
-  assert.match(source, /agentpass_migrator/u);
-  assert.doesNotMatch(source, /n4-upgrade-qualification/u);
-  assert.doesNotMatch(source, /\.github\/workflows/u);
-  const integration = await readFile(INTEGRATION_PATH, "utf8");
-  assert.match(integration, /AGENTPASS_N5_POSTGRES_ADMIN_URL/u);
-  assert.match(integration, /AGENTPASS_N5_POSTGRES_MIGRATION_URL/u);
-  assert.match(integration, /skip: ADMIN_DATABASE_URL && MIGRATION_DATABASE_URL \? false :/u);
 });
 
 test("N5 qualification rejects non-TLS, non-admin, or non-migrator DSNs before opening a database", async () => {

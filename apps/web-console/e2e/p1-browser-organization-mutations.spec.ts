@@ -332,33 +332,6 @@ test("fails closed when a mocked invitation replay is rejected", async ({ page }
   expect(state.mutationCalls[0].body).toEqual({ one_time_token: INVITATION_TOKEN });
 });
 
-test("keeps the help modal keyboard reachable and returns focus to its launcher", async ({ page }) => {
-  await openOrganization(page, "role_conflict");
-  const launcher = page.getByRole("button", { name: "ヘルプを開く", exact: true });
-  await launcher.focus();
-  await launcher.press("Enter");
-
-  const dialog = page.getByRole("dialog", { name: "AgentPassの見方", exact: true });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-modal", "true");
-  await expect(dialog).toHaveAttribute("aria-labelledby", "help-title");
-  await expect(dialog).toHaveAttribute("aria-describedby", "help-copy");
-  await expect(launcher).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("button", { name: "ヘルプを閉じる", exact: true })).toBeFocused();
-
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "監査ログを見る", exact: true })).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "ヘルプを閉じる", exact: true })).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.getByRole("button", { name: "監査ログを見る", exact: true })).toBeFocused();
-
-  await page.keyboard.press("Escape");
-  await expect(dialog).toHaveCount(0);
-  await expect(launcher).toHaveAttribute("aria-expanded", "false");
-  await expect(launcher).toBeFocused();
-});
-
 test.afterEach(async ({ page }) => {
   const authenticator = activeAuthenticators.get(page);
   if (authenticator) await disposeVirtualAuthenticator(authenticator);

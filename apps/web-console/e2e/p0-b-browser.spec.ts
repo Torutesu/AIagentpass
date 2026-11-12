@@ -319,7 +319,6 @@ test.describe("role and recent-auth matrix", () => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("button", { name: "確認して送信" }).click();
-      await page.waitForTimeout(1_000);
       await expect(card.getByRole("status")).toContainText("依頼を受け付けました");
       expect(routeStates.get(page)).toMatchObject({ wakeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
     });

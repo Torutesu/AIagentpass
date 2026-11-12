@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -77,21 +76,6 @@ function issueInput(overrides = {}) {
     ...overrides
   };
 }
-
-test("migration 0007 revokes unattributable legacy authority and requires attribution for active capabilities", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0007_capability_membership_authority.sql", import.meta.url), "utf8");
-  assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/);
-  assert.match(sql, /ADD COLUMN issued_by_member_id uuid/);
-  assert.match(sql, /ADD COLUMN issued_membership_version bigint/);
-  assert.match(sql, /UPDATE capabilities\s+SET revoked_at = clock_timestamp\(\)\s+WHERE revoked_at IS NULL/);
-  assert.doesNotMatch(sql, /WITH candidates AS|SET issued_by_member_id\s*=/);
-  assert.match(sql, /capabilities_active_membership_authority_complete/);
-  assert.match(sql, /revoked_at IS NOT NULL[\s\S]*issued_by_member_id IS NOT NULL[\s\S]*issued_membership_version IS NOT NULL/);
-  assert.match(sql, /FOREIGN KEY \(issued_by_member_id\)\s+REFERENCES members \(id\)/);
-  assert.match(sql, /FOREIGN KEY \(organization_id, issued_by_member_id\)\s+REFERENCES memberships \(organization_id, member_id\)/);
-  assert.match(sql, /CREATE INDEX capabilities_issued_by_member_active_lookup[\s\S]*organization_id, issued_by_member_id/);
-  assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/i);
-});
 
 test("exposes a frozen authority API and validates input before opening a transaction", async () => {
   const client = new FakeClient();

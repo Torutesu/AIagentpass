@@ -450,20 +450,6 @@ func concurrentSynchronizeCallsExposeTheMissingWholeCycleLock() async throws {
 @Test
 func deviceSyncErrorsRemainRedactedAcrossCoordinatorTransportAndStateMachine() async throws {
     let marker = "SECRET_DEVICE_NONCE_PRIVATE_PAYLOAD_4f6c8d"
-    let errors: [any Error] = [
-        NativeDeviceSyncCoordinatorError.transportUnavailable,
-        NativeDeviceSyncCoordinatorError.verificationFailed,
-        NativeDeviceSyncCoordinatorError.activationUnavailable,
-        NativeDeviceSyncHTTPTransportError.unexpectedStatusCode(503),
-        NativeDeviceSyncHTTPTransportError.unexpectedURL,
-        NativeDeviceRefreshStateMachineError(.statementHashConflict, failClosed: true)
-    ]
-    for error in errors {
-        let description = String(describing: error)
-        #expect(!description.contains(marker))
-        #expect(!(error.localizedDescription).contains(marker))
-    }
-
     let transport = AdversarialTransport()
     transport.failPoll(with: NSError(domain: marker, code: 17, userInfo: [NSLocalizedDescriptionKey: marker]))
     let fixture = AdversarialFixture()

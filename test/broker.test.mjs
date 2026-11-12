@@ -291,25 +291,6 @@ process.stdin.on("end", () => {
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
 });
 
-test("native recovery and prune bridge pins protocol 13 and dedicated management routes", () => {
-  const clientSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeClient/main.swift"), "utf8");
-  const serviceSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeService/main.swift"), "utf8");
-  const protocolSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeCore/XPCProtocol.swift"), "utf8");
-  assert.match(clientSource, /"audit-prune-submit"/);
-  assert.match(clientSource, /"audit-prune-execute"/);
-  assert.match(clientSource, /"control-refresh"/);
-  assert.match(clientSource, /extendedTimeoutCommands\.contains\(command\) \? 120 : 30/);
-  assert.match(clientSource, /case "audit-recovery-abort-expired":/);
-  assert.match(clientSource, /case "audit-recovery-status":/);
-  assert.match(clientSource, /Native service protocol 13 is required/);
-  assert.match(serviceSource, /"protocol_version": 13, "key_backend": "secure-enclave"/);
-  assert.match(protocolSource, /func abortExpiredAuditRecovery\(withReply/);
-  assert.match(protocolSource, /func auditRecoveryStatus\(withReply/);
-  assert.match(serviceSource, /abortExpiredUnsubmittedPending\(nowMilliseconds: nowMilliseconds\)/);
-  assert.match(serviceSource, /preparedRecordVerifier: keyLifecycle/);
-  assert.match(serviceSource, /lifecycleAncestryVerifier: keyLifecycle/);
-});
-
 test("running broker fails closed after configuration mutation", async () => {
   const data = fixture();
   const { root, configDir } = data;

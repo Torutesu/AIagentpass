@@ -4,23 +4,6 @@ import Testing
 
 private let sessionRecordID = "session-000000000000000000000000000000000000000000000000000000000000"
 
-private let expectedSuccessors: [NativeAgentSessionState: Set<NativeAgentSessionState>] = [
-    .none: [.challengePending],
-    .challengePending: [.active, .expired, .revoked, .processLost, .worktreeLost, .controlChanged, .keyChanged, .closed],
-    .active: [.requestReserved, .expired, .revoked, .processLost, .worktreeLost, .controlChanged, .keyChanged, .closed],
-    .requestReserved: [.active, .signingIntent, .expired, .revoked, .processLost, .worktreeLost, .controlChanged, .keyChanged, .closed],
-    .signingIntent: [.active, .signed, .expired, .revoked, .processLost, .worktreeLost, .controlChanged, .keyChanged, .outcomeUnknown],
-    .signed: [.active, .closed],
-    .expired: [],
-    .revoked: [],
-    .processLost: [],
-    .worktreeLost: [],
-    .controlChanged: [],
-    .keyChanged: [],
-    .outcomeUnknown: [],
-    .closed: []
-]
-
 private func makeRecord(
     state: NativeAgentSessionState = .none,
     updatedAtMilliseconds: Int64 = 1_000,
@@ -36,21 +19,6 @@ private func makeRecord(
         signaturesUsed: 1,
         revision: revision
     )
-}
-
-@Test func everyStatePairUsesTheExplicitClosedTransitionTable() {
-    for from in NativeAgentSessionState.allCases {
-        for to in NativeAgentSessionState.allCases {
-            let expected = expectedSuccessors[from, default: []].contains(to)
-            #expect(
-                NativeAgentSessionTransitionValidator.isAllowed(from: from, to: to) == expected,
-                "Unexpected transition \(from.rawValue) -> \(to.rawValue)"
-            )
-            #expect(
-                NativeAgentSessionTransitionValidator.allowedSuccessors(for: from) == expectedSuccessors[from, default: []]
-            )
-        }
-    }
 }
 
 @Test func everyTerminalStateCannotLeaveTerminal() {

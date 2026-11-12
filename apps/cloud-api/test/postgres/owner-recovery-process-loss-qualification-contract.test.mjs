@@ -7,7 +7,6 @@ import {
   OwnerRecoveryProcessLossQualificationError,
   requireOwnerRecoveryQualificationDatabase
 } from "../support/owner-recovery-process-loss-qualification-harness.mjs";
-import { OWNER_RECOVERY_DELIVERY_FAULT_BOUNDARIES } from "../support/owner-recovery-delivery-fault-controller.mjs";
 
 const NO_DATABASE_CONNECTION = "postgresql://qualification.invalid/qualification";
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -52,19 +51,6 @@ test("rejects unknown boundaries before starting a child", () => {
     () => launchOwnerRecoveryProcessLossQualificationChild({ databaseUrl: NO_DATABASE_CONNECTION, mode: "contract", boundary: "provider_call" }),
     (error) => error.code === OWNER_RECOVERY_PROCESS_LOSS_QUALIFICATION_ERROR_CODES.INVALID_ARGUMENT
   );
-});
-
-test("keeps the boundary set closed and rejects ambient fault controls", () => {
-  assert.deepEqual(OWNER_RECOVERY_DELIVERY_FAULT_BOUNDARIES, [
-    "after_claim",
-    "before_provider_call",
-    "after_provider_acceptance",
-    "before_terminal_commit",
-    "after_terminal_commit",
-    "after_response_encoded"
-  ]);
-  const source = String(requireOwnerRecoveryQualificationDatabase);
-  assert.doesNotMatch(source, /fault|boundary|provider|request|response|globalThis/iu);
 });
 
 test("terminates a child that exceeds the output budget without returning child output", async () => {

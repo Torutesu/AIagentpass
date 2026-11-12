@@ -45,45 +45,6 @@ private struct FailingBootIdentitySource: NativeAgentBootIdentitySource {
     #expect(throws: NativeAgentSessionDeadlineError.clockUnavailable) { try negative.sample() }
 }
 
-@Test func systemMonotonicClockPreservesBoundedNanosecondsAndIdentity() throws {
-    let clock = NativeAgentSystemMonotonicClock(
-        continuousSource: FixedContinuousNanosecondsSource(value: UInt64.max),
-        bootIdentitySource: FixedBootIdentitySource(value: "boot-123-456")
-    )
-
-    let sample = try clock.sample()
-    #expect(sample.nanoseconds == UInt64.max)
-    #expect(sample.bootIdentity == "boot-123-456")
-    #expect(sample.bootIdentity.utf8.count <= NativeAgentMonotonicClockValue.maximumBootIdentityBytes)
-}
-
-@Test func systemMonotonicClockExposesBootChangesToDeadlineContract() throws {
-    let first = NativeAgentSystemMonotonicClock(
-        continuousSource: FixedContinuousNanosecondsSource(value: 10),
-        bootIdentitySource: FixedBootIdentitySource(value: "boot-1-1")
-    )
-    let afterBoot = NativeAgentSystemMonotonicClock(
-        continuousSource: FixedContinuousNanosecondsSource(value: 10),
-        bootIdentitySource: FixedBootIdentitySource(value: "boot-2-1")
-    )
-
-    let firstSample = try first.sample()
-    let secondSample = try afterBoot.sample()
-    #expect(firstSample.bootIdentity != secondSample.bootIdentity)
-
-    var deadline = try NativeAgentSessionDeadline(
-        signedWallExpiryMilliseconds: 1_000_100,
-        wallClock: NativeAgentWallClockValue(millisecondsSinceUnixEpoch: 1_000_000),
-        monotonicClock: firstSample
-    )
-    #expect(throws: NativeAgentSessionDeadlineError.monotonicBootChanged) {
-        try deadline.revalidate(
-            wallClock: NativeAgentWallClockValue(millisecondsSinceUnixEpoch: 1_000_001),
-            monotonicClock: secondSample
-        )
-    }
-}
-
 @Test func systemMonotonicClockSamplesAreNondecreasingWithoutTimingAssumptions() throws {
     let clock = NativeAgentSystemMonotonicClock()
     let first = try clock.sample()

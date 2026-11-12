@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   PLATFORM_SESSION_COOKIE_NAME,
-  PLATFORM_SESSION_CSRF_HEADER,
   PLATFORM_SESSION_TRANSPORT_ERROR_CODES,
   hashPlatformSessionToken,
   isPlatformSessionToken,
@@ -18,7 +17,6 @@ test("serializes an isolated __Host- platform cookie", () => {
   const value = serializePlatformSessionCookie(TOKEN, { maxAgeSeconds: 900 });
   assert.equal(value, `${PLATFORM_SESSION_COOKIE_NAME}=${TOKEN}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=900`);
   assert.equal(value.includes("Domain="), false);
-  assert.equal(PLATFORM_SESSION_CSRF_HEADER, "agentpass-platform-csrf");
   assert.equal(serializeClearedPlatformSessionCookie(), `${PLATFORM_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
 });
 

@@ -52,15 +52,11 @@ unproven.
 
 Do not commit private keys, real credentials, audit logs, or machine-specific paths.
 
-When changing README or qualification/runbook documentation, run the focused
-documentation contracts before opening a pull request:
+When changing GitHub Actions workflows, run the workflow security lint and the
+executable release workflow validators before opening a pull request:
 
 ```sh
-node --test \
-  test/production-readiness-audit-docs.test.mjs \
-  test/release-evidence-index-workflow.test.mjs \
-  test/cloud-production-qualification-workflow.test.mjs \
-  test/external-qualification-runners-workflow.test.mjs
+node --test test/workflow-security-lint.test.mjs scripts/release/*.test.mjs
 git diff --check
 ```
 

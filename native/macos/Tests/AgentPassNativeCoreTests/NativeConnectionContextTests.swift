@@ -180,13 +180,4 @@ private func expectConnectionError(
     try expectConnectionError(.invalidSerializedContext) {
         _ = try JSONDecoder().decode(NativeConnectionContext.self, from: invalidPeer)
     }
-
-    #expect(NativeConnectionContextError.allCases.map(\.rawValue) == [
-        "malformed_audit_token",
-        "all_zero_audit_token",
-        "broad_audit_token_input",
-        "invalid_audit_token_field",
-        "invalid_serialized_context",
-        "peer_identity_mismatch"
-    ])
 }

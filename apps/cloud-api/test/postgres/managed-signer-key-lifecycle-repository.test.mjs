@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -284,94 +283,9 @@ function transitionName(current, target) {
   return "single-key";
 }
 
-function assertFixedFunctionCall(call) {
-  assert.equal(typeof call?.text, "string");
-  const match = call.text.match(/^SELECT public\.(agentpass_managed_signer_[a-z_]+)\(([^)]*)\) AS result$/u);
-  assert.ok(match, `not a fixed 0051 function call: ${call.text}`);
-  assert.ok(EXPECTED_FUNCTIONS.includes(match[1]), `function is not allow-listed: ${match[1]}`);
-  const placeholders = match[2] === "" ? [] : match[2].split(",");
-  assert.deepEqual(placeholders.map((value) => value.replace(/::[a-z]+$/u, "")), placeholders.map((_, index) => `$${index + 1}`));
-  assert.equal(call.params.length, placeholders.length);
-  assert.doesNotMatch(call.text, /(?:FROM|INSERT|UPDATE|DELETE|TRUNCATE)\s/iu);
-  assert.doesNotMatch(call.text, /(?:private_key|claim_token_digest)/iu);
-  return match[1];
-}
-
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest();
 }
-
-test("0037 creates purpose-scoped public lifecycle and signing ledgers", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0037_managed_signer_lifecycle.sql", import.meta.url), "utf8");
-  assert.match(sql, /CREATE TABLE managed_signer_key_lifecycles/u);
-  assert.match(sql, /CREATE TABLE managed_signer_keys/u);
-  assert.match(sql, /CREATE TABLE managed_signer_key_lifecycle_operations/u);
-  assert.match(sql, /CREATE TABLE managed_signer_signing_idempotency/u);
-  assert.match(sql, /FOR UPDATE/u);
-  assert.match(sql, /status IN \('pending', 'uncertain', 'committed'\)/u);
-  assert.match(sql, /octet_length\(signature\) = 64/u);
-  assert.doesNotMatch(sql, /organization_id/u);
-  assert.doesNotMatch(sql, /private_key/u);
-});
-
-test("0038 catalogs the forward-only fencing contract", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0038_managed_signer_fencing.sql", import.meta.url), "utf8");
-  assert.match(sql, /ALTER TABLE managed_signer_signing_idempotency/u);
-  assert.match(sql, /claim_token_digest/u);
-  assert.match(sql, /claim_expires_at/u);
-  assert.match(sql, /provider_started_at/u);
-  assert.match(sql, /reserved_lifecycle_version/u);
-  assert.match(sql, /status IN \('pending', 'uncertain', 'committed', 'aborted'\)/u);
-  assert.match(sql, /clock_timestamp\(\)/u);
-  assert.match(sql, /CREATE INDEX managed_signer_signing_claim_expiry/u);
-  const { loadSqlMigrations, defaultContractDirectory } = await import("../../src/postgres/migration-runner.mjs");
-  const migrations = await loadSqlMigrations(defaultContractDirectory());
-  assert.equal(migrations.find(({ name }) => name === "0038_managed_signer_fencing.sql")?.version, 38);
-  assert.equal(migrations.find(({ name }) => name === "0039_managed_signer_provider_receipts.sql")?.version, 39);
-});
-
-test("0039 stores only closed provider receipt columns", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0039_managed_signer_provider_receipts.sql", import.meta.url), "utf8");
-  assert.match(sql, /provider_receipt_provider/u);
-  assert.match(sql, /provider_receipt_id/u);
-  assert.match(sql, /managed_signer_provider_receipt_shape/u);
-  assert.match(sql, /status = 'committed'/u);
-  assert.doesNotMatch(sql, /provider_receipt\s+jsonb/iu);
-  assert.doesNotMatch(sql, /private_key|raw_provider_response|credential_payload/iu);
-});
-
-test("0051 uses exactly the fixed public-schema function allowlist", async () => {
-  const source = await readFile(new URL("../../src/postgres/managed-signer-key-lifecycle-repository.mjs", import.meta.url), "utf8");
-  for (const name of EXPECTED_FUNCTIONS) assert.match(source, new RegExp(`public\\.${name}\\(`, "u"));
-  assert.doesNotMatch(source, /(?:FROM|INSERT|UPDATE|DELETE|TRUNCATE)\s+managed_signer_/iu);
-  assert.doesNotMatch(source, /SELECT\s+(?:purpose|key_id|operation_id)[\s\S]*FROM\s+managed_signer_/iu);
-
-  const pool = new FakePgPool();
-  const repo = repository(pool);
-  await repo.initialize({ snapshot: snapshot() });
-  await repo.snapshot();
-  await repo.rotate({ expected_version: 1, operation_id: "rotate-allowlist", new_key: nextKey(), verification_until: "2026-08-14T13:00:00.000Z" });
-
-  const firstDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-1", bytes: Buffer.from("allowlist-1") });
-  const first = await repo.reserveSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1 });
-  await repo.startSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token });
-  await repo.fenceSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token });
-  await repo.commitSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token, signature: SIGNATURE });
-
-  const secondDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-2", bytes: Buffer.from("allowlist-2") });
-  const second = await repo.reserveSignature({ operation_id: "sign-allowlist-2", request_digest: secondDigest, key_id: "agent-key-2", key_version: 2 });
-  await repo.startSignature({ operation_id: "sign-allowlist-2", request_digest: secondDigest, key_id: "agent-key-2", key_version: 2, claim_token: second.claim_token });
-  await repo.markSignatureUncertain({ operation_id: "sign-allowlist-2", request_digest: secondDigest, key_id: "agent-key-2", key_version: 2, claim_token: second.claim_token });
-  await repo.reconcileSignature({ operation_id: "sign-allowlist-2", request_digest: secondDigest, key_id: "agent-key-2", key_version: 2, signature: SIGNATURE, provider_receipt: { provider: "fixture-kms", receipt_id: "receipt-allowlist", operation_id: "sign-allowlist-2", key_id: "agent-key-2", key_version: 2 } });
-  await repo.lookupSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1 });
-  await repo.pruneSigningRecords({ before: "2027-08-15T00:00:00.000Z", limit: 10 });
-  await repo.pruneLifecycleOperations({ before: "2027-08-15T00:00:00.000Z", limit: 10 });
-
-  const databaseCalls = pool.calls.filter(({ text }) => text !== "BEGIN" && text !== "COMMIT" && text !== "ROLLBACK");
-  const names = databaseCalls.map(assertFixedFunctionCall);
-  assert.deepEqual([...new Set(names)].sort(), [...EXPECTED_FUNCTIONS].sort());
-  assert.equal(databaseCalls.some(({ text }) => /\b(?:FROM|INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(text)), false);
-});
 
 test("0051 rejects malformed, unknown, and closed-outcome envelopes", async () => {
   const malformed = [

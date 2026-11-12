@@ -67,7 +67,7 @@ test("orchestrates source, build, plan, and reconciled deployment receipt", asyn
   const h = makeHarness();
   const result = await h.service.preparePreview({ organization_id: ids[0], app_id: ids[1], idempotency_key: "preview-001", source_bundle: source(), source_bytes: Buffer.from("app") });
   assert.equal(result.state, "complete");
-  assert.equal(result.publish_plan.source_bundle_digest, canonicalDigest(result.publish_plan.source_bundle_digest ? source() : source()));
+  assert.equal(result.publish_plan.source_bundle_digest, canonicalDigest(source()));
   assert.equal(result.deployment_receipt.state, "active");
   assert.equal(h.plans.length, 1);
   assert.equal(h.deployments.length, 1);

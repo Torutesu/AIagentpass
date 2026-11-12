@@ -115,14 +115,7 @@ function txResponses(...responses) { return [response(), response(), ...response
 
 function repo(client, options = {}) { return createPostgresOrganizationRepository({ client, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }), ...options }); }
 
-test("exposes exactly the frozen organization API", () => {
-  const repository = repo(new QueueClient());
-  assert.equal(Object.isFrozen(repository), true);
-  assert.deepEqual(Object.keys(repository).sort(), [
-    "acceptInvitation", "createInvitation", "createOrganizationWithOwner", "listInvitations",
-    "getOrganization", "listMembers", "listOrganizationsForMember", "removeMember", "renameOrganization",
-    "reissueInvitation", "revokeInvitation", "updateMemberRole"
-  ].sort());
+test("rejects invalid construction options", () => {
   assert.throws(() => createPostgresOrganizationRepository({ client: {} }), /database client/);
   assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), now: "not-a-function" }), /now must be a function/);
   assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), onAuthorityReduction: "not-a-function" }), /onAuthorityReduction/);

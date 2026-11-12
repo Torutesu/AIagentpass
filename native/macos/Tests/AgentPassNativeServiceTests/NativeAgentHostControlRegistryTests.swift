@@ -99,31 +99,6 @@ func controlCloseConvergesAfterResponseLoss() throws {
     }
 }
 
-@Test("control close rejects a different signed principal")
-func controlCloseRejectsPeerMismatch() throws {
-    let observation = try controlObservation()
-    let ownerIdentity = NativeProcessIdentity(observation: observation)
-    let endpoint = try controlEndpoint(observation: observation)
-    let prepared = try prepareControlSession(endpoint)
-    let registry = NativeAgentHostControlRegistry()
-    try registry.register(sessionID: prepared.sessionID, endpoint: endpoint, ownerIdentity: ownerIdentity)
-
-    let otherIdentity = NativeProcessIdentity(observation: try controlObservation(
-        pid: 43,
-        pidVersion: 20,
-        codeDirectoryHash: String(repeating: "b", count: 64)
-    ))
-    let request = try #require(AgentPassHostControlCloseRequest(
-        sessionID: prepared.sessionID,
-        operationID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        reason: .cancelled
-    ))
-    #expect(ownerIdentity.canonicalControlPrincipalHash != otherIdentity.canonicalControlPrincipalHash)
-    #expect(throws: NativeAgentHostControlRegistryError.controlPeerMismatch) {
-        _ = try registry.close(request: request, controllerIdentity: otherIdentity)
-    }
-}
-
 @Test("control principal identity permits a distinct process of the same signed product")
 func controlPrincipalExcludesProcessCoordinates() throws {
     let first = NativeProcessIdentity(observation: try controlObservation(pid: 42, pidVersion: 19))

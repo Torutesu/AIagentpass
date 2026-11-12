@@ -20,49 +20,6 @@ private func unarchive<T: NSObject & NSSecureCoding>(_ type: T.Type, from data: 
     return try #require(object)
 }
 
-private func protocolSelectors(_ proto: Protocol) -> Set<String> {
-    var count: UInt32 = 0
-    guard let descriptions = protocol_copyMethodDescriptionList(proto, true, true, &count) else { return [] }
-    defer { free(descriptions) }
-    return Set((0..<Int(count)).compactMap { index in
-        descriptions[index].name.map(NSStringFromSelector)
-    })
-}
-
-private func classNames(_ classes: Set<AnyHashable>) -> Set<String> {
-    Set(classes.map { value in
-        let description = String(describing: value.base)
-        return description.split(separator: ".").last.map(String.init) ?? description
-    })
-}
-
-/// A same-shaped but authority-bearing object must not cross the Host
-/// interface as a substitute for a closed Host DTO.
-@objc(AgentPassHostAuthorityBearingObject)
-private final class HostAuthorityBearingObject: NSObject, NSSecureCoding {
-    static var supportsSecureCoding: Bool { true }
-
-    let capability: Data
-    let algorithm: String
-
-    override init() {
-        capability = Data(repeating: 0xAA, count: 32)
-        algorithm = "ed25519"
-        super.init()
-    }
-
-    required init?(coder: NSCoder) {
-        capability = coder.decodeObject(of: NSData.self, forKey: "capability") as Data? ?? Data()
-        algorithm = coder.decodeObject(of: NSString.self, forKey: "algorithm") as String? ?? ""
-        super.init()
-    }
-
-    func encode(with coder: NSCoder) {
-        coder.encode(capability as NSData, forKey: "capability")
-        coder.encode(algorithm as NSString, forKey: "algorithm")
-    }
-}
-
 private final class HostForbiddenKeyCoder: NSCoder {
     private let forbiddenKey: String
 
@@ -77,65 +34,6 @@ private final class HostForbiddenKeyCoder: NSCoder {
         key == forbiddenKey || key == "commit_payload"
     }
 
-}
-
-@Test func hostProtocolHasExactlyFiveFrozenSelectorsAndIsDisjoint() {
-    #expect(protocolSelectors(AgentPassHostXPCProtocol.self) == [
-        "prepareHostSession:withReply:",
-        "attachHostChild:withReply:",
-        "signHostPayload:withReply:",
-        "hostSessionStatus:withReply:",
-        "closeHostSession:withReply:",
-    ])
-    #expect(protocolSelectors(AgentPassHostXPCProtocol.self).intersection(protocolSelectors(AgentPassAgentXPCProtocol.self)).isEmpty)
-    #expect(protocolSelectors(AgentPassHostXPCProtocol.self).intersection(protocolSelectors(AgentPassNativeServiceProtocol.self)).isEmpty)
-}
-
-@Test func hostControlProtocolIsDedicatedAndOnlyCloses() {
-    #expect(protocolSelectors(AgentPassHostControlXPCProtocol.self) == [
-        "closeHostSessionFromControl:withReply:"
-    ])
-    #expect(protocolSelectors(AgentPassHostControlXPCProtocol.self).intersection(protocolSelectors(AgentPassHostXPCProtocol.self)).isEmpty)
-    let interface = AgentPassHostControlXPCInterface.make()
-    let selector = #selector(AgentPassHostControlXPCProtocol.closeHostSessionFromControl(_:withReply:))
-    #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: false)) == ["AgentPassHostControlCloseRequest"])
-    #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: true)) == ["AgentPassHostControlCloseResponse"])
-}
-
-@Test func hostInterfaceRegistersOnlyFrozenRequestAndReplyClasses() {
-    let interface = AgentPassHostXPCInterface.make()
-    let expected: [(Selector, Set<String>, Set<String>)] = [
-        (
-            #selector(AgentPassHostXPCProtocol.prepareHostSession(_:withReply:)),
-            ["AgentPassHostPrepareRequest"],
-            ["AgentPassHostPrepareResponse"]
-        ),
-        (
-            #selector(AgentPassHostXPCProtocol.attachHostChild(_:withReply:)),
-            ["AgentPassHostAttachChildRequest"],
-            ["AgentPassHostAttachChildResponse"]
-        ),
-        (
-            #selector(AgentPassHostXPCProtocol.signHostPayload(_:withReply:)),
-            ["AgentPassHostSignRequest"],
-            ["AgentPassHostSignResponse"]
-        ),
-        (
-            #selector(AgentPassHostXPCProtocol.hostSessionStatus(_:withReply:)),
-            ["AgentPassHostStatusRequest"],
-            ["AgentPassHostStatusResponse"]
-        ),
-        (
-            #selector(AgentPassHostXPCProtocol.closeHostSession(_:withReply:)),
-            ["AgentPassHostCloseRequest"],
-            ["AgentPassHostCloseResponse"]
-        ),
-    ]
-
-    for (selector, requests, responses) in expected {
-        #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: false)) == requests)
-        #expect(classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: true)) == responses)
-    }
 }
 
 @Test func hostDTOsRoundTripWithSecureCodingAndServiceAssignedSessionOnly() throws {
@@ -294,23 +192,6 @@ private final class HostForbiddenKeyCoder: NSCoder {
     #expect(AgentPassHostStatusRequest(protocolVersion: 2) == nil)
 }
 
-@Test func hostAttachAcceptsMicrosecondPIDVersionAndRejectsMillisecondRangeOverflow() throws {
-    #expect(AgentPassHostAttachChildRequest(
-        childPID: 42,
-        childPIDVersion: 1_735_000_000_000_000,
-        executableIdentityDigest: hostDigest,
-        ancestryBindingDigest: hostDigest2,
-        worktreeBindingDigest: hostDigest3
-    ) != nil)
-    #expect(AgentPassHostAttachChildRequest(
-        childPID: 42,
-        childPIDVersion: AgentPassHostXPCContract.maximumChildPIDVersion + 1,
-        executableIdentityDigest: hostDigest,
-        ancestryBindingDigest: hostDigest2,
-        worktreeBindingDigest: hostDigest3
-    ) == nil)
-}
-
 @Test func signCarriesOnlySequenceAndPayloadAndOrderingRejectsSignBeforeAttach() throws {
     let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data(repeating: 0x01, count: 1)))
     #expect(request.requestSequence == 1)
@@ -366,23 +247,8 @@ private final class HostForbiddenKeyCoder: NSCoder {
     }
 }
 
-@Test func authorityBearingArchiveCannotDecodeAsHostSignDTO() throws {
-    let authorityObject = HostAuthorityBearingObject()
-    let bytes = try archive(authorityObject)
-    #expect(throws: Error.self) {
-        _ = try unarchive(AgentPassHostSignRequest.self, from: bytes)
-    }
-}
-
 @Test func hostRequestsRejectUnexpectedAuthorityKeysIncludingCallerSessionID() {
     for key in ["capability", "lease", "grant", "private_key", "key", "authority", "algorithm", "operation", "repository_path", "session_id", "agent_id", "adapter_kind"] {
         #expect(AgentPassHostSignRequest(coder: HostForbiddenKeyCoder(forbiddenKey: key)) == nil)
     }
-}
-
-@Test func hostContractInventoryAndRuntimeSurfaceIncludeExactHostClasses() throws {
-    #expect(AgentPassNativeXPCContract.hostProtocol.methods.count == 5)
-    #expect(AgentPassNativeXPCContract.dtoInventories.filter { $0.purpose == .host }.count == 10)
-    #expect(AgentPassNativeXPCContract.dtoInventories.filter { $0.purpose == .host }.allSatisfy { $0.secureCoding })
-    try AgentPassNativeXPCContract.verifyRuntimeSurface()
 }

@@ -173,6 +173,13 @@ test("Platform promotion digest vector freezes the exact request binding", () =>
     candidate_id: value.input.candidate_id,
     idempotency_key: value.input.idempotency_key
   }, { organizationId: value.input.organization_id, operation: value.input.operation }), value.request_digest_sha256);
+  assert.throws(() => platformPromotionAuthorizationRequestDigest({
+    promotion_id: value.input.promotion_id,
+    deployment_id: value.input.deployment_id,
+    environment: value.input.environment,
+    candidate_id: value.input.candidate_id,
+    idempotency_key: value.input.idempotency_key
+  }, { organizationId: value.input.organization_id, operation: "platform.promotion.replay" }));
 });
 
 test("The new issue schemas and fixtures are catalogued without changing source boundaries", () => {

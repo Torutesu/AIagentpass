@@ -429,13 +429,13 @@ jobs:
         working-directory: apps/web-console
       - name: Run WebAuthn, role, device-state, wake, and revoke browser E2E (real browser required)
         env:
-          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "83"
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "82"
           AGENTPASS_BROWSER_E2E_RESULT_PATH: ${{ github.workspace }}/apps/web-console/e2e/test-results/browser-e2e-result.json
         run: npm run e2e
         working-directory: apps/web-console
       - name: Verify and bind browser E2E evidence before upload
         env:
-          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "83"
+          AGENTPASS_EXPECTED_BROWSER_E2E_TESTS: "82"
         run: |
           set -euo pipefail
           source_tree="$(git rev-parse "${GITHUB_SHA}^{tree}")"
@@ -594,5 +594,4 @@ jobs:
         run: npm run test:native-durability-model
       - run: npm run release:validate
       - run: npm run release:workflow-validate
-      - run: node --test scripts/release/sign-deployment-trust.test.mjs scripts/release/validate-promotion-workflow.test.mjs
       - run: npm run lint

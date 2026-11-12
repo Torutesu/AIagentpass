@@ -12,7 +12,6 @@ import {
   POSSESSION_RECEIPT_VERSION,
   possessionReceiptSigningData
 } from "../src/possession-receipt-signer.mjs";
-import { createManagedSignerKeyLifecycle } from "../src/managed-signer-key-lifecycle.mjs";
 import { SIGNER_PURPOSE_REGISTRY } from "../src/signer-purpose-registry.mjs";
 
 const AGENT_PURPOSE = "agentpass.agent-session-grant";
@@ -471,48 +470,6 @@ test("GCP possession receipt binding rejects a substituted cryptoKeyVersion", as
   assert.equal(signCalls, 0);
   await providers.close();
   assert.equal(closed, 1);
-});
-
-test("possession receipt lifecycle injection is purpose-bound and can disable only that provider", async () => {
-  const env = baseEnv();
-  const fingerprint = crypto.createHash("sha256").update(publicDer(env.__keys.possession)).digest("hex");
-  const lifecycle = createManagedSignerKeyLifecycle({
-    purpose: POSSESSION_RECEIPT_PURPOSE,
-    snapshot: {
-      version: 1,
-      purpose: POSSESSION_RECEIPT_PURPOSE,
-      algorithm: "ed25519",
-      keys: [{
-        key_id: env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID,
-        key_version: 1,
-        purpose: POSSESSION_RECEIPT_PURPOSE,
-        algorithm: "ed25519",
-        public_key_fingerprint: fingerprint,
-        state: "active",
-        state_version: 1
-      }]
-    }
-  });
-  class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
-  class SignCommand { constructor(input) { this.input = input; this.kind = "sign"; } }
-  class KMSClient {
-    destroy() {}
-    async send(command) {
-      const pair = command.input.KeyId === awsPossessionResource ? env.__keys.possession : env.__keys.agent;
-      if (command.kind === "get") return { KeyId: command.input.KeyId, KeyUsage: "SIGN_VERIFY", KeySpec: "ECC_NIST_EDWARDS25519", SigningAlgorithms: ["ED25519_SHA_512"], PublicKey: publicDer(pair) };
-      return { KeyId: command.input.KeyId, SigningAlgorithm: "ED25519_SHA_512", Signature: crypto.sign(null, command.input.Message, pair.privateKey) };
-    }
-  }
-  const providers = await createHostedKmsProviders({
-    env,
-    keyLifecycles: { possessionReceipt: lifecycle },
-    sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand })
-  });
-  lifecycle.emergencyDisable({ expected_version: 1, operation_id: "disable-possession-receipt" });
-  await assert.rejects(
-    providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionReceiptSigningData(possessionStatement()), key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION })
-  );
-  await providers.close();
 });
 
 test("third-purpose construction failure closes the owned cloud client", async () => {

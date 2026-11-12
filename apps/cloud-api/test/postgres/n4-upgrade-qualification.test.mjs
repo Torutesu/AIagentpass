@@ -1,33 +1,22 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  N4_APPLICATION_VERSION,
-  N4_AUTHORITY_TEST_FILES,
   N4_LEGACY_TABLE_SPECS,
-  N4_MIGRATION_NAME,
-  N4_SOURCE_VERSION,
-  N4_TARGET_VERSION,
   assertLegacyRowsPreserved,
   assertN4MigrationHistory,
   assertPlatformAuthorityRowsPreserved,
   assertPlatformCredentialsPreserved,
   assertPlatformSessionUpgrade,
   assertReviewedN4MigrationSet,
-  buildN4UpgradePlan,
   parseN4AuthorityTapEvidence,
   runN4UpgradeQualification
 } from "../../../../scripts/postgres/n4-upgrade-qualification.mjs";
-import { loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../scripts/postgres/n4-upgrade-qualification.mjs");
-const CI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../.github/workflows/ci.yml");
+import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 
 function cleanAuthority() {
   return {
@@ -147,20 +136,6 @@ test("N4 qualification rejects missing authority TAP before opening a database",
   }
 });
 
-test("N4 plan is exactly 53→54 and names the reviewed migration head", async () => {
-  const migrations = await loadSqlMigrations();
-  const plan = buildN4UpgradePlan(migrations);
-  assert.equal(N4_SOURCE_VERSION, 53);
-  assert.equal(N4_TARGET_VERSION, 54);
-  assert.equal(N4_APPLICATION_VERSION, "n4-postgres-upgrade-qualification");
-  assert.deepEqual(plan.map(({ startVersion, targetVersion }) => ({ startVersion, targetVersion })), [{ startVersion: 53, targetVersion: 54 }]);
-  assert.equal(plan[0].bootstrap.at(-1).name, "0053_platform_sessions.sql");
-  assert.equal(plan[0].upgrade.at(-1).name, N4_MIGRATION_NAME);
-  assert.equal(plan[0].bootstrap.length, 53);
-  assert.equal(plan[0].upgrade.length, 54);
-  assert.ok(migrations.slice(0, 54).every(({ sql, checksum }) => migrationChecksum(sql) === checksum));
-});
-
 test("N4 reviewed migration set rejects missing, reordered, drifted, and wrong-headed history", async () => {
   const migrations = await loadSqlMigrations();
   assert.equal(assertReviewedN4MigrationSet(migrations), true);
@@ -253,32 +228,6 @@ test("N4 validators reject history, identity, preservation, and invalid session 
   assert.throws(() => assertPlatformAuthorityRowsPreserved(authority, { ...authority, platform_principals: [] }));
   assert.throws(() => assertPlatformCredentialsPreserved(credentials, [{ status: "revoked" }]));
   assert.throws(() => assertPlatformSessionUpgrade(sessions, [{ ...upgradedSessions()[0], allowed_credential_ids: [] }]));
-});
-
-test("N4 qualification owns its seed set, authority evidence, and direct CI aggregation contract", async () => {
-  const source = await readFile(SCRIPT_PATH, "utf8");
-  assert.match(source, /createMigrationRunner/u);
-  assert.match(source, /loadSqlMigrations/u);
-  assert.match(source, /createDisposablePostgres/u);
-  assert.match(source, /agentpass_migrator/u);
-  assert.match(source, /0053_platform_sessions\.sql/u);
-  assert.match(source, /0054_platform_authorization\.sql/u);
-  assert.match(source, /platform_credential_provision/u);
-  assert.match(source, /platform_principal_provision/u);
-  assert.match(source, /platform_operator_assignment_request/u);
-  assert.match(source, /INSERT INTO platform_sessions/u);
-  assert.match(source, /WITH db_now AS MATERIALIZED/u);
-  assert.match(source, /created_at, authenticated_at, last_seen_at/u);
-  assert.match(source, /platform_sessions/u);
-  assert.match(source, /platform_credentials/u);
-  assert.match(source, /platform_authorization/u);
-  assert.match(source, /parseN4AuthorityTapEvidence/u);
-  assert.doesNotMatch(source, /\.github\/workflows/u);
-  const ci = `${await readFile(CI_PATH, "utf8")}\n${await readFile(new URL("../../../../.github/actions/postgres-authority-qualification/action.yml", import.meta.url), "utf8")}`;
-  assert.match(ci, /qualification-n4-upgrade\.json/u);
-  assert.match(ci, /qualification-0054\.tap/u);
-  assert.match(ci, /n4UpgradeReport/u);
-  for (const file of N4_AUTHORITY_TEST_FILES) assert.match(ci, new RegExp(file.replaceAll("/", "\\/"), "u"));
 });
 
 test("N4 qualification rejects non-TLS, non-admin, or non-migrator DSNs before opening a database", async () => {

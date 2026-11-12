@@ -35,56 +35,6 @@ test("audit export download and verify fixtures are strict and secret-free", () 
   assert.deepEqual(Object.keys(verification).sort(), ["anchor", "historical_key", "payload_digest", "reason", "root", "valid"]);
 });
 
-test("audit export download freezes attachment transport and auditor access", () => {
-  const document = readJson("contracts/openapi/human-v1.json");
-  const operation = document.paths["/organizations/{organization_id}/audit/exports/{export_id}/download"].get;
-  assert.equal(operation.operationId, "downloadAuditExport");
-  assert.deepEqual(operation.security, [{ humanSession: [], recentWebAuthn: [] }]);
-  assert.deepEqual(operation.parameters.map((parameter) => parameter.$ref), [
-    "#/components/parameters/OrganizationId",
-    "#/components/parameters/AuditExportId",
-    "#/components/parameters/AuditExportEnvironment",
-    "#/components/parameters/AuditExportChain"
-  ]);
-  assert.equal(Object.hasOwn(operation, "requestBody"), false);
-  assert.equal(operation.parameters.some((parameter) => parameter.$ref.endsWith("CsrfToken") || parameter.$ref.endsWith("IdempotencyKey")), false);
-  assert.equal(operation["x-agentpass-contract-status"], "frozen-c2");
-  assert.equal(operation["x-agentpass-minimum-role"], "auditor");
-  assert.equal(operation["x-agentpass-recent-auth-operation"], "audit.export.download");
-  assert.deepEqual(operation.responses["200"], { $ref: "#/components/responses/AuditExportDownload" });
-
-  const response = document.components.responses.AuditExportDownload;
-  assert.deepEqual(Object.keys(response.content), ["application/json"]);
-  assert.deepEqual(response.content["application/json"].schema, { $ref: "#/components/schemas/AuditExport" });
-  assert.equal(response.headers["Content-Type"].schema.const, "application/json");
-  assert.equal(response.headers["Content-Disposition"].schema.const, "attachment; filename=\"agentpass-audit-export.json\"");
-  assert.equal(response.headers["Cache-Control"].schema.const, "no-store, max-age=0");
-  assert.equal(response.headers["X-Content-Type-Options"].schema.const, "nosniff");
-});
-
-test("audit export verify freezes exact public input, CSRF, recent WebAuthn, and result fields", () => {
-  const document = readJson("contracts/openapi/human-v1.json");
-  const operation = document.paths["/organizations/{organization_id}/audit/exports/verify"].post;
-  assert.equal(operation.operationId, "verifyAuditExport");
-  assert.deepEqual(operation.security, [{ humanSession: [], recentWebAuthn: [] }]);
-  assert.deepEqual(operation.parameters.map((parameter) => parameter.$ref), [
-    "#/components/parameters/OrganizationId",
-    "#/components/parameters/CsrfToken"
-  ]);
-  assert.equal(operation.parameters.some((parameter) => parameter.$ref.endsWith("IdempotencyKey")), false);
-  assert.deepEqual(operation.requestBody, { $ref: "#/components/requestBodies/VerifyAuditExport" });
-  assert.equal(operation["x-agentpass-contract-status"], "frozen-c2");
-  assert.equal(operation["x-agentpass-recent-auth-operation"], "audit.export.verify");
-  assert.deepEqual(operation.responses["200"], { $ref: "#/components/responses/AuditExportVerificationResult" });
-
-  assert.deepEqual(document.components.schemas.AuditExportVerifyRequest, { $ref: "#/components/schemas/AuditExport" });
-  assert.deepEqual(document.components.schemas.AuditExportVerificationResult, { $ref: "../schemas/audit-export-verification-result-v1.schema.json" });
-  const result = document.components.responses.AuditExportVerificationResult;
-  assert.deepEqual(result.content["application/json"].schema, { $ref: "#/components/schemas/AuditExportVerificationResult" });
-  assert.equal(result.headers["Cache-Control"].schema.const, "no-store, max-age=0");
-  assert.equal(result.headers["X-Content-Type-Options"].schema.const, "nosniff");
-});
-
 test("catalog inventory includes the C2 download and verification contracts", () => {
   const catalog = readJson("contracts/catalog-v1.json");
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});

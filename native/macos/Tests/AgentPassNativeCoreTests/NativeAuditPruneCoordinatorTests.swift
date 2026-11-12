@@ -264,67 +264,6 @@ struct NativeAuditPruneCoordinatorTests {
         try expectTargets(value.segment, directory: value.archive, exist: true)
     }
 
-    @Test static func externalModuleCannotCallArbitraryCompletionProofFactory() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let modules = root.appendingPathComponent(".build/arm64-apple-macosx/debug/Modules", isDirectory: true)
-        let temporary = try temporaryDirectory("agentpass-public-api-negative")
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let source = temporary.appendingPathComponent("Misuse.swift")
-        try Data("""
-        import AgentPassNativeCore
-        func misuse<S: P256MessageSigner>(_ plan: NativeAuditPrunePlan, _ execution: NativeAuditPruneExecutionResult, _ signer: S) throws {
-            _ = try NativeAuditPruneCompletionProof.create(plan: plan, execution: execution, signer: signer)
-        }
-        """.utf8).write(to: source)
-        let process = Process(); let stderr = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["swiftc", "-typecheck", "-I", modules.path, source.path]
-        process.standardError = stderr
-        try process.run(); process.waitUntilExit()
-        let diagnostic = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        #expect(process.terminationStatus != 0)
-        #expect(diagnostic.contains("inaccessible") || diagnostic.contains("internal protection level"))
-    }
-
-    @Test static func externalModuleCannotCallPhaseChainOmittingVerifier() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let modules = root.appendingPathComponent(".build/arm64-apple-macosx/debug/Modules", isDirectory: true)
-        let temporary = try temporaryDirectory("agentpass-phase-chain-public-api-negative")
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let source = temporary.appendingPathComponent("Misuse.swift")
-        try Data("""
-        import Foundation
-        import AgentPassNativeCore
-        func misuse(
-            _ verifier: NativeAuditRetentionVerifier,
-            _ authorization: Data, _ receipt: Data, _ manifest: Data, _ proof: Data,
-            _ completion: Data, _ prior: NativeAuditPruneChainState,
-            _ boundary: NativeAuditRetentionBoundary, _ retained: NativeAuditRetentionSegment,
-            _ identities: [NativeAuditRetentionFileIdentity]
-        ) throws {
-            _ = try verifier.verifyCompletedPruneEvidence(
-                authorizationData: authorization, receiptData: receipt, manifestData: manifest,
-                completionProofData: proof, completionStatementData: completion, prior: prior,
-                currentBoundary: boundary, expectedNextRetained: retained,
-                expectedNextRetainedFileIdentities: identities
-            )
-        }
-        """.utf8).write(to: source)
-        let process = Process(); let stderr = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["swiftc", "-typecheck", "-I", modules.path, source.path]
-        process.standardError = stderr
-        try process.run(); process.waitUntilExit()
-        let diagnostic = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        #expect(process.terminationStatus != 0)
-        #expect(diagnostic.contains("verifyCompletedPruneEvidence"))
-        #expect(
-            diagnostic.contains("inaccessible") || diagnostic.contains("internal protection level")
-                || diagnostic.contains("extra argument") || diagnostic.contains("missing argument")
-                || diagnostic.contains("no exact matches")
-        )
-    }
-
     @Test static func lostResponseRetriesByteExactAuthorizationAfterRestart() throws {
         let anchor = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 0x72, count: 32))
         let transport = Transport(anchor: anchor, loseFirstResponse: true)

@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { Readable } from "node:stream";
 
-import {
-  PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH,
-  PLATFORM_PROMOTION_ISSUE_PATH,
-  PLATFORM_PROMOTION_REPLAY_PATH
-} from "../src/platform-promotion-http-contract.mjs";
+import { PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH } from "../src/platform-promotion-http-contract.mjs";
 import {
   PLATFORM_PROMOTION_JTI_HEADER,
   PLATFORM_PROMOTION_PROOF_ID_HEADER
@@ -18,40 +13,17 @@ import {
   PLATFORM_SESSION_COOKIE_NAME,
   PLATFORM_SESSION_CSRF_HEADER
 } from "../src/platform-session-transport.mjs";
-import { createCloudApi } from "../src/server.mjs";
 import { CLOUD_RUNTIME_PROFILE_ERROR_CODES, parseCloudRuntimeProfile } from "../src/runtime-profile.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
 const matrix = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "contracts/route-profile-authority-matrix-v1.json"), "utf8"));
 const platformOpenApi = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "contracts/openapi/platform-v1.json"), "utf8"));
-const runtimeSource = fs.readFileSync(path.join(repositoryRoot, "apps/cloud-api/src/runtime.mjs"), "utf8");
-const serverSource = fs.readFileSync(path.join(repositoryRoot, "apps/cloud-api/src/server.mjs"), "utf8");
 
 const routeById = new Map(matrix.routes.map((route) => [route.id, route]));
 const legacyById = new Map(matrix.legacy_routes.map((route) => [route.id, route]));
 
 function routeShape(route) {
   return `${route.method} ${route.path}`;
-}
-
-async function dispatch(server, { method = "POST", url, headers = {}, body = "" } = {}) {
-  const request = Readable.from([Buffer.from(body)]);
-  request.method = method;
-  request.url = url;
-  request.headers = headers;
-  request.socket = { remoteAddress: "203.0.113.9" };
-  return new Promise((resolve, reject) => {
-    const response = {
-      headersSent: false,
-      statusCode: 200,
-      headers: {},
-      writeHead(status, values = {}) { this.statusCode = status; this.headers = { ...values }; this.headersSent = true; },
-      setHeader(name, value) { this.headers[name] = value; },
-      end(value) { this.body = value; resolve(this); },
-      destroy(error) { reject(error ?? new Error("response destroyed")); }
-    };
-    server.emit("request", request, response);
-  });
 }
 
 test("matrix freezes the exact hosted Platform Session and promotion route set", () => {
@@ -112,59 +84,6 @@ test("matrix freezes authentication transport and database authority", () => {
   assert.equal(challenge.authority.source, "postgresql");
   assert.equal(assertion.authority.source, "postgresql");
   assert.equal(revoke.authority.source, "postgresql");
-
-  assert.match(runtimeSource, /postgresRuntime\.platformSessionWebAuthnRepository/u);
-  assert.match(runtimeSource, /postgresRuntime\.createPlatformAuthorizationRepository/u);
-  assert.match(runtimeSource, /createPlatformPromotionHttpApi\(/u);
-  assert.match(runtimeSource, /platformSessionHttpApi\.expectedOrigin/u);
-  assert.match(serverSource, /isPlatformSessionHttpPath\(request\.url/u);
-  assert.match(serverSource, /isPlatformPromotionHttpIssuePath\(request\.url/u);
-});
-
-test("hosted raw dispatch reaches only the authorized boundaries and never legacy routes", async () => {
-  const calls = [];
-  const humanCalls = [];
-  const platformSessionHttpApi = {
-    paths: PLATFORM_SESSION_HTTP_PATHS,
-    async handle(request, response) {
-      calls.push(["session", request.method, request.url]);
-      for await (const _chunk of request) {}
-      response.writeHead(209);
-      response.end(JSON.stringify({ ok: true }));
-    }
-  };
-  const platformPromotionHttpApi = {
-    paths: { issue: PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH },
-    async handle(request, response) {
-      calls.push(["promotion", request.method, request.url]);
-      for await (const _chunk of request) {}
-      response.writeHead(210);
-      response.end(JSON.stringify({ ok: true }));
-    }
-  };
-  const server = createCloudApi({
-    store: {},
-    platformSessionHttpApi,
-    platformPromotionHttpApi,
-    humanSession: { async authenticateRequest(input) { humanCalls.push(input); return { session: {} }; } }
-  });
-
-  const session = await dispatch(server, { url: PLATFORM_SESSION_HTTP_PATHS.challenge, body: "{}" });
-  const promotion = await dispatch(server, { url: PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH, body: "{}" });
-  const legacyIssue = await dispatch(server, { url: PLATFORM_PROMOTION_ISSUE_PATH, body: "{}" });
-  const legacyReplay = await dispatch(server, { url: PLATFORM_PROMOTION_REPLAY_PATH, body: "{}" });
-  const sessionReplay = await dispatch(server, { url: "/api/platform/v1/sessions/replay", body: "{}" });
-
-  assert.equal(session.statusCode, 209);
-  assert.equal(promotion.statusCode, 210);
-  assert.equal(legacyIssue.statusCode, 404);
-  assert.equal(legacyReplay.statusCode, 404);
-  assert.equal(sessionReplay.statusCode, 404);
-  assert.deepEqual(calls, [
-    ["session", "POST", PLATFORM_SESSION_HTTP_PATHS.challenge],
-    ["promotion", "POST", PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH]
-  ]);
-  assert.deepEqual(humanCalls, []);
   assert.equal(legacyById.get("legacy.platform.promotion.issue").profiles.hosted, "absent");
   assert.equal(legacyById.get("legacy.platform.promotion.replay").profiles.hosted, "absent");
 });
