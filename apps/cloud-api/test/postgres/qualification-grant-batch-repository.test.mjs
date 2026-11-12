@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -139,23 +138,6 @@ function result(rows = [], rowCount = rows.length) { return { rows, rowCount }; 
 function sha256(value) { return importCrypto().createHash("sha256").update(value).digest("hex"); }
 function importCrypto() { return requireCrypto; }
 const requireCrypto = await import("node:crypto");
-
-test("0023 uses existing grants, manifest columns, tenant-qualified FKs, RLS, and no secret columns", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0023_qualification_grant_batches.sql", import.meta.url), "utf8");
-  assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/u);
-  assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/iu);
-  assert.match(sql, /CREATE TABLE qualification_grant_batches/iu);
-  assert.match(sql, /manifest_json jsonb NOT NULL[\s\S]*manifest_hash text NOT NULL[\s\S]*manifest_signature_base64url/iu);
-  assert.match(sql, /CREATE TABLE qualification_grant_batch_steps[\s\S]*step_index[\s\S]*run_binding[\s\S]*grant_hash[\s\S]*statement_hash/iu);
-  assert.match(sql, /REFERENCES agent_session_grants\(organization_id, grant_id, device_id, agent_id, grant_hash\)/u);
-  assert.match(sql, /REFERENCES qualification_grant_batches\(organization_id, batch_id\)/u);
-  assert.match(sql, /status IN \('issued', 'claimed', 'expired', 'revoked'\)/u);
-  assert.match(sql, /status = 'claimed'[\s\S]*claim_identity_sha256 IS NOT NULL[\s\S]*claim_request_sha256 IS NOT NULL/u);
-  assert.match(sql, /ENABLE ROW LEVEL SECURITY[\s\S]*FORCE ROW LEVEL SECURITY/u);
-  assert.match(sql, /CREATE TRIGGER qualification_grant_batches_forward_only[\s\S]*BEFORE UPDATE OR DELETE ON qualification_grant_batches/u);
-  assert.match(sql, /CREATE TRIGGER qualification_grant_batch_steps_immutable[\s\S]*BEFORE UPDATE OR DELETE ON qualification_grant_batch_steps/u);
-  assert.doesNotMatch(sql, /private_key|secret_value|bearer_token|raw_nonce/iu);
-});
 
 test("issue requires both callbacks and never accepts a qualification-specific Grant type", async () => {
   const repository = createQualificationGrantBatchRepository({

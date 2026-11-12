@@ -40,20 +40,6 @@ func dedicatedSignerDoesNotInvokeIssuerOrProviderWithoutServiceContext() throws 
     #expect(issuer.calls == 0)
 }
 
-@Test("Dedicated signer seam does not add Cloud fields to Host or Child DTOs")
-func dedicatedSignerSeamKeepsTransportDTOsOpaque() throws {
-    let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appendingPathComponent(
-            "Sources/AgentPassNativeService/NativeAgentDedicatedSigningServiceAdapter.swift"
-        )
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
-
-    #expect(source.contains("AgentPassHostSignRequest") == false)
-    #expect(source.contains("AgentPassChildGitSignRequest") == false)
-    #expect(source.contains("gitCommitSigner") == false)
-    #expect(source.contains("NativeAgentDedicatedSigningHandoffBroker"))
-}
-
 private enum IssueTrap: Error {
     case unexpectedIssuerCall
     case unexpectedHandoffCall

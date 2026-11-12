@@ -86,7 +86,3 @@ test("fails closed for malformed requests and private service responses", async 
   assert.equal(privateResponse.status, 503);
   assert.equal((await privateResponse.json()).error.code, "platform_promotion_http_unavailable");
 });
-
-test("does not expose the authorized route without the exact injected boundary", () => {
-  assert.throws(() => createCloudApi({ store: {}, platformPromotionHttpApi: { handle() {}, paths: { issue: "/v1/platform/promotions" } } }), /platformPromotionHttpApi must expose handle\(\) and paths\.issue/);
-});

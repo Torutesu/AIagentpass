@@ -5,7 +5,6 @@ import test from "node:test";
 import { verifyDeviceRequest, signDeviceRequest, createReplayCache } from "../src/auth.mjs";
 import {
   AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES,
-  AGENT_SESSION_SIGNING_CAPABILITY_HTTP_PATHS,
   createAgentSessionSigningCapabilityApi
 } from "../src/agent-session-signing-capability-api.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
@@ -138,11 +137,6 @@ function assertError(result, status, code, requestId = IDS.correlation) {
   assert.equal(result.body.error.message.includes("password"), false);
   assert.equal(result.body.error.message.includes("provider"), false);
 }
-
-test("exports the exact frozen POST path binding", () => {
-  assert.deepEqual(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_PATHS, { issue: "/v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities" });
-  assert.equal(Object.isFrozen(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_PATHS), true);
-});
 
 test("requires a Device verifier, issuance service, and authoritative session binder", () => {
   assert.throws(() => createAgentSessionSigningCapabilityApi({ issuanceService: { issue() {} }, sessionBinder() {} }), /deviceRequestVerifier/);

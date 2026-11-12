@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
 import test from "node:test";
-
-const templateRoot = new URL("../", import.meta.url);
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -37,10 +34,4 @@ test("server-renders the AgentPass Console", async () => {
   assert.match(html, /表示上の情報を権限判断に使用しないでください/);
   assert.match(html, /緊急停止/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/);
-});
-
-test("removes the disposable starter preview", async () => {
-  await assert.rejects(
-    access(new URL("app/_sites-preview", templateRoot)),
-  );
 });

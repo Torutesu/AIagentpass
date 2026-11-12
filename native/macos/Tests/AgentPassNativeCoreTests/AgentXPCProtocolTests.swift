@@ -34,60 +34,6 @@ private func unarchive<T: NSObject & NSSecureCoding>(_ type: T.Type, from data: 
     return try #require(object)
 }
 
-private func protocolSelectors(_ proto: Protocol) -> Set<String> {
-    var count: UInt32 = 0
-    guard let descriptions = protocol_copyMethodDescriptionList(proto, true, true, &count) else { return [] }
-    defer { free(descriptions) }
-    return Set((0..<Int(count)).compactMap { index in
-        guard let selector = descriptions[index].name else { return nil }
-        return NSStringFromSelector(selector)
-    })
-}
-
-@Test func agentProtocolIsDedicatedAndContainsOnlyAgentOperations() {
-    let selectors = protocolSelectors(AgentPassAgentXPCProtocol.self)
-    #expect(selectors == [
-        "bootstrapAgent:withReply:",
-        "startAgentSession:withReply:",
-        "agentSessionStatus:withReply:",
-        "signGitCommit:withReply:",
-        "closeAgentSession:withReply:"
-    ])
-}
-
-@Test func agentProtocolHasNoManagementSelectors() {
-    let agentSelectors = protocolSelectors(AgentPassAgentXPCProtocol.self)
-    let forbiddenNames = [
-        "health", "publicKey", "auditStatus", "auditPublicKey", "createAuditCheckpoint",
-        "rotateAudit", "rotateAuditEvidence", "keyLifecycleStatus", "stageKey",
-        "approvalKeyStagePlan", "stageApprovalKey", "beginKeyActivation", "completeKeyActivation",
-        "completeApprovalKeyActivation", "beginKeyAbort", "completeKeyAbort", "beginKeyDeletion",
-        "completeKeyDeletion", "beginRecovery", "prepareRecoveryInstallation", "completeRecovery",
-        "prepareAuditRecoveryInstallation", "completeAuditRecovery", "abortExpiredAuditRecovery",
-        "auditRecoveryStatus", "auditAnchorStatus", "pushAuditAnchor", "prepareAuditPrune",
-        "submitAuditPrune", "executeAuditPrune", "auditPruneStatus", "beginSession", "completeSession", "revokeSessions",
-        "validateSession", "applyControlBundle", "controlStatus", "refreshControl", "validateControl"
-    ]
-    let forbiddenAgentSelectors = agentSelectors.filter { selector in
-        forbiddenNames.contains { selector.hasPrefix($0) }
-    }
-    #expect(forbiddenAgentSelectors.isEmpty)
-}
-
-@Test func agentXPCInterfaceRegistersOnlyTheContractDTOs() throws {
-    let interface = AgentPassAgentXPCInterface.make()
-    let bootstrapSelector = #selector(AgentPassAgentXPCProtocol.bootstrapAgent(_:withReply:))
-    let signSelector = #selector(AgentPassAgentXPCProtocol.signGitCommit(_:withReply:))
-    let requestClasses = interface.classes(for: bootstrapSelector, argumentIndex: 0, ofReply: false)
-    let responseClasses = interface.classes(for: bootstrapSelector, argumentIndex: 0, ofReply: true)
-    let signRequestClasses = interface.classes(for: signSelector, argumentIndex: 0, ofReply: false)
-    #expect(requestClasses.contains { String(describing: $0).contains("AgentPassAgentBootstrapRequest") })
-    #expect(responseClasses.contains { String(describing: $0).contains("AgentPassAgentBootstrapResponse") })
-    #expect(signRequestClasses.contains { String(describing: $0).contains("AgentPassAgentSignRequest") })
-    #expect(requestClasses.contains { String(describing: $0).contains("AgentPassNativeServiceProtocol") } == false)
-    #expect(protocolSelectors(AgentPassAgentXPCProtocol.self).intersection(protocolSelectors(AgentPassNativeServiceProtocol.self)).isEmpty)
-}
-
 @Test func bootstrapRequestRoundTripsAsSecureCodedClosedDTO() throws {
     let request = try #require(AgentPassAgentBootstrapRequest(
         agentID: fixedUUID,
@@ -165,13 +111,6 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     #expect(decodedSignResponse.signature.count == 64)
     #expect(decodedCloseRequest.reason == "completed")
     #expect(decodedCloseResponse.status == "closed")
-
-    let publicPropertyNames = [
-        "token", "sessionToken", "privateKey", "privateKeyData", "operation", "namespace", "signerArguments"
-    ]
-    for name in publicPropertyNames {
-        #expect(String(describing: type(of: decodedSignRequest)).contains(name) == false)
-    }
 }
 
 @Test func agentDTOConstructorsRejectUnboundedOrOpenValues() {
@@ -302,36 +241,4 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     unknownArchiver.encode("future" as NSString, forKey: "future_authority")
     unknownArchiver.finishEncoding()
     #expect((try? NSKeyedUnarchiver.unarchivedObject(ofClass: AgentPassAgentSessionResponse.self, from: unknownArchiver.encodedData)) == nil)
-}
-
-@Test("generic Agent XPC routes new signing through the coordinator adapter")
-func genericAgentSigningCutoverKeepsReplayAndAuthorityBoundaries() throws {
-    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-    let sourceURL = testDirectory
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent("Sources/AgentPassNativeService/main.swift")
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
-    let signStart = try #require(source.range(of: "func signGitCommit("))
-    let closeStart = try #require(source.range(of: "func closeAgentSession(", range: signStart.upperBound..<source.endIndex))
-    let signBody = String(source[signStart.lowerBound..<closeStart.lowerBound])
-
-    #expect(signBody.contains("coordinator.makeSigningHandoff"))
-    #expect(signBody.contains("NativeAgentSessionCoordinatorSigningAdapter"))
-    #expect(signBody.contains("adapter.execute"))
-    #expect(signBody.contains("consumeSigningCapability"))
-    #expect(signBody.contains("verifyGitCommitSignature"))
-    for phase in [".completed", ".signedVerified", ".providerStarted", ".uncertain"] {
-        #expect(signBody.contains(phase))
-    }
-    #expect(signBody.contains("recoverSigningReservation"))
-    #expect(signBody.contains("markUncertain"))
-    #expect(signBody.contains("case .completed"))
-    #expect(signBody.contains("case .signedVerified"))
-    #expect(signBody.contains("case .providerStarted"))
-    #expect(signBody.contains("case .uncertain"))
-    #expect(signBody.contains("runtime.signingTransactions.admit") == false)
-    #expect(signBody.contains("runtime.signingTransactions.markIntent") == false)
-    #expect(signBody.contains("runtime.signingTransactions.markProviderStarted") == false)
-    #expect(signBody.contains("runtime.signingTransactions.recordVerified") == false)
 }

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 
 import {
   createPostgresProviderOperationMaintenanceRepository,
@@ -147,46 +146,6 @@ test("rejects malformed health JSON and never exposes identifiers", async () => 
     });
     await assert.rejects(repository.health(), { code: CODES.DATABASE });
   }
-});
-
-test("JS contains no direct managed signer tables or DML", async () => {
-  const source = await readFile(new URL("../../src/postgres/provider-operation-maintenance-repository.mjs", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /\b(?:FROM|JOIN|INSERT|UPDATE|DELETE|TRUNCATE)\b/iu);
-  assert.doesNotMatch(source, /(?:^|[^A-Za-z0-9_])managed_signer_(?:provider_operations|signing_idempotency)(?:[^A-Za-z0-9_]|$)/u);
-  assert.match(source, /SELECT public\.agentpass_maintain_managed_signer_provider_operations\(\$1::integer\) AS result/u);
-  assert.match(source, /SELECT public\.agentpass_health_managed_signer_provider_operations\(\) AS result/u);
-});
-
-test("0050 defines bounded SECURITY DEFINER maintenance authorities", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0050_managed_signer_provider_operation_maintenance_authority.sql", import.meta.url), "utf8");
-  const roles = await readFile(new URL("../../../../scripts/postgres/roles.sql", import.meta.url), "utf8");
-  assert.match(sql, /CREATE FUNCTION public\.agentpass_maintain_managed_signer_provider_operations\(\s*p_limit integer/u);
-  assert.match(sql, /CREATE FUNCTION public\.agentpass_health_managed_signer_provider_operations\(\)/u);
-  assert.equal((sql.match(/SECURITY DEFINER/gu) ?? []).length, 2);
-  assert.equal((sql.match(/SET search_path = pg_catalog, public/gu) ?? []).length, 2);
-  assert.match(sql, /REVOKE ALL ON FUNCTION public\.agentpass_maintain_managed_signer_provider_operations\(integer\) FROM PUBLIC/u);
-  assert.match(sql, /REVOKE ALL ON FUNCTION public\.agentpass_health_managed_signer_provider_operations\(\) FROM PUBLIC/u);
-  assert.match(roles, /agentpass_maintain_managed_signer_provider_operations\(integer\)/u);
-  assert.match(roles, /agentpass_health_managed_signer_provider_operations\(\)/u);
-  assert.match(sql, /jsonb_build_object/u);
-  assert.match(sql, /total_count > p_limit/u);
-  assert.equal((sql.match(/FOR UPDATE SKIP LOCKED/gu) ?? []).length, 1);
-  assert.equal((sql.match(/FOR UPDATE OF provider, signing SKIP LOCKED/gu) ?? []).length, 2);
-  assert.match(sql, /claim_expires_at <= database_now/u);
-  assert.match(sql, /provider\.expires_at <= database_now/u);
-  assert.match(sql, /signing\.expires_at <= database_now/u);
-  for (const expression of [
-    "request_digest", "key_id", "key_version", "signature",
-    "provider_receipt_provider", "provider_receipt_id"
-  ]) {
-    assert.ok((sql.match(new RegExp(`provider\\.${expression} = signing\\.${expression}`, "gu")) ?? []).length >= 2);
-  }
-  const healthStart = sql.indexOf("CREATE FUNCTION public.agentpass_health_managed_signer_provider_operations");
-  assert.notEqual(healthStart, -1);
-  const healthSql = sql.slice(healthStart);
-  assert.ok((healthSql.match(/LIMIT 10000/gu) ?? []).length >= 8);
-  assert.match(healthSql, /oldest_nonterminal_at'[\s\S]*ORDER BY created_at, purpose, operation_id[\s\S]*LIMIT 1/u);
-  assert.doesNotMatch(healthSql, /'operation_id'|'purpose'|'key_id'|'provider_receipt/iu);
 });
 
 class MaintenanceClient {

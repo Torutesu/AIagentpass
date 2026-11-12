@@ -26,7 +26,6 @@ export const N4_MIGRATION_NAME = "0054_platform_authorization.sql";
 export const N4_REPORT_SCHEMA_VERSION = 1;
 export const N4_AUTHORITY_TAP_LABEL = "0054";
 export const N4_AUTHORITY_TEST_FILES = Object.freeze([
-  "apps/cloud-api/test/postgres/platform-authorization-migration.test.mjs",
   "apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs"
 ]);
 

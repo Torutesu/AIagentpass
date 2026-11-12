@@ -26,6 +26,6 @@ test('checked-in physical drivers assign every runner test exactly once', () => 
   }
   assert.deepEqual([...declared.keys()], [...REQUIRED_GATES]);
   assert.deepEqual([...testOwners.keys()].sort(), [...REQUIRED_TESTS].sort());
-  const allowedFiles = new Set([...REQUIRED_GATES, 'install-signing-drivers.test.mjs', 'lifecycle-drivers.test.mjs']);
+  const allowedFiles = new Set(REQUIRED_GATES);
   assert.deepEqual(fs.readdirSync(drivers).sort(), [...allowedFiles].sort());
 });

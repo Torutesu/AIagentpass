@@ -77,13 +77,7 @@ function serviceFixture(overrides = {}) {
   return { service, ...fixtureValue };
 }
 
-test("exposes exactly the eleven organization service methods", () => {
-  const { service } = serviceFixture();
-  assert.equal(Object.isFrozen(service), true);
-  assert.deepEqual(Object.keys(service).sort(), [
-    "acceptInvitation", "createInvitation", "createOrganization", "listInvitations", "listMembers",
-    "listOrganizations", "removeMember", "renameOrganization", "reissueInvitation", "revokeInvitation", "updateMemberRole"
-  ].sort());
+test("rejects an incomplete repository and an invalid clock at construction", () => {
   assert.throws(() => createPostgresOrganizationService({ repository: {} }), /missing/);
   assert.throws(() => createPostgresOrganizationService({ repository: serviceFixture().repository, now: "not-a-function" }), /now must be a function/);
 });

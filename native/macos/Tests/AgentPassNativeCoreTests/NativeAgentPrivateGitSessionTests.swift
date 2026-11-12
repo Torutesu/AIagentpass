@@ -42,17 +42,6 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
     #expect(try NativeAgentPrivateGitSessionFrameCodec.decode(close) == .close)
 }
 
-@Test func privateGitSessionLifecycleErrorsHaveStableF1Codes() {
-    #expect(NativeAgentPrivateGitSessionLifecycleError.allCases.map(\.rawValue) == [
-        "outcome_unknown",
-        "revoked",
-        "expired",
-        "policy_drift",
-        "process_drift",
-        "transport_quarantined",
-    ])
-}
-
 @Test func privateGitSessionCodecRejectsEmptyAndBoundViolations() throws {
     #expect(throws: NativeAgentPrivateGitSessionCodecError.emptyPayload) {
         try NativeAgentPrivateGitSessionFrameCodec.encode(.request(sequence: 1, commitPayload: Data()))

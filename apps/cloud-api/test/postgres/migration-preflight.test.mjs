@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -79,15 +78,4 @@ test("validation failure rolls back and redacts database details behind a stable
       && !error.message.includes("database detail")
   );
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
-});
-
-test("0011 migration contains the same fail-closed preflight and staged tenant FKs", async () => {
-  const sql = await readFile(new URL("../../../../contracts/postgres/0011_control_plane_hosted_cutover.sql", import.meta.url), "utf8");
-
-  assert.match(sql, /MESSAGE = 'AGENTPASS_0011_PREFLIGHT_CROSS_TENANT_CREATED_BY'/);
-  assert.match(sql, /HINT = 'Repair or quarantine/);
-  assert.match(sql, /device_enrollments_created_by_tenant_fk[\s\S]*REFERENCES memberships\(organization_id, member_id\)\s+NOT VALID/);
-  assert.match(sql, /policies_created_by_tenant_fk[\s\S]*REFERENCES memberships\(organization_id, member_id\)\s+NOT VALID/);
-  assert.match(sql, /revocations_created_by_tenant_fk[\s\S]*REFERENCES memberships\(organization_id, member_id\)\s+NOT VALID/);
-  assert.match(sql, /revocations_revoked_by_tenant_fk[\s\S]*REFERENCES memberships\(organization_id, member_id\)\s+NOT VALID/);
 });

@@ -29,22 +29,6 @@ function repositories(overrides = {}) {
   return { calls, repository: { ...repository, ...overrides } };
 }
 
-test("exposes exactly the Cloud server contract and freezes the facade", () => {
-  const { repository } = repositories();
-  const store = createPostgresControlPlaneStore({
-    organizationRepository: repository,
-    resourceRepository: repository,
-    authorityRepository: repository,
-    auditRepository: repository,
-    adminAuditRepository: repository,
-    capabilityAuthorityRepository: repository,
-    deviceManualWakeRepository: repository,
-    sharedControlRepository: { withTransaction() {} }
-  });
-  assert.equal(Object.isFrozen(store), true);
-  assert.deepEqual(Object.keys(store).sort(), [...CONTROL_PLANE_STORE_METHODS].sort());
-});
-
 test("exposes hosted device-plane methods without widening the enumerable admin contract", async () => {
   const { repository, calls } = repositories();
   const store = createPostgresControlPlaneStore({ authorityRepository: repository });

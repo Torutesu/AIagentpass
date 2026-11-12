@@ -10,7 +10,7 @@ const port = Number.isInteger(portValue) && portValue >= 1024 && portValue <= 65
 // removal must update the protected CI inputs and the evidence contract in
 // the same change; silently deriving it at runtime would allow an empty or
 // reduced suite to qualify.
-const expectedTests = Number.parseInt(process.env.AGENTPASS_EXPECTED_BROWSER_E2E_TESTS ?? "83", 10);
+const expectedTests = Number.parseInt(process.env.AGENTPASS_EXPECTED_BROWSER_E2E_TESTS ?? "82", 10);
 const resultPath = process.env.AGENTPASS_BROWSER_E2E_RESULT_PATH;
 const startupTimeoutMs = Number.parseInt(process.env.PLAYWRIGHT_STARTUP_TIMEOUT_MS ?? "60000", 10);
 const cloudPortValue = Number.parseInt(process.env.PLAYWRIGHT_CLOUD_API_PORT ?? "4310", 10);

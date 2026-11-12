@@ -130,7 +130,7 @@ The Console bootstraps a durable Human session first, then performs browser-nati
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
 - `npm test`: build and run the console API/render tests
-- `node --test tests/hosted-bootstrap-*.test.mjs tests/hosted-onboarding-ui.test.mjs`: run the focused Hosted onboarding contract tests
+- `node --test tests/hosted-bootstrap-*.test.mjs`: run the focused Hosted onboarding contract tests
 
 ## Learn More
 

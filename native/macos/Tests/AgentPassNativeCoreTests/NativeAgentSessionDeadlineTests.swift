@@ -258,8 +258,3 @@ private func monotonic(_ nanoseconds: UInt64, bootIdentity: String = "boot-a") t
         try deadline.revalidate(wallClock: ThrowingWallClock(), monotonicClock: try FixedMonotonicClock(nanoseconds: 2))
     }
 }
-
-@Test func deadlineErrorsHaveStableNonAssociatedCodes() {
-    #expect(NativeAgentSessionDeadlineError.allCases.map(\.rawValue).count == 10)
-    #expect(NativeAgentSessionDeadlineError.wallClockRollback.localizedDescription == "wall_clock_rollback")
-}

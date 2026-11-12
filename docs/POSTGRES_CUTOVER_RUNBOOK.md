@@ -225,9 +225,9 @@ node scripts/postgres/role-privilege-check.mjs
 The checker reads `AGENTPASS_DATABASE_URL`, requires exactly one URL parameter
 (`sslmode=verify-full`), rejects all command-line arguments, measures
 `current_user` and the effective schema/table/sequence/function privileges,
-and emits only an opaque evidence digest. Run the contract test before the
-cutover approval:
+and emits only an opaque evidence digest. Run the live least-privilege test
+against the target database before the cutover approval:
 
 ```sh
-node --test apps/cloud-api/test/postgres/least-privilege-role-contract.test.mjs
+node --test apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs
 ```

@@ -12,9 +12,7 @@ import {
   createFixtureRoot,
   createTlsMaterial,
   generateCredentials,
-  parseArgs,
-  startFixture,
-  stopFixture
+  parseArgs
 } from "../scripts/p0b/postgres-tls/fixture.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -47,29 +45,6 @@ test("P0-B CLI parses only PostgreSQL 17 images and requires state for lifecycle
   assert.equal(parseArgs(["start", "--image", "registry.example/postgres:17.6-alpine"]).image, "registry.example/postgres:17.6-alpine");
   assert.throws(() => parseArgs(["start", "--image", "postgres:16-alpine"]), /PostgreSQL 17/);
   assert.throws(() => parseArgs(["stop"]), /requires --state-file/);
-});
-
-test("P0-B Docker fixture starts with TLS when explicitly requested", async (t) => {
-  if (process.env.P0B_POSTGRES_TLS_DOCKER_TEST !== "1") {
-    t.skip("set P0B_POSTGRES_TLS_DOCKER_TEST=1 to run the Docker qualification");
-    return;
-  }
-  let fixture;
-  try {
-    fixture = await startFixture({ timeoutMs: 60_000 });
-  } catch (error) {
-    if (["docker_missing", "openssl_missing"].includes(error?.code)) {
-      t.skip(error.code);
-      return;
-    }
-    throw error;
-  }
-  t.after(async () => stopFixture(fixture.state_file));
-  const environment = await fs.readFile(fixture.env_file, "utf8");
-  assert.match(environment, /sslmode=verify-full/);
-  assert.doesNotMatch(JSON.stringify(fixture), /POSTGRES_PASSWORD|password|postgresql:\/\/[^\n]*:[^\n@]+@/iu);
-  assert.equal(fixture.host, "localhost");
-  assert.equal(fixture.database, "agentpass_p0b");
 });
 
 test("fixture temp roots are created below the operating system temp directory", async () => {

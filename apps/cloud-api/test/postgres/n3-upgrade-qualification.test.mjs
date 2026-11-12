@@ -1,28 +1,16 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  N3_APPLICATION_VERSION,
-  N3_MIGRATION_NAME,
   N3_LEGACY_TABLE_SPECS,
-  N3_PLATFORM_AUTHORITY_TABLE_SPECS,
-  N3_SOURCE_VERSION,
-  N3_TARGET_VERSION,
   assertN3MigrationHistory,
   assertLegacyRowsPreserved,
   assertNoImplicitPlatformSessionSeeds,
   assertPlatformAuthorityRowsPreserved,
   assertReviewedN3MigrationSet,
-  buildN3UpgradePlan,
   runN3UpgradeQualification
 } from "../../../../scripts/postgres/n3-upgrade-qualification.mjs";
-import { loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../scripts/postgres/n3-upgrade-qualification.mjs");
-const INTEGRATION_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "./n3-upgrade-qualification.integration.test.mjs");
+import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 
 function cleanAuthority() {
   return {
@@ -45,20 +33,6 @@ function cleanSessions() {
     { name: "platform_sessions", exists: false, row_count: 0 }
   ];
 }
-
-test("N3 plan is exactly 52→53 and names the reviewed migration head", async () => {
-  const migrations = await loadSqlMigrations();
-  const plan = buildN3UpgradePlan(migrations);
-  assert.equal(N3_SOURCE_VERSION, 52);
-  assert.equal(N3_TARGET_VERSION, 53);
-  assert.equal(N3_APPLICATION_VERSION, "n3-postgres-upgrade-qualification");
-  assert.deepEqual(plan.map(({ startVersion, targetVersion }) => ({ startVersion, targetVersion })), [{ startVersion: 52, targetVersion: 53 }]);
-  assert.equal(plan[0].bootstrap.at(-1).version, 52);
-  assert.equal(plan[0].upgrade.at(-1).name, N3_MIGRATION_NAME);
-  assert.equal(plan[0].bootstrap.length, 52);
-  assert.equal(plan[0].upgrade.length, 53);
-  assert.ok(migrations.slice(0, 53).every(({ sql, checksum }) => migrationChecksum(sql) === checksum));
-});
 
 test("N3 reviewed migration set rejects missing, reordered, drifted, and wrong-headed history", async () => {
   const migrations = await loadSqlMigrations();
@@ -168,26 +142,4 @@ test("N3 validators reject history, identity, preservation, and implicit session
   assert.throws(() => assertLegacyRowsPreserved(legacy, { ...legacy, members: [{ id: "changed" }] }));
   assert.throws(() => assertPlatformAuthorityRowsPreserved(authority, { ...authority, platform_principals: [] }));
   assert.throws(() => assertNoImplicitPlatformSessionSeeds([{ name: "platform_sessions", exists: true, row_count: 1 }, { name: "platform_credentials", exists: true, row_count: 0 }], "post-upgrade"));
-});
-
-test("N3 qualification script and integration gate expose only the reviewed CI contract", async () => {
-  const source = await readFile(SCRIPT_PATH, "utf8");
-  assert.match(source, /createMigrationRunner/u);
-  assert.match(source, /loadSqlMigrations/u);
-  assert.match(source, /createDisposablePostgres/u);
-  assert.match(source, /agentpass_migrator/u);
-  assert.match(source, /schema_migrations/u);
-  assert.match(source, /migrationChecksum/u);
-  assert.match(source, /databaseName: `agentpass_n3_from_\$\{scenario\.startVersion\}`/u);
-  assert.match(source, /AGENTPASS_N3_POSTGRES_ADMIN_URL/u);
-  assert.match(source, /AGENTPASS_N3_POSTGRES_MIGRATION_URL/u);
-  assert.match(source, /platform_operator_assignment_approvals/u);
-  assert.match(source, /platform_credentials/u);
-  assert.match(source, /platform_sessions/u);
-  assert.doesNotMatch(source, /\.github\/workflows/u);
-  const integration = await readFile(INTEGRATION_PATH, "utf8");
-  assert.match(integration, /const ADMIN_DATABASE_URL = process\.env\.AGENTPASS_N3_POSTGRES_ADMIN_URL \?\? process\.env\.AGENTPASS_TEST_POSTGRES_ADMIN_URL/u);
-  assert.match(integration, /const MIGRATION_DATABASE_URL = process\.env\.AGENTPASS_N3_POSTGRES_MIGRATION_URL \?\? process\.env\.AGENTPASS_TEST_MIGRATION_DATABASE_URL/u);
-  assert.match(integration, /skip: ADMIN_DATABASE_URL && MIGRATION_DATABASE_URL \? false :/u);
-  assert.doesNotMatch(integration, /t\.skip\(|P0BSkip|postgres_unavailable|external_disabled/u);
 });

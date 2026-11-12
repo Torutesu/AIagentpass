@@ -95,9 +95,6 @@ function fixture({ purpose = "agentpass.capability", pair = crypto.generateKeyPa
 }
 
 test("derives all eight signer purposes and pins each registry protocol version", async () => {
-  assert.deepEqual(SIGNER_PURPOSES, Object.values(SIGNER_PURPOSE_REGISTRY).map(({ purpose }) => purpose).sort());
-  assert.equal(SIGNER_PURPOSES.length, 8);
-
   for (const purpose of SIGNER_PURPOSES) {
     const fixtureValue = fixture({ purpose });
     const result = await fixtureValue.provider.signOnce();

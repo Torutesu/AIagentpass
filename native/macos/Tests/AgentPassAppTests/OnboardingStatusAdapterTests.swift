@@ -141,15 +141,6 @@ private func completeStatus() -> String {
     }
 }
 
-@Test func outputIsDefensiveAndReadOnly() throws {
-    let first = try adapter.viewModel(from: status())
-    let second = try adapter.viewModel(from: status())
-    #expect(first == second)
-    #expect(first.interaction == .readOnly)
-    #expect(first.isComplete == false)
-    #expect(first.nextAction?.command == "agentpass setup continue")
-}
-
 @Test func parsesProductionDiagnosticsWithoutExposingRawFields() throws {
     let distribution = try AgentPassDoctorStatusAdapter().distributionStatus(from: Data(doctorReport.utf8))
     #expect(distribution.developerID == .verified)

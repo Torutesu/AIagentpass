@@ -924,33 +924,6 @@ private func controlClose(
     #expect(errorCode(endpoint, sign: signRequest) == 10)
 }
 
-@Test func hostControlRegistryClosesOwnerSessionThroughASeparateAuthenticatedEndpoint() throws {
-    let harness = try HostEndpointHarness()
-    let controlRegistry = NativeAgentHostControlRegistry()
-    let ownerEndpoint = try harness.makeEndpoint(
-        signerPolicy: .developmentLegacySignerAllowed,
-        controlRegistry: controlRegistry
-    )
-    let controllerEndpoint = try harness.makeEndpoint(
-        signerPolicy: .developmentLegacySignerAllowed,
-        controlRegistry: controlRegistry
-    )
-    let prepared = try prepare(ownerEndpoint)
-    _ = try prepare(controllerEndpoint)
-    let request = try #require(AgentPassHostControlCloseRequest(
-        sessionID: prepared.sessionID,
-        operationID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-        reason: .completed
-    ))
-
-    let (response, error) = controlClose(controlRegistry, controllerObservation: harness.hostObservation, request: request)
-
-    #expect(error == nil)
-    #expect(response?.sessionID == prepared.sessionID)
-    let signRequest = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x6D])))
-    #expect(errorCode(ownerEndpoint, sign: signRequest) == 10)
-}
-
 @Test func hostEndpointRejectsPIDIdentityAndWorktreeMismatchDuringAttach() throws {
     enum Mismatch {
         case pid

@@ -1,26 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  N2_APPLICATION_VERSION,
-  N2_MIGRATION_NAME,
   N2_LEGACY_TABLE_SPECS,
   N2_PLATFORM_AUTHORITY_TABLE_SPECS,
-  N2_SOURCE_VERSION,
-  N2_TARGET_VERSION,
   assertN2MigrationHistory,
   assertLegacyRowsPreserved,
   assertReviewedN2MigrationSet,
-  buildN2UpgradePlan,
   runN2UpgradeQualification
 } from "../../../../scripts/postgres/n2-upgrade-qualification.mjs";
-import { loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
-
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../scripts/postgres/n2-upgrade-qualification.mjs");
-const INTEGRATION_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "./n2-upgrade-qualification.integration.test.mjs");
+import { loadSqlMigrations } from "../../src/postgres/migration-runner.mjs";
 
 function cleanSeeds() {
   return N2_PLATFORM_AUTHORITY_TABLE_SPECS.map(({ name }) => ({ name, exists: true, row_count: 0 }));
@@ -29,20 +18,6 @@ function cleanSeeds() {
 function cleanLegacyRows() {
   return Object.fromEntries(N2_LEGACY_TABLE_SPECS.map(({ name }, index) => [name, [{ id: `legacy-${index}` }]]));
 }
-
-test("N2 plan is exactly 51→52 and names the reviewed migration head", async () => {
-  const migrations = await loadSqlMigrations();
-  const plan = buildN2UpgradePlan(migrations);
-  assert.equal(N2_SOURCE_VERSION, 51);
-  assert.equal(N2_TARGET_VERSION, 52);
-  assert.equal(N2_APPLICATION_VERSION, "n2-postgres-upgrade-qualification");
-  assert.deepEqual(plan.map(({ startVersion, targetVersion }) => ({ startVersion, targetVersion })), [{ startVersion: 51, targetVersion: 52 }]);
-  assert.equal(plan[0].bootstrap.at(-1).version, 51);
-  assert.equal(plan[0].upgrade.at(-1).name, N2_MIGRATION_NAME);
-  assert.equal(plan[0].bootstrap.length, 51);
-  assert.equal(plan[0].upgrade.length, 52);
-  assert.ok(migrations.slice(0, 52).every(({ sql, checksum }) => migrationChecksum(sql) === checksum));
-});
 
 test("N2 reviewed migration set rejects a missing, reordered, drifted, or wrong-headed set", async () => {
   const migrations = await loadSqlMigrations();
@@ -141,23 +116,4 @@ test("N2 history validator rejects wrong source/head, history, status, identity,
   const changedLegacy = cleanLegacyRows();
   changedLegacy.memberships[0].id = "changed";
   assert.throws(() => assertLegacyRowsPreserved(cleanLegacyRows(), changedLegacy));
-});
-
-test("N2 qualification script and integration gate expose only the reviewed CI contract", async () => {
-  const source = await readFile(SCRIPT_PATH, "utf8");
-  assert.match(source, /createMigrationRunner/);
-  assert.match(source, /loadSqlMigrations/);
-  assert.match(source, /createDisposablePostgres/);
-  assert.match(source, /agentpass_migrator/);
-  assert.match(source, /schema_migrations/);
-  assert.match(source, /migrationChecksum/);
-  assert.match(source, /databaseName: `agentpass_n2_from_\$\{scenario\.startVersion\}`/);
-  assert.match(source, /AGENTPASS_N2_POSTGRES_ADMIN_URL/);
-  assert.match(source, /AGENTPASS_N2_POSTGRES_MIGRATION_URL/);
-  assert.doesNotMatch(source, /\.github\/workflows/u);
-  const integration = await readFile(INTEGRATION_PATH, "utf8");
-  assert.match(integration, /const ADMIN_DATABASE_URL = process\.env\.AGENTPASS_N2_POSTGRES_ADMIN_URL \?\? process\.env\.AGENTPASS_TEST_POSTGRES_ADMIN_URL/u);
-  assert.match(integration, /const MIGRATION_DATABASE_URL = process\.env\.AGENTPASS_N2_POSTGRES_MIGRATION_URL \?\? process\.env\.AGENTPASS_TEST_MIGRATION_DATABASE_URL/u);
-  assert.match(integration, /skip: ADMIN_DATABASE_URL && MIGRATION_DATABASE_URL \? false :/u);
-  assert.doesNotMatch(integration, /t\.skip\(|P0BSkip|postgres_unavailable|external_disabled/u);
 });

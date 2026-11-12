@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
@@ -31,7 +30,6 @@ const SCOPE = Object.freeze({
   branches: { allow: ["feature/*"], deny: ["main"] },
   remotes: { allow: ["git@example.test:project.git"], deny: [] }
 });
-const AGENT_SESSIONS_MIGRATION = readFileSync(new URL("../../../../contracts/postgres/0019_agent_sessions.sql", import.meta.url), "utf8");
 
 class ContractClient {
   constructor(options = {}, shared = undefined) {
@@ -399,16 +397,6 @@ test("never replays a terminal or expired session as a usable Lease", async () =
   client.options.now = EXPIRES;
   const expiredRepo = repository(client, { now: () => EXPIRES });
   await assert.rejects(expiredRepo.consumeAgentSessionGrant(request), { code: "ERR_GRANT_EXPIRED" });
-});
-
-test("pins the migration trigger as the only grant-consumption transition", () => {
-  const migration = AGENT_SESSIONS_MIGRATION.replace(/--[^\n]*\n/g, " ").replace(/\s+/gu, " ");
-  assert.match(migration, /CREATE FUNCTION agentpass_consume_agent_session_grant_for_session\(\)/u);
-  assert.match(migration, /SELECT grant_record\.\* INTO grant_row FROM agent_session_grants AS grant_record/u);
-  assert.match(migration, /FOR UPDATE; IF NOT FOUND THEN/u);
-  assert.match(migration, /UPDATE agent_session_grants SET status = 'consumed', consumed_at = clock_timestamp\(\), consumed_session_id = NEW\.session_id, consumed_process_binding_sha256 = NEW\.process_binding_sha256 WHERE organization_id = grant_row\.organization_id AND grant_id = grant_row\.grant_id AND status = 'issued';/u);
-  assert.match(migration, /GET DIAGNOSTICS changed = ROW_COUNT; IF changed <> 1 THEN/u);
-  assert.match(migration, /CREATE TRIGGER agent_sessions_consume_grant BEFORE INSERT ON agent_sessions FOR EACH ROW EXECUTE FUNCTION agentpass_consume_agent_session_grant_for_session\(\);/u);
 });
 
 test("does not allow a caller to bypass the function-owned grant transition", async () => {

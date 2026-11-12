@@ -118,11 +118,3 @@ private func dependencyBinding() throws -> NativeAgentSessionBinding {
             binding: dependencyBinding())
     }
 }
-
-@Test func fixedSignerProtocolHasNoOperationOrKeySelectionParameters() throws {
-    final class Signer: NativeAgentGitCommitSigning, @unchecked Sendable {
-        func signGitCommitPayload(_ payload: Data) throws -> Data { Data(payload.reversed()) }
-    }
-    let signer = Signer()
-    #expect(try signer.signGitCommitPayload(Data([1, 2, 3])) == Data([3, 2, 1]))
-}

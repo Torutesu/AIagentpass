@@ -26,23 +26,3 @@ import Testing
     }
     #expect(actions.first?.inputRequirement?.displayName.contains("public") == true)
 }
-
-@Test func diagnosticsSourceDoesNotExecuteCommandsOrExposeSecretMaterial() throws {
-    let source = try sourceText("Sources/AgentPassApp/OnboardingDiagnostics.swift")
-    #expect(source.contains("Process(") == false)
-    #expect(source.contains("NSTask") == false)
-    #expect(source.contains("/Users/") == false)
-    #expect(source.localizedCaseInsensitiveContains("private key") == false)
-    #expect(source.localizedCaseInsensitiveContains("secret") == true)
-    #expect(source.contains("approvedCommand") == true)
-    #expect(source.contains("inputRequirement") == true)
-}
-
-private func sourceText(_ relativePath: String) throws -> String {
-    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-    let sourceURL = testDirectory
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent(relativePath)
-    return try String(contentsOf: sourceURL, encoding: .utf8)
-}

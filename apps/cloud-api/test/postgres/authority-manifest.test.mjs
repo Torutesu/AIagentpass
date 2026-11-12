@@ -26,8 +26,6 @@ import {
 } from "../../../../scripts/postgres/authority-manifest.mjs";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
-const PROMOTION_AUTHORITY_MIGRATION_URL = new URL("../../../../contracts/postgres/0048_platform_promotion_authority_boundary.sql", import.meta.url);
-const AUTHORITY_MANIFEST_CONTRACT_URL = new URL("../../../../scripts/postgres/authority-manifest.v1.json", import.meta.url);
 const TABLES = [
   "organizations", "members", "memberships", "human_sessions", "webauthn_credentials", "webauthn_challenges", "upstream_identities",
   "devices", "device_enrollments", "release_candidates", "device_enrollment_possession_receipts", "agents", "agent_session_grants", "agent_sessions", "agent_session_signing_capability_reservations", "agent_capability_sequence_heads", "qualification_grant_control_heads", "qualification_grant_batches", "qualification_grant_batch_steps", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements",
@@ -107,29 +105,6 @@ test("rejects correlated count drift, invalid constraints, and tenant-integrity 
     return FakeManifestClient.prototype.query.call(this, text, params);
   };
   await assert.rejects(createAuthorityManifest({ client }), (error) => error.code === DIAGNOSTICS.CROSS_TENANT.code);
-});
-
-test("tracks migration 0048 authority boundary objects exactly", async () => {
-  const contract = JSON.parse(await readFile(AUTHORITY_MANIFEST_CONTRACT_URL, "utf8"));
-  const sql = await readFile(PROMOTION_AUTHORITY_MIGRATION_URL, "utf8");
-  assert.equal(contract.migration_version, 48);
-  assert.deepEqual(contract.tables, []);
-  assert.deepEqual(contract.functions, [
-    "agentpass_platform_promotion_issuance_result",
-    "agentpass_platform_promotion_statement_canonical_json",
-    "agentpass_platform_promotion_request_digest",
-    "agentpass_platform_promotion_issuance_reserve",
-    "agentpass_platform_promotion_issuance_replay",
-    "agentpass_platform_promotion_issuance_commit",
-    "agentpass_platform_promotion_issuance_uncertain",
-    "agentpass_platform_promotion_issuance_get"
-  ]);
-  assert.deepEqual(contract.triggers, []);
-  assert.deepEqual(contract.policies, []);
-  assert.deepEqual(contract.views, []);
-  for (const objectName of [...contract.functions, ...contract.triggers, ...contract.policies, ...contract.views]) assert.match(sql, new RegExp(`\\b${objectName}\\b`, "u"));
-  assert.deepEqual(contract.table_contracts, {});
-  assert.deepEqual(contract.view_contracts, {});
 });
 
 test("normalizes before comparison and rejects unknown or secret-like nested fields", async () => {

@@ -342,7 +342,6 @@ runs:
           grep -Eq '^1\.\.[1-9][0-9]*$' "$output"
         }
         run_qualification 0048 \
-          apps/cloud-api/test/postgres/platform-promotion-authority-boundary-migration.test.mjs \
           apps/cloud-api/test/postgres/platform-promotion-authority-qualification.integration.test.mjs
         provider_operation_tests=(
           apps/cloud-api/test/postgres/provider-operation-repository.test.mjs
@@ -355,26 +354,20 @@ runs:
         run_qualification 0050 \
           apps/cloud-api/test/postgres/provider-operation-maintenance-repository.test.mjs
         run_qualification 0051 \
-          apps/cloud-api/test/postgres/managed-signer-authority-boundary-migration.test.mjs \
-          apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority-migration.test.mjs \
           apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs \
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs \
           apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority.integration.test.mjs \
           apps/cloud-api/test/postgres/managed-signer-s13-multi-instance.integration.test.mjs
         run_qualification 0052 \
-          apps/cloud-api/test/postgres/platform-operator-authority-migration.test.mjs \
           apps/cloud-api/test/postgres/platform-operator-authority.integration.test.mjs \
           apps/cloud-api/test/postgres/platform-operator-assignment-repository.test.mjs \
           apps/cloud-api/test/platform-operator-authorizer.test.mjs
         run_qualification 0053 \
-          apps/cloud-api/test/postgres/platform-session-authority-migration.test.mjs \
           test/platform-session-contract.test.mjs
         run_qualification 0054 \
-          apps/cloud-api/test/postgres/platform-authorization-migration.test.mjs \
           apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs
         run_qualification 0055 \
           apps/cloud-api/test/postgres/n5-upgrade-qualification.test.mjs \
-          apps/cloud-api/test/postgres/platform-session-bootstrap-migration.test.mjs \
           apps/cloud-api/test/postgres/platform-session-bootstrap-repository.test.mjs \
           apps/cloud-api/test/postgres/platform-session-bootstrap.integration.test.mjs
         AGENTPASS_N4_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \

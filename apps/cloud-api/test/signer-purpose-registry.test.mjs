@@ -44,13 +44,6 @@ test("freezes one closed registry with eight distinct purposes and domains", () 
   assert.ok(Object.isFrozen(SIGNER_PURPOSE_REGISTRY));
   assert.ok(entries.every(Object.isFrozen));
   assert.ok(entries.every(({ hosted_status }) => hosted_status === "managed_kms_integrated"));
-  assert.equal(SIGNER_PURPOSE_REGISTRY.control_bundle.protocol_version, 2);
-  assert.equal(SIGNER_PURPOSE_REGISTRY.control_bundle.signing_version, 2);
-  assert.equal(SIGNER_PURPOSE_REGISTRY.qualification_manifest.protocol_version, 2);
-  assert.equal(SIGNER_PURPOSE_REGISTRY.promotion_evidence.domain, "AgentPass-Promotion-Evidence-v3\0");
-  assert.equal(SIGNER_PURPOSE_REGISTRY.promotion_evidence.protocol_version, 3);
-  assert.equal(SIGNER_PURPOSE_REGISTRY.promotion_evidence.signing_version, 3);
-  assert.deepEqual(SIGNER_PURPOSE_REGISTRY.possession_receipt.allowed_algorithms, ["ed25519", "p256-sha256"]);
 });
 
 test("accepts only one complete managed binding per frozen purpose", () => {

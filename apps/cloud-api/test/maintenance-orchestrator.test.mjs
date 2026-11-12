@@ -42,8 +42,6 @@ test("orchestrator persists the planned job and keeps receipt persistence explic
 });
 
 test("orchestrator without a receipt repository fails closed", async () => {
-  const { orchestrator } = harness();
-  const noReceipt = createMaintenanceOrchestrator({ jobs: harness().repositories.jobs, effects: harness().repositories.effects, results: harness().repositories.results, pullRequests: harness().repositories.pullRequests });
-  await assert.rejects(noReceipt.saveReceipt({}), { code: "maintenance.invalid_configuration" });
-  assert.ok(orchestrator);
+  const { receipts: _receipts, ...repositories } = harness().repositories;
+  await assert.rejects(createMaintenanceOrchestrator(repositories).saveReceipt({}), { code: "maintenance.invalid_configuration" });
 });

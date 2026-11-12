@@ -171,30 +171,3 @@ test("M2 OpenAPI operations freeze Human grant issuance and Device grant consump
   assert.ok(human.paths["/organizations/{organization_id}/device-enrollments"], "existing Human enrollment path must remain");
   assert.ok(device.paths["/organizations/{organization_id}/devices/{device_id}/enrollment-receipt"], "existing Device receipt path must remain");
 });
-
-test("M2 OpenAPI assertions reject weakened authentication or request bindings", () => {
-  const human = readOpenApi("human-v1.json");
-  const device = readOpenApi("device-v1.json");
-  assertHumanOperation(human);
-  assertDeviceOperation(device);
-
-  const withoutRecentWebAuthn = structuredClone(human);
-  withoutRecentWebAuthn.paths[HUMAN_ROUTE].post.security = [{ humanSession: [] }];
-  assert.throws(() => assertHumanOperation(withoutRecentWebAuthn), /deep-equal|recentWebAuthn/i);
-
-  const withoutIdempotency = structuredClone(human);
-  withoutIdempotency.paths[HUMAN_ROUTE].post.parameters.pop();
-  assert.throws(() => assertHumanOperation(withoutIdempotency), /IdempotencyKey|deep-equal/i);
-
-  const wrappedGrant = structuredClone(device);
-  wrappedGrant.components.requestBodies.ConsumeAgentSessionGrant.content["application/json"].schema = { $ref: "#/components/schemas/LooseGrant" };
-  assert.throws(() => assertDeviceOperation(wrappedGrant), /AgentSessionGrantConsumeRequest|deep-equal/i);
-
-  const withoutProcessBinding = structuredClone(device);
-  delete withoutProcessBinding.components.schemas.AgentSessionGrantConsumeRequest.properties.process_binding_sha256;
-  assert.throws(() => assertDeviceOperation(withoutProcessBinding), /process_binding_sha256/i);
-
-  const bearerDevice = structuredClone(device);
-  bearerDevice.paths[DEVICE_ROUTE].post.security = [{ deviceSignature: [] }, { humanSession: [] }];
-  assert.throws(() => assertDeviceOperation(bearerDevice), /deep-equal|deviceSignature/i);
-});

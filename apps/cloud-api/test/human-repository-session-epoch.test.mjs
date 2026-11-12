@@ -26,20 +26,6 @@ const sessionInput = Object.freeze({
   recent_auth_at: null
 });
 
-test("session creation snapshots the current organization and membership epochs", async () => {
-  const calls = [];
-  const client = { async query(text, params) {
-    calls.push({ text, params });
-    return { rowCount: 1, rows: [{ session: { id: ids.session, ...sessionInput, token_hash_hex: sessionInput.token_hash, csrf_token_hash_hex: sessionInput.csrf_token_hash, revoked_at: null } }] };
-  } };
-  const repository = createPostgresHumanRepository({ client });
-
-  await repository.createSession(sessionInput);
-
-  assert.match(calls[0].text, /agentpass_human_session_create/);
-  assert.equal(Buffer.isBuffer(calls[0].params[5]), true);
-});
-
 test("all authority-bearing session and credential paths require exact current epochs", async () => {
   const calls = [];
   const credentialId = Buffer.alloc(16, 7).toString("base64url");

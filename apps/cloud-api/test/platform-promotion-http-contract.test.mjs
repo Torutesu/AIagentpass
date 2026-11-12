@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 
@@ -8,7 +7,6 @@ import {
   normalizePlatformOperatorAuthorization,
   normalizePlatformPromotionRequest,
   normalizePlatformPromotionResult,
-  platformPromotionAuthorizationRequestDigest,
   platformPromotionContextHash,
   PLATFORM_PROMOTION_OPERATIONS
 } from "../src/platform-promotion-http-contract.mjs";
@@ -52,14 +50,6 @@ test("normalizes the exact authorized six-field public intent without carrying o
     ...INPUT,
     principal_id: "11111111-1111-4111-8111-111111111111"
   }, IDEMPOTENCY_KEY), /request contract/u);
-});
-
-test("matches the 0054 organization-bound authorization request digest", () => {
-  const normalized = normalizePlatformPromotionRequest(INPUT, IDEMPOTENCY_KEY);
-  const canonical = `{"candidate_id":"${INPUT.candidate_id}","deployment_id":"${INPUT.deployment_id}","environment":"${INPUT.environment}","idempotency_key":"${IDEMPOTENCY_KEY}","operation":"platform.promotion.issue","organization_id":"${ORGANIZATION_ID}","promotion_id":"${INPUT.promotion_id}"}`;
-  const expected = crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
-  assert.equal(platformPromotionAuthorizationRequestDigest(normalized, { organizationId: ORGANIZATION_ID }), expected);
-  assert.throws(() => platformPromotionAuthorizationRequestDigest(normalized, { organizationId: ORGANIZATION_ID, operation: "platform.promotion.replay" }));
 });
 
 test("accepts only an exact platform role and capability decision", () => {

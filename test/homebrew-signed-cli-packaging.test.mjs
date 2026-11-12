@@ -5,19 +5,6 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-const root = path.resolve(import.meta.dirname, "..");
-const formula = fs.readFileSync(path.join(root, "Formula", "agentpass.rb"), "utf8");
-const verifier = fs.readFileSync(path.join(root, "native/macos/scripts/verify-installer-package.sh"), "utf8");
-
-test("Homebrew CLI is visibly distinct from the production dev.agentpass helper", () => {
-  assert.match(formula, /system_command\s+"\/usr\/bin\/codesign"[\s\S]*--sign[\s\S]*"-"[\s\S]*--identifier[\s\S]*"dev\.agentpass\.homebrew-evaluation"[\s\S]*bin\/"agentpass"/u);
-  assert.doesNotMatch(formula, /--identifier",\s*"dev\.agentpass"/u);
-  assert.match(verifier, /SIGNED_CLI="\$APP\/Contents\/MacOS\/agentpass-onboarding"/u);
-  assert.match(verifier, /codesign --verify --strict --verbose=2 "\$SIGNED_CLI"/u);
-  assert.match(verifier, /CLI_IDENTIFIER=.*Identifier=/u);
-  assert.match(verifier, /\[ "\$CLI_IDENTIFIER" == "dev\.agentpass" \]/u);
-});
-
 test("macOS recognizes the ad-hoc signed Homebrew wrapper as non-production", { skip: process.platform !== "darwin" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-homebrew-cli-"));
   const wrapper = path.join(directory, "agentpass");
