@@ -24,14 +24,14 @@ const script = path.resolve(import.meta.dirname, "production-readiness-gate.mjs"
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const packageJsonPath = path.join(repoRoot, "package.json");
 
-function baseGate() {
+function baseGate({ producedAt = "2026-08-21T00:00:00.000Z", reviewedAt = "2026-08-21T12:00:00.000Z", expiresAt = "2026-08-30T00:00:00.000Z" } = {}) {
   const evidence = REQUIRED_PRODUCTION_EVIDENCE_ROWS.map((required, index) => ({
     artifact_sha256: artifact,
     candidate_id: candidateId,
-    expires_at: "2026-08-30T00:00:00.000Z",
+    expires_at: expiresAt,
     kind: required.kind,
     name: `evidence-${index}`,
-    produced_at: "2026-08-21T00:00:00.000Z",
+    produced_at: producedAt,
     provenance: {
       environment: "production",
       execution_class: "protected_external",
@@ -54,11 +54,11 @@ function baseGate() {
       artifact_sha256: artifact,
       candidate_id: candidateId,
       evidence_sha256: productionReadinessEvidenceSHA256(evidence),
-      expires_at: "2026-08-30T00:00:00.000Z",
+      expires_at: expiresAt,
       id: "external-reviewer-1",
       independent: true,
       report_sha256: SHA("d"),
-      reviewed_at: "2026-08-21T12:00:00.000Z",
+      reviewed_at: reviewedAt,
       source_commit: sourceCommit,
       source_tree: sourceTree
     },
@@ -72,6 +72,14 @@ function assertReason(value, reason) {
     assert.equal(error.code, reason);
     return true;
   });
+}
+
+// The CLI verifies against the real clock, so its success paths need evidence
+// that is valid now rather than at the fixed NOW used by the in-process tests.
+function currentGate() {
+  const now = Date.now();
+  const iso = (ms) => new Date(ms).toISOString();
+  return baseGate({ producedAt: iso(now - 24 * 60 * 60 * 1_000), reviewedAt: iso(now - 12 * 60 * 60 * 1_000), expiresAt: iso(now + 7 * 24 * 60 * 60 * 1_000) });
 }
 
 test("accepts a complete production-bound gate and returns only a safe summary", () => {
@@ -152,13 +160,13 @@ test("rejects unknown fields and duplicate JSON object keys before validation", 
 test("CLI accepts only canonical JSON and returns production_ready true on success", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-readiness-"));
   try {
-    const file = path.join(temp, "gate.json"); fs.writeFileSync(file, canonicalJson(baseGate()));
+    const file = path.join(temp, "gate.json"); fs.writeFileSync(file, canonicalJson(currentGate()));
     const child = spawnSync(process.execPath, [script, "verify", file], { encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const result = JSON.parse(child.stdout);
     assert.equal(result.production_ready, true);
     assert.equal(child.stderr, "");
-    fs.writeFileSync(file, `${canonicalJson(baseGate())}\n`);
+    fs.writeFileSync(file, `${canonicalJson(currentGate())}\n`);
     const noncanonical = spawnSync(process.execPath, [script, "verify", file], { encoding: "utf8" });
     assert.notEqual(noncanonical.status, 0);
     assert.equal(noncanonical.stdout, "");
@@ -172,12 +180,12 @@ test("npm release:readiness forwards the evidence path and fails closed", () => 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-readiness-npm-"));
   try {
     const file = path.join(temp, "gate.json");
-    fs.writeFileSync(file, canonicalJson(baseGate()));
+    fs.writeFileSync(file, canonicalJson(currentGate()));
     const ok = spawnSync("npm", ["run", "--silent", "release:readiness", "--", file], { cwd: repoRoot, encoding: "utf8" });
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(JSON.parse(ok.stdout).production_ready, true);
 
-    fs.writeFileSync(file, `${canonicalJson(baseGate())}\n`);
+    fs.writeFileSync(file, `${canonicalJson(currentGate())}\n`);
     const rejected = spawnSync("npm", ["run", "--silent", "release:readiness", "--", file], { cwd: repoRoot, encoding: "utf8" });
     assert.notEqual(rejected.status, 0);
     assert.equal(rejected.stdout, "");
